@@ -1,0 +1,919 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { acquireCodedbHostUseLease } from "../shared/codedb-host-use-gate.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const ADAPTER_EXTENSIONS = new Set([".shader", ".hlsl", ".compute", ".cginc"]);
+const EXCLUDED_PREFIXES = [
+  "Library/",
+  "Temp/",
+  "Logs/",
+  "UserSettings/",
+  "obj/",
+  "bin/",
+  "Build/",
+  "Builds/",
+  "AIWork/.runtime/"
+];
+const EXCLUDED_FRAGMENTS = ["/Library/PackageCache/", "/AIWork/.runtime/"];
+const MAX_LIMIT = 200;
+const TRANSIENT_READ_RETRY_DELAY_MS = 100;
+const TRANSIENT_READ_RETRY_MAX_MS = 2000;
+const COORDINATOR_RESTART_THROTTLE_MS = 5000;
+const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
+
+const context = createContext(process.argv.slice(2));
+if (context.printContext) {
+  process.stdout.write(`${JSON.stringify({
+    unity_root: context.unityRoot,
+    project_slug: context.projectSlug,
+    provider_name: context.providerName,
+    runtime_root: path.join("AIWork", ".runtime", "codedb", context.providerName).replace(/\\/g, "/")
+  })}\n`);
+  process.exit(0);
+}
+
+const hostUseLease = acquireCodedbHostUseLease(context.unityRoot, "mcp");
+process.once("exit", () => hostUseLease.release());
+
+let lastCoordinatorStartAttemptMs = 0;
+tryStartWatchCoordinator();
+
+const tools = [
+  {
+    name: "codedb_status",
+    description: "Report project-local wrapper, provider, and Shader/HLSL text adapter status.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    }
+  },
+  {
+    name: "codedb_search",
+    description: "Search indexed project code through the project CodeDB wrapper.",
+    inputSchema: createSearchSchema()
+  },
+  {
+    name: "codedb_text_search",
+    description: "Run bounded text search across provider-indexed code and the Shader/HLSL adapter.",
+    inputSchema: createSearchSchema()
+  },
+  {
+    name: "codedb_find",
+    description: "Find project files or symbols through the project CodeDB wrapper.",
+    inputSchema: createSearchSchema()
+  },
+  {
+    name: "codedb_read",
+    description: "Read a bounded line range from an indexed project file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        start_line: { type: "integer", minimum: 1 },
+        end_line: { type: "integer", minimum: 1 },
+        startLine: { type: "integer", minimum: 1 },
+        endLine: { type: "integer", minimum: 1 },
+        language: { type: "string" }
+      },
+      required: ["path"],
+      additionalProperties: true
+    }
+  },
+  {
+    name: "codedb_context",
+    description: "Compose compact bounded project context from search and read results.",
+    inputSchema: createSearchSchema()
+  }
+];
+
+process.stdin.setEncoding("utf8");
+
+let stdinBuffer = "";
+process.stdin.on("data", (chunk) => {
+  stdinBuffer += chunk;
+  while (true) {
+    const newlineIndex = stdinBuffer.indexOf("\n");
+    if (newlineIndex < 0) {
+      break;
+    }
+
+    const line = stdinBuffer.slice(0, newlineIndex).trim();
+    stdinBuffer = stdinBuffer.slice(newlineIndex + 1);
+    if (line.length === 0) {
+      continue;
+    }
+
+    handleMessageLine(line);
+  }
+});
+
+process.stdin.on("end", () => {
+  process.exit(0);
+});
+
+function createSearchSchema() {
+  return {
+    type: "object",
+    properties: {
+      query: { type: "string" },
+      pattern: { type: "string" },
+      symbol: { type: "string" },
+      path: { type: "string" },
+      path_glob: { type: "string" },
+      limit: { type: "integer", minimum: 1, maximum: MAX_LIMIT },
+      language: { type: "string" },
+      regex: { type: "boolean" }
+    },
+    additionalProperties: true
+  };
+}
+
+function createContext(args) {
+  const options = parseArgs(args);
+  const defaultUnityRoot = path.resolve(__dirname, "..", "..", "..");
+  const unityRoot = path.resolve(process.cwd(), options.root ?? defaultUnityRoot);
+  const projectSlug = createProjectSlug(path.basename(unityRoot));
+  const providerName = `codedb-${projectSlug}`;
+  const runtimeRoot = path.join(unityRoot, "AIWork", ".runtime", "codedb", providerName);
+
+  return {
+    unityRoot,
+    projectSlug,
+    providerName,
+    printContext: options.printContext === true,
+    providerExecutablePath: path.join(runtimeRoot, "bin", "codebase-mcp.exe"),
+    providerConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.toml"),
+    watchConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.watch.toml"),
+    watchEnabledMarkerPath: path.join(runtimeRoot, "watch", "auto-start.json"),
+    watchManagementLockPath: path.join(runtimeRoot, "watch", "management.lock"),
+    watchCoordinatorRuntimePath: path.join(runtimeRoot, "watch", "coordinator"),
+    watchCoordinatorStatePath: path.join(runtimeRoot, "watch", "coordinator", "coordinator-state.json"),
+    watchCoordinatorScriptPath: path.join(__dirname, "..", "coordinator", "codedb-watch-coordinator.mjs"),
+    adapterBuilderPath: path.join(__dirname, "..", "scripts", "build-codedb-project-text-adapter.ps1"),
+    adapterWorkerPath: path.join(__dirname, "..", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
+    providerIndexRoot: path.join(runtimeRoot, "index"),
+    textAdapterRoot: path.join(runtimeRoot, "adapter", "text-index"),
+    textAdapterManifestPath: path.join(runtimeRoot, "adapter", "text-index", "manifest.json"),
+    textAdapterFilesPath: path.join(runtimeRoot, "adapter", "text-index", "files.jsonl"),
+    textAdapterIndexPath: path.join(runtimeRoot, "adapter", "text-index", "index.jsonl")
+  };
+}
+
+function createProjectSlug(value) {
+  let result = "";
+  let previousWasSeparator = false;
+  for (const character of String(value ?? "")) {
+    if (/^[\p{L}\p{N}]$/u.test(character)) {
+      result += character.toLowerCase();
+      previousWasSeparator = false;
+      continue;
+    }
+
+    if (previousWasSeparator || result.length === 0) {
+      continue;
+    }
+
+    result += "-";
+    previousWasSeparator = true;
+  }
+
+  return result.replace(/-+$/, "") || "unity-project";
+}
+
+function parseArgs(args) {
+  const options = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--root" && index + 1 < args.length) {
+      options.root = args[index + 1];
+      index += 1;
+    } else if (arg === "--print-context") {
+      options.printContext = true;
+    }
+  }
+
+  return options;
+}
+
+function handleMessageLine(line) {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch (error) {
+    writeLog(`Invalid JSON-RPC input: ${error.message}`);
+    return;
+  }
+
+  if (!message || typeof message !== "object") {
+    return;
+  }
+
+  if (message.id === undefined || message.id === null) {
+    if (message.method === "notifications/initialized") {
+      return;
+    }
+
+    return;
+  }
+
+  Promise.resolve()
+    .then(() => handleRequest(message))
+    .then((result) => {
+      sendResponse({ jsonrpc: "2.0", id: message.id, result });
+    })
+    .catch((error) => {
+      sendResponse({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: {
+          code: -32000,
+          message: error.message || String(error)
+        }
+      });
+    });
+}
+
+async function handleRequest(message) {
+  switch (message.method) {
+    case "initialize":
+      return {
+        protocolVersion: message.params?.protocolVersion ?? "2024-11-05",
+        capabilities: {
+          tools: {}
+        },
+        serverInfo: {
+          name: "codedb-project-wrapper",
+          version: "0.1.0"
+        }
+      };
+    case "tools/list":
+      return { tools };
+    case "tools/call":
+      return callTool(message.params ?? {});
+    case "ping":
+      return {};
+    default:
+      throw new Error(`Unsupported method: ${message.method}`);
+  }
+}
+
+function callTool(params) {
+  const name = params.name;
+  const args = normalizeArgs(params.arguments ?? {});
+
+  switch (name) {
+    case "codedb_status":
+      return toToolResult(getStatusText());
+    case "codedb_search":
+    case "codedb_text_search":
+    case "codedb_find":
+      return toToolResult(routeSearchTool(name, args));
+    case "codedb_read":
+      return toToolResult(routeReadTool(args));
+    case "codedb_context":
+      return toToolResult(routeContextTool(args));
+    default:
+      throw new Error(`Unsupported tool: ${name}`);
+  }
+}
+
+function toToolResult(text, isError = false) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: String(text ?? "")
+      }
+    ],
+    isError
+  };
+}
+
+function normalizeArgs(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return { ...value };
+}
+
+function routeSearchTool(name, args) {
+  const query = getQueryText(args);
+  const limit = getLimit(args.limit);
+
+  if (isExcludedScope(args.path_glob ?? args.path)) {
+    return `[NO HIT] excluded path scope: ${normalizeRelativePath(args.path_glob ?? args.path)}`;
+  }
+
+  if (shouldUseAdapter(args)) {
+    return formatAdapterSearch(query, args, limit);
+  }
+
+  if (shouldUseProviderOnly(args)) {
+    return invokeProviderTool(name, stripWrapperOnlyArgs(args));
+  }
+
+  const parts = [];
+  try {
+    const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args));
+    parts.push("[PROVIDER]");
+    parts.push(providerOutput.trim());
+  } catch (error) {
+    parts.push(`[PROVIDER ERROR] ${error.message}`);
+  }
+
+  const adapterOutput = formatAdapterSearch(query, args, limit);
+  parts.push("[SHADER ADAPTER]");
+  parts.push(adapterOutput.trim());
+  return parts.filter(Boolean).join("\n");
+}
+
+function routeReadTool(args) {
+  const targetPath = normalizeRelativePath(args.path);
+  if (!targetPath) {
+    throw new Error("codedb_read requires a relative path.");
+  }
+
+  if (isExcludedScope(targetPath)) {
+    return `[NO HIT] excluded path scope: ${targetPath}`;
+  }
+
+  if (isAdapterPath(targetPath) || isShaderLanguage(args.language)) {
+    return formatAdapterRead(targetPath, args);
+  }
+
+  return invokeProviderTool("codedb_read", stripWrapperOnlyArgs(args));
+}
+
+function routeContextTool(args) {
+  const query = getQueryText(args);
+  const limit = Math.min(getLimit(args.limit), 5);
+
+  if (isExcludedScope(args.path_glob ?? args.path)) {
+    return `[NO HIT] excluded path scope: ${normalizeRelativePath(args.path_glob ?? args.path)}`;
+  }
+
+  if (shouldUseAdapter(args)) {
+    const matches = findAdapterMatches(query, args, limit);
+    if (matches.length === 0) {
+      return `[NO HIT] Shader adapter context found no hit for: ${query}`;
+    }
+
+    return matches.map((match) => formatAdapterRead(match.path, {
+      start_line: Math.max(1, match.line - 3),
+      end_line: match.line + 5
+    })).join("\n\n");
+  }
+
+  if (shouldUseProviderOnly(args)) {
+    return invokeProviderTool("codedb_context", stripWrapperOnlyArgs(args));
+  }
+
+  const providerOutput = invokeProviderTool("codedb_context", stripWrapperOnlyArgs(args));
+  const adapterOutput = routeContextTool({ ...args, language: "ShaderHlsl", limit });
+  return ["[PROVIDER]", providerOutput.trim(), "[SHADER ADAPTER]", adapterOutput.trim()].join("\n");
+}
+
+function shouldUseProviderOnly(args) {
+  if (isShaderLanguage(args.language) || hasAdapterPathScope(args)) {
+    return false;
+  }
+
+  if (args.language) {
+    return true;
+  }
+
+  return Boolean(args.path || args.path_glob);
+}
+
+function shouldUseAdapter(args) {
+  return isShaderLanguage(args.language) || hasAdapterPathScope(args);
+}
+
+function hasAdapterPathScope(args) {
+  return isAdapterPath(args.path) || isAdapterPath(args.path_glob);
+}
+
+function isShaderLanguage(language) {
+  if (!language) {
+    return false;
+  }
+
+  const normalized = String(language).replace(/[-_\s/]/g, "").toLowerCase();
+  return normalized === "shaderhlsl"
+    || normalized === "shader"
+    || normalized === "hlsl"
+    || normalized === "compute"
+    || normalized === "cginc";
+}
+
+function isAdapterPath(value) {
+  const relativePath = normalizeRelativePath(value);
+  if (!relativePath) {
+    return false;
+  }
+
+  const extension = path.posix.extname(relativePath).toLowerCase();
+  return ADAPTER_EXTENSIONS.has(extension);
+}
+
+function isExcludedScope(value) {
+  const relativePath = normalizeRelativePath(value);
+  if (!relativePath) {
+    return false;
+  }
+
+  const trimmed = stripGlob(relativePath);
+  for (const prefix of EXCLUDED_PREFIXES) {
+    if (trimmed.toLowerCase().startsWith(prefix.toLowerCase())) {
+      return true;
+    }
+  }
+
+  const wrapped = `/${trimmed}`;
+  return EXCLUDED_FRAGMENTS.some((fragment) => wrapped.toLowerCase().includes(fragment.toLowerCase()));
+}
+
+function stripGlob(value) {
+  const index = value.search(/[*?{[]/);
+  if (index < 0) {
+    return value;
+  }
+
+  return value.slice(0, index);
+}
+
+function getQueryText(args) {
+  const query = args.query ?? args.pattern ?? args.symbol ?? args.name ?? "";
+  return String(query).trim();
+}
+
+function getLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 20;
+  }
+
+  return Math.min(parsed, MAX_LIMIT);
+}
+
+function stripWrapperOnlyArgs(args) {
+  const clone = { ...args };
+  delete clone.language;
+  delete clone.regex;
+  return clone;
+}
+
+function invokeProviderTool(name, args) {
+  assertFileExists(context.providerExecutablePath, "provider executable");
+  const providerConfigPath = getActiveProviderConfigPath(true);
+  assertFileExists(providerConfigPath, "active provider config");
+
+  const startedAt = Date.now();
+  let transientFailures = 0;
+  while (true) {
+    const result = spawnSync(context.providerExecutablePath, [
+      "tool",
+      name,
+      JSON.stringify(args),
+      "--root",
+      context.unityRoot,
+      "--config",
+      providerConfigPath,
+      "--no-watch"
+    ], {
+      cwd: context.unityRoot,
+      encoding: "utf8",
+      timeout: 120000,
+      windowsHide: true
+    });
+
+    if (result.error) {
+      throw result.error;
+    }
+
+    if (result.status === 0) {
+      if (transientFailures > 0) {
+        writeLog(`Recovered provider ${name} after ${transientFailures} transient read failure(s) in ${Date.now() - startedAt} ms.`);
+      }
+      return result.stdout || "";
+    }
+
+    const detail = (result.stderr || result.stdout || "").trim();
+    const canRetry = isWatchCoordinatorReady()
+      && isTransientProviderReadFailure(detail)
+      && Date.now() - startedAt < TRANSIENT_READ_RETRY_MAX_MS;
+    if (!canRetry) {
+      throw new Error(`provider tool ${name} failed with exit code ${result.status}. ${detail}`);
+    }
+
+    transientFailures += 1;
+    sleepSync(TRANSIENT_READ_RETRY_DELAY_MS);
+  }
+}
+
+function getActiveProviderConfigPath(ensureCoordinator) {
+  if (!isWatchOptInEnabled()) {
+    return context.providerConfigPath;
+  }
+  if (ensureCoordinator && !isWatchCoordinatorReady()) {
+    tryStartWatchCoordinator();
+  }
+  return isWatchCoordinatorReady() ? context.watchConfigPath : context.providerConfigPath;
+}
+
+function isWatchOptInEnabled() {
+  return readWatchOptInMarker() !== null;
+}
+
+function readWatchOptInMarker() {
+  if (!fs.existsSync(context.watchEnabledMarkerPath) || !fs.existsSync(context.watchConfigPath)) {
+    return null;
+  }
+  try {
+    const marker = JSON.parse(fs.readFileSync(context.watchEnabledMarkerPath, "utf8"));
+    const debounceMs = Number(marker.adapter_debounce_ms);
+    const valid = marker.schema_version === 1
+      && typeof marker.lifecycle_id === "string"
+      && /^[A-Za-z0-9._-]{1,128}$/.test(marker.lifecycle_id)
+      && typeof marker.exclusive_lifecycle === "boolean"
+      && normalizeRelativePath(marker.watch_config) === toUnityRelativePath(context.watchConfigPath)
+      && normalizeRelativePath(marker.coordinator_runtime) === toUnityRelativePath(context.watchCoordinatorRuntimePath)
+      && normalizeRelativePath(marker.adapter_builder) === toUnityRelativePath(context.adapterBuilderPath)
+      && normalizeRelativePath(marker.adapter_worker) === toUnityRelativePath(context.adapterWorkerPath)
+      && normalizeRelativePath(marker.adapter_manifest) === toUnityRelativePath(context.textAdapterManifestPath)
+      && Number.isInteger(debounceMs)
+      && debounceMs > 0;
+    return valid ? marker : null;
+  } catch {
+    return null;
+  }
+}
+
+function isWatchCoordinatorReady() {
+  const marker = readWatchOptInMarker();
+  const state = readWatchCoordinatorState();
+  if (!marker || !state) {
+    return false;
+  }
+  return state.provider_state === "ready"
+    && state.lifecycle_id === marker.lifecycle_id
+    && state.exclusive_lifecycle === marker.exclusive_lifecycle
+    && state.adapter_enabled === true
+    && ADAPTER_OPERATIONAL_STATES.has(state.adapter_state)
+    && Number(state.adapter_debounce_ms) === Number(marker.adapter_debounce_ms)
+    && normalizeAbsolutePath(state.root) === normalizeAbsolutePath(context.unityRoot)
+    && normalizeAbsolutePath(state.provider_executable) === normalizeAbsolutePath(context.providerExecutablePath)
+    && normalizeAbsolutePath(state.provider_config) === normalizeAbsolutePath(context.watchConfigPath)
+    && normalizeAbsolutePath(state.adapter_builder) === normalizeAbsolutePath(context.adapterBuilderPath)
+    && normalizeAbsolutePath(state.adapter_worker) === normalizeAbsolutePath(context.adapterWorkerPath)
+    && normalizeAbsolutePath(state.adapter_manifest) === normalizeAbsolutePath(context.textAdapterManifestPath)
+    && state.adapter_worker_state === "ready"
+    && isProcessAlive(state.coordinator_pid)
+    && isProcessAlive(state.provider_pid)
+    && isProcessAlive(state.adapter_worker_pid);
+}
+
+function readWatchCoordinatorState() {
+  if (!fs.existsSync(context.watchCoordinatorStatePath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(context.watchCoordinatorStatePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function tryStartWatchCoordinator() {
+  if (!isWatchOptInEnabled() || isWatchCoordinatorReady()) {
+    return isWatchCoordinatorReady();
+  }
+  const now = Date.now();
+  if (now - lastCoordinatorStartAttemptMs < COORDINATOR_RESTART_THROTTLE_MS) {
+    return false;
+  }
+  lastCoordinatorStartAttemptMs = now;
+
+  const managementLock = tryEnterWatchManagementLock();
+  if (managementLock === null) {
+    return false;
+  }
+
+  try {
+    if (!isWatchOptInEnabled() || isWatchCoordinatorReady()) {
+      return isWatchCoordinatorReady();
+    }
+
+    for (const [filePath, label] of [
+      [context.watchCoordinatorScriptPath, "watch coordinator script"],
+      [context.providerExecutablePath, "provider executable"],
+      [context.watchConfigPath, "watch config"],
+      [context.adapterBuilderPath, "Shader adapter builder"],
+      [context.adapterWorkerPath, "Shader adapter worker"],
+      [context.textAdapterManifestPath, "Shader adapter manifest"]
+    ]) {
+      if (!fs.existsSync(filePath)) {
+        writeLog(`Cannot start watch coordinator; missing ${label}: ${toUnityRelativePath(filePath)}`);
+        return false;
+      }
+    }
+
+    const marker = readWatchOptInMarker();
+    if (!marker) {
+      return false;
+    }
+
+    const result = spawnSync(process.execPath, [
+      context.watchCoordinatorScriptPath,
+      "start",
+      "--root", context.unityRoot,
+      "--provider", context.providerExecutablePath,
+      "--config", context.watchConfigPath,
+      "--runtime", context.watchCoordinatorRuntimePath,
+      "--adapter-builder", context.adapterBuilderPath,
+      "--adapter-worker", context.adapterWorkerPath,
+      "--adapter-manifest", context.textAdapterManifestPath,
+      "--adapter-debounce-ms", String(marker.adapter_debounce_ms),
+      "--lifecycle-id", marker.lifecycle_id,
+      "--exclusive-lifecycle", String(marker.exclusive_lifecycle),
+      "--startup-timeout-ms", "120000"
+    ], {
+      cwd: context.unityRoot,
+      encoding: "utf8",
+      timeout: 130000,
+      windowsHide: true
+    });
+    if (result.error || result.status !== 0) {
+      const detail = result.error?.message ?? (result.stderr || result.stdout || "").trim();
+      writeLog(`Watch coordinator attach/start failed: ${detail}`);
+      return false;
+    }
+    return isWatchCoordinatorReady();
+  } finally {
+    fs.closeSync(managementLock);
+  }
+}
+
+function tryEnterWatchManagementLock() {
+  try {
+    return fs.openSync(context.watchManagementLockPath, "a+");
+  } catch (error) {
+    writeLog(`Watch coordinator recovery deferred by management lock: ${error.message}`);
+    return null;
+  }
+}
+
+function isTransientProviderReadFailure(message) {
+  return /failed(?:_|\s+)to(?:_|\s+)read/i.test(String(message ?? ""));
+}
+
+function sleepSync(milliseconds) {
+  const buffer = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(buffer), 0, 0, milliseconds);
+}
+
+function isProcessAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeAbsolutePath(value) {
+  return path.resolve(String(value ?? "")).replace(/^\\\\\?\\/, "").replace(/\\/g, "/").toLowerCase();
+}
+
+function getStatusText() {
+  const watchState = readWatchCoordinatorState();
+  const lines = [
+    `[OK] ${context.providerName} wrapper ready.`,
+    `Unity root: ${toUnityRelativePath(context.unityRoot)}`,
+    `Provider executable: ${fileState(context.providerExecutablePath)}`,
+    `Provider config: ${fileState(context.providerConfigPath)}`,
+    `Watch opt-in: ${isWatchOptInEnabled() ? "enabled" : "disabled"}`,
+    `Watch config: ${fileState(context.watchConfigPath)}`,
+    `Watch coordinator: ${isWatchCoordinatorReady() ? "ready" : "stopped"}`,
+    `Shader watcher: ${watchState?.adapter_state ?? "stopped"}`,
+    `Active provider config: ${toUnityRelativePath(getActiveProviderConfigPath(false))}`,
+    `Provider index: ${fileState(context.providerIndexRoot)}`,
+    `Shader adapter manifest: ${fileState(context.textAdapterManifestPath)}`,
+    "Tool profile: Discover Read only"
+  ];
+
+  if (watchState?.adapter_last_error) {
+    lines.push(`[WARN] Shader watcher last error: ${watchState.adapter_last_error}`);
+  }
+
+  if (fs.existsSync(context.textAdapterManifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(context.textAdapterManifestPath, "utf8"));
+      lines.push(`Shader adapter files: ${manifest.fileCount ?? "unknown"}`);
+      lines.push(`Shader adapter lines: ${manifest.lineCount ?? "unknown"}`);
+    } catch (error) {
+      lines.push(`[WARN] Shader adapter manifest parse failed: ${error.message}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function fileState(filePath) {
+  return fs.existsSync(filePath) ? "present" : "missing";
+}
+
+function formatAdapterSearch(query, args, limit) {
+  if (!query) {
+    return "[NO HIT] Shader adapter search requires a query.";
+  }
+
+  const matches = findAdapterMatches(query, args, limit);
+  if (matches.length === 0) {
+    return `[NO HIT] Shader adapter search found no hit for: ${query}`;
+  }
+
+  const lines = [`[OK] Shader adapter search found ${matches.length} hit(s) for: ${query}`];
+  for (const match of matches) {
+    lines.push(`[HIT] ${match.path}:${match.line}`);
+  }
+
+  return lines.join("\n");
+}
+
+function findAdapterMatches(query, args, limit) {
+  assertFileExists(context.textAdapterIndexPath, "Shader adapter index");
+
+  const pathGlob = normalizeRelativePath(args.path_glob ?? args.path);
+  const useRegex = Boolean(args.regex);
+  const regex = useRegex ? new RegExp(query, "i") : null;
+  const records = fs.readFileSync(context.textAdapterIndexPath, "utf8").split(/\r?\n/);
+  const matches = [];
+
+  for (const line of records) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const entry = JSON.parse(line);
+    const entryPath = normalizeRelativePath(entry.path);
+    if (!entryPath || isExcludedScope(entryPath)) {
+      continue;
+    }
+
+    if (pathGlob && !matchesGlob(entryPath, pathGlob)) {
+      continue;
+    }
+
+    const text = getAdapterLineText(entry);
+    const matched = useRegex ? regex.test(text) : text.toLowerCase().includes(query.toLowerCase());
+    if (!matched) {
+      continue;
+    }
+
+    matches.push({
+      path: entryPath,
+      line: Number.parseInt(entry.line, 10),
+      text
+    });
+
+    if (matches.length >= limit) {
+      break;
+    }
+  }
+
+  return matches;
+}
+
+function getAdapterLineText(entry) {
+  if (entry.textBase64) {
+    return Buffer.from(String(entry.textBase64), "base64").toString("utf8");
+  }
+
+  return String(entry.text ?? "");
+}
+
+function formatAdapterRead(targetPath, args) {
+  const relativePath = normalizeRelativePath(targetPath);
+  if (!relativePath) {
+    throw new Error("Shader adapter read requires a relative path.");
+  }
+
+  if (!isAdapterPath(relativePath)) {
+    throw new Error(`Shader adapter read only supports ${Array.from(ADAPTER_EXTENSIONS).join(", ")} files.`);
+  }
+
+  if (isExcludedScope(relativePath)) {
+    return `[NO HIT] excluded path scope: ${relativePath}`;
+  }
+
+  const fullPath = resolveUnityPath(relativePath);
+  assertPathInside(fullPath, context.unityRoot, "Shader adapter read");
+  assertFileExists(fullPath, "Shader adapter source");
+
+  const lines = fs.readFileSync(fullPath, "utf8").split(/\r?\n/);
+  const requestedStart = Number.parseInt(args.start_line ?? args.startLine ?? 0, 10);
+  const requestedEnd = Number.parseInt(args.end_line ?? args.endLine ?? 0, 10);
+  const start = requestedStart > 0 ? Math.min(requestedStart, lines.length) : 1;
+  const end = requestedEnd > 0 ? Math.min(requestedEnd, lines.length) : Math.min(start + 8, lines.length);
+  const safeEnd = Math.max(start, end);
+
+  const output = [`[OK] Shader adapter read ${relativePath} lines ${start}-${safeEnd}.`, `[HIT] ${relativePath}:${start}`];
+  for (let lineNumber = start; lineNumber <= safeEnd; lineNumber += 1) {
+    output.push(`${String(lineNumber).padStart(5, " ")}: ${lines[lineNumber - 1] ?? ""}`);
+  }
+
+  return output.join("\n");
+}
+
+function normalizeRelativePath(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  const text = String(value).trim().replace(/\\/g, "/");
+  if (!text || text === ".") {
+    return text;
+  }
+
+  if (path.isAbsolute(text) || text.includes("\0")) {
+    throw new Error(`Expected Unity-root-relative path, got: ${text}`);
+  }
+
+  const normalized = path.posix.normalize(text);
+  if (normalized === ".." || normalized.startsWith("../")) {
+    throw new Error(`Path escapes Unity root: ${text}`);
+  }
+
+  return normalized;
+}
+
+function resolveUnityPath(relativePath) {
+  return path.resolve(context.unityRoot, relativePath.replace(/\//g, path.sep));
+}
+
+function toUnityRelativePath(filePath) {
+  const relativePath = path.relative(context.unityRoot, filePath).replace(/\\/g, "/");
+  return relativePath || ".";
+}
+
+function assertPathInside(filePath, rootPath, label) {
+  const resolvedPath = path.resolve(filePath);
+  const resolvedRoot = path.resolve(rootPath);
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(rootPrefix)) {
+    throw new Error(`${label} path is outside Unity root: ${resolvedPath}`);
+  }
+}
+
+function assertFileExists(filePath, label) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Missing ${label}: ${toUnityRelativePath(filePath)}`);
+  }
+}
+
+function matchesGlob(relativePath, glob) {
+  if (!glob || glob === "**/*" || glob === "**") {
+    return true;
+  }
+
+  const normalizedGlob = normalizeRelativePath(glob);
+  const regexText = normalizedGlob
+    .split("")
+    .map((character, index, source) => {
+      if (character === "*") {
+        return source[index + 1] === "*" ? ".*" : "[^/]*";
+      }
+
+      if (character === "?") {
+        return "[^/]";
+      }
+
+      return character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+    })
+    .join("")
+    .replace(/\.\*\[\^\/\]\*/g, ".*");
+
+  return new RegExp(`^${regexText}$`, "i").test(relativePath);
+}
+
+function sendResponse(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function writeLog(message) {
+  process.stderr.write(`[${context.providerName}-wrapper] ${message}\n`);
+}

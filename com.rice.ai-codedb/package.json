@@ -1,0 +1,19 @@
+{
+  "name": "com.rice.ai-codedb",
+  "version": "0.1.0",
+  "displayName": "Rice AI CodeDB",
+  "description": "Editor tooling for project-local CodeDB setup, status, indexing, and Discover Read workflows.",
+  "unity": "2022.3",
+  "documentationUrl": "https://github.com/riceWithoutIce/UnityCodeDB#readme",
+  "changelogUrl": "https://github.com/riceWithoutIce/UnityCodeDB/blob/main/com.rice.ai-codedb/CHANGELOG.md",
+  "licensesUrl": "https://github.com/riceWithoutIce/UnityCodeDB/blob/main/LICENSE",
+  "keywords": [
+    "ai",
+    "codedb",
+    "editor"
+  ],
+  "author": {
+    "name": "Rice",
+    "url": "https://github.com/riceWithoutIce"
+  }
+}

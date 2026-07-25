@@ -1,11 +1,14 @@
-# This .gitignore file should be placed at the root of your Unity project directory
-#
-# Get latest from https://github.com/github/gitignore/blob/main/Unity.gitignore
+# UnityCodeDB repository-local scratch and disposable validation projects.
+/.codex_tmp/
+.utmp/
+/AIWork/.runtime/
+
+# Unity-generated files, retained for disposable package validation projects.
+# Based on https://github.com/github/gitignore/blob/main/Unity.gitignore.
 #
 # Recommended: add any editor/OS/tool-specific ignore rules from the Global/ templates as needed.
 # See: https://github.com/github/gitignore/tree/main/Global
 #
-.utmp/
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/

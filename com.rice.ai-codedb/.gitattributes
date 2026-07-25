@@ -1,0 +1,7 @@
+Payload~/**/*.ps1 text eol=lf
+Payload~/**/*.mjs text eol=lf
+Payload~/**/*.json text eol=lf
+Payload~/**/*.toml text eol=lf
+Payload~/**/codedbignore.example text eol=lf
+Tools~/**/*.ps1 text eol=lf
+Tests~/**/*.ps1 text eol=lf

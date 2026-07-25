@@ -1,0 +1,21 @@
+{
+    "name": "Rice.AICodedb.Editor.Tests",
+    "rootNamespace": "Rice.AI.Codedb.Editor.Tests",
+    "references": [
+        "Rice.AICodedb.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}
