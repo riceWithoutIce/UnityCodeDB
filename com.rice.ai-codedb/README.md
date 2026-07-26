@@ -70,8 +70,8 @@ name. Its closed schema is:
   "git_head": "<current repository HEAD>",
   "action": "Sync",
   "package_version": "0.1.0",
-  "payload_version": "poc.11",
-  "payload_sequence": 11,
+  "payload_version": "poc.12",
+  "payload_sequence": 12,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -103,6 +103,9 @@ index-only cleanup against an isolated runtime-built provider executable. It
 also proves wrapper-local C#/Shader reads return only the requested line window,
 cap one read at 200 lines, reject resolved paths outside the Unity root, and
 limit every tool or error text response to 64 KiB with explicit truncation. It
+normalizes the legacy `path` search alias to `path_glob`, filters Provider hits
+again at the wrapper boundary, and verifies no-language directory searches
+merge Provider and Shader lanes with deduplication and one global limit. It
 also validates provider and adapter status/search/read probes, hit/no-hit
 reporting, `OK`/`STALE`/`UNKNOWN` freshness, exact fresh no-op behavior, and
 independent provider-only or adapter-only refresh. It also verifies copy-only

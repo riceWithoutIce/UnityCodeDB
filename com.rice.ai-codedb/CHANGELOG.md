@@ -14,6 +14,10 @@
   resolve inside the Unity root, honor an exact requested window capped at 200
   lines, and all tool or surfaced error text is capped at 64 KiB with explicit
   truncation.
+- Normalized search `path` aliases to `path_glob`, parsed the Provider's native
+  search/text-search/find formats, reapplied scope filtering in the wrapper,
+  and merged no-language directory results across Provider and Shader lanes
+  with deduplication and one global limit. Context now consumes the same hits.
 
 ## 0.1.0 - 2026-07-26
 

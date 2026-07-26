@@ -67,6 +67,10 @@ $sentinelPaths = @(
     "Assets/ZMaterializerBoundedReadProbe.cs",
     "Assets/ZMaterializerOutputCeilingProbe.cs",
     "Assets/MaterializerProbe.shader",
+    "Assets/Scoped/ScopedProbe.cs",
+    "Assets/Scoped/SecondScopedProbe.cs",
+    "Assets/Scoped/ScopedProbe.shader",
+    "Assets/Outside/OutsideProbe.cs",
     ".codex/config.toml",
     "AIWork/codedb/adoption-decision.md",
     "AIWork/codedb/wrapper/host-compatibility-sentinel.mjs"
@@ -365,13 +369,47 @@ public static class CodedbMaterializerFixtureProvider
         }
         Console.WriteLine("[FIXTURE PROVIDER] active_config=" + Path.GetFileName(args[configIndex + 1]));
         string toolName = args.Length > 1 ? args[1] : String.Empty;
+        string toolArguments = args.Length > 2 ? args[2] : String.Empty;
         if (String.Equals(toolName, "codedb_status", StringComparison.Ordinal))
         {
             Console.WriteLine("ready");
         }
         else if (String.Equals(toolName, "codedb_text_search", StringComparison.Ordinal))
         {
-            Console.WriteLine("[HIT] Assets/MaterializerFreshnessProbe.cs:1 CodedbMaterializerFreshnessProbe CODEDB_MATERIALIZER_PROVIDER_PROBE");
+            if (toolArguments.IndexOf("CODEDB_SCOPE_CONTRACT", StringComparison.Ordinal) >= 0)
+            {
+                Console.WriteLine("[FIXTURE PROVIDER] args=" + toolArguments);
+                Console.WriteLine("4 results for 'CODEDB_SCOPE_CONTRACT' in 4 files:");
+                Console.WriteLine("  Assets/Scoped/ScopedProbe.cs");
+                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+                Console.WriteLine("  Assets/Outside/OutsideProbe.cs");
+                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+                Console.WriteLine("  Assets/Scoped/ScopedProbe.shader");
+                Console.WriteLine("    L2: // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+                Console.WriteLine("  Assets/Scoped/SecondScopedProbe.cs");
+                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+            }
+            else
+            {
+                Console.WriteLine("[HIT] Assets/MaterializerFreshnessProbe.cs:1 CodedbMaterializerFreshnessProbe CODEDB_MATERIALIZER_PROVIDER_PROBE");
+            }
+        }
+        else if (String.Equals(toolName, "codedb_search", StringComparison.Ordinal) &&
+            toolArguments.IndexOf("CODEDB_SEARCH_CONTRACT", StringComparison.Ordinal) >= 0)
+        {
+            Console.WriteLine("3 results for 'CODEDB_SEARCH_CONTRACT':");
+            Console.WriteLine("  Assets/Outside/OutsideProbe.cs:1-1  [score=1.000, text]");
+            Console.WriteLine("    // CODEDB_SEARCH_CONTRACT");
+            Console.WriteLine("  Assets/Scoped/ScopedProbe.cs:1-2  [score=0.900, text]");
+            Console.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+            Console.WriteLine("  Assets/Scoped/ScopedProbe.shader:1-3  [score=0.800, text]");
+            Console.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+        }
+        else if (String.Equals(toolName, "codedb_find", StringComparison.Ordinal) &&
+            toolArguments.IndexOf("CODEDB_FIND_CONTRACT", StringComparison.Ordinal) >= 0)
+        {
+            Console.WriteLine("1. Assets/Outside/OutsideProbe.cs (score: 100.00)");
+            Console.WriteLine("2. Assets/Scoped/SecondScopedProbe.cs (score: 90.00)");
         }
         else if (String.Equals(toolName, "codedb_read", StringComparison.Ordinal))
         {
@@ -633,6 +671,10 @@ public static class CodedbMaterializerFreshnessProbe {
         -Path (Join-Path $Root "Assets\ZMaterializerOutputCeilingProbe.cs") `
         -Content ("// " + ("x" * 70000) + "`n")
     Write-Utf8File -Path (Join-Path $Root "Assets\MaterializerProbe.shader") -Content "Shader `"Hidden/Rice/MaterializerProbe`" {`n    // CODEDB_MATERIALIZER_ADAPTER_PROBE`n}`n"
+    Write-Utf8File -Path (Join-Path $Root "Assets\Scoped\ScopedProbe.cs") -Content "// CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT`npublic static class ScopedProbe { }`n"
+    Write-Utf8File -Path (Join-Path $Root "Assets\Scoped\SecondScopedProbe.cs") -Content "// CODEDB_SCOPE_CONTRACT CODEDB_FIND_CONTRACT`n"
+    Write-Utf8File -Path (Join-Path $Root "Assets\Scoped\ScopedProbe.shader") -Content "Shader `"Hidden/Rice/ScopedProbe`" {`n    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT`n}`n"
+    Write-Utf8File -Path (Join-Path $Root "Assets\Outside\OutsideProbe.cs") -Content "// CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT CODEDB_FIND_CONTRACT`n"
     Write-Utf8File -Path (Join-Path $Root ".codex\config.toml") -Content @"
 # config sentinel
 [mcp_servers.codedb-fixture]
@@ -947,6 +989,71 @@ function Invoke-WrapperWatchProbe {
     }
 }
 
+function Invoke-WrapperToolProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$WrapperPath,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$ToolName,
+        [Parameter(Mandatory = $true)]$Arguments,
+        [string]$WaitForCoordinatorStatePath,
+        [string]$WaitForWatchMarkerPath
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $nodePath
+    $startInfo.Arguments = "`"$WrapperPath`" --root `"$Root`""
+    $startInfo.WorkingDirectory = $Root
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        $null = $process.Start()
+        $started = $true
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $null = Invoke-WrapperRpc -Process $process -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 201
+            method = "initialize"
+            params = [ordered]@{ protocolVersion = "2024-11-05" }
+        })
+        if ($WaitForCoordinatorStatePath -and
+            -not (Wait-ForWatchReady -StatePath $WaitForCoordinatorStatePath)) {
+            throw "Materialized wrapper tool probe did not observe watcher ready within 30 seconds."
+        }
+        if ($WaitForWatchMarkerPath -and
+            -not (Wait-ForPathState -Path $WaitForWatchMarkerPath -Present $true -TimeoutMilliseconds 30000)) {
+            throw "Materialized wrapper tool probe did not observe the watch marker within 30 seconds."
+        }
+        $response = Invoke-WrapperRpc -Process $process -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 202
+            method = "tools/call"
+            params = [ordered]@{ name = $ToolName; arguments = $Arguments }
+        })
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(10000)) {
+            $process.Kill()
+            throw "Materialized wrapper tool probe did not exit after stdin closed."
+        }
+        $stderr = $stderrTask.Result.Trim()
+        if ($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+            throw "Materialized wrapper tool probe exited with code $($process.ExitCode).`n$stderr"
+        }
+        return [string]$response.result.content[0].text
+    } finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+        }
+        $process.Dispose()
+    }
+}
+
 function Assert-NoMaterializerResidue {
     $runtimePath = Join-Path $hostRoot "AIWork\.runtime\codedb\payload-materializer"
     Assert-True -Condition (-not (Test-Path -LiteralPath $runtimePath)) -Message "Materializer runtime residue remains: $runtimePath"
@@ -1248,8 +1355,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.11" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 11 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.12" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 12 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1320,7 +1427,7 @@ try {
     Assert-True -Condition (Test-Path -LiteralPath $adapterManifestPath -PathType Leaf) -Message "Materialized builder did not publish the adapter manifest."
     $adapterManifest = Get-Content -LiteralPath $adapterManifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $adapterManifest.buildReason -Expected "manual" -Message "Materialized builder reason mismatch."
-    Assert-Equal -Actual $adapterManifest.fileCount -Expected 1 -Message "Materialized builder file count mismatch."
+    Assert-Equal -Actual $adapterManifest.fileCount -Expected 2 -Message "Materialized builder file count mismatch."
     Assert-Equal -Actual $adapterManifest.files[0].path -Expected "Assets/MaterializerProbe.shader" -Message "Materialized builder indexed the wrong fixture file."
 
     $materializedWorker = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/run-codedb-project-text-adapter-worker.ps1"
@@ -1344,7 +1451,7 @@ try {
     Assert-Equal -Actual $workerResponse.request_id -Expected $workerRequestId -Message "Materialized worker request id mismatch."
     $adapterManifest = Get-Content -LiteralPath $adapterManifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $adapterManifest.buildReason -Expected "automatic" -Message "Materialized worker build reason mismatch."
-    Assert-Equal -Actual $adapterManifest.fileCount -Expected 1 -Message "Materialized worker file count mismatch."
+    Assert-Equal -Actual $adapterManifest.fileCount -Expected 2 -Message "Materialized worker file count mismatch."
     Write-Host "[OK] Materialized Shader adapter builder and persistent worker executed from the host path."
 
     $materializedWrapper = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
@@ -1424,7 +1531,7 @@ try {
             "Automatic refresh: pending",
             "Watch coordinator: stopped",
             "Shader adapter manifest: present",
-            "Shader adapter files: 1",
+            "Shader adapter files: 2",
             "Tool profile: Discover Read only"
         )) {
             Assert-True -Condition ($statusText.Contains($expectedStatus)) -Message "Materialized wrapper status is missing '$expectedStatus'."
@@ -1517,9 +1624,26 @@ try {
         [System.IO.Directory]::Delete($readEscapeJunctionPath)
         $readEscapeJunctionPath = $null
 
-        $excludedRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+        $conflictingScopeRpc = Invoke-WrapperRpcError -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
             id = 10
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_text_search"
+                arguments = [ordered]@{
+                    query = "CODEDB_SCOPE_CONTRACT"
+                    path = "Assets/Scoped"
+                    path_glob = "Assets/Outside/**"
+                }
+            }
+        })
+        Assert-True `
+            -Condition ([string]$conflictingScopeRpc.error.message -like "*path and path_glob disagree*") `
+            -Message "Wrapper accepted conflicting search scope aliases."
+
+        $excludedRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 11
             method = "tools/call"
             params = [ordered]@{
                 name = "codedb_text_search"
@@ -1660,6 +1784,53 @@ try {
     $automaticLifecycleId = [string]$automaticStatus.lifecycle_id
     $activeWatchManagerPath = $materializedWatchManager
     $activeWatchLifecycleId = $automaticLifecycleId
+
+    $scopedTextSearch = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_text_search" `
+        -Arguments ([ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; path = "Assets/Scoped"; limit = 2 }) `
+        -WaitForCoordinatorStatePath $coordinatorStatePath `
+        -WaitForWatchMarkerPath $watchMarkerPath
+    Assert-True -Condition ($scopedTextSearch.Contains('"path_glob":"Assets/Scoped/**"')) -Message "Wrapper did not normalize path to a directory path_glob before Provider routing."
+    Assert-True -Condition (-not $scopedTextSearch.Contains('"path":"Assets/Scoped"')) -Message "Wrapper forwarded the legacy path alias to the Provider."
+    Assert-Equal -Actual ([regex]::Matches($scopedTextSearch, '(?m)^\[HIT\] ').Count) -Expected 2 -Message "Merged text search did not enforce one global limit."
+    Assert-True -Condition ($scopedTextSearch.Contains("Assets/Scoped/ScopedProbe.cs:1 [provider]")) -Message "Scoped text search omitted the Provider C# lane."
+    Assert-True -Condition ($scopedTextSearch.Contains("Assets/Scoped/ScopedProbe.shader:2 [provider+shader-adapter]")) -Message "Scoped text search did not deduplicate and merge the Shader lanes."
+    Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Scoped text search leaked a Provider result outside path_glob."
+    Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Scoped/SecondScopedProbe.cs")) -Message "Scoped text search exceeded its global result limit."
+    Assert-True -Condition ($scopedTextSearch.Contains("[LIMIT] Global result limit 2 applied")) -Message "Scoped text search did not disclose global limiting."
+
+    $scopedSemanticSearch = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_search" `
+        -Arguments ([ordered]@{ query = "CODEDB_SEARCH_CONTRACT"; path_glob = "Assets/Scoped/**"; limit = 2 })
+    Assert-Equal -Actual ([regex]::Matches($scopedSemanticSearch, '(?m)^\[HIT\] ').Count) -Expected 2 -Message "Semantic search parser returned the wrong unique hit count."
+    Assert-True -Condition ($scopedSemanticSearch.Contains("Assets/Scoped/ScopedProbe.cs:1-2 [provider]")) -Message "Semantic search did not parse the Provider chunk range."
+    Assert-True -Condition ($scopedSemanticSearch.Contains("Assets/Scoped/ScopedProbe.shader:1-3 [provider+shader-adapter]")) -Message "Semantic search did not merge an Adapter line into its Provider chunk."
+    Assert-True -Condition (-not $scopedSemanticSearch.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Semantic search leaked an out-of-scope chunk."
+
+    $scopedFind = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_find" `
+        -Arguments ([ordered]@{ query = "CODEDB_FIND_CONTRACT"; path = "Assets/Scoped"; language = "CSharp"; limit = 1 })
+    Assert-Equal -Actual ([regex]::Matches($scopedFind, '(?m)^\[HIT\] ').Count) -Expected 1 -Message "Find parser returned the wrong scoped hit count."
+    Assert-True -Condition ($scopedFind.Contains("Assets/Scoped/SecondScopedProbe.cs [provider]")) -Message "Find parser omitted the in-scope Provider result."
+    Assert-True -Condition (-not $scopedFind.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Find parser leaked an out-of-scope Provider result."
+
+    $scopedContext = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_context" `
+        -Arguments ([ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; path = "Assets/Scoped"; limit = 2 })
+    Assert-True -Condition ($scopedContext.Contains("CodeDB read Assets/Scoped/ScopedProbe.cs")) -Message "Context omitted the bounded C# lane."
+    Assert-True -Condition ($scopedContext.Contains("Shader adapter read Assets/Scoped/ScopedProbe.shader")) -Message "Context omitted the bounded Shader lane."
+    Assert-True -Condition (-not $scopedContext.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Context leaked an out-of-scope Provider result."
+    Assert-True -Condition (-not $scopedContext.Contains("Assets/Scoped/SecondScopedProbe.cs")) -Message "Context exceeded its global result limit."
+    Assert-True -Condition ($scopedContext.Contains("[LIMIT] Global context result limit 2 applied")) -Message "Context did not disclose its global result limit."
+    Write-Host "[OK] Materialized wrapper normalized scopes and enforced dual-lane merge, deduplication, and global limits."
 
     $pauseResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Pause -ExpectedLifecycleId $automaticLifecycleId
@@ -2059,7 +2230,7 @@ try {
         & $materializedAdapterProbe -Check Stale
     }
     Assert-Result -Result $adapterFreshProbe -ExitCode 0 -Label "Materialized refreshed Shader adapter probe"
-    Assert-True -Condition ($adapterFreshProbe.Text.Contains("[OK] Shader adapter stale check passed for 2 file(s).")) -Message "Refreshed Shader adapter probe did not return to OK."
+    Assert-True -Condition ($adapterFreshProbe.Text.Contains("[OK] Shader adapter stale check passed for 3 file(s).")) -Message "Refreshed Shader adapter probe did not return to OK."
     Write-Host "[OK] Adapter STALE rebuilt only the Shader/HLSL adapter lane."
 
     Remove-Item -LiteralPath $adapterManifestPath -Force

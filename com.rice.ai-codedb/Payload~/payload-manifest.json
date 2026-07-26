@@ -2,8 +2,8 @@
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
   "package_version": "0.1.0",
-  "payload_version": "poc.11",
-  "payload_sequence": 11,
+  "payload_version": "poc.12",
+  "payload_sequence": 12,
   "retired_targets": [],
   "files": [
     {
@@ -109,7 +109,7 @@
     {
       "source": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
       "target": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
-      "sha256": "06fe21ba7a8c8b0d83fa78ea1faa490747927d729d116db2f1e8e51413faa9ff"
+      "sha256": "6e8ee120fa190fcdc8cda67e6f6802f784365c5ad2d1c554c903857627908d02"
     }
   ]
 }

@@ -88,6 +88,13 @@ does not generate, persist, infer, or delete that authorization.
   generated/excluded scopes and binary files remain unreadable.
 - Every tool result and surfaced tool error is capped at 64 KiB of UTF-8 text.
   Truncated output carries an explicit `[TRUNCATED]` marker.
+- Search scope aliases are canonicalized to `path_glob`; an existing or
+  path-like directory becomes `<directory>/**`, and conflicting aliases fail.
+- Without an explicit language, directory scopes search both Provider and
+  Shader/HLSL lanes. Parsed native results are filtered again by the wrapper,
+  merged by file/range, deduplicated, and then subject to one global limit.
+- `codedb_context` uses those same unified hits and wrapper-local bounded reads,
+  so context cannot bypass scope, deduplication, read, or output limits.
 
 Host-only lifecycle acceptance code is not part of the package. The package
 assembly remains independent, with an optional friend-assembly declaration for

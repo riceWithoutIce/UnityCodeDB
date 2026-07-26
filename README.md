@@ -68,6 +68,8 @@ vendor its source or redistribute its binary.
 - Provider watch and the Shader/HLSL text adapter remain separate owners.
 - `codedb_read` resolves a project-local real file, returns at most 200
   requested lines, and all wrapper text responses are capped at 64 KiB.
+- Search `path` aliases are normalized to `path_glob`; directory queries without
+  a language merge Provider and Shader hits under one deduplicated global limit.
 
 See [the package README](com.rice.ai-codedb/README.md) and
 [package documentation](com.rice.ai-codedb/Documentation~/index.md) for the

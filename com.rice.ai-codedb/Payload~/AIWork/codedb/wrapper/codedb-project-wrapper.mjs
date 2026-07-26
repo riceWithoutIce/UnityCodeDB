@@ -308,35 +308,19 @@ function normalizeArgs(value) {
   return { ...value };
 }
 
-function routeSearchTool(name, args) {
+function routeSearchTool(name, rawArgs) {
+  const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = getLimit(args.limit);
-
-  if (isExcludedScope(args.path_glob ?? args.path)) {
-    return `[NO HIT] excluded path scope: ${normalizeRelativePath(args.path_glob ?? args.path)}`;
+  if (!query) {
+    return `[NO HIT] ${name} requires a query.`;
   }
 
-  if (shouldUseAdapter(args)) {
-    return formatAdapterSearch(query, args, limit);
+  if (isExcludedScope(args.path_glob)) {
+    return `[NO HIT] excluded path scope: ${args.path_glob}`;
   }
 
-  if (shouldUseProviderOnly(args)) {
-    return invokeProviderTool(name, stripWrapperOnlyArgs(args));
-  }
-
-  const parts = [];
-  try {
-    const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args));
-    parts.push("[PROVIDER]");
-    parts.push(providerOutput.trim());
-  } catch (error) {
-    parts.push(`[PROVIDER ERROR] ${error.message}`);
-  }
-
-  const adapterOutput = formatAdapterSearch(query, args, limit);
-  parts.push("[SHADER ADAPTER]");
-  parts.push(adapterOutput.trim());
-  return parts.filter(Boolean).join("\n");
+  return formatUnifiedSearchResult(name, query, collectUnifiedSearchEntries(name, args, limit));
 }
 
 function routeReadTool(args) {
@@ -356,53 +340,65 @@ function routeReadTool(args) {
   return formatProjectRead(targetPath, args);
 }
 
-function routeContextTool(args) {
+function routeContextTool(rawArgs) {
+  const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = Math.min(getLimit(args.limit), 5);
-
-  if (isExcludedScope(args.path_glob ?? args.path)) {
-    return `[NO HIT] excluded path scope: ${normalizeRelativePath(args.path_glob ?? args.path)}`;
+  if (!query) {
+    return "[NO HIT] codedb_context requires a query.";
   }
 
-  if (shouldUseAdapter(args)) {
-    const matches = findAdapterMatches(query, args, limit);
-    if (matches.length === 0) {
-      return `[NO HIT] Shader adapter context found no hit for: ${query}`;
+  if (isExcludedScope(args.path_glob)) {
+    return `[NO HIT] excluded path scope: ${args.path_glob}`;
+  }
+
+  const search = collectUnifiedSearchEntries("codedb_text_search", args, limit);
+  if (search.entries.length === 0) {
+    return [...search.diagnostics, `[NO HIT] CodeDB context found no match for: ${query}`]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  const sections = [...search.diagnostics];
+  for (const entry of search.entries) {
+    const line = Math.max(1, entry.startLine ?? 1);
+    const label = isAdapterPath(entry.path) ? "Shader adapter" : "CodeDB";
+    try {
+      sections.push(formatLocalRead(entry.path, {
+        start_line: Math.max(1, line - 3),
+        end_line: line + 5
+      }, label));
+    } catch (error) {
+      sections.push(`[READ ERROR] ${entry.path}: ${error.message}`);
     }
-
-    return matches.map((match) => formatAdapterRead(match.path, {
-      start_line: Math.max(1, match.line - 3),
-      end_line: match.line + 5
-    })).join("\n\n");
   }
-
-  if (shouldUseProviderOnly(args)) {
-    return invokeProviderTool("codedb_context", stripWrapperOnlyArgs(args));
+  if (search.hasMore) {
+    sections.push(`[LIMIT] Global context result limit ${limit} applied; additional hits were omitted.`);
   }
-
-  const providerOutput = invokeProviderTool("codedb_context", stripWrapperOnlyArgs(args));
-  const adapterOutput = routeContextTool({ ...args, language: "ShaderHlsl", limit });
-  return ["[PROVIDER]", providerOutput.trim(), "[SHADER ADAPTER]", adapterOutput.trim()].join("\n");
+  return sections.filter(Boolean).join("\n\n");
 }
 
-function shouldUseProviderOnly(args) {
+function resolveSearchLanes(args) {
   if (isShaderLanguage(args.language) || hasAdapterPathScope(args)) {
-    return false;
+    return { provider: false, adapter: true };
   }
-
-  if (args.language) {
-    return true;
+  if (args.language || hasNonAdapterFileScope(args)) {
+    return { provider: true, adapter: false };
   }
-
-  return Boolean(args.path || args.path_glob);
-}
-
-function shouldUseAdapter(args) {
-  return isShaderLanguage(args.language) || hasAdapterPathScope(args);
+  return { provider: true, adapter: true };
 }
 
 function hasAdapterPathScope(args) {
-  return isAdapterPath(args.path) || isAdapterPath(args.path_glob);
+  return isAdapterPath(args.path_glob);
+}
+
+function hasNonAdapterFileScope(args) {
+  const scope = normalizeRelativePath(args.path_glob);
+  if (!scope) {
+    return false;
+  }
+  const extension = path.posix.extname(scope).toLowerCase();
+  return Boolean(extension) && !ADAPTER_EXTENSIONS.has(extension);
 }
 
 function isShaderLanguage(language) {
@@ -468,11 +464,329 @@ function getLimit(value) {
   return Math.min(parsed, MAX_LIMIT);
 }
 
+function normalizeSearchArgs(args) {
+  const normalized = { ...args };
+  const pathScope = normalizeSearchScope(args.path);
+  const globScope = normalizeSearchScope(args.path_glob);
+  if (pathScope && globScope && pathScope.toLowerCase() !== globScope.toLowerCase()) {
+    throw new Error("Search scope aliases path and path_glob disagree.");
+  }
+
+  delete normalized.path;
+  if (pathScope || globScope) {
+    normalized.path_glob = pathScope || globScope;
+  } else {
+    delete normalized.path_glob;
+  }
+  normalized.limit = getLimit(args.limit);
+  return normalized;
+}
+
+function normalizeSearchScope(value) {
+  const relativePath = normalizeRelativePath(value);
+  if (!relativePath) {
+    return "";
+  }
+  if (relativePath === ".") {
+    return "**";
+  }
+  if (/[*?{[]/.test(relativePath)) {
+    return relativePath;
+  }
+
+  const fullPath = resolveUnityPath(relativePath);
+  assertPathInside(fullPath, context.unityRoot, "Search scope");
+  if (fs.existsSync(fullPath)) {
+    const realRoot = fs.realpathSync(context.unityRoot);
+    const realPath = fs.realpathSync(fullPath);
+    assertPathInside(realPath, realRoot, "Search scope resolved");
+    if (fs.statSync(realPath).isDirectory()) {
+      return `${relativePath.replace(/\/$/, "")}/**`;
+    }
+    return relativePath;
+  }
+
+  if (relativePath.endsWith("/") || !path.posix.extname(relativePath)) {
+    return `${relativePath.replace(/\/$/, "")}/**`;
+  }
+  return relativePath;
+}
+
 function stripWrapperOnlyArgs(args) {
   const clone = { ...args };
   delete clone.language;
   delete clone.regex;
   return clone;
+}
+
+function collectUnifiedSearchEntries(name, args, limit) {
+  const lanes = resolveSearchLanes(args);
+  const diagnostics = [];
+  const candidates = [];
+  let providerReportedTotal = 0;
+  let providerParsedCount = 0;
+
+  if (lanes.provider) {
+    try {
+      const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args));
+      const parsed = parseProviderSearchOutput(name, providerOutput);
+      diagnostics.push(...parsed.diagnostics);
+      candidates.push(...parsed.entries);
+      providerReportedTotal = parsed.reportedTotal;
+      providerParsedCount = parsed.entries.length;
+    } catch (error) {
+      if (!lanes.adapter) {
+        throw error;
+      }
+      diagnostics.push(`[PROVIDER ERROR] ${error.message}`);
+    }
+  }
+
+  let adapterMayHaveMore = false;
+  if (lanes.adapter) {
+    try {
+      const adapterFetchLimit = Math.min(MAX_LIMIT, limit + 1);
+      const matches = findAdapterMatches(getQueryText(args), args, adapterFetchLimit);
+      adapterMayHaveMore = limit < MAX_LIMIT && matches.length > limit;
+      for (const match of matches) {
+        candidates.push({
+          path: match.path,
+          startLine: match.line,
+          endLine: match.line,
+          text: match.text,
+          lanes: ["shader-adapter"]
+        });
+      }
+    } catch (error) {
+      if (!lanes.provider) {
+        throw error;
+      }
+      diagnostics.push(`[SHADER ADAPTER ERROR] ${error.message}`);
+    }
+  }
+
+  const scoped = candidates.filter((entry) => {
+    if (!entry.path || isExcludedScope(entry.path)) {
+      return false;
+    }
+    return !args.path_glob || matchesGlob(entry.path, args.path_glob);
+  });
+  const deduplicated = mergeSearchEntries(name, scoped);
+  const hasMore = deduplicated.length > limit
+    || adapterMayHaveMore
+    || providerReportedTotal > providerParsedCount;
+  return {
+    diagnostics,
+    entries: deduplicated.slice(0, limit),
+    hasMore,
+    limit
+  };
+}
+
+function parseProviderSearchOutput(name, output) {
+  const lines = String(output ?? "").split(/\r?\n/);
+  const entries = [];
+  const diagnostics = [];
+  let reportedTotal = 0;
+  let currentPath = "";
+  let currentChunk = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) {
+      currentChunk = null;
+      continue;
+    }
+
+    const totalMatch = line.match(/^\s*(\d+)\s+results?\b/i);
+    if (totalMatch) {
+      reportedTotal = Math.max(reportedTotal, Number.parseInt(totalMatch[1], 10));
+      currentChunk = null;
+      continue;
+    }
+
+    if (line.startsWith("[FIXTURE PROVIDER]")) {
+      diagnostics.push(line);
+      continue;
+    }
+
+    const normalizedHit = line.match(/^\[HIT\]\s+(.+?):(\d+)(?:-(\d+))?(?:\s+(.*))?$/i);
+    if (normalizedHit) {
+      const entry = createSearchEntry(
+        normalizedHit[1],
+        Number.parseInt(normalizedHit[2], 10),
+        Number.parseInt(normalizedHit[3] ?? normalizedHit[2], 10),
+        normalizedHit[4] ?? "",
+        "provider"
+      );
+      if (entry) {
+        entries.push(entry);
+      }
+      currentChunk = null;
+      continue;
+    }
+
+    if (name === "codedb_text_search") {
+      const sourceLine = line.match(/^\s+L(\d+):\s?(.*)$/);
+      if (sourceLine && currentPath) {
+        const entry = createSearchEntry(
+          currentPath,
+          Number.parseInt(sourceLine[1], 10),
+          Number.parseInt(sourceLine[1], 10),
+          sourceLine[2],
+          "provider"
+        );
+        if (entry) {
+          entries.push(entry);
+        }
+        continue;
+      }
+
+      const pathLine = line.match(/^\s{2}([^\s].*)$/);
+      if (pathLine && isProjectSourcePath(pathLine[1])) {
+        currentPath = pathLine[1].trim();
+      }
+      continue;
+    }
+
+    if (name === "codedb_search") {
+      const chunkLine = line.match(/^\s{2}(.+):(\d+)-(\d+)\s+\[score=[^\]]+\]\s*$/i);
+      if (chunkLine) {
+        currentChunk = createSearchEntry(
+          chunkLine[1],
+          Number.parseInt(chunkLine[2], 10),
+          Number.parseInt(chunkLine[3], 10),
+          "",
+          "provider"
+        );
+        if (currentChunk) {
+          entries.push(currentChunk);
+        }
+        continue;
+      }
+      if (currentChunk && /^\s{4}/.test(rawLine)) {
+        currentChunk.text = currentChunk.text
+          ? `${currentChunk.text}\n${rawLine.trim()}`
+          : rawLine.trim();
+      }
+      continue;
+    }
+
+    if (name === "codedb_find") {
+      const findLine = line.match(/^\s*\d+\.\s+(.+?)(?:\s+\(score:[^)]+\))?\s*$/i);
+      if (findLine) {
+        const entry = createSearchEntry(findLine[1], null, null, "", "provider");
+        if (entry) {
+          entries.push(entry);
+        }
+      }
+    }
+  }
+
+  return {
+    entries,
+    diagnostics,
+    reportedTotal: Math.max(reportedTotal, entries.length)
+  };
+}
+
+function createSearchEntry(rawPath, startLine, endLine, text, lane) {
+  let relativePath;
+  try {
+    relativePath = normalizeRelativePath(rawPath);
+  } catch {
+    return null;
+  }
+  if (!isProjectSourcePath(relativePath)) {
+    return null;
+  }
+  return {
+    path: relativePath,
+    startLine: Number.isInteger(startLine) && startLine > 0 ? startLine : null,
+    endLine: Number.isInteger(endLine) && endLine > 0 ? endLine : null,
+    text: String(text ?? "").trim(),
+    lanes: [lane]
+  };
+}
+
+function isProjectSourcePath(value) {
+  try {
+    const relativePath = normalizeRelativePath(value);
+    return /^(Assets|Packages|ProjectSettings)\//i.test(relativePath);
+  } catch {
+    return false;
+  }
+}
+
+function mergeSearchEntries(name, entries) {
+  const merged = [];
+  for (const entry of entries) {
+    const existing = merged.find((candidate) => searchEntriesOverlap(name, candidate, entry));
+    if (!existing) {
+      merged.push({ ...entry, lanes: [...entry.lanes] });
+      continue;
+    }
+    for (const lane of entry.lanes) {
+      if (!existing.lanes.includes(lane)) {
+        existing.lanes.push(lane);
+      }
+    }
+    if (!existing.text && entry.text) {
+      existing.text = entry.text;
+    }
+  }
+  return merged;
+}
+
+function searchEntriesOverlap(name, left, right) {
+  if (left.path.toLowerCase() !== right.path.toLowerCase()) {
+    return false;
+  }
+  if (name === "codedb_find") {
+    return true;
+  }
+  if (name === "codedb_text_search") {
+    return left.startLine === right.startLine;
+  }
+  if (left.startLine === null || right.startLine === null) {
+    return true;
+  }
+  const leftEnd = left.endLine ?? left.startLine;
+  const rightEnd = right.endLine ?? right.startLine;
+  return left.startLine <= rightEnd && right.startLine <= leftEnd;
+}
+
+function formatUnifiedSearchResult(name, query, result) {
+  const lines = [...result.diagnostics];
+  if (result.entries.length === 0) {
+    lines.push(`[NO HIT] ${name} found no match for: ${query}`);
+    return lines.join("\n");
+  }
+
+  lines.push(`[OK] ${name} found ${result.entries.length} unique hit(s) for: ${query}`);
+  for (const entry of result.entries) {
+    const location = formatSearchLocation(entry);
+    lines.push(`[HIT] ${location} [${entry.lanes.join("+")}]`);
+    if (entry.text) {
+      for (const textLine of entry.text.split(/\r?\n/)) {
+        lines.push(`    ${textLine}`);
+      }
+    }
+  }
+  if (result.hasMore) {
+    lines.push(`[LIMIT] Global result limit ${result.limit} applied; additional hits were omitted.`);
+  }
+  return lines.join("\n");
+}
+
+function formatSearchLocation(entry) {
+  if (!entry.startLine) {
+    return entry.path;
+  }
+  if (entry.endLine && entry.endLine !== entry.startLine) {
+    return `${entry.path}:${entry.startLine}-${entry.endLine}`;
+  }
+  return `${entry.path}:${entry.startLine}`;
 }
 
 function invokeProviderTool(name, args) {
@@ -710,24 +1024,6 @@ function fileState(filePath) {
   return fs.existsSync(filePath) ? "present" : "missing";
 }
 
-function formatAdapterSearch(query, args, limit) {
-  if (!query) {
-    return "[NO HIT] Shader adapter search requires a query.";
-  }
-
-  const matches = findAdapterMatches(query, args, limit);
-  if (matches.length === 0) {
-    return `[NO HIT] Shader adapter search found no hit for: ${query}`;
-  }
-
-  const lines = [`[OK] Shader adapter search found ${matches.length} hit(s) for: ${query}`];
-  for (const match of matches) {
-    lines.push(`[HIT] ${match.path}:${match.line}`);
-  }
-
-  return lines.join("\n");
-}
-
 function findAdapterMatches(query, args, limit) {
   assertFileExists(context.textAdapterIndexPath, "Shader adapter index");
 
@@ -951,21 +1247,29 @@ function matchesGlob(relativePath, glob) {
   }
 
   const normalizedGlob = normalizeRelativePath(glob);
-  const regexText = normalizedGlob
-    .split("")
-    .map((character, index, source) => {
-      if (character === "*") {
-        return source[index + 1] === "*" ? ".*" : "[^/]*";
+  let regexText = "";
+  for (let index = 0; index < normalizedGlob.length; index += 1) {
+    const character = normalizedGlob[index];
+    if (character === "*" && normalizedGlob[index + 1] === "*") {
+      index += 1;
+      if (normalizedGlob[index + 1] === "/") {
+        index += 1;
+        regexText += "(?:.*/)?";
+      } else {
+        regexText += ".*";
       }
-
-      if (character === "?") {
-        return "[^/]";
-      }
-
-      return character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-    })
-    .join("")
-    .replace(/\.\*\[\^\/\]\*/g, ".*");
+      continue;
+    }
+    if (character === "*") {
+      regexText += "[^/]*";
+      continue;
+    }
+    if (character === "?") {
+      regexText += "[^/]";
+      continue;
+    }
+    regexText += character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+  }
 
   return new RegExp(`^${regexText}$`, "i").test(relativePath);
 }
