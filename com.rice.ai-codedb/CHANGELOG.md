@@ -22,6 +22,10 @@
   It separates one-shot queue, Provider process/core, Shader adapter, merge,
   local-read, attempt-count, end-to-end, and uncapped-body byte evidence while
   preserving the footer inside the existing 64 KiB response ceiling.
+- Extended the existing watch coordinator with a token-authenticated read-only
+  query proxy for search, text-search, and find. Ready wrappers now reuse the
+  coordinator-owned persistent Provider MCP process, while paused, starting,
+  stale, or unavailable states retain the one-shot fallback.
 
 ## 0.1.0 - 2026-07-26
 

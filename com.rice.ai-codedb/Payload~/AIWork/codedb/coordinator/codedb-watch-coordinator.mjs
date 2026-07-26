@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -23,9 +24,11 @@ const ADAPTER_WORKER_BUILD_TIMEOUT_MS = 120000;
 const MAX_ADAPTER_WORKER_RESTARTS = 3;
 const DEFAULT_ADAPTER_DEBOUNCE_MS = 750;
 const MAX_ADAPTER_OUTPUT_CHARS = 8192;
+const MAX_IPC_REQUEST_BYTES = 64 * 1024;
 const ADAPTER_WATCH_ROOTS = ["Assets", "Packages", "ProjectSettings"];
 const ADAPTER_EXTENSIONS = new Set([".shader", ".hlsl", ".compute", ".cginc"]);
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
+const PROVIDER_QUERY_TOOLS = new Set(["codedb_search", "codedb_text_search", "codedb_find"]);
 
 const { command, options } = parseArgs(process.argv.slice(2));
 
@@ -455,6 +458,52 @@ async function runOwnedDaemon(context) {
 
   const persistState = () => writeJsonFile(context.statePath, daemonState);
   const publicStatus = () => sanitizeStatus(daemonState);
+
+  const queryProvider = async (request) => {
+    if (request.schema_version !== 1) {
+      return { ok: false, error_code: "INVALID_QUERY", error: "Unsupported coordinator query schema version." };
+    }
+    if (!PROVIDER_QUERY_TOOLS.has(request.tool)) {
+      return { ok: false, error_code: "INVALID_QUERY", error: `Unsupported coordinator query tool: ${request.tool}` };
+    }
+    if (!request.arguments || typeof request.arguments !== "object" || Array.isArray(request.arguments)) {
+      return { ok: false, error_code: "INVALID_QUERY", error: "Coordinator query arguments must be an object." };
+    }
+    if (stopping || daemonState.provider_state !== "ready" || !providerRpc) {
+      return { ok: false, error_code: "PROVIDER_UNAVAILABLE", error: "Coordinator Provider is not ready." };
+    }
+
+    const providerStartedAt = performance.now();
+    daemonState.provider_query_count += 1;
+    daemonState.provider_last_query_at_utc = new Date().toISOString();
+    try {
+      const result = await providerRpc.request("tools/call", {
+        name: request.tool,
+        arguments: request.arguments
+      }, PROVIDER_REQUEST_TIMEOUT_MS);
+      const providerProcessMs = performance.now() - providerStartedAt;
+      daemonState.provider_last_query_elapsed_ms = Math.round(providerProcessMs * 100) / 100;
+      return {
+        ok: true,
+        lifecycle_id: daemonState.lifecycle_id,
+        output: getProviderToolOutput(result),
+        timing: {
+          queue_ms: 0,
+          provider_process_ms: daemonState.provider_last_query_elapsed_ms,
+          provider_core_ms: null,
+          provider_attempts: 1
+        }
+      };
+    } catch (error) {
+      daemonState.provider_query_error_count += 1;
+      daemonState.provider_last_query_elapsed_ms = Math.round((performance.now() - providerStartedAt) * 100) / 100;
+      return {
+        ok: false,
+        error_code: error.code === "PROVIDER_TOOL_ERROR" ? "PROVIDER_TOOL_ERROR" : "PROVIDER_UNAVAILABLE",
+        error: error.message
+      };
+    }
+  };
 
   const persistAdapterPending = () => {
     daemonState.adapter_pending_paths = [...adapterPendingPaths].sort();
@@ -1070,6 +1119,9 @@ async function runOwnedDaemon(context) {
       if (clientCommand === "status") {
         return { ok: true, status: publicStatus() };
       }
+      if (clientCommand === "query") {
+        return queryProvider(request);
+      }
       if (clientCommand === "stop") {
         if (daemonState.exclusive_lifecycle === true && !request.expected_lifecycle_id) {
           return { ok: false, error: "Exclusive coordinator lifecycle requires an expected lifecycle id for Stop." };
@@ -1128,6 +1180,10 @@ function createDaemonState(context, recovery) {
     auth_token: crypto.randomBytes(24).toString("hex"),
     started_at_utc: new Date().toISOString(),
     provider_ready_at_utc: null,
+    provider_query_count: 0,
+    provider_query_error_count: 0,
+    provider_last_query_at_utc: null,
+    provider_last_query_elapsed_ms: null,
     adapter_enabled: context.adapterEnabled,
     adapter_builder: context.adapterBuilder,
     adapter_worker: context.adapterWorker,
@@ -1331,28 +1387,46 @@ function normalizePath(value) {
 function handleClient(socket, authToken, getStatus, dispatch) {
   socket.setEncoding("utf8");
   let buffer = "";
+  let handled = false;
   socket.on("data", (chunk) => {
+    if (handled) {
+      return;
+    }
     buffer += chunk;
+    if (Buffer.byteLength(buffer, "utf8") > MAX_IPC_REQUEST_BYTES) {
+      handled = true;
+      socket.end(`${JSON.stringify({ ok: false, error_code: "REQUEST_TOO_LARGE", error: "Coordinator request exceeds 64 KiB." })}\n`);
+      return;
+    }
     const newline = buffer.indexOf("\n");
     if (newline < 0) {
       return;
     }
+    handled = true;
     const line = buffer.slice(0, newline);
     buffer = buffer.slice(newline + 1);
     void (async () => {
       try {
         const request = JSON.parse(line);
-        if (request.auth_token !== authToken) {
-          socket.end(`${JSON.stringify({ ok: false, error: "Unauthorized coordinator request." })}\n`);
+        if (!authTokensMatch(request.auth_token, authToken)) {
+          socket.end(`${JSON.stringify({ ok: false, error_code: "UNAUTHORIZED", error: "Unauthorized coordinator request." })}\n`);
           return;
         }
         const response = await dispatch(request, getStatus());
         socket.end(`${JSON.stringify(response)}\n`);
       } catch (error) {
-        socket.end(`${JSON.stringify({ ok: false, error: error.message })}\n`);
+        socket.end(`${JSON.stringify({ ok: false, error_code: error.code ?? "COORDINATOR_REQUEST_FAILED", error: error.message })}\n`);
       }
     })();
   });
+}
+
+function authTokensMatch(value, expected) {
+  const actualBuffer = Buffer.from(String(value ?? ""), "utf8");
+  const expectedBuffer = Buffer.from(String(expected ?? ""), "utf8");
+  return actualBuffer.length === expectedBuffer.length
+    && actualBuffer.length > 0
+    && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
 async function requestCoordinator(context, clientCommand, timeoutMs, requestOptions = {}) {
@@ -1417,7 +1491,9 @@ class ProviderRpc {
     child.once("exit", () => {
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
-        pending.reject(new Error("Provider exited while an MCP request was pending."));
+        const error = new Error("Provider exited while an MCP request was pending.");
+        error.code = "PROVIDER_UNAVAILABLE";
+        pending.reject(error);
       }
       this.pending.clear();
     });
@@ -1429,7 +1505,9 @@ class ProviderRpc {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Timed out waiting for provider MCP method ${method}.`));
+        const error = new Error(`Timed out waiting for provider MCP method ${method}.`);
+        error.code = "PROVIDER_TIMEOUT";
+        reject(error);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
@@ -1454,11 +1532,32 @@ class ProviderRpc {
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
     if (message.error) {
-      pending.reject(new Error(message.error.message ?? "Provider MCP error."));
+      const error = new Error(message.error.message ?? "Provider MCP error.");
+      error.code = "PROVIDER_TOOL_ERROR";
+      pending.reject(error);
     } else {
       pending.resolve(message.result);
     }
   }
+}
+
+function getProviderToolOutput(result) {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const text = content
+    .filter((entry) => entry?.type === "text")
+    .map((entry) => String(entry.text ?? ""))
+    .join("\n");
+  if (result?.isError === true) {
+    const error = new Error(text || "Provider tool returned an error result.");
+    error.code = "PROVIDER_TOOL_ERROR";
+    throw error;
+  }
+  if (content.length > 0 && !content.some((entry) => entry?.type === "text")) {
+    const error = new Error("Provider tool returned no text content.");
+    error.code = "PROVIDER_TOOL_ERROR";
+    throw error;
+  }
+  return text;
 }
 
 class AdapterWorkerRpc {
@@ -1746,6 +1845,10 @@ function sanitizeStatus(state) {
     runtime: state.runtime,
     started_at_utc: state.started_at_utc,
     provider_ready_at_utc: state.provider_ready_at_utc,
+    provider_query_count: state.provider_query_count,
+    provider_query_error_count: state.provider_query_error_count,
+    provider_last_query_at_utc: state.provider_last_query_at_utc,
+    provider_last_query_elapsed_ms: state.provider_last_query_elapsed_ms,
     adapter_enabled: state.adapter_enabled,
     adapter_builder: state.adapter_builder,
     adapter_worker: state.adapter_worker,

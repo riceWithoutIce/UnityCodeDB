@@ -309,7 +309,14 @@ public static class CodedbMaterializerFixtureProvider
             }
             else if (line.IndexOf("\"method\":\"tools/list\"", StringComparison.Ordinal) >= 0)
             {
-                Respond(line, "{\"tools\":[{\"name\":\"codedb_text_search\",\"description\":\"Fixture provider search\",\"inputSchema\":{\"type\":\"object\"}}]}");
+                Respond(line, "{\"tools\":[{\"name\":\"codedb_search\",\"description\":\"Fixture semantic search\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"codedb_text_search\",\"description\":\"Fixture text search\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"codedb_find\",\"description\":\"Fixture find\",\"inputSchema\":{\"type\":\"object\"}}]}");
+            }
+            else if (line.IndexOf("\"method\":\"tools/call\"", StringComparison.Ordinal) >= 0)
+            {
+                string toolName = GetRequestedToolName(line);
+                Console.Error.WriteLine("codebase-mcp timing total: 0.007s");
+                string output = BuildToolOutput(toolName, line, Path.GetFileName(args[1]), "mcp", args[3]);
+                Respond(line, "{\"content\":[{\"type\":\"text\",\"text\":\"" + EscapeJson(output) + "\"}],\"isError\":false}");
             }
         }
         return 0;
@@ -368,62 +375,90 @@ public static class CodedbMaterializerFixtureProvider
             return 2;
         }
         Console.Error.WriteLine("codebase-mcp timing total: 0.007s");
-        Console.WriteLine("[FIXTURE PROVIDER] active_config=" + Path.GetFileName(args[configIndex + 1]));
         string toolName = args.Length > 1 ? args[1] : String.Empty;
         string toolArguments = args.Length > 2 ? args[2] : String.Empty;
+        int rootIndex = Array.IndexOf(args, "--root");
+        string root = rootIndex >= 0 && rootIndex + 1 < args.Length
+            ? Path.GetFullPath(args[rootIndex + 1])
+            : Directory.GetCurrentDirectory();
+        Console.Write(BuildToolOutput(toolName, toolArguments, Path.GetFileName(args[configIndex + 1]), "tool", root));
+        return 0;
+    }
+
+    private static string BuildToolOutput(string toolName, string toolArguments, string activeConfig, string mode, string root)
+    {
+        StringWriter writer = new StringWriter();
+        writer.WriteLine("[FIXTURE PROVIDER] active_config=" + activeConfig);
+        writer.WriteLine("[FIXTURE PROVIDER] mode=" + mode + " pid=" + System.Diagnostics.Process.GetCurrentProcess().Id);
         if (String.Equals(toolName, "codedb_status", StringComparison.Ordinal))
         {
-            Console.WriteLine("ready");
+            writer.WriteLine("ready");
         }
         else if (String.Equals(toolName, "codedb_text_search", StringComparison.Ordinal))
         {
             if (toolArguments.IndexOf("CODEDB_SCOPE_CONTRACT", StringComparison.Ordinal) >= 0)
             {
-                Console.WriteLine("[FIXTURE PROVIDER] args=" + toolArguments);
-                Console.WriteLine("4 results for 'CODEDB_SCOPE_CONTRACT' in 4 files:");
-                Console.WriteLine("  Assets/Scoped/ScopedProbe.cs");
-                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
-                Console.WriteLine("  Assets/Outside/OutsideProbe.cs");
-                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
-                Console.WriteLine("  Assets/Scoped/ScopedProbe.shader");
-                Console.WriteLine("    L2: // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
-                Console.WriteLine("  Assets/Scoped/SecondScopedProbe.cs");
-                Console.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+                writer.WriteLine("[FIXTURE PROVIDER] args=" + toolArguments);
+                writer.WriteLine("4 results for 'CODEDB_SCOPE_CONTRACT' in 4 files:");
+                writer.WriteLine("  Assets/Scoped/ScopedProbe.cs");
+                writer.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+                writer.WriteLine("  Assets/Outside/OutsideProbe.cs");
+                writer.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
+                writer.WriteLine("  Assets/Scoped/ScopedProbe.shader");
+                writer.WriteLine("    L2: // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+                writer.WriteLine("  Assets/Scoped/SecondScopedProbe.cs");
+                writer.WriteLine("    L1: // CODEDB_SCOPE_CONTRACT");
             }
             else
             {
-                Console.WriteLine("[HIT] Assets/MaterializerFreshnessProbe.cs:1 CodedbMaterializerFreshnessProbe CODEDB_MATERIALIZER_PROVIDER_PROBE");
+                writer.WriteLine("[HIT] Assets/MaterializerFreshnessProbe.cs:1 CodedbMaterializerFreshnessProbe CODEDB_MATERIALIZER_PROVIDER_PROBE");
             }
         }
         else if (String.Equals(toolName, "codedb_search", StringComparison.Ordinal) &&
             toolArguments.IndexOf("CODEDB_SEARCH_CONTRACT", StringComparison.Ordinal) >= 0)
         {
-            Console.WriteLine("3 results for 'CODEDB_SEARCH_CONTRACT':");
-            Console.WriteLine("  Assets/Outside/OutsideProbe.cs:1-1  [score=1.000, text]");
-            Console.WriteLine("    // CODEDB_SEARCH_CONTRACT");
-            Console.WriteLine("  Assets/Scoped/ScopedProbe.cs:1-2  [score=0.900, text]");
-            Console.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
-            Console.WriteLine("  Assets/Scoped/ScopedProbe.shader:1-3  [score=0.800, text]");
-            Console.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+            writer.WriteLine("3 results for 'CODEDB_SEARCH_CONTRACT':");
+            writer.WriteLine("  Assets/Outside/OutsideProbe.cs:1-1  [score=1.000, text]");
+            writer.WriteLine("    // CODEDB_SEARCH_CONTRACT");
+            writer.WriteLine("  Assets/Scoped/ScopedProbe.cs:1-2  [score=0.900, text]");
+            writer.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
+            writer.WriteLine("  Assets/Scoped/ScopedProbe.shader:1-3  [score=0.800, text]");
+            writer.WriteLine("    // CODEDB_SCOPE_CONTRACT CODEDB_SEARCH_CONTRACT");
         }
         else if (String.Equals(toolName, "codedb_find", StringComparison.Ordinal) &&
             toolArguments.IndexOf("CODEDB_FIND_CONTRACT", StringComparison.Ordinal) >= 0)
         {
-            Console.WriteLine("1. Assets/Outside/OutsideProbe.cs (score: 100.00)");
-            Console.WriteLine("2. Assets/Scoped/SecondScopedProbe.cs (score: 90.00)");
+            writer.WriteLine("1. Assets/Outside/OutsideProbe.cs (score: 100.00)");
+            writer.WriteLine("2. Assets/Scoped/SecondScopedProbe.cs (score: 90.00)");
         }
         else if (String.Equals(toolName, "codedb_read", StringComparison.Ordinal))
         {
-            int rootIndex = Array.IndexOf(args, "--root");
-            if (rootIndex < 0 || rootIndex + 1 >= args.Length)
-            {
-                Console.Error.WriteLine("Fixture provider read is missing --root.");
-                return 2;
-            }
-            string sourcePath = Path.Combine(Path.GetFullPath(args[rootIndex + 1]), "Assets", "MaterializerFreshnessProbe.cs");
-            Console.WriteLine(File.ReadAllText(sourcePath));
+            string sourcePath = Path.Combine(root, "Assets", "MaterializerFreshnessProbe.cs");
+            writer.WriteLine(File.ReadAllText(sourcePath));
         }
-        return 0;
+        return writer.ToString();
+    }
+
+    private static string GetRequestedToolName(string request)
+    {
+        foreach (string toolName in new[] { "codedb_search", "codedb_text_search", "codedb_find" })
+        {
+            if (request.IndexOf("\"name\":\"" + toolName + "\"", StringComparison.Ordinal) >= 0)
+            {
+                return toolName;
+            }
+        }
+        return String.Empty;
+    }
+
+    private static string EscapeJson(string value)
+    {
+        return value
+            .Replace("\\", "\\\\")
+            .Replace("\"", "\\\"")
+            .Replace("\r", "\\r")
+            .Replace("\n", "\\n")
+            .Replace("\t", "\\t");
     }
 
     private static void Respond(string request, string resultJson)
@@ -932,6 +967,44 @@ function Get-WrapperTiming {
     }
 }
 
+function Invoke-CoordinatorPipeRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$StatePath,
+        [Parameter(Mandatory = $true)]$Request
+    )
+
+    $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    $pipePrefix = "\\.\pipe\"
+    if (-not ([string]$state.pipe_name).StartsWith($pipePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Coordinator fixture expected a Windows named pipe, got '$($state.pipe_name)'."
+    }
+
+    $pipeName = ([string]$state.pipe_name).Substring($pipePrefix.Length)
+    $client = [System.IO.Pipes.NamedPipeClientStream]::new(
+        ".",
+        $pipeName,
+        [System.IO.Pipes.PipeDirection]::InOut,
+        [System.IO.Pipes.PipeOptions]::None)
+    $reader = $null
+    $writer = $null
+    try {
+        $client.Connect(5000)
+        $reader = [System.IO.StreamReader]::new($client, [System.Text.Encoding]::UTF8, $false, 4096, $true)
+        $writer = [System.IO.StreamWriter]::new($client, [System.Text.UTF8Encoding]::new($false), 4096, $true)
+        $writer.AutoFlush = $true
+        $writer.WriteLine(($Request | ConvertTo-Json -Compress -Depth 8))
+        $responseLine = $reader.ReadLine()
+        if ([string]::IsNullOrWhiteSpace($responseLine)) {
+            throw "Coordinator pipe closed without a response."
+        }
+        return $responseLine | ConvertFrom-Json
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $reader) { $reader.Dispose() }
+        $client.Dispose()
+    }
+}
+
 function Invoke-WrapperWatchProbe {
     param(
         [Parameter(Mandatory = $true)][string]$WrapperPath,
@@ -1373,8 +1446,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.13" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 13 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.14" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 14 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1813,9 +1886,31 @@ try {
     Assert-Equal -Actual $automaticStatus.action -Expected "running" -Message "Automatic watcher did not reach running."
     Assert-Equal -Actual $automaticStatus.provider_state -Expected "ready" -Message "Automatic watcher provider did not reach ready."
     Assert-Equal -Actual $automaticStatus.adapter_state -Expected "watching" -Message "Automatic watcher adapter did not reach watching."
+    Assert-True -Condition ($automaticStatus.provider_query_count -ge 1) -Message "Automatic wrapper did not route its Provider query through the coordinator."
     $automaticLifecycleId = [string]$automaticStatus.lifecycle_id
     $activeWatchManagerPath = $materializedWatchManager
     $activeWatchLifecycleId = $automaticLifecycleId
+
+    $coordinatorState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
+    $unauthorizedQuery = Invoke-CoordinatorPipeRequest -StatePath $coordinatorStatePath -Request ([ordered]@{
+        schema_version = 1
+        auth_token = "invalid-token"
+        command = "query"
+        tool = "codedb_text_search"
+        arguments = [ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; limit = 1 }
+    })
+    Assert-Equal -Actual $unauthorizedQuery.ok -Expected $false -Message "Coordinator accepted an invalid query token."
+    Assert-Equal -Actual $unauthorizedQuery.error_code -Expected "UNAUTHORIZED" -Message "Coordinator unauthorized-query error code mismatch."
+
+    $unsupportedQuery = Invoke-CoordinatorPipeRequest -StatePath $coordinatorStatePath -Request ([ordered]@{
+        schema_version = 1
+        auth_token = [string]$coordinatorState.auth_token
+        command = "query"
+        tool = "codedb_read"
+        arguments = [ordered]@{ path = "Assets/MaterializerFreshnessProbe.cs" }
+    })
+    Assert-Equal -Actual $unsupportedQuery.ok -Expected $false -Message "Coordinator exposed a Provider tool outside the query allowlist."
+    Assert-Equal -Actual $unsupportedQuery.error_code -Expected "INVALID_QUERY" -Message "Coordinator unsupported-query error code mismatch."
 
     $scopedTextSearch = Invoke-WrapperToolProbe `
         -WrapperPath $materializedWrapper `
@@ -1832,11 +1927,12 @@ try {
     Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Scoped text search leaked a Provider result outside path_glob."
     Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Scoped/SecondScopedProbe.cs")) -Message "Scoped text search exceeded its global result limit."
     Assert-True -Condition ($scopedTextSearch.Contains("[LIMIT] Global result limit 2 applied")) -Message "Scoped text search did not disclose global limiting."
+    Assert-True -Condition ($scopedTextSearch.Contains("[FIXTURE PROVIDER] mode=mcp pid=$($automaticStatus.provider_pid)")) -Message "Scoped text search did not reuse the coordinator-owned Provider process."
     $scopedTextSearchTiming = Get-WrapperTiming -Text $scopedTextSearch -Label "Scoped dual-lane text search"
     Assert-Equal -Actual $scopedTextSearchTiming.tool -Expected "codedb_text_search" -Message "Scoped text search timing tool mismatch."
-    Assert-Equal -Actual $scopedTextSearchTiming.queue_ms -Expected 0 -Message "One-shot Provider path unexpectedly reported queue time."
+    Assert-Equal -Actual $scopedTextSearchTiming.queue_ms -Expected 0 -Message "Shared Provider path unexpectedly reported queue time before single-flight integration."
     Assert-True -Condition ($scopedTextSearchTiming.provider_process_ms -gt 0) -Message "Scoped text search did not report Provider process wall time."
-    Assert-Equal -Actual $scopedTextSearchTiming.provider_core_ms -Expected 7 -Message "Scoped text search did not parse Provider core timing."
+    Assert-True -Condition ($null -eq $scopedTextSearchTiming.provider_core_ms) -Message "Persistent Provider query unexpectedly reported uncorrelated core timing."
     Assert-Equal -Actual $scopedTextSearchTiming.provider_attempts -Expected 1 -Message "Scoped text search Provider attempt count mismatch."
     Assert-True -Condition ($scopedTextSearchTiming.adapter_ms -ge 0) -Message "Scoped text search adapter timing is negative."
     Assert-True -Condition ($scopedTextSearchTiming.merge_ms -ge 0) -Message "Scoped text search merge timing is negative."
@@ -1886,6 +1982,11 @@ try {
 
     $pausedWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
     Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.toml")) -Message "Paused wrapper did not fall back to the formal provider config."
+    Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] mode=tool pid=")) -Message "Paused wrapper did not use the one-shot Provider path."
+    $pausedSearchTiming = Get-WrapperTiming -Text $pausedWatchProbe.SearchText -Label "Paused one-shot search"
+    Assert-Equal -Actual $pausedSearchTiming.queue_ms -Expected 0 -Message "Paused one-shot search unexpectedly reported queue time."
+    Assert-Equal -Actual $pausedSearchTiming.provider_core_ms -Expected 7 -Message "Paused one-shot search did not parse Provider core timing."
+    Assert-Equal -Actual $pausedSearchTiming.provider_attempts -Expected 1 -Message "Paused one-shot Provider attempt count mismatch."
     foreach ($expectedStatus in @(
         "Watch opt-in: disabled",
         "Automatic refresh: paused",

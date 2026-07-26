@@ -2,6 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,8 @@ const MAX_READ_LINES = 200;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const TRANSIENT_READ_RETRY_DELAY_MS = 100;
 const TRANSIENT_READ_RETRY_MAX_MS = 2000;
+const COORDINATOR_QUERY_TIMEOUT_MS = 95000;
+const MAX_COORDINATOR_RESPONSE_BYTES = 1024 * 1024;
 const AUTOMATIC_WATCH_ENSURE_THROTTLE_MS = 5000;
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
 
@@ -269,7 +272,7 @@ async function handleRequest(message) {
   }
 }
 
-function callTool(params) {
+async function callTool(params) {
   const name = params.name;
   const args = normalizeArgs(params.arguments ?? {});
   const timing = createToolTiming(name);
@@ -283,13 +286,13 @@ function callTool(params) {
       case "codedb_search":
       case "codedb_text_search":
       case "codedb_find":
-        text = routeSearchTool(name, args, timing);
+        text = await routeSearchTool(name, args, timing);
         break;
       case "codedb_read":
         text = routeReadTool(args, timing);
         break;
       case "codedb_context":
-        text = routeContextTool(args, timing);
+        text = await routeContextTool(args, timing);
         break;
       default:
         throw new Error(`Unsupported tool: ${name}`);
@@ -375,7 +378,7 @@ function roundMilliseconds(value) {
   return Math.round(Math.max(0, Number(value) || 0) * 100) / 100;
 }
 
-function routeSearchTool(name, rawArgs, timing) {
+async function routeSearchTool(name, rawArgs, timing) {
   const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = getLimit(args.limit);
@@ -387,7 +390,8 @@ function routeSearchTool(name, rawArgs, timing) {
     return `[NO HIT] excluded path scope: ${args.path_glob}`;
   }
 
-  return formatUnifiedSearchResult(name, query, collectUnifiedSearchEntries(name, args, limit, timing));
+  const result = await collectUnifiedSearchEntries(name, args, limit, timing);
+  return formatUnifiedSearchResult(name, query, result);
 }
 
 function routeReadTool(args, timing) {
@@ -407,7 +411,7 @@ function routeReadTool(args, timing) {
   return measureToolPhase(timing, "readMs", () => formatProjectRead(targetPath, args));
 }
 
-function routeContextTool(rawArgs, timing) {
+async function routeContextTool(rawArgs, timing) {
   const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = Math.min(getLimit(args.limit), 5);
@@ -419,7 +423,7 @@ function routeContextTool(rawArgs, timing) {
     return `[NO HIT] excluded path scope: ${args.path_glob}`;
   }
 
-  const search = collectUnifiedSearchEntries("codedb_text_search", args, limit, timing);
+  const search = await collectUnifiedSearchEntries("codedb_text_search", args, limit, timing);
   if (search.entries.length === 0) {
     return [...search.diagnostics, `[NO HIT] CodeDB context found no match for: ${query}`]
       .filter(Boolean)
@@ -586,7 +590,7 @@ function stripWrapperOnlyArgs(args) {
   return clone;
 }
 
-function collectUnifiedSearchEntries(name, args, limit, timing) {
+async function collectUnifiedSearchEntries(name, args, limit, timing) {
   const lanes = resolveSearchLanes(args);
   const diagnostics = [];
   const candidates = [];
@@ -595,7 +599,7 @@ function collectUnifiedSearchEntries(name, args, limit, timing) {
 
   if (lanes.provider) {
     try {
-      const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args), timing);
+      const providerOutput = await invokeProviderTool(name, stripWrapperOnlyArgs(args), timing);
       const parsed = parseProviderSearchOutput(name, providerOutput);
       diagnostics.push(...parsed.diagnostics);
       candidates.push(...parsed.entries);
@@ -861,9 +865,30 @@ function formatSearchLocation(entry) {
   return `${entry.path}:${entry.startLine}`;
 }
 
-function invokeProviderTool(name, args, timing) {
+async function invokeProviderTool(name, args, timing) {
   assertFileExists(context.providerExecutablePath, "provider executable");
-  const providerConfigPath = getActiveProviderConfigPath(true);
+  if (!isAutomaticRefreshPaused()) {
+    const readyState = getReadyWatchCoordinatorState();
+    if (readyState) {
+      const response = await requestCoordinatorQuery(readyState, name, args);
+      if (response?.ok && response.lifecycle_id === readyState.lifecycle_id) {
+        applyCoordinatorTiming(timing, response.timing);
+        return String(response.output ?? "");
+      }
+      if (response?.error_code === "PROVIDER_TOOL_ERROR") {
+        throw new Error(response.error ?? `provider tool ${name} failed.`);
+      }
+      writeLog(`Shared coordinator query unavailable for ${name}; falling back to one-shot Provider.`);
+    } else {
+      tryEnsureAutomaticWatch();
+    }
+  }
+
+  return invokeProviderToolOneShot(name, args, timing);
+}
+
+function invokeProviderToolOneShot(name, args, timing) {
+  const providerConfigPath = getActiveProviderConfigPath(false);
   assertFileExists(providerConfigPath, "active provider config");
 
   const startedAt = Date.now();
@@ -916,6 +941,78 @@ function invokeProviderTool(name, args, timing) {
   }
 }
 
+function applyCoordinatorTiming(timing, metrics) {
+  const value = metrics && typeof metrics === "object" ? metrics : {};
+  timing.queueMs += toNonNegativeNumber(value.queue_ms);
+  timing.providerProcessMs += toNonNegativeNumber(value.provider_process_ms);
+  if (value.provider_core_ms !== null && value.provider_core_ms !== undefined) {
+    timing.providerCoreMs = (timing.providerCoreMs ?? 0) + toNonNegativeNumber(value.provider_core_ms);
+  }
+  timing.providerAttempts += Math.max(0, Number.parseInt(value.provider_attempts, 10) || 0);
+}
+
+function toNonNegativeNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function requestCoordinatorQuery(state, name, args) {
+  if (!state?.pipe_name || !state?.auth_token) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const socket = net.createConnection(state.pipe_name);
+    let settled = false;
+    let buffer = "";
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), COORDINATOR_QUERY_TIMEOUT_MS);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify({
+        schema_version: 1,
+        auth_token: state.auth_token,
+        command: "query",
+        tool: name,
+        arguments: args
+      })}\n`);
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (Buffer.byteLength(buffer, "utf8") > MAX_COORDINATOR_RESPONSE_BYTES) {
+        finish(null);
+        return;
+      }
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      try {
+        finish(JSON.parse(buffer.slice(0, newline)));
+      } catch {
+        finish(null);
+      }
+    });
+    socket.on("error", () => finish(null));
+    socket.on("end", () => {
+      if (!settled && buffer.trim()) {
+        try {
+          finish(JSON.parse(buffer.trim()));
+        } catch {
+          finish(null);
+        }
+      }
+    });
+  });
+}
+
 function getActiveProviderConfigPath(ensureCoordinator) {
   if (ensureCoordinator && !isAutomaticRefreshPaused() && !isWatchCoordinatorReady()) {
     tryEnsureAutomaticWatch();
@@ -952,12 +1049,16 @@ function readWatchOptInMarker() {
 }
 
 function isWatchCoordinatorReady() {
+  return getReadyWatchCoordinatorState() !== null;
+}
+
+function getReadyWatchCoordinatorState() {
   const marker = readWatchOptInMarker();
   const state = readWatchCoordinatorState();
   if (!marker || !state) {
-    return false;
+    return null;
   }
-  return state.provider_state === "ready"
+  const ready = state.provider_state === "ready"
     && state.lifecycle_id === marker.lifecycle_id
     && state.exclusive_lifecycle === marker.exclusive_lifecycle
     && state.adapter_enabled === true
@@ -973,6 +1074,7 @@ function isWatchCoordinatorReady() {
     && isProcessAlive(state.coordinator_pid)
     && isProcessAlive(state.provider_pid)
     && isProcessAlive(state.adapter_worker_pid);
+  return ready ? state : null;
 }
 
 function readWatchCoordinatorState() {

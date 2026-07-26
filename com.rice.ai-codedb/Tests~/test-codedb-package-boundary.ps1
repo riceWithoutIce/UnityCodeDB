@@ -129,8 +129,8 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.13" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 13 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.14" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 14 -Label "Payload sequence"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 21 -Label "Payload target count"
 Assert-Equal -Actual @($payloadManifest.retired_targets).Count -Expected 0 -Label "Retired target count"
 
