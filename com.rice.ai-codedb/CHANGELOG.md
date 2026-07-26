@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-07-26
 
 - Prepared the reusable Editor assembly for standalone Git URL installation.
 - Moved the CodeDB EditMode tests into the package test layout.

@@ -11,7 +11,7 @@ project's ignored runtime instead of sharing state across projects.
 ## Package
 
 - Package name: `com.rice.ai-codedb`
-- Current version: `0.1.0`
+- Latest release: `v0.1.0`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -22,13 +22,13 @@ Add the package to the Unity project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#main"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0"
   }
 }
 ```
 
-After a version tag is published, pin production projects to that tag instead
-of `main`, for example `#v0.1.0`.
+Production projects should pin a published version tag. Use `#main` only when
+intentionally validating unreleased development changes.
 
 ## Requirements
 

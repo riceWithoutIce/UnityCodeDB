@@ -5,9 +5,9 @@ reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
 and bounded MCP discovery surface. Version `0.1.0` targets Unity `2022.3` on
 Windows.
 
-Install from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#main`.
-Pin a published version tag instead of `main` for production projects.
+Install the published release from the repository subfolder with
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0`.
+Use `#main` only when intentionally validating unreleased development changes.
 
 The current `0.1.0` release materializes reviewed process tooling into the host
 project. Manager actions resolve tracked scripts, wrapper files, and templates
@@ -110,6 +110,6 @@ no payload-file EOL normalization occurs in the materializer. Ownership markers
 are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
 also passed with exact host restoration. Manager integration passes static
-build, package-neutral, full materializer fixture, real Unity import, and 44/44
+build, package-neutral, full materializer fixture, real Unity import, and 59/59
 package EditMode tests. Wide, minimum-width floating, and docked Compact visual
 acceptance also passes as recorded in the host handoff.

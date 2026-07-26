@@ -13,6 +13,22 @@ project-local CodeDB index from the Unity Editor.
 
 The package does not bundle or redistribute the external provider.
 
+## Installation
+
+Add the published package tag to the Unity project's
+`Packages/manifest.json`:
+
+```json
+{
+  "dependencies": {
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0"
+  }
+}
+```
+
+Production projects should pin a release tag. The `#main` revision is reserved
+for intentional validation of unreleased development changes.
+
 ## Manager
 
 Open `Tools/Rice AI/Codedb/Manager`. The Manager provides five focused views:
