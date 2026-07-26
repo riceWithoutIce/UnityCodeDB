@@ -82,7 +82,7 @@ $binaryFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-
 $binaryFilePaths = @($binaryFiles | ForEach-Object { $_.FullName })
 Assert-True -Condition ($binaryFiles.Count -eq 0) -Message "Package contains forbidden provider or archive binaries: $($binaryFilePaths -join ', ')"
 
-$textExtensions = @(".asmdef", ".cs", ".json", ".md", ".meta", ".mjs", ".ps1", ".toml")
+$textExtensions = @(".asmdef", ".cs", ".json", ".md", ".meta", ".mjs", ".ps1", ".svg", ".toml")
 $textFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object {
     $textExtensions -contains $_.Extension.ToLowerInvariant() -or
     $_.Name -in @(".gitattributes", "codedbignore.example")
@@ -101,6 +101,29 @@ foreach ($file in $textFiles) {
         throw "Package contains a machine-local absolute path: $(Get-RelativePath -Root $packageRoot -Path $file.FullName)"
     }
 }
+
+$iconSourcePath = Join-Path $packageRoot "Documentation~\images\codedb-icon.svg"
+$iconTexturePath = Join-Path $packageRoot "Editor\Icons\CodedbIcon.png"
+$thirdPartyNoticesPath = Join-Path $packageRoot "Third Party Notices.md"
+Assert-True -Condition (Test-Path -LiteralPath $iconSourcePath -PathType Leaf) -Message "Brand SVG source is missing."
+Assert-True -Condition (Test-Path -LiteralPath $iconTexturePath -PathType Leaf) -Message "Brand PNG is missing."
+
+[xml]$iconSource = Get-Content -LiteralPath $iconSourcePath -Raw
+$iconPaths = @($iconSource.svg.g.path)
+Assert-Equal -Actual $iconSource.svg.viewBox -Expected "0 0 48 48" -Label "Brand SVG viewBox"
+Assert-Equal -Actual $iconPaths.Count -Expected 3 -Label "Brand SVG path count"
+Assert-Equal -Actual ($iconPaths.fill -join "|") -Expected "#8fbffa|#2859c5|#2859c5" -Label "Brand SVG colors"
+
+$iconBytes = [System.IO.File]::ReadAllBytes($iconTexturePath)
+Assert-True -Condition ($iconBytes.Length -ge 24) -Message "Brand PNG is truncated."
+Assert-Equal -Actual (($iconBytes[0..7] -join ",")) -Expected "137,80,78,71,13,10,26,10" -Label "Brand PNG signature"
+Assert-Equal -Actual (($iconBytes[16..19] -join ",")) -Expected "0,0,0,48" -Label "Brand PNG width"
+Assert-Equal -Actual (($iconBytes[20..23] -join ",")) -Expected "0,0,0,48" -Label "Brand PNG height"
+
+$thirdPartyNotices = Get-Content -LiteralPath $thirdPartyNoticesPath -Raw
+Assert-True -Condition ($thirdPartyNotices.IndexOf("Streamline", [StringComparison]::Ordinal) -ge 0) -Message "Streamline attribution is missing."
+Assert-True -Condition ($thirdPartyNotices.IndexOf("CC BY 4.0", [StringComparison]::Ordinal) -ge 0) -Message "Streamline license is missing."
+Assert-True -Condition ($thirdPartyNotices.IndexOf("https://streamlinehq.com", [StringComparison]::Ordinal) -ge 0) -Message "Streamline project link is missing."
 
 $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"

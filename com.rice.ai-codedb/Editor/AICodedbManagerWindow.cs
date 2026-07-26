@@ -42,6 +42,9 @@ namespace Rice.AI.Codedb.Editor
         private const float BodyVerticalSpacing = 4f;
         private const float WatchToggleWidth = 42f;
         private const float HeaderProfileWidth = 106f;
+        private const float HeaderBrandIconWidth = 36f;
+        private const float HeaderBrandIconSize = 32f;
+        private const float HeaderContentHeight = 40f;
         private const float CustomProbeSingleRowMinWidth =
             CustomProbeLanguageLabelWidth
             + CustomProbeLanguageWidth
@@ -88,7 +91,7 @@ namespace Rice.AI.Codedb.Editor
         internal static void Open(AICodedbManagerTab tab)
         {
             var window = GetWindow<AICodedbManagerWindow>(false, "Codedb Manager");
-            window.titleContent = new GUIContent("Codedb Manager");
+            window.ApplyWindowTitle();
             window.minSize = new Vector2(900f, 460f);
             window._selectedTab = (int)tab;
             window.Show();
@@ -99,6 +102,7 @@ namespace Rice.AI.Codedb.Editor
 
         private void OnEnable()
         {
+            ApplyWindowTitle();
             _activitySidebarWidth = EditorPrefs.GetFloat(
                 ActivitySidebarWidthPrefsKey,
                 AICodedbManagerLayout.ActivityDefaultWidth);
@@ -173,11 +177,12 @@ namespace Rice.AI.Codedb.Editor
         {
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox, GUILayout.Height(AICodedbManagerStyles.HeaderHeight)))
             {
+                DrawHeaderBrandIcon();
                 GUILayout.Label(
                     "\u25cf",
                     AICodedbManagerStyles.GetStateDotStyle(_statusSnapshot.OverallState),
                     GUILayout.Width(AICodedbManagerStyles.StatusDotWidth),
-                    GUILayout.Height(40f));
+                    GUILayout.Height(HeaderContentHeight));
 
                 using (new EditorGUILayout.VerticalScope())
                 {
@@ -199,6 +204,30 @@ namespace Rice.AI.Codedb.Editor
                 DrawHeaderIconButton("Refresh", "Refresh status", RefreshAllStatus);
                 DrawHeaderIconButton("pane options", "More actions", ShowHeaderMenu);
             }
+        }
+
+        private void ApplyWindowTitle()
+        {
+            titleContent = AICodedbBrandAssets.CreateWindowTitleContent();
+        }
+
+        private static void DrawHeaderBrandIcon()
+        {
+            var layoutRect = GUILayoutUtility.GetRect(
+                HeaderBrandIconWidth,
+                HeaderBrandIconWidth,
+                HeaderContentHeight,
+                HeaderContentHeight);
+            var icon = AICodedbBrandAssets.Icon;
+            if (icon == null)
+                return;
+
+            var iconRect = new Rect(
+                layoutRect.x + (layoutRect.width - HeaderBrandIconSize) * 0.5f,
+                layoutRect.y + (layoutRect.height - HeaderBrandIconSize) * 0.5f,
+                HeaderBrandIconSize,
+                HeaderBrandIconSize);
+            GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit, true);
         }
 
         private void DrawHeaderIconButton(string iconName, string tooltip, Action action)

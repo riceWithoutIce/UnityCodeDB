@@ -1,5 +1,11 @@
 # Rice AI CodeDB
 
+<p align="center">
+  <img src="images/codedb-icon.svg" width="96" alt="Rice AI CodeDB icon">
+</p>
+
+<p align="center"><sub>"Memes Comment Reply" icon by <a href="https://streamlinehq.com">Streamline</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</sub></p>
+
 Rice AI CodeDB is an Editor-only package for setting up and operating a
 project-local CodeDB index from the Unity Editor.
 

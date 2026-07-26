@@ -1,5 +1,11 @@
 # UnityCodeDB
 
+<p align="center">
+  <img src="com.rice.ai-codedb/Documentation~/images/codedb-icon.svg" width="96" alt="Rice AI CodeDB icon">
+</p>
+
+<p align="center"><sub>"Memes Comment Reply" icon by <a href="https://streamlinehq.com">Streamline</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</sub></p>
+
 UnityCodeDB is an Editor-only Unity Package Manager package for project-local
 CodeDB setup, indexing, health checks, automatic refresh, and bounded source
 discovery from Codex or another MCP client.

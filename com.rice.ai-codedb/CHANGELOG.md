@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added the attributed Streamline Plump Free brand icon to the Manager window,
+  package documentation, and repository presentation without adding a runtime
+  vector-graphics dependency.
+
 ## 0.1.0 - 2026-07-26
 
 - Prepared the reusable Editor assembly for standalone Git URL installation.

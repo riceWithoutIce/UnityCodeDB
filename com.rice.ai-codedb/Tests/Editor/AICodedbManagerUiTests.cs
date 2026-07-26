@@ -30,6 +30,32 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
     }
 
+    internal sealed class AICodedbBrandAssetsTests
+    {
+        [Test]
+        public void Icon_IsPackagedForEditorUi()
+        {
+            Assert.That(
+                AICodedbBrandAssets.IconAssetPath,
+                Is.EqualTo("Packages/com.rice.ai-codedb/Editor/Icons/CodedbIcon.png"));
+
+            var icon = AICodedbBrandAssets.Icon;
+            Assert.That(icon, Is.Not.Null);
+            Assert.That(icon.width, Is.EqualTo(48));
+            Assert.That(icon.height, Is.EqualTo(48));
+        }
+
+        [Test]
+        public void WindowTitleContent_UsesBrandIcon()
+        {
+            var content = AICodedbBrandAssets.CreateWindowTitleContent();
+
+            Assert.That(content.text, Is.EqualTo("Codedb Manager"));
+            Assert.That(content.tooltip, Is.EqualTo("Rice AI CodeDB"));
+            Assert.That(content.image, Is.SameAs(AICodedbBrandAssets.Icon));
+        }
+    }
+
     internal sealed class AICodedbActivitySummaryBuilderTests
     {
         [TestCase("[OK] Ready", AICodedbStatusState.Ok, "OK")]

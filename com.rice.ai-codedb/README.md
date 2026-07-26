@@ -1,5 +1,11 @@
 # Rice AI CodeDB
 
+<p align="center">
+  <img src="Documentation~/images/codedb-icon.svg" width="96" alt="Rice AI CodeDB icon">
+</p>
+
+<p align="center"><sub>"Memes Comment Reply" icon by <a href="https://streamlinehq.com">Streamline</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</sub></p>
+
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
 and bounded MCP discovery surface. Version `0.1.0` targets Unity `2022.3` on
