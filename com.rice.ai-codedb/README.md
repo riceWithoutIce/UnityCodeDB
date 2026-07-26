@@ -70,8 +70,8 @@ name. Its closed schema is:
   "git_head": "<current repository HEAD>",
   "action": "Sync",
   "package_version": "0.1.0",
-  "payload_version": "poc.9",
-  "payload_sequence": 9,
+  "payload_version": "poc.10",
+  "payload_sequence": 10,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -95,8 +95,9 @@ index, watch, and probe actions continue to resolve the materialized host paths.
 This package still does not include the external CodeDB provider, host
 acceptance probes, MCP client configuration, generated project data, or any
 host-owned compatibility entry. Those ownership boundaries remain unchanged.
-The fixture validates disabled-by-default watch config, explicit Start/Status/
-Stop ownership, wrapper recovery, read-only provider guidance, ignored-runtime
+The fixture validates a disabled formal watch config, automatic post-Setup
+startup, persistent Pause, explicit Resume/Status/Stop ownership, wrapper
+recovery, read-only provider guidance, ignored-runtime
 verification, formal `--no-watch` refresh, generated ignore parity, and
 index-only cleanup against an isolated runtime-built provider executable. It
 also validates provider and adapter status/search/read probes, hit/no-hit

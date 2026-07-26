@@ -20,6 +20,7 @@ namespace Rice.AI.Codedb.Editor
         internal static string WatchCoordinatorRuntimePath => GetProjectPath(AICodedbProjectSettings.WatchCoordinatorRuntimeRelativePath);
         internal static string WatchCoordinatorStatePath => Path.Combine(WatchCoordinatorRuntimePath, "coordinator-state.json");
         internal static string WatchEnabledMarkerPath => GetProjectPath(AICodedbProjectSettings.WatchEnabledMarkerRelativePath);
+        internal static string WatchPausedMarkerPath => GetProjectPath(AICodedbProjectSettings.WatchPausedMarkerRelativePath);
         internal static string IndexPath => GetProjectPath(AICodedbProjectSettings.IndexRelativePath);
         internal static string IndexManifestPath => GetProjectPath(AICodedbProjectSettings.IndexManifestRelativePath);
         internal static string TextAdapterPath => GetProjectPath(AICodedbProjectSettings.TextAdapterRelativePath);

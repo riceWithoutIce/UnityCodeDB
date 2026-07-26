@@ -181,6 +181,14 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Ensures the default project-local automatic refresh lifecycle is ready when Setup is complete.
+        /// </summary>
+        internal static AICodedbCommandResult RunEnsureWatcher()
+        {
+            return RunScript("Codedb Ensure Watcher", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, "-Action", "Ensure");
+        }
+
+        /// <summary>
         /// Reads the project-local watch opt-in and coordinator status.
         /// </summary>
         internal static AICodedbCommandResult RunWatcherStatus()
@@ -194,6 +202,14 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunStopWatcher()
         {
             return RunScript("Codedb Stop Watcher", AICodedbPaths.WatchManageScriptPath, 0, "-Action", "Stop");
+        }
+
+        /// <summary>
+        /// Persists an explicit automatic-refresh pause and stops the project-local coordinator.
+        /// </summary>
+        internal static AICodedbCommandResult RunPauseWatcher()
+        {
+            return RunScript("Codedb Pause Watcher", AICodedbPaths.WatchManageScriptPath, 0, "-Action", "Pause");
         }
 
         /// <summary>

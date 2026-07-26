@@ -6,6 +6,8 @@ namespace Rice.AI.Codedb.Editor
     {
         Unknown,
         Disabled,
+        Paused,
+        Pending,
         Ready,
         Stale,
         DisabledRunning,
@@ -82,6 +84,8 @@ namespace Rice.AI.Codedb.Editor
             var output = result.StandardOutput ?? string.Empty;
             var enabled = Contains(output, "Watch opt-in: ENABLED");
             var disabled = Contains(output, "Watch opt-in: DISABLED");
+            var automaticPaused = Contains(output, "Automatic refresh: PAUSED");
+            var automaticPending = Contains(output, "Automatic refresh: PENDING");
             var providerReady = Contains(output, "\"provider_state\":\"ready\"");
             var adapterOperational = Contains(output, "\"adapter_state\":\"watching\"")
                                      || Contains(output, "\"adapter_state\":\"pending\"")
@@ -124,6 +128,28 @@ namespace Rice.AI.Codedb.Editor
                     false);
             }
 
+            if (automaticPaused && disabled && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Paused,
+                    AICodedbStatusState.Inactive,
+                    "Paused",
+                    "Automatic refresh is paused for this project.",
+                    true,
+                    false);
+            }
+
+            if (automaticPending && disabled && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Pending,
+                    AICodedbStatusState.Inactive,
+                    "Automatic / Waiting",
+                    "Automatic refresh will start when project Setup is complete.",
+                    true,
+                    true);
+            }
+
             if (enabled && ready)
             {
                 return new AICodedbWatcherStatus(
@@ -151,7 +177,9 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool IsWatcherActivity(string actionTitle, string output)
         {
-            return Contains(actionTitle, "Watcher") || Contains(output, "Watch opt-in:");
+            return Contains(actionTitle, "Watcher")
+                   || Contains(output, "Watch opt-in:")
+                   || Contains(output, "Automatic refresh:");
         }
 
         private static bool Contains(string text, string value)

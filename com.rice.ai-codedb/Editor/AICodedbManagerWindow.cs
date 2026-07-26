@@ -542,7 +542,7 @@ namespace Rice.AI.Codedb.Editor
                             if (requestedEnabled)
                                 RunStartWatcherWithConfirmation();
                             else
-                                RunAction("Stop Watcher", AICodedbActions.RunStopWatcher);
+                                RunAction("Pause Watcher", AICodedbActions.RunPauseWatcher);
                         }
                     }
                     EditorGUI.showMixedValue = previousMixedValue;
@@ -956,8 +956,8 @@ namespace Rice.AI.Codedb.Editor
         {
             if (!EditorUtility.DisplayDialog(
                     "Enable automatic refresh",
-                    "Enable the project-local background watcher? Turning Automatic refresh off disables wrapper auto-attach and stops the coordinator.",
-                    "Enable",
+                    "Resume the project-local automatic refresh lifecycle? Pausing it stops the coordinator until it is resumed explicitly.",
+                    "Resume",
                     "Cancel"))
             {
                 return;
@@ -1103,7 +1103,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void RefreshWatcherStatusSilently()
         {
-            var result = AICodedbActions.RunWatcherStatus();
+            var result = Application.isBatchMode
+                ? AICodedbActions.RunWatcherStatus()
+                : AICodedbActions.RunEnsureWatcher();
             _watcherStatus = AICodedbWatcherStatusBuilder.Build(result);
             _watcherStatusLoaded = true;
             ApplyWatcherDisclosurePolicy();
@@ -1163,7 +1165,7 @@ namespace Rice.AI.Codedb.Editor
         {
             return _watcherStatusLoaded
                 ? _watcherStatus.Detail
-                : "Reading the project-local opt-in and coordinator state.";
+                : "Reading the project-local automatic-refresh state.";
         }
 
         private string GetWatcherRepairLabel()
@@ -1175,7 +1177,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbWatcherState.Stale:
                     return "Repair watcher";
                 case AICodedbWatcherState.DisabledRunning:
-                    return "Stop watcher";
+                    return "Pause watcher";
                 case AICodedbWatcherState.Unknown:
                 case AICodedbWatcherState.Error:
                     return "Check watcher";
@@ -1191,7 +1193,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbWatcherState.Stale:
                     return RunStartWatcherWithConfirmation;
                 case AICodedbWatcherState.DisabledRunning:
-                    return () => RunAction("Stop Watcher", AICodedbActions.RunStopWatcher);
+                    return () => RunAction("Pause Watcher", AICodedbActions.RunPauseWatcher);
                 default:
                     return () => RunAction("Watcher Status", AICodedbActions.RunWatcherStatus);
             }

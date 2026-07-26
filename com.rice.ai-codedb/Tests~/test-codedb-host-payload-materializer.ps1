@@ -122,6 +122,39 @@ function Wait-ForPathState {
     return (Test-Path -LiteralPath $Path) -eq $Present
 }
 
+function Wait-ForWatchReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$StatePath,
+        [int]$TimeoutMilliseconds = 30000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+            try {
+                $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+                $processIds = @($state.coordinator_pid, $state.provider_pid, $state.adapter_worker_pid)
+                $processesReady = @($processIds | Where-Object {
+                    $processId = 0
+                    -not [int]::TryParse([string]$_, [ref]$processId) -or
+                        $processId -le 0 -or
+                        $null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)
+                }).Count -eq 0
+                if ($state.provider_state -eq "ready" -and
+                    $state.adapter_state -in @("watching", "pending", "building") -and
+                    $state.adapter_worker_state -eq "ready" -and
+                    $processesReady) {
+                    return $true
+                }
+            } catch {
+                # The coordinator publishes state atomically; retry any transient read race.
+            }
+        }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Get-HostUseLeasePaths {
     param(
         [Parameter(Mandatory = $true)][ValidateSet("mcp", "watcher")][string]$Owner,
@@ -807,7 +840,9 @@ function Invoke-WrapperRpc {
 function Invoke-WrapperWatchProbe {
     param(
         [Parameter(Mandatory = $true)][string]$WrapperPath,
-        [Parameter(Mandatory = $true)][string]$Root
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$WaitForCoordinatorStatePath,
+        [string]$WaitForWatchMarkerPath
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -832,6 +867,14 @@ function Invoke-WrapperWatchProbe {
             method = "initialize"
             params = [ordered]@{ protocolVersion = "2024-11-05" }
         })
+        if ($WaitForCoordinatorStatePath -and
+            -not (Wait-ForWatchReady -StatePath $WaitForCoordinatorStatePath)) {
+            throw "Materialized wrapper did not start automatic watch within 30 seconds."
+        }
+        if ($WaitForWatchMarkerPath -and
+            -not (Wait-ForPathState -Path $WaitForWatchMarkerPath -Present $true -TimeoutMilliseconds 30000)) {
+            throw "Materialized wrapper did not publish its automatic watch marker within 30 seconds."
+        }
         $search = Invoke-WrapperRpc -Process $process -Request ([ordered]@{
             jsonrpc = "2.0"
             id = 102
@@ -1170,8 +1213,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.9" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 9 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.10" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 10 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1337,6 +1380,7 @@ try {
             "[OK] codedb-fixture wrapper ready.",
             "Provider executable: missing",
             "Watch opt-in: disabled",
+            "Automatic refresh: pending",
             "Watch coordinator: stopped",
             "Shader adapter manifest: present",
             "Shader adapter files: 1",
@@ -1441,15 +1485,16 @@ try {
         $staleLeaseProcess.Dispose()
     }
     $fixtureWatchRoot = Join-Path $hostRoot "AIWork\.runtime\codedb\codedb-fixture\watch"
-    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $fixtureWatchRoot "auto-start.json"))) -Message "Materialized wrapper created a watch opt-in marker."
-    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $fixtureWatchRoot "coordinator\coordinator-state.json"))) -Message "Materialized wrapper started the coordinator without opt-in."
-    Write-Host "[OK] Materialized wrapper passed MCP Discover Read, active gate, stale-lease recovery, and no-auto-start coverage."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $fixtureWatchRoot "auto-start.json"))) -Message "Materialized wrapper created a watch marker before Setup completed."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $fixtureWatchRoot "coordinator\coordinator-state.json"))) -Message "Materialized wrapper started the coordinator before Setup completed."
+    Write-Host "[OK] Materialized wrapper passed MCP Discover Read, active gate, stale-lease recovery, and pre-Setup pending coverage."
 
     $materializedWatchPrepare = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/prepare-codedb-project-watch-config.ps1"
     $materializedWatchManager = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/manage-codedb-project-watch.ps1"
     $fixtureProviderExecutable = Join-Path $hostRoot "AIWork\.runtime\codedb\codedb-fixture\bin\codebase-mcp.exe"
     $watchConfigPath = Join-Path $hostRoot "AIWork\.runtime\codedb\codedb-fixture\config\codedb-mcp.watch.toml"
     $watchMarkerPath = Join-Path $fixtureWatchRoot "auto-start.json"
+    $watchPausedMarkerPath = Join-Path $fixtureWatchRoot "automatic-refresh-paused.json"
     $coordinatorRuntime = Join-Path $fixtureWatchRoot "coordinator"
     $coordinatorStatePath = Join-Path $coordinatorRuntime "coordinator-state.json"
     $materializedProviderGuidance = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/show-codedb-project-provider-guidance.ps1"
@@ -1478,16 +1523,63 @@ try {
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeAvailableGuidance -Message "Provider guidance mutated the fixture after the executable was present."
     Write-Host "[OK] Materialized provider guidance remained read-only and registration-free."
 
-    Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Formal fixture config must start watch-disabled."
-    $watchPrepareResult = Invoke-PowerShellAction -Action {
-        & $materializedWatchPrepare -PollIntervalSeconds 1
+    Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Formal fixture config must remain watch-disabled."
+    $activeWatchManagerPath = $materializedWatchManager
+    $automaticWatchProbe = Invoke-WrapperWatchProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -WaitForCoordinatorStatePath $coordinatorStatePath `
+        -WaitForWatchMarkerPath $watchMarkerPath
+    Assert-True -Condition ($automaticWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.watch.toml")) -Message "First post-Setup wrapper did not route reads through automatic watch."
+    foreach ($expectedStatus in @(
+        "Watch opt-in: enabled",
+        "Automatic refresh: active",
+        "Watch coordinator: ready",
+        "Shader watcher: watching"
+    )) {
+        Assert-True -Condition ($automaticWatchProbe.StatusText.Contains($expectedStatus)) -Message "Automatic wrapper status is missing '$expectedStatus'."
     }
-    Assert-Result -Result $watchPrepareResult -ExitCode 0 -Label "Materialized watch config preparation"
-    Assert-True -Condition (Test-Path -LiteralPath $watchConfigPath -PathType Leaf) -Message "Materialized watch config was not generated."
-    Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Watch preparation changed the formal provider config."
+    Assert-True -Condition (Test-Path -LiteralPath $watchConfigPath -PathType Leaf) -Message "Automatic watch did not generate the watch config."
+    Assert-True -Condition (Test-Path -LiteralPath $watchMarkerPath -PathType Leaf) -Message "Automatic watch did not create its lifecycle marker."
+    Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Automatic watch changed the formal provider config."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $watchConfigPath -Section "watch" -Key "enabled").Trim() -Expected "true" -Message "Generated watch config did not enable native watch."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $watchConfigPath -Section "watch" -Key "poll_interval_seconds").Trim() -Expected "1" -Message "Generated watch config poll interval mismatch."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $watchConfigPath -Section "storage" -Key "dir").Trim() -Expected (Get-TomlSectionValue -Path $generatedConfig -Section "storage" -Key "dir").Trim() -Message "Generated watch config changed the formal index location."
+
+    $automaticStatusResult = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Status
+    }
+    Assert-Result -Result $automaticStatusResult -ExitCode 0 -Label "Automatic watcher Status"
+    $automaticStatus = Get-LastJsonObject -Result $automaticStatusResult -Label "Automatic watcher Status"
+    Assert-Equal -Actual $automaticStatus.action -Expected "running" -Message "Automatic watcher did not reach running."
+    Assert-Equal -Actual $automaticStatus.provider_state -Expected "ready" -Message "Automatic watcher provider did not reach ready."
+    Assert-Equal -Actual $automaticStatus.adapter_state -Expected "watching" -Message "Automatic watcher adapter did not reach watching."
+    $automaticLifecycleId = [string]$automaticStatus.lifecycle_id
+    $activeWatchManagerPath = $materializedWatchManager
+    $activeWatchLifecycleId = $automaticLifecycleId
+
+    $pauseResult = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Pause -ExpectedLifecycleId $automaticLifecycleId
+    }
+    Assert-Result -Result $pauseResult -ExitCode 0 -Label "Materialized watcher Pause"
+    $activeWatchManagerPath = $null
+    $activeWatchLifecycleId = $null
+    Assert-True -Condition ($pauseResult.Text.Contains("[OK] Automatic refresh: PAUSED")) -Message "Pause did not report the persisted automatic-refresh state."
+    Assert-True -Condition (Wait-ForPathState -Path $watchPausedMarkerPath -Present $true) -Message "Pause did not create its persistent marker."
+    Assert-True -Condition (Wait-ForPathState -Path $watchMarkerPath -Present $false) -Message "Pause left the watch lifecycle marker behind."
+    Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false) -Message "Pause left coordinator state behind."
+
+    $pausedWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
+    Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.toml")) -Message "Paused wrapper did not fall back to the formal provider config."
+    foreach ($expectedStatus in @(
+        "Watch opt-in: disabled",
+        "Automatic refresh: paused",
+        "Watch coordinator: stopped"
+    )) {
+        Assert-True -Condition ($pausedWatchProbe.StatusText.Contains($expectedStatus)) -Message "Paused wrapper status is missing '$expectedStatus'."
+    }
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchMarkerPath)) -Message "A wrapper restarted automatic watch while paused."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $coordinatorStatePath)) -Message "A wrapper recreated coordinator state while paused."
 
     $watchLifecycleId = "materializer-" + [guid]::NewGuid().ToString("N")
     $activeWatchManagerPath = $materializedWatchManager
@@ -1509,6 +1601,7 @@ try {
     Assert-Equal -Actual $startStatus.provider_state -Expected "ready" -Message "Materialized watcher provider did not reach ready."
     Assert-Equal -Actual $startStatus.adapter_state -Expected "watching" -Message "Materialized watcher adapter did not reach watching."
     Assert-Equal -Actual $startStatus.adapter_worker_state -Expected "ready" -Message "Materialized watcher adapter worker did not reach ready."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchPausedMarkerPath)) -Message "Resume left the automatic-refresh pause marker behind."
     Assert-True -Condition (Wait-ForPathState -Path $watchMarkerPath -Present $true) -Message "Materialized watcher did not create the opt-in marker."
 
     $marker = Get-Content -LiteralPath $watchMarkerPath -Raw | ConvertFrom-Json
@@ -1554,7 +1647,11 @@ try {
     }
     Assert-True -Condition (Test-Path -LiteralPath $watchMarkerPath -PathType Leaf) -Message "Direct coordinator stop unexpectedly removed the host-owned opt-in marker."
 
-    $wrapperWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
+    $wrapperWatchProbe = Invoke-WrapperWatchProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -WaitForCoordinatorStatePath $coordinatorStatePath `
+        -WaitForWatchMarkerPath $watchMarkerPath
     Assert-True -Condition ($wrapperWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.watch.toml")) -Message "Materialized wrapper did not route provider reads through the watch config."
     foreach ($expectedStatus in @(
         "Watch opt-in: enabled",
@@ -2332,11 +2429,15 @@ try {
         }
         $activeMcpProcess = $null
     }
-    if ($activeWatchLifecycleId) {
+    if ($activeWatchManagerPath -or $activeWatchLifecycleId) {
         try {
             if ($activeWatchManagerPath -and (Test-Path -LiteralPath $activeWatchManagerPath -PathType Leaf)) {
                 $cleanupResult = Invoke-PowerShellAction -Action {
-                    & $activeWatchManagerPath -Action Stop -ExpectedLifecycleId $activeWatchLifecycleId
+                    if ($activeWatchLifecycleId) {
+                        & $activeWatchManagerPath -Action Stop -ExpectedLifecycleId $activeWatchLifecycleId
+                    } else {
+                        & $activeWatchManagerPath -Action Stop
+                    }
                 }
                 if ($cleanupResult.ExitCode -ne 0) {
                     Write-Warning "Fixture watcher cleanup through the manager failed: $($cleanupResult.Text)"
@@ -2347,7 +2448,11 @@ try {
             $cleanupState = Join-Path $cleanupRuntime "coordinator-state.json"
             if ((Test-Path -LiteralPath $cleanupCoordinator -PathType Leaf) -and (Test-Path -LiteralPath $cleanupState -PathType Leaf)) {
                 $global:LASTEXITCODE = 0
-                $cleanupOutput = @(& $nodePath $cleanupCoordinator stop --runtime $cleanupRuntime --expected-lifecycle-id $activeWatchLifecycleId 2>&1)
+                $cleanupArguments = @($cleanupCoordinator, "stop", "--runtime", $cleanupRuntime)
+                if ($activeWatchLifecycleId) {
+                    $cleanupArguments += @("--expected-lifecycle-id", $activeWatchLifecycleId)
+                }
+                $cleanupOutput = @(& $nodePath @cleanupArguments 2>&1)
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warning "Fixture watcher cleanup through the coordinator failed: $($cleanupOutput -join [Environment]::NewLine)"
                 }

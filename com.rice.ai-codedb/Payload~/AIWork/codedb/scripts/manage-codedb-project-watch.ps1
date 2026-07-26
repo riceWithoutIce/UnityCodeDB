@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Start", "Status", "Stop")]
+    [ValidateSet("Ensure", "Start", "Status", "Pause", "Stop")]
     [string]$Action,
     [ValidateRange(1, 10)]
     [int]$PollIntervalSeconds = 1,
@@ -125,20 +125,22 @@ $watchConfigPath = Join-Path $context.ProviderConfigRoot "codedb-mcp.watch.toml"
 $watchRoot = Join-Path $context.ProviderRoot "watch"
 $coordinatorRuntime = Join-Path $watchRoot "coordinator"
 $enabledMarkerPath = Join-Path $watchRoot "auto-start.json"
+$pausedMarkerPath = Join-Path $watchRoot "automatic-refresh-paused.json"
 $managementLockPath = Join-Path $watchRoot "management.lock"
+$refreshIfStaleScript = Join-Path $context.CodedbRoot "scripts\refresh-codedb-project-if-stale.ps1"
 
-if ($Action -eq "Start") {
+if ($Action -in @("Ensure", "Start")) {
     if ($ExpectedLifecycleId) {
-        throw "-ExpectedLifecycleId is valid only with -Action Stop."
+        throw "-ExpectedLifecycleId is valid only with -Action Pause or Stop."
     }
     if (-not $LifecycleId) {
         $LifecycleId = [Guid]::NewGuid().ToString("N")
     }
 } elseif ($LifecycleId -or $RequireNewOwner -or $ExclusiveOwner) {
-    throw "-LifecycleId, -RequireNewOwner, and -ExclusiveOwner are valid only with -Action Start."
+    throw "-LifecycleId, -RequireNewOwner, and -ExclusiveOwner are valid only with -Action Ensure or Start."
 }
 
-foreach ($path in @($coordinatorScript, $watchPrepareScript, $adapterBuilderPath, $adapterWorkerPath)) {
+foreach ($path in @($coordinatorScript, $watchPrepareScript, $adapterBuilderPath, $adapterWorkerPath, $refreshIfStaleScript)) {
     Assert-CodedbPathInside -Path $path -Root $context.CodedbRoot -Label "watch integration script"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Missing watch integration file: $(ConvertTo-CodedbProjectRelativePath -Context $context -Path $path)"
@@ -149,12 +151,58 @@ Assert-CodedbPathInside -Path $managementLockPath -Root $context.ProviderRoot -L
 
 $managementLock = $null
 try {
-    if ($Action -in @("Start", "Stop")) {
+    if ($Action -in @("Ensure", "Start", "Pause", "Stop")) {
         $managementLock = Enter-WatchManagementLock -Path $managementLockPath
     }
     switch ($Action) {
-    "Start" {
+    { $_ -in @("Ensure", "Start") } {
+        $isAutomaticEnsure = $Action -eq "Ensure"
+        if ($isAutomaticEnsure -and (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf)) {
+            Write-Host "[SKIP] Automatic refresh is paused for this project."
+            Write-Host "[OK] Automatic refresh: PAUSED"
+            $status = Invoke-CoordinatorCli -Command status
+            break
+        }
+        if ($isAutomaticEnsure -and (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf)) {
+            $existingMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
+            if (-not [string]::IsNullOrWhiteSpace([string]$existingMarker.lifecycle_id)) {
+                $LifecycleId = [string]$existingMarker.lifecycle_id
+            }
+            if ($existingMarker.exclusive_lifecycle -eq $true) {
+                $ExclusiveOwner = $true
+            }
+            $existingDebounceMilliseconds = 0
+            if ([int]::TryParse([string]$existingMarker.adapter_debounce_ms, [ref]$existingDebounceMilliseconds) -and
+                $existingDebounceMilliseconds -ge 100 -and
+                $existingDebounceMilliseconds -le 10000) {
+                $AdapterDebounceMilliseconds = $existingDebounceMilliseconds
+            }
+
+            $existingStatus = Invoke-CoordinatorCli -Command status
+            $adapterOperational = [string]$existingStatus.adapter_state -in @("watching", "pending", "building")
+            if ($existingStatus.action -eq "running" -and
+                $existingStatus.provider_state -eq "ready" -and
+                $adapterOperational) {
+                Write-Host "[OK] Watch opt-in: ENABLED"
+                Write-Host "[OK] Automatic refresh: ACTIVE"
+                break
+            }
+        }
         try {
+            if ($isAutomaticEnsure) {
+                try {
+                    $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
+                    $global:LASTEXITCODE = 0
+                    & $refreshIfStaleScript
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Freshness repair failed with exit code $LASTEXITCODE."
+                    }
+                } catch {
+                    Write-Host "[SKIP] Automatic refresh is waiting for completed Setup: $($_.Exception.Message)"
+                    Write-Host "[OK] Automatic refresh: PENDING"
+                    break
+                }
+            }
             $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
             if (-not (Test-Path -LiteralPath $context.TextAdapterManifestPath -PathType Leaf)) {
                 throw "Missing Shader adapter manifest. Build the Shader/HLSL text adapter before starting the watcher."
@@ -193,7 +241,11 @@ try {
                 exclusive_lifecycle = $status.exclusive_lifecycle -eq $true
             } | ConvertTo-Json -Depth 6
             Write-Utf8NoBom -Path $enabledMarkerPath -Content $marker
+            if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
+                Remove-Item -LiteralPath $pausedMarkerPath -Force
+            }
             Write-Host "[OK] Watch opt-in: ENABLED"
+            Write-Host "[OK] Automatic refresh: ACTIVE"
             Write-Host "[OK] Wrapper auto-attach marker: $(ConvertTo-CodedbProjectRelativePath -Context $context -Path $enabledMarkerPath)"
             Write-Output ($status | ConvertTo-Json -Depth 8 -Compress)
         } catch {
@@ -227,13 +279,22 @@ try {
     "Status" {
         $markerState = if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) { "ENABLED" } else { "DISABLED" }
         Write-Host "[OK] Watch opt-in: $markerState"
+        $automaticState = if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
+            "PAUSED"
+        } elseif ($markerState -eq "ENABLED") {
+            "ACTIVE"
+        } else {
+            "PENDING"
+        }
+        Write-Host "[OK] Automatic refresh: $automaticState"
         $status = Invoke-CoordinatorCli -Command status
         $adapterOperational = [string]$status.adapter_state -in @("watching", "pending", "building")
         if ($markerState -eq "ENABLED" -and ($status.action -ne "running" -or $status.provider_state -ne "ready" -or -not $adapterOperational)) {
             Write-Warning "Watch opt-in is enabled but provider/adapter coordination is not ready. The wrapper will attempt recovery on its next startup."
         }
     }
-    "Stop" {
+    { $_ -in @("Pause", "Stop") } {
+        $isPause = $Action -eq "Pause"
         $effectiveExpectedLifecycleId = $ExpectedLifecycleId
         if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
             $currentMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
@@ -262,6 +323,20 @@ try {
                 Remove-Item -LiteralPath $enabledMarkerPath -Force
             }
             $null = Invoke-CoordinatorCli -Command stop
+        }
+        if ($isPause) {
+            $pauseMarker = [ordered]@{
+                schema_version = 1
+                paused_at_utc = [DateTime]::UtcNow.ToString("o")
+                project_root = "."
+            } | ConvertTo-Json -Depth 4
+            Write-Utf8NoBom -Path $pausedMarkerPath -Content $pauseMarker
+            Write-Host "[OK] Automatic refresh: PAUSED"
+        } else {
+            if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
+                Remove-Item -LiteralPath $pausedMarkerPath -Force
+            }
+            Write-Host "[OK] Automatic refresh: PENDING"
         }
         Write-Host "[OK] Watch opt-in: DISABLED"
         Write-Host "[OK] Watch coordinator stop completed."

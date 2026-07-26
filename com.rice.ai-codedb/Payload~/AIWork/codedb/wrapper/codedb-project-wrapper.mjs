@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,7 @@ const EXCLUDED_FRAGMENTS = ["/Library/PackageCache/", "/AIWork/.runtime/"];
 const MAX_LIMIT = 200;
 const TRANSIENT_READ_RETRY_DELAY_MS = 100;
 const TRANSIENT_READ_RETRY_MAX_MS = 2000;
-const COORDINATOR_RESTART_THROTTLE_MS = 5000;
+const AUTOMATIC_WATCH_ENSURE_THROTTLE_MS = 5000;
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
 
 const context = createContext(process.argv.slice(2));
@@ -42,8 +42,9 @@ if (context.printContext) {
 const hostUseLease = acquireCodedbHostUseLease(context.unityRoot, "mcp");
 process.once("exit", () => hostUseLease.release());
 
-let lastCoordinatorStartAttemptMs = 0;
-tryStartWatchCoordinator();
+let lastAutomaticWatchEnsureAttemptMs = 0;
+let automaticWatchEnsureInFlight = false;
+tryEnsureAutomaticWatch();
 
 const tools = [
   {
@@ -153,10 +154,10 @@ function createContext(args) {
     providerConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.toml"),
     watchConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.watch.toml"),
     watchEnabledMarkerPath: path.join(runtimeRoot, "watch", "auto-start.json"),
-    watchManagementLockPath: path.join(runtimeRoot, "watch", "management.lock"),
+    watchPausedMarkerPath: path.join(runtimeRoot, "watch", "automatic-refresh-paused.json"),
     watchCoordinatorRuntimePath: path.join(runtimeRoot, "watch", "coordinator"),
     watchCoordinatorStatePath: path.join(runtimeRoot, "watch", "coordinator", "coordinator-state.json"),
-    watchCoordinatorScriptPath: path.join(__dirname, "..", "coordinator", "codedb-watch-coordinator.mjs"),
+    watchManageScriptPath: path.join(__dirname, "..", "scripts", "manage-codedb-project-watch.ps1"),
     adapterBuilderPath: path.join(__dirname, "..", "scripts", "build-codedb-project-text-adapter.ps1"),
     adapterWorkerPath: path.join(__dirname, "..", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
     providerIndexRoot: path.join(runtimeRoot, "index"),
@@ -521,11 +522,8 @@ function invokeProviderTool(name, args) {
 }
 
 function getActiveProviderConfigPath(ensureCoordinator) {
-  if (!isWatchOptInEnabled()) {
-    return context.providerConfigPath;
-  }
-  if (ensureCoordinator && !isWatchCoordinatorReady()) {
-    tryStartWatchCoordinator();
+  if (ensureCoordinator && !isAutomaticRefreshPaused() && !isWatchCoordinatorReady()) {
+    tryEnsureAutomaticWatch();
   }
   return isWatchCoordinatorReady() ? context.watchConfigPath : context.providerConfigPath;
 }
@@ -593,83 +591,53 @@ function readWatchCoordinatorState() {
   }
 }
 
-function tryStartWatchCoordinator() {
-  if (!isWatchOptInEnabled() || isWatchCoordinatorReady()) {
-    return isWatchCoordinatorReady();
-  }
-  const now = Date.now();
-  if (now - lastCoordinatorStartAttemptMs < COORDINATOR_RESTART_THROTTLE_MS) {
-    return false;
-  }
-  lastCoordinatorStartAttemptMs = now;
-
-  const managementLock = tryEnterWatchManagementLock();
-  if (managementLock === null) {
-    return false;
-  }
-
-  try {
-    if (!isWatchOptInEnabled() || isWatchCoordinatorReady()) {
-      return isWatchCoordinatorReady();
-    }
-
-    for (const [filePath, label] of [
-      [context.watchCoordinatorScriptPath, "watch coordinator script"],
-      [context.providerExecutablePath, "provider executable"],
-      [context.watchConfigPath, "watch config"],
-      [context.adapterBuilderPath, "Shader adapter builder"],
-      [context.adapterWorkerPath, "Shader adapter worker"],
-      [context.textAdapterManifestPath, "Shader adapter manifest"]
-    ]) {
-      if (!fs.existsSync(filePath)) {
-        writeLog(`Cannot start watch coordinator; missing ${label}: ${toUnityRelativePath(filePath)}`);
-        return false;
-      }
-    }
-
-    const marker = readWatchOptInMarker();
-    if (!marker) {
-      return false;
-    }
-
-    const result = spawnSync(process.execPath, [
-      context.watchCoordinatorScriptPath,
-      "start",
-      "--root", context.unityRoot,
-      "--provider", context.providerExecutablePath,
-      "--config", context.watchConfigPath,
-      "--runtime", context.watchCoordinatorRuntimePath,
-      "--adapter-builder", context.adapterBuilderPath,
-      "--adapter-worker", context.adapterWorkerPath,
-      "--adapter-manifest", context.textAdapterManifestPath,
-      "--adapter-debounce-ms", String(marker.adapter_debounce_ms),
-      "--lifecycle-id", marker.lifecycle_id,
-      "--exclusive-lifecycle", String(marker.exclusive_lifecycle),
-      "--startup-timeout-ms", "120000"
-    ], {
-      cwd: context.unityRoot,
-      encoding: "utf8",
-      timeout: 130000,
-      windowsHide: true
-    });
-    if (result.error || result.status !== 0) {
-      const detail = result.error?.message ?? (result.stderr || result.stdout || "").trim();
-      writeLog(`Watch coordinator attach/start failed: ${detail}`);
-      return false;
-    }
-    return isWatchCoordinatorReady();
-  } finally {
-    fs.closeSync(managementLock);
-  }
+function isAutomaticRefreshPaused() {
+  return fs.existsSync(context.watchPausedMarkerPath);
 }
 
-function tryEnterWatchManagementLock() {
-  try {
-    return fs.openSync(context.watchManagementLockPath, "a+");
-  } catch (error) {
-    writeLog(`Watch coordinator recovery deferred by management lock: ${error.message}`);
-    return null;
+function tryEnsureAutomaticWatch() {
+  if (isAutomaticRefreshPaused() || isWatchCoordinatorReady()) {
+    return isWatchCoordinatorReady();
   }
+
+  if (automaticWatchEnsureInFlight) {
+    return false;
+  }
+  const now = Date.now();
+  if (now - lastAutomaticWatchEnsureAttemptMs < AUTOMATIC_WATCH_ENSURE_THROTTLE_MS) {
+    return false;
+  }
+  lastAutomaticWatchEnsureAttemptMs = now;
+
+  if (!fs.existsSync(context.watchManageScriptPath)) {
+    writeLog(`Automatic refresh is pending; missing watch manager: ${toUnityRelativePath(context.watchManageScriptPath)}`);
+    return false;
+  }
+
+  const powershell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  const child = spawn(powershell, [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", context.watchManageScriptPath,
+    "-Action", "Ensure"
+  ], {
+    cwd: context.unityRoot,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  automaticWatchEnsureInFlight = true;
+  child.once("error", (error) => {
+    automaticWatchEnsureInFlight = false;
+    writeLog(`Automatic refresh ensure failed: ${error.message}`);
+  });
+  child.once("exit", (code) => {
+    automaticWatchEnsureInFlight = false;
+    if (code !== 0) {
+      writeLog(`Automatic refresh ensure exited with code ${code}.`);
+    }
+  });
+  child.unref();
+  return isWatchCoordinatorReady();
 }
 
 function isTransientProviderReadFailure(message) {
@@ -700,12 +668,16 @@ function normalizeAbsolutePath(value) {
 
 function getStatusText() {
   const watchState = readWatchCoordinatorState();
+  const automaticRefreshState = isAutomaticRefreshPaused()
+    ? "paused"
+    : (isWatchCoordinatorReady() ? "active" : "pending");
   const lines = [
     `[OK] ${context.providerName} wrapper ready.`,
     `Unity root: ${toUnityRelativePath(context.unityRoot)}`,
     `Provider executable: ${fileState(context.providerExecutablePath)}`,
     `Provider config: ${fileState(context.providerConfigPath)}`,
     `Watch opt-in: ${isWatchOptInEnabled() ? "enabled" : "disabled"}`,
+    `Automatic refresh: ${automaticRefreshState}`,
     `Watch config: ${fileState(context.watchConfigPath)}`,
     `Watch coordinator: ${isWatchCoordinatorReady() ? "ready" : "stopped"}`,
     `Shader watcher: ${watchState?.adapter_state ?? "stopped"}`,

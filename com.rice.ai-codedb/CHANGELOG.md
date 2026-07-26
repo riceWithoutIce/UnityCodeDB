@@ -5,6 +5,11 @@
 - Added the attributed Streamline Plump Free brand icon to the Manager window,
   package documentation, and repository presentation without adding a runtime
   vector-graphics dependency.
+- Made project-local automatic refresh the normal post-Setup state. Manager and
+  MCP wrapper use now ensure the coordinator is ready, repair stale indexes
+  before startup, preserve lifecycle ownership during recovery, and expose a
+  persistent Pause/Resume workflow while the formal provider config remains
+  `watch=false`.
 
 ## 0.1.0 - 2026-07-26
 

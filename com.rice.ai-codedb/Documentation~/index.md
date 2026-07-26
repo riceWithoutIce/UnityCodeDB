@@ -67,7 +67,10 @@ does not generate, persist, infer, or delete that authorization.
 
 ## Safety Boundaries
 
-- Watch is disabled by default and starts only through an explicit action.
+- After Setup completes, project-local automatic refresh starts and recovers on
+  Manager or MCP wrapper use. Pause is explicit and persistent until Resume.
+- The tracked provider config remains `watch=false`; the coordinator owns a
+  generated watch-enabled config and the Shader/HLSL adapter lifecycle.
 - Provider watch and the Shader/HLSL adapter have separate ownership.
 - Generated indexes, provider binaries, logs, and watcher state remain ignored.
 - MCP guidance is project-level first; global client configuration is never
