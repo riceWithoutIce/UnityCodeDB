@@ -1561,8 +1561,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.15" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 15 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.0" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.16" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 16 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1705,6 +1706,7 @@ try {
             params = [ordered]@{ protocolVersion = "2024-11-05" }
         })
         Assert-Equal -Actual $initializeRpc.result.serverInfo.name -Expected "codedb-project-wrapper" -Message "Materialized wrapper server name mismatch."
+        Assert-Equal -Actual $initializeRpc.result.serverInfo.version -Expected "0.2.0" -Message "Materialized wrapper server version mismatch."
 
         $toolsRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"

@@ -30,7 +30,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0"
   }
 }
 ```

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-07-26
 
 - Added the attributed Streamline Plump Free brand icon to the Manager window,
   package documentation, and repository presentation without adding a runtime

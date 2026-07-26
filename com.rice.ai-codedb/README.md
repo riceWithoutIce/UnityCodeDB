@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. Version `0.1.0` targets Unity `2022.3` on
+and bounded MCP discovery surface. Version `0.2.0` targets Unity `2022.3` on
 Windows.
 
 Install the published release from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The current `0.1.0` release materializes reviewed process tooling into the host
+The current `0.2.0` release materializes reviewed process tooling into the host
 project. Manager actions resolve tracked scripts, wrapper files, and templates
 under `AIWork/codedb/`, while generated provider binaries, configs, indexes,
 logs, and watcher state remain under ignored `AIWork/.runtime/`. The external
@@ -69,9 +69,9 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.1.0",
-  "payload_version": "poc.15",
-  "payload_sequence": 15,
+  "package_version": "0.2.0",
+  "payload_version": "poc.16",
+  "payload_sequence": 16,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."

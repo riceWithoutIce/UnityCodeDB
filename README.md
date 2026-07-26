@@ -10,14 +10,14 @@ UnityCodeDB is an Editor-only Unity Package Manager package for project-local
 CodeDB setup, indexing, health checks, automatic refresh, and bounded source
 discovery from Codex or another MCP client.
 
-The first release targets Unity `2022.3` on Windows. It keeps every generated
+The current release targets Unity `2022.3` on Windows. It keeps every generated
 index, provider binary, log, and watcher state inside the consuming Unity
 project's ignored runtime instead of sharing state across projects.
 
 ## Package
 
 - Package name: `com.rice.ai-codedb`
-- Latest release: `v0.1.0`
+- Latest release: `v0.2.0`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -28,7 +28,7 @@ Add the package to the Unity project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.1.0"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0"
   }
 }
 ```
@@ -70,6 +70,9 @@ vendor its source or redistribute its binary.
   requested lines, and all wrapper text responses are capped at 64 KiB.
 - Search `path` aliases are normalized to `path_glob`; directory queries without
   a language merge Provider and Shader hits under one deduplicated global limit.
+- Ready MCP wrappers share the project coordinator's persistent Provider.
+  Identical concurrent searches join one execution; distinct work is queued
+  without implicit batching, and paused/unavailable states fall back one-shot.
 
 See [the package README](com.rice.ai-codedb/README.md) and
 [package documentation](com.rice.ai-codedb/Documentation~/index.md) for the

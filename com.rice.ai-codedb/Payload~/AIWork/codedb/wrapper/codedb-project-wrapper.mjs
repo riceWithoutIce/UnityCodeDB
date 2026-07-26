@@ -258,7 +258,7 @@ async function handleRequest(message) {
         },
         serverInfo: {
           name: "codedb-project-wrapper",
-          version: "0.1.0"
+          version: "0.2.0"
         }
       };
     case "tools/list":
