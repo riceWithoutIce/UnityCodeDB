@@ -23,6 +23,8 @@ const EXCLUDED_PREFIXES = [
 ];
 const EXCLUDED_FRAGMENTS = ["/Library/PackageCache/", "/AIWork/.runtime/"];
 const MAX_LIMIT = 200;
+const MAX_READ_LINES = 200;
+const MAX_OUTPUT_BYTES = 64 * 1024;
 const TRANSIENT_READ_RETRY_DELAY_MS = 100;
 const TRANSIENT_READ_RETRY_MAX_MS = 2000;
 const AUTOMATIC_WATCH_ENSURE_THROTTLE_MS = 5000;
@@ -236,7 +238,7 @@ function handleMessageLine(line) {
         id: message.id,
         error: {
           code: -32000,
-          message: error.message || String(error)
+          message: limitOutputText(error.message || String(error))
         }
       });
     });
@@ -291,7 +293,7 @@ function toToolResult(text, isError = false) {
     content: [
       {
         type: "text",
-        text: String(text ?? "")
+        text: limitOutputText(text)
       }
     ],
     isError
@@ -351,7 +353,7 @@ function routeReadTool(args) {
     return formatAdapterRead(targetPath, args);
   }
 
-  return invokeProviderTool("codedb_read", stripWrapperOnlyArgs(args));
+  return formatProjectRead(targetPath, args);
 }
 
 function routeContextTool(args) {
@@ -792,23 +794,106 @@ function formatAdapterRead(targetPath, args) {
     return `[NO HIT] excluded path scope: ${relativePath}`;
   }
 
+  return formatLocalRead(relativePath, args, "Shader adapter");
+}
+
+function formatProjectRead(targetPath, args) {
+  const relativePath = normalizeRelativePath(targetPath);
+  if (!relativePath) {
+    throw new Error("CodeDB read requires a relative path.");
+  }
+
+  if (isExcludedScope(relativePath)) {
+    return `[NO HIT] excluded path scope: ${relativePath}`;
+  }
+
+  return formatLocalRead(relativePath, args, "CodeDB");
+}
+
+function formatLocalRead(relativePath, args, label) {
   const fullPath = resolveUnityPath(relativePath);
-  assertPathInside(fullPath, context.unityRoot, "Shader adapter read");
-  assertFileExists(fullPath, "Shader adapter source");
+  assertPathInside(fullPath, context.unityRoot, `${label} read`);
+  assertFileExists(fullPath, `${label} source`);
 
-  const lines = fs.readFileSync(fullPath, "utf8").split(/\r?\n/);
-  const requestedStart = Number.parseInt(args.start_line ?? args.startLine ?? 0, 10);
-  const requestedEnd = Number.parseInt(args.end_line ?? args.endLine ?? 0, 10);
-  const start = requestedStart > 0 ? Math.min(requestedStart, lines.length) : 1;
-  const end = requestedEnd > 0 ? Math.min(requestedEnd, lines.length) : Math.min(start + 8, lines.length);
-  const safeEnd = Math.max(start, end);
+  const realRoot = fs.realpathSync(context.unityRoot);
+  const realPath = fs.realpathSync(fullPath);
+  assertPathInside(realPath, realRoot, `${label} read resolved`);
+  if (!fs.statSync(realPath).isFile()) {
+    throw new Error(`${label} read target is not a file: ${relativePath}`);
+  }
 
-  const output = [`[OK] Shader adapter read ${relativePath} lines ${start}-${safeEnd}.`, `[HIT] ${relativePath}:${start}`];
-  for (let lineNumber = start; lineNumber <= safeEnd; lineNumber += 1) {
+  const source = fs.readFileSync(realPath);
+  if (source.includes(0)) {
+    throw new Error(`${label} read does not support binary files: ${relativePath}`);
+  }
+
+  const lines = source.toString("utf8").split(/\r\n|\n|\r/);
+  const window = resolveReadWindow(args, lines.length);
+  if (window.start > lines.length) {
+    return `[NO HIT] ${label} read ${relativePath}: requested start line ${window.start} exceeds ${lines.length} line(s).`;
+  }
+
+  const output = [`[OK] ${label} read ${relativePath} lines ${window.start}-${window.end}.`, `[HIT] ${relativePath}:${window.start}`];
+  if (window.wasCapped) {
+    output.push(`[LIMIT] Read window capped at ${MAX_READ_LINES} lines; requested end line was ${window.requestedEnd}.`);
+  }
+  for (let lineNumber = window.start; lineNumber <= window.end; lineNumber += 1) {
     output.push(`${String(lineNumber).padStart(5, " ")}: ${lines[lineNumber - 1] ?? ""}`);
   }
 
   return output.join("\n");
+}
+
+function resolveReadWindow(args, totalLines) {
+  const start = getAliasedPositiveInteger(args, "start_line", "startLine", 1);
+  const requestedEnd = getAliasedPositiveInteger(args, "end_line", "endLine", start + 8);
+  if (requestedEnd < start) {
+    throw new Error("codedb_read end_line must be greater than or equal to start_line.");
+  }
+
+  const maximumEnd = start + MAX_READ_LINES - 1;
+  return {
+    start,
+    end: Math.min(requestedEnd, maximumEnd, totalLines),
+    requestedEnd,
+    wasCapped: requestedEnd > maximumEnd
+  };
+}
+
+function getAliasedPositiveInteger(args, snakeName, camelName, defaultValue) {
+  const snakeValue = args[snakeName];
+  const camelValue = args[camelName];
+  if (snakeValue !== undefined && camelValue !== undefined && Number(snakeValue) !== Number(camelValue)) {
+    throw new Error(`codedb_read ${snakeName} and ${camelName} disagree.`);
+  }
+
+  const value = snakeValue ?? camelValue;
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`codedb_read ${snakeName} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function limitOutputText(value) {
+  const text = String(value ?? "");
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= MAX_OUTPUT_BYTES) {
+    return text;
+  }
+
+  const notice = `\n[TRUNCATED] Wrapper output exceeded ${MAX_OUTPUT_BYTES} UTF-8 bytes.`;
+  const budget = Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(notice, "utf8"));
+  let end = budget;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  const prefix = bytes.subarray(0, end).toString("utf8").trimEnd();
+  return `${prefix}${notice}`;
 }
 
 function normalizeRelativePath(value) {
@@ -845,8 +930,11 @@ function toUnityRelativePath(filePath) {
 function assertPathInside(filePath, rootPath, label) {
   const resolvedPath = path.resolve(filePath);
   const resolvedRoot = path.resolve(rootPath);
-  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
-  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(rootPrefix)) {
+  const relativePath = path.relative(resolvedRoot, resolvedPath);
+  if (relativePath === "") {
+    return;
+  }
+  if (relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
     throw new Error(`${label} path is outside Unity root: ${resolvedPath}`);
   }
 }

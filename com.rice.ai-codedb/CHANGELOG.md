@@ -10,6 +10,10 @@
   before startup, preserve lifecycle ownership during recovery, and expose a
   persistent Pause/Resume workflow while the formal provider config remains
   `watch=false`.
+- Enforced wrapper-local bounded reads for C# and Shader/HLSL source. Reads now
+  resolve inside the Unity root, honor an exact requested window capped at 200
+  lines, and all tool or surfaced error text is capped at 64 KiB with explicit
+  truncation.
 
 ## 0.1.0 - 2026-07-26
 

@@ -78,6 +78,17 @@ does not generate, persist, infer, or delete that authorization.
 - Host mutations fail closed on drift, staged managed files, active watchers or
   MCP wrappers, interrupted transactions, downgrade, and payload collisions.
 
+## Discover Read Bounds
+
+- `codedb_read` is enforced by the wrapper against the resolved project-local
+  source file instead of trusting a Provider's returned file body.
+- Snake-case and camel-case line aliases must agree. A read returns only its
+  requested range, capped at 200 lines, and reports when that cap is applied.
+- Lexical paths and resolved real paths must both remain under the Unity root;
+  generated/excluded scopes and binary files remain unreadable.
+- Every tool result and surfaced tool error is capped at 64 KiB of UTF-8 text.
+  Truncated output carries an explicit `[TRUNCATED]` marker.
+
 Host-only lifecycle acceptance code is not part of the package. The package
 assembly remains independent, with an optional friend-assembly declaration for
 host extensions that does not reverse the dependency direction.

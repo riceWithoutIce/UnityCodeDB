@@ -53,8 +53,8 @@ vendor its source or redistribute its binary.
    flow described in the package README.
 4. Prepare the project-local runtime and provide the external provider.
 5. Generate and review project-level MCP registration guidance.
-6. Start automatic watching only when desired; watch remains disabled by
-   default and has an explicit Stop action.
+6. Automatic refresh starts after Setup completes. Use Pause when the project
+   must remain stopped; Resume clears that persistent pause.
 
 ## Ownership Boundaries
 
@@ -66,6 +66,8 @@ vendor its source or redistribute its binary.
 - MCP registration is workspace-local or project-level first. The package does
   not silently edit global client configuration.
 - Provider watch and the Shader/HLSL text adapter remain separate owners.
+- `codedb_read` resolves a project-local real file, returns at most 200
+  requested lines, and all wrapper text responses are capped at 64 KiB.
 
 See [the package README](com.rice.ai-codedb/README.md) and
 [package documentation](com.rice.ai-codedb/Documentation~/index.md) for the

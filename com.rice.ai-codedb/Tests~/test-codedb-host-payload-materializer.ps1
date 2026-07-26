@@ -33,6 +33,7 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $fixtureMarkerName = ".rice-ai-codedb-poc-fixture.json"
 $junctionPath = $null
+$readEscapeJunctionPath = $null
 $activeWatchManagerPath = $null
 $activeWatchLifecycleId = $null
 $activeMcpProcess = $null
@@ -63,6 +64,8 @@ $sentinelPaths = @(
     $fixtureMarkerName,
     "Assets/BusinessSentinel.txt",
     "Assets/MaterializerFreshnessProbe.cs",
+    "Assets/ZMaterializerBoundedReadProbe.cs",
+    "Assets/ZMaterializerOutputCeilingProbe.cs",
     "Assets/MaterializerProbe.shader",
     ".codex/config.toml",
     "AIWork/codedb/adoption-decision.md",
@@ -616,7 +619,19 @@ function New-TestHost {
     Write-Utf8File -Path (Join-Path $Root "Packages\manifest.json") -Content "{}`n"
     Write-Utf8File -Path (Join-Path $Root "ProjectSettings\ProjectVersion.txt") -Content "m_EditorVersion: 2022.3.62f1`n"
     Write-Utf8File -Path (Join-Path $Root "Assets\BusinessSentinel.txt") -Content "business sentinel`n"
-    Write-Utf8File -Path (Join-Path $Root "Assets\MaterializerFreshnessProbe.cs") -Content "public static class CodedbMaterializerFreshnessProbe { public const string Token = `"CODEDB_MATERIALIZER_PROVIDER_PROBE`"; }`n"
+    Write-Utf8File -Path (Join-Path $Root "Assets\MaterializerFreshnessProbe.cs") -Content @"
+public static class CodedbMaterializerFreshnessProbe {
+    public const string Token = "CODEDB_MATERIALIZER_PROVIDER_PROBE";
+    public const string Outside = "CODEDB_BOUNDED_READ_EXCLUDED";
+}
+"@
+    $boundedReadLines = @(1..250 | ForEach-Object { "// CODEDB_BOUNDED_LINE_{0:D3}" -f $_ })
+    Write-Utf8File `
+        -Path (Join-Path $Root "Assets\ZMaterializerBoundedReadProbe.cs") `
+        -Content (($boundedReadLines -join "`n") + "`n")
+    Write-Utf8File `
+        -Path (Join-Path $Root "Assets\ZMaterializerOutputCeilingProbe.cs") `
+        -Content ("// " + ("x" * 70000) + "`n")
     Write-Utf8File -Path (Join-Path $Root "Assets\MaterializerProbe.shader") -Content "Shader `"Hidden/Rice/MaterializerProbe`" {`n    // CODEDB_MATERIALIZER_ADAPTER_PROBE`n}`n"
     Write-Utf8File -Path (Join-Path $Root ".codex\config.toml") -Content @"
 # config sentinel
@@ -833,6 +848,26 @@ function Invoke-WrapperRpc {
     $response = $responseLine | ConvertFrom-Json
     if ($null -ne $response.PSObject.Properties["error"]) {
         throw "Materialized wrapper returned an RPC error for request id $($Request.id): $($response.error.message)"
+    }
+    return $response
+}
+
+function Invoke-WrapperRpcError {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]$Request
+    )
+
+    $requestLine = $Request | ConvertTo-Json -Compress -Depth 8
+    $Process.StandardInput.WriteLine($requestLine)
+    $Process.StandardInput.Flush()
+    $responseLine = $Process.StandardOutput.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($responseLine)) {
+        throw "Materialized wrapper closed without responding to expected-error request id $($Request.id)."
+    }
+    $response = $responseLine | ConvertFrom-Json
+    if ($null -eq $response.PSObject.Properties["error"]) {
+        throw "Materialized wrapper accepted request id $($Request.id), but an RPC error was expected."
     }
     return $response
 }
@@ -1213,8 +1248,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.10" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 10 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.11" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 11 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1326,6 +1361,12 @@ try {
     Assert-Equal -Actual $wrapperContext.provider_name -Expected "codedb-fixture" -Message "Materialized wrapper provider name mismatch."
     Assert-Equal -Actual $wrapperContext.runtime_root -Expected "AIWork/.runtime/codedb/codedb-fixture" -Message "Materialized wrapper runtime root mismatch."
 
+    $readEscapeRoot = Join-Path $runRoot "read-escape-source"
+    New-Item -ItemType Directory -Force -Path $readEscapeRoot | Out-Null
+    Write-Utf8File -Path (Join-Path $readEscapeRoot "Outside.cs") -Content "// CODEDB_READ_MUST_NOT_ESCAPE_ROOT`n"
+    $readEscapeJunctionPath = Join-Path $hostRoot "Assets\ReadEscape"
+    New-Item -ItemType Junction -Path $readEscapeJunctionPath -Target $readEscapeRoot | Out-Null
+
     $wrapperStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $wrapperStartInfo.FileName = $nodePath
     $wrapperStartInfo.Arguments = "`"$materializedWrapper`" --root `"$hostRoot`""
@@ -1414,9 +1455,71 @@ try {
         Assert-True -Condition ($readText.Contains("lines 2-2")) -Message "Materialized wrapper did not preserve the requested read window."
         Assert-True -Condition ($readText.Contains("CODEDB_MATERIALIZER_ADAPTER_PROBE")) -Message "Materialized wrapper read omitted the Shader fixture token."
 
-        $excludedRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+        $csharpReadRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
             id = 6
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_read"
+                arguments = [ordered]@{ path = "Assets/MaterializerFreshnessProbe.cs"; start_line = 2; end_line = 2; language = "CSharp" }
+            }
+        })
+        $csharpReadText = [string]$csharpReadRpc.result.content[0].text
+        Assert-True -Condition ($csharpReadText.Contains("CodeDB read Assets/MaterializerFreshnessProbe.cs lines 2-2")) -Message "C# read did not report the exact requested window."
+        Assert-True -Condition ($csharpReadText.Contains("CODEDB_MATERIALIZER_PROVIDER_PROBE")) -Message "C# read omitted the requested source line."
+        Assert-True -Condition (-not $csharpReadText.Contains("CodedbMaterializerFreshnessProbe {")) -Message "C# read leaked source before the requested window."
+        Assert-True -Condition (-not $csharpReadText.Contains("CODEDB_BOUNDED_READ_EXCLUDED")) -Message "C# read leaked source after the requested window."
+
+        $cappedReadRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 7
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_read"
+                arguments = [ordered]@{ path = "Assets/ZMaterializerBoundedReadProbe.cs"; start_line = 10; end_line = 250; language = "CSharp" }
+            }
+        })
+        $cappedReadText = [string]$cappedReadRpc.result.content[0].text
+        Assert-True -Condition ($cappedReadText.Contains("lines 10-209")) -Message "C# read did not cap the requested window at 200 lines."
+        Assert-True -Condition ($cappedReadText.Contains("[LIMIT] Read window capped at 200 lines")) -Message "C# read did not disclose its line cap."
+        Assert-True -Condition ($cappedReadText.Contains("CODEDB_BOUNDED_LINE_010")) -Message "C# capped read omitted its first requested line."
+        Assert-True -Condition ($cappedReadText.Contains("CODEDB_BOUNDED_LINE_209")) -Message "C# capped read omitted its final allowed line."
+        Assert-True -Condition (-not $cappedReadText.Contains("CODEDB_BOUNDED_LINE_210")) -Message "C# capped read exceeded the 200-line boundary."
+
+        $largeReadRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 8
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_read"
+                arguments = [ordered]@{ path = "Assets/ZMaterializerOutputCeilingProbe.cs"; start_line = 1; end_line = 1; language = "CSharp" }
+            }
+        })
+        $largeReadText = [string]$largeReadRpc.result.content[0].text
+        $largeReadBytes = [System.Text.Encoding]::UTF8.GetByteCount($largeReadText)
+        Assert-True -Condition ($largeReadBytes -le 65536) -Message "Wrapper output exceeded its 64 KiB UTF-8 ceiling: $largeReadBytes bytes."
+        Assert-True -Condition ($largeReadText.Contains("[TRUNCATED] Wrapper output exceeded 65536 UTF-8 bytes.")) -Message "Wrapper output ceiling did not disclose truncation."
+
+        $escapedReadRpc = Invoke-WrapperRpcError -Process $wrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 9
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_read"
+                arguments = [ordered]@{ path = "Assets/ReadEscape/Outside.cs"; start_line = 1; end_line = 1; language = "CSharp" }
+            }
+        })
+        Assert-True `
+            -Condition ([string]$escapedReadRpc.error.message -like "*read resolved path is outside Unity root*") `
+            -Message "Wrapper did not report the resolved-path escape boundary."
+        $readEscapeItem = Get-Item -LiteralPath $readEscapeJunctionPath -Force
+        Assert-True -Condition (($readEscapeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -Message "Read escape fixture stopped being a junction."
+        [System.IO.Directory]::Delete($readEscapeJunctionPath)
+        $readEscapeJunctionPath = $null
+
+        $excludedRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 10
             method = "tools/call"
             params = [ordered]@{
                 name = "codedb_text_search"
@@ -1853,7 +1956,7 @@ try {
     }
     Assert-Result -Result $providerCustomHit -ExitCode 0 -Label "Materialized provider custom hit"
     Assert-True -Condition ($providerCustomHit.Text.Contains("[OK] C# custom probe found 1 hit(s)")) -Message "Provider custom probe did not report its hit."
-    Assert-True -Condition ($providerCustomHit.Text.Contains("[HIT] Assets/MaterializerFreshnessProbe.cs:1")) -Message "Provider custom probe did not report the fixture path."
+    Assert-True -Condition ($providerCustomHit.Text.Contains("[HIT] Assets/MaterializerFreshnessProbe.cs:2")) -Message "Provider custom probe did not report the fixture path."
 
     $providerCustomNoHit = Invoke-PowerShellAction -Action {
         & $materializedProviderProbe -Check CustomProbe -Language CSharp -Query "CODEDB_MATERIALIZER_PROVIDER_MISSING"
@@ -2468,6 +2571,14 @@ try {
         }
         [System.IO.Directory]::Delete($junctionPath)
         $junctionPath = $null
+    }
+    if ($null -ne $readEscapeJunctionPath -and (Test-Path -LiteralPath $readEscapeJunctionPath)) {
+        $readEscapeItem = Get-Item -LiteralPath $readEscapeJunctionPath -Force
+        if (($readEscapeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+            throw "Refusing to clean an unexpected non-junction path: $readEscapeJunctionPath"
+        }
+        [System.IO.Directory]::Delete($readEscapeJunctionPath)
+        $readEscapeJunctionPath = $null
     }
     if (Test-Path -LiteralPath $runRoot) {
         $fullRunRoot = [System.IO.Path]::GetFullPath($runRoot)
