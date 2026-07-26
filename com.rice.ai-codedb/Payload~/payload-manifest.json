@@ -2,8 +2,8 @@
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
   "package_version": "0.1.0",
-  "payload_version": "poc.14",
-  "payload_sequence": 14,
+  "payload_version": "poc.15",
+  "payload_sequence": 15,
   "retired_targets": [],
   "files": [
     {
@@ -19,7 +19,7 @@
     {
       "source": "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
       "target": "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
-      "sha256": "e51f005be3fe5f381a45df27231850272de0ba49a6a6384222f2e9c2f5e27b31"
+      "sha256": "023c3f9941eb47f10c19e126aef1996bbd1023566e2b628b5630e401ceadf0ec"
     },
     {
       "source": "AIWork/codedb/scripts/build-codedb-project-text-adapter.ps1",
@@ -109,7 +109,7 @@
     {
       "source": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
       "target": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
-      "sha256": "9a848815487b822936acbb2a8761da6bd45f42009077f0fec07ddf0e32d35eb2"
+      "sha256": "d9a4719a7147700df1e734e8c85866182d018533b5784054f4081630e0943a87"
     }
   ]
 }

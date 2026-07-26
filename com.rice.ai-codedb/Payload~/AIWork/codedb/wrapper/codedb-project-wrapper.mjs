@@ -333,7 +333,9 @@ function createToolTiming(tool) {
     adapterMs: 0,
     mergeMs: 0,
     readMs: 0,
-    providerAttempts: 0
+    providerAttempts: 0,
+    providerRoute: "none",
+    providerShared: false
   };
 }
 
@@ -369,6 +371,8 @@ function formatTimedOutput(value, timing) {
     merge_ms: roundMilliseconds(timing.mergeMs),
     read_ms: roundMilliseconds(timing.readMs),
     provider_attempts: timing.providerAttempts,
+    provider_route: timing.providerRoute,
+    provider_shared: timing.providerShared,
     output_bytes: Buffer.byteLength(text, "utf8")
   };
   return limitOutputText(text, `[TIMING] ${JSON.stringify(metrics)}`);
@@ -888,6 +892,8 @@ async function invokeProviderTool(name, args, timing) {
 }
 
 function invokeProviderToolOneShot(name, args, timing) {
+  timing.providerRoute = "one-shot";
+  timing.providerShared = false;
   const providerConfigPath = getActiveProviderConfigPath(false);
   assertFileExists(providerConfigPath, "active provider config");
 
@@ -943,6 +949,8 @@ function invokeProviderToolOneShot(name, args, timing) {
 
 function applyCoordinatorTiming(timing, metrics) {
   const value = metrics && typeof metrics === "object" ? metrics : {};
+  timing.providerRoute = "coordinator";
+  timing.providerShared = value.provider_shared === true;
   timing.queueMs += toNonNegativeNumber(value.queue_ms);
   timing.providerProcessMs += toNonNegativeNumber(value.provider_process_ms);
   if (value.provider_core_ms !== null && value.provider_core_ms !== undefined) {

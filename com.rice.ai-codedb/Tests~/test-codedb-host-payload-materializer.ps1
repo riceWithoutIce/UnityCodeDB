@@ -396,7 +396,20 @@ public static class CodedbMaterializerFixtureProvider
         }
         else if (String.Equals(toolName, "codedb_text_search", StringComparison.Ordinal))
         {
-            if (toolArguments.IndexOf("CODEDB_SCOPE_CONTRACT", StringComparison.Ordinal) >= 0)
+            if (toolArguments.IndexOf("CODEDB_SINGLEFLIGHT_CONTRACT_A", StringComparison.Ordinal) >= 0)
+            {
+                System.Threading.Thread.Sleep(400);
+                writer.WriteLine("1 result for 'CODEDB_SINGLEFLIGHT_CONTRACT_A' in 1 file:");
+                writer.WriteLine("  Assets/Scoped/ScopedProbe.cs");
+                writer.WriteLine("    L1: // CODEDB_SINGLEFLIGHT_CONTRACT_A");
+            }
+            else if (toolArguments.IndexOf("CODEDB_SINGLEFLIGHT_CONTRACT_B", StringComparison.Ordinal) >= 0)
+            {
+                writer.WriteLine("1 result for 'CODEDB_SINGLEFLIGHT_CONTRACT_B' in 1 file:");
+                writer.WriteLine("  Assets/Scoped/SecondScopedProbe.cs");
+                writer.WriteLine("    L1: // CODEDB_SINGLEFLIGHT_CONTRACT_B");
+            }
+            else if (toolArguments.IndexOf("CODEDB_SCOPE_CONTRACT", StringComparison.Ordinal) >= 0)
             {
                 writer.WriteLine("[FIXTURE PROVIDER] args=" + toolArguments);
                 writer.WriteLine("4 results for 'CODEDB_SCOPE_CONTRACT' in 4 files:");
@@ -1145,6 +1158,108 @@ function Invoke-WrapperToolProbe {
     }
 }
 
+function Invoke-ConcurrentWrapperQueries {
+    param(
+        [Parameter(Mandatory = $true)][string]$WrapperPath,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $queries = @(
+        "CODEDB_SINGLEFLIGHT_CONTRACT_A",
+        "CODEDB_SINGLEFLIGHT_CONTRACT_A",
+        "CODEDB_SINGLEFLIGHT_CONTRACT_B"
+    )
+    $entries = @()
+    try {
+        for ($index = 0; $index -lt $queries.Count; $index += 1) {
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $nodePath
+            $startInfo.Arguments = "`"$WrapperPath`" --root `"$Root`""
+            $startInfo.WorkingDirectory = $Root
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardInput = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            $null = $process.Start()
+            $entry = [pscustomobject]@{
+                Process = $process
+                StderrTask = $process.StandardError.ReadToEndAsync()
+                Query = $queries[$index]
+            }
+            $entries += $entry
+            $null = Invoke-WrapperRpc -Process $process -Request ([ordered]@{
+                jsonrpc = "2.0"
+                id = 301
+                method = "initialize"
+                params = [ordered]@{ protocolVersion = "2024-11-05" }
+            })
+        }
+
+        for ($index = 0; $index -lt 2; $index += 1) {
+            $requestLine = [ordered]@{
+                jsonrpc = "2.0"
+                id = 302
+                method = "tools/call"
+                params = [ordered]@{
+                    name = "codedb_text_search"
+                    arguments = [ordered]@{ query = $entries[$index].Query; language = "CSharp"; limit = 1 }
+                }
+            } | ConvertTo-Json -Compress -Depth 8
+            $entries[$index].Process.StandardInput.WriteLine($requestLine)
+            $entries[$index].Process.StandardInput.Flush()
+        }
+        Start-Sleep -Milliseconds 75
+        $thirdRequest = [ordered]@{
+            jsonrpc = "2.0"
+            id = 302
+            method = "tools/call"
+            params = [ordered]@{
+                name = "codedb_text_search"
+                arguments = [ordered]@{ query = $entries[2].Query; language = "CSharp"; limit = 1 }
+            }
+        } | ConvertTo-Json -Compress -Depth 8
+        $entries[2].Process.StandardInput.WriteLine($thirdRequest)
+        $entries[2].Process.StandardInput.Flush()
+
+        $texts = @()
+        foreach ($entry in $entries) {
+            $responseLine = $entry.Process.StandardOutput.ReadLine()
+            if ([string]::IsNullOrWhiteSpace($responseLine)) {
+                throw "Concurrent wrapper closed without responding for $($entry.Query)."
+            }
+            $response = $responseLine | ConvertFrom-Json
+            if ($null -ne $response.PSObject.Properties["error"]) {
+                throw "Concurrent wrapper returned an RPC error for $($entry.Query): $($response.error.message)"
+            }
+            $texts += [string]$response.result.content[0].text
+            $entry.Process.StandardInput.Close()
+        }
+
+        foreach ($entry in $entries) {
+            if (-not $entry.Process.WaitForExit(10000)) {
+                $entry.Process.Kill()
+                throw "Concurrent wrapper did not exit for $($entry.Query)."
+            }
+            $stderr = $entry.StderrTask.Result.Trim()
+            if ($entry.Process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+                throw "Concurrent wrapper exited with code $($entry.Process.ExitCode) for $($entry.Query).`n$stderr"
+            }
+        }
+        return $texts
+    } finally {
+        foreach ($entry in $entries) {
+            if (-not $entry.Process.HasExited) {
+                $entry.Process.Kill()
+                $entry.Process.WaitForExit()
+            }
+            $entry.Process.Dispose()
+        }
+    }
+}
+
 function Assert-NoMaterializerResidue {
     $runtimePath = Join-Path $hostRoot "AIWork\.runtime\codedb\payload-materializer"
     Assert-True -Condition (-not (Test-Path -LiteralPath $runtimePath)) -Message "Materializer runtime residue remains: $runtimePath"
@@ -1446,8 +1561,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.14" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 14 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.15" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 15 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1930,7 +2045,9 @@ try {
     Assert-True -Condition ($scopedTextSearch.Contains("[FIXTURE PROVIDER] mode=mcp pid=$($automaticStatus.provider_pid)")) -Message "Scoped text search did not reuse the coordinator-owned Provider process."
     $scopedTextSearchTiming = Get-WrapperTiming -Text $scopedTextSearch -Label "Scoped dual-lane text search"
     Assert-Equal -Actual $scopedTextSearchTiming.tool -Expected "codedb_text_search" -Message "Scoped text search timing tool mismatch."
-    Assert-Equal -Actual $scopedTextSearchTiming.queue_ms -Expected 0 -Message "Shared Provider path unexpectedly reported queue time before single-flight integration."
+    Assert-True -Condition ($scopedTextSearchTiming.queue_ms -ge 0) -Message "Shared Provider query reported negative queue time."
+    Assert-Equal -Actual $scopedTextSearchTiming.provider_route -Expected "coordinator" -Message "Scoped text search reported the wrong Provider route."
+    Assert-Equal -Actual $scopedTextSearchTiming.provider_shared -Expected $false -Message "Isolated scoped text search unexpectedly joined another flight."
     Assert-True -Condition ($scopedTextSearchTiming.provider_process_ms -gt 0) -Message "Scoped text search did not report Provider process wall time."
     Assert-True -Condition ($null -eq $scopedTextSearchTiming.provider_core_ms) -Message "Persistent Provider query unexpectedly reported uncorrelated core timing."
     Assert-Equal -Actual $scopedTextSearchTiming.provider_attempts -Expected 1 -Message "Scoped text search Provider attempt count mismatch."
@@ -1969,6 +2086,43 @@ try {
     Assert-True -Condition ($scopedContext.Contains("[LIMIT] Global context result limit 2 applied")) -Message "Context did not disclose its global result limit."
     Write-Host "[OK] Materialized wrapper normalized scopes and enforced dual-lane merge, deduplication, and global limits."
 
+    $beforeSingleFlightResult = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Status
+    }
+    Assert-Result -Result $beforeSingleFlightResult -ExitCode 0 -Label "Pre-single-flight watcher Status"
+    $beforeSingleFlight = Get-LastJsonObject -Result $beforeSingleFlightResult -Label "Pre-single-flight watcher Status"
+
+    $concurrentQueryTexts = @(Invoke-ConcurrentWrapperQueries -WrapperPath $materializedWrapper -Root $hostRoot)
+    Assert-Equal -Actual $concurrentQueryTexts.Count -Expected 3 -Message "Concurrent wrapper query result count mismatch."
+    Assert-True -Condition ($concurrentQueryTexts[0].Contains("CODEDB_SINGLEFLIGHT_CONTRACT_A")) -Message "First shared query omitted its token."
+    Assert-True -Condition ($concurrentQueryTexts[1].Contains("CODEDB_SINGLEFLIGHT_CONTRACT_A")) -Message "Second shared query omitted its token."
+    Assert-True -Condition ($concurrentQueryTexts[2].Contains("CODEDB_SINGLEFLIGHT_CONTRACT_B")) -Message "Queued distinct query omitted its token."
+
+    $concurrentTimings = @()
+    for ($index = 0; $index -lt $concurrentQueryTexts.Count; $index += 1) {
+        Assert-True -Condition ($concurrentQueryTexts[$index].Contains("[FIXTURE PROVIDER] mode=mcp pid=$($automaticStatus.provider_pid)")) -Message "Concurrent wrapper $index did not reuse the coordinator Provider PID."
+        $timing = Get-WrapperTiming -Text $concurrentQueryTexts[$index] -Label "Concurrent wrapper query $index"
+        Assert-Equal -Actual $timing.provider_route -Expected "coordinator" -Message "Concurrent wrapper $index reported the wrong Provider route."
+        $concurrentTimings += $timing
+    }
+    Assert-Equal -Actual (($concurrentTimings | Measure-Object -Property provider_attempts -Sum).Sum) -Expected 2 -Message "Three concurrent wrappers did not collapse to two Provider executions."
+    Assert-Equal -Actual @($concurrentTimings | Where-Object { $_.provider_shared -eq $true }).Count -Expected 1 -Message "Exactly one duplicate wrapper query should join a single flight."
+    Assert-True -Condition ($concurrentTimings[2].queue_ms -ge 200) -Message "Distinct queued query did not report real queue wait."
+
+    $afterSingleFlightResult = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Status
+    }
+    Assert-Result -Result $afterSingleFlightResult -ExitCode 0 -Label "Post-single-flight watcher Status"
+    $afterSingleFlight = Get-LastJsonObject -Result $afterSingleFlightResult -Label "Post-single-flight watcher Status"
+    Assert-Equal -Actual ($afterSingleFlight.provider_query_count - $beforeSingleFlight.provider_query_count) -Expected 3 -Message "Coordinator client-query count mismatch."
+    Assert-Equal -Actual ($afterSingleFlight.provider_query_execution_count - $beforeSingleFlight.provider_query_execution_count) -Expected 2 -Message "Coordinator Provider execution count mismatch."
+    Assert-Equal -Actual ($afterSingleFlight.provider_query_shared_count - $beforeSingleFlight.provider_query_shared_count) -Expected 1 -Message "Coordinator single-flight join count mismatch."
+    Assert-Equal -Actual $afterSingleFlight.provider_query_inflight_count -Expected 0 -Message "Coordinator retained a completed query flight."
+    Assert-Equal -Actual $afterSingleFlight.provider_query_queue_depth -Expected 0 -Message "Coordinator retained a completed query queue entry."
+    Assert-Equal -Actual $afterSingleFlight.lifecycle_id -Expected $automaticLifecycleId -Message "Concurrent queries changed the coordinator lifecycle."
+    Assert-Equal -Actual $afterSingleFlight.provider_pid -Expected $automaticStatus.provider_pid -Message "Concurrent queries replaced the persistent Provider process."
+    Write-Host "[OK] Three concurrent wrappers reused one Provider, joined identical work, and reported real queue time without implicit batching."
+
     $pauseResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Pause -ExpectedLifecycleId $automaticLifecycleId
     }
@@ -1985,6 +2139,8 @@ try {
     Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] mode=tool pid=")) -Message "Paused wrapper did not use the one-shot Provider path."
     $pausedSearchTiming = Get-WrapperTiming -Text $pausedWatchProbe.SearchText -Label "Paused one-shot search"
     Assert-Equal -Actual $pausedSearchTiming.queue_ms -Expected 0 -Message "Paused one-shot search unexpectedly reported queue time."
+    Assert-Equal -Actual $pausedSearchTiming.provider_route -Expected "one-shot" -Message "Paused search reported the wrong Provider route."
+    Assert-Equal -Actual $pausedSearchTiming.provider_shared -Expected $false -Message "Paused one-shot search unexpectedly reported shared work."
     Assert-Equal -Actual $pausedSearchTiming.provider_core_ms -Expected 7 -Message "Paused one-shot search did not parse Provider core timing."
     Assert-Equal -Actual $pausedSearchTiming.provider_attempts -Expected 1 -Message "Paused one-shot Provider attempt count mismatch."
     foreach ($expectedStatus in @(

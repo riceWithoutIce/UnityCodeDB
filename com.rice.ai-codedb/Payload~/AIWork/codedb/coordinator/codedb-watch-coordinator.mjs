@@ -454,10 +454,59 @@ async function runOwnedDaemon(context) {
   const adapterSourceSnapshots = new Map();
   const adapterValidationTimers = new Map();
   const adapterBufferedCandidates = new Map();
+  const providerQueryFlights = new Map();
+  let providerQueryTail = Promise.resolve();
   let adapterInitializing = false;
 
   const persistState = () => writeJsonFile(context.statePath, daemonState);
   const publicStatus = () => sanitizeStatus(daemonState);
+
+  const createProviderQueryFlight = (request, key) => {
+    const flight = {
+      enqueuedAt: performance.now(),
+      startedAt: null,
+      promise: null
+    };
+    daemonState.provider_query_queue_depth += 1;
+    daemonState.provider_query_max_queue_depth = Math.max(
+      daemonState.provider_query_max_queue_depth,
+      daemonState.provider_query_queue_depth);
+
+    const execute = async () => {
+      flight.startedAt = performance.now();
+      daemonState.provider_query_queue_depth = Math.max(0, daemonState.provider_query_queue_depth - 1);
+      if (stopping || daemonState.provider_state !== "ready" || !providerRpc) {
+        const error = new Error("Coordinator Provider is not ready.");
+        error.code = "PROVIDER_UNAVAILABLE";
+        throw error;
+      }
+
+      daemonState.provider_query_execution_count += 1;
+      const providerStartedAt = performance.now();
+      const result = await providerRpc.request("tools/call", {
+        name: request.tool,
+        arguments: request.arguments
+      }, PROVIDER_REQUEST_TIMEOUT_MS);
+      return {
+        output: getProviderToolOutput(result),
+        startedAt: flight.startedAt,
+        providerProcessMs: performance.now() - providerStartedAt
+      };
+    };
+
+    flight.promise = providerQueryTail.then(execute, execute);
+    providerQueryTail = flight.promise.then(() => undefined, () => undefined);
+    providerQueryFlights.set(key, flight);
+    daemonState.provider_query_inflight_count = providerQueryFlights.size;
+    const cleanupFlight = () => {
+      if (providerQueryFlights.get(key) === flight) {
+        providerQueryFlights.delete(key);
+        daemonState.provider_query_inflight_count = providerQueryFlights.size;
+      }
+    };
+    void flight.promise.then(cleanupFlight, cleanupFlight);
+    return flight;
+  };
 
   const queryProvider = async (request) => {
     if (request.schema_version !== 1) {
@@ -473,30 +522,36 @@ async function runOwnedDaemon(context) {
       return { ok: false, error_code: "PROVIDER_UNAVAILABLE", error: "Coordinator Provider is not ready." };
     }
 
-    const providerStartedAt = performance.now();
+    const arrivedAt = performance.now();
     daemonState.provider_query_count += 1;
     daemonState.provider_last_query_at_utc = new Date().toISOString();
+    const key = createProviderQueryKey(request.tool, request.arguments);
+    let flight = providerQueryFlights.get(key);
+    const providerShared = Boolean(flight);
+    if (providerShared) {
+      daemonState.provider_query_shared_count += 1;
+    } else {
+      flight = createProviderQueryFlight(request, key);
+    }
     try {
-      const result = await providerRpc.request("tools/call", {
-        name: request.tool,
-        arguments: request.arguments
-      }, PROVIDER_REQUEST_TIMEOUT_MS);
-      const providerProcessMs = performance.now() - providerStartedAt;
-      daemonState.provider_last_query_elapsed_ms = Math.round(providerProcessMs * 100) / 100;
+      const result = await flight.promise;
+      const requestElapsedMs = performance.now() - arrivedAt;
+      daemonState.provider_last_query_elapsed_ms = Math.round(requestElapsedMs * 100) / 100;
       return {
         ok: true,
         lifecycle_id: daemonState.lifecycle_id,
-        output: getProviderToolOutput(result),
+        output: result.output,
         timing: {
-          queue_ms: 0,
-          provider_process_ms: daemonState.provider_last_query_elapsed_ms,
+          queue_ms: Math.round(Math.max(0, result.startedAt - arrivedAt) * 100) / 100,
+          provider_process_ms: Math.round(result.providerProcessMs * 100) / 100,
           provider_core_ms: null,
-          provider_attempts: 1
+          provider_attempts: providerShared ? 0 : 1,
+          provider_shared: providerShared
         }
       };
     } catch (error) {
       daemonState.provider_query_error_count += 1;
-      daemonState.provider_last_query_elapsed_ms = Math.round((performance.now() - providerStartedAt) * 100) / 100;
+      daemonState.provider_last_query_elapsed_ms = Math.round((performance.now() - arrivedAt) * 100) / 100;
       return {
         ok: false,
         error_code: error.code === "PROVIDER_TOOL_ERROR" ? "PROVIDER_TOOL_ERROR" : "PROVIDER_UNAVAILABLE",
@@ -904,15 +959,16 @@ async function runOwnedDaemon(context) {
       }
       closeAdapterWatchers();
       persistState();
-      if (server) {
-        await new Promise((resolve) => server.close(resolve));
-      }
+      const serverClosed = server
+        ? new Promise((resolve) => server.close(resolve))
+        : Promise.resolve();
       if (context.adapterWorker) {
         await stopAdapterWorker();
       } else {
         await stopAdapterBuilder();
       }
       await stopProvider();
+      await serverClosed;
       fs.rmSync(context.statePath, { force: true });
       try {
         fs.closeSync(lockFd);
@@ -1081,6 +1137,8 @@ async function runOwnedDaemon(context) {
       if (provider !== child) {
         return;
       }
+      provider = null;
+      providerRpc = null;
       daemonState.provider_pid = null;
       daemonState.provider_state = stopping ? "stopped" : "exited";
       daemonState.last_event = `provider_exit code=${code} signal=${signal ?? "none"}`;
@@ -1182,6 +1240,11 @@ function createDaemonState(context, recovery) {
     provider_ready_at_utc: null,
     provider_query_count: 0,
     provider_query_error_count: 0,
+    provider_query_execution_count: 0,
+    provider_query_shared_count: 0,
+    provider_query_inflight_count: 0,
+    provider_query_queue_depth: 0,
+    provider_query_max_queue_depth: 0,
     provider_last_query_at_utc: null,
     provider_last_query_elapsed_ms: null,
     adapter_enabled: context.adapterEnabled,
@@ -1429,6 +1492,23 @@ function authTokensMatch(value, expected) {
     && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+function createProviderQueryKey(tool, args) {
+  return `${tool}\n${stableJson(args)}`;
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+    .join(",")}}`;
+}
+
 async function requestCoordinator(context, clientCommand, timeoutMs, requestOptions = {}) {
   const state = readJsonFile(context.statePath);
   if (!state?.pipe_name || !state?.auth_token) {
@@ -1488,14 +1568,12 @@ class ProviderRpc {
     this.pending = new Map();
     this.lines = readline.createInterface({ input: child.stdout });
     this.lines.on("line", (line) => this.handleLine(line));
+    child.stdin.on("error", (cause) => this.rejectPending(cause));
+    child.once("error", (cause) => this.rejectPending(cause));
     child.once("exit", () => {
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        const error = new Error("Provider exited while an MCP request was pending.");
-        error.code = "PROVIDER_UNAVAILABLE";
-        pending.reject(error);
-      }
-      this.pending.clear();
+      const error = new Error("Provider exited while an MCP request was pending.");
+      error.code = "PROVIDER_UNAVAILABLE";
+      this.rejectPending(error);
     });
   }
 
@@ -1503,6 +1581,12 @@ class ProviderRpc {
     const id = this.nextId;
     this.nextId += 1;
     return new Promise((resolve, reject) => {
+      if (this.child.exitCode !== null || this.child.stdin.destroyed) {
+        const error = new Error("Provider is not available for an MCP request.");
+        error.code = "PROVIDER_UNAVAILABLE";
+        reject(error);
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(id);
         const error = new Error(`Timed out waiting for provider MCP method ${method}.`);
@@ -1510,7 +1594,15 @@ class ProviderRpc {
         reject(error);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      try {
+        this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (cause) => {
+          if (cause) {
+            this.rejectPending(cause);
+          }
+        });
+      } catch (cause) {
+        this.rejectPending(cause);
+      }
     });
   }
 
@@ -1538,6 +1630,16 @@ class ProviderRpc {
     } else {
       pending.resolve(message.result);
     }
+  }
+
+  rejectPending(cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    error.code = error.code ?? "PROVIDER_UNAVAILABLE";
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 }
 
@@ -1847,6 +1949,11 @@ function sanitizeStatus(state) {
     provider_ready_at_utc: state.provider_ready_at_utc,
     provider_query_count: state.provider_query_count,
     provider_query_error_count: state.provider_query_error_count,
+    provider_query_execution_count: state.provider_query_execution_count,
+    provider_query_shared_count: state.provider_query_shared_count,
+    provider_query_inflight_count: state.provider_query_inflight_count,
+    provider_query_queue_depth: state.provider_query_queue_depth,
+    provider_query_max_queue_depth: state.provider_query_max_queue_depth,
     provider_last_query_at_utc: state.provider_last_query_at_utc,
     provider_last_query_elapsed_ms: state.provider_last_query_elapsed_ms,
     adapter_enabled: state.adapter_enabled,

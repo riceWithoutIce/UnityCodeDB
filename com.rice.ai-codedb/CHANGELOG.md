@@ -26,6 +26,11 @@
   query proxy for search, text-search, and find. Ready wrappers now reuse the
   coordinator-owned persistent Provider MCP process, while paused, starting,
   stale, or unavailable states retain the one-shot fallback.
+- Added project-level single-flight query ownership. The coordinator serializes
+  distinct Provider calls, joins identical concurrent tool/argument keys, and
+  reports route, shared-work, execution-attempt, and real queue-time evidence.
+  Graceful Stop now drains query sockets by terminating the Provider before
+  awaiting connection closure.
 
 ## 0.1.0 - 2026-07-26
 
