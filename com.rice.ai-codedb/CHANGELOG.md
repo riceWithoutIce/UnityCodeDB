@@ -18,6 +18,10 @@
   search/text-search/find formats, reapplied scope filtering in the wrapper,
   and merged no-language directory results across Provider and Shader lanes
   with deduplication and one global limit. Context now consumes the same hits.
+- Added a bounded machine-readable timing footer to every wrapper tool response.
+  It separates one-shot queue, Provider process/core, Shader adapter, merge,
+  local-read, attempt-count, end-to-end, and uncapped-body byte evidence while
+  preserving the footer inside the existing 64 KiB response ceiling.
 
 ## 0.1.0 - 2026-07-26
 

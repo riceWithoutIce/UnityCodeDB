@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { acquireCodedbHostUseLease } from "../shared/codedb-host-use-gate.mjs";
 
@@ -271,29 +272,40 @@ async function handleRequest(message) {
 function callTool(params) {
   const name = params.name;
   const args = normalizeArgs(params.arguments ?? {});
+  const timing = createToolTiming(name);
 
-  switch (name) {
-    case "codedb_status":
-      return toToolResult(getStatusText());
-    case "codedb_search":
-    case "codedb_text_search":
-    case "codedb_find":
-      return toToolResult(routeSearchTool(name, args));
-    case "codedb_read":
-      return toToolResult(routeReadTool(args));
-    case "codedb_context":
-      return toToolResult(routeContextTool(args));
-    default:
-      throw new Error(`Unsupported tool: ${name}`);
+  try {
+    let text;
+    switch (name) {
+      case "codedb_status":
+        text = getStatusText();
+        break;
+      case "codedb_search":
+      case "codedb_text_search":
+      case "codedb_find":
+        text = routeSearchTool(name, args, timing);
+        break;
+      case "codedb_read":
+        text = routeReadTool(args, timing);
+        break;
+      case "codedb_context":
+        text = routeContextTool(args, timing);
+        break;
+      default:
+        throw new Error(`Unsupported tool: ${name}`);
+    }
+    return toToolResult(text, false, timing);
+  } catch (error) {
+    throw new Error(formatTimedOutput(error.message || String(error), timing));
   }
 }
 
-function toToolResult(text, isError = false) {
+function toToolResult(text, isError = false, timing = null) {
   return {
     content: [
       {
         type: "text",
-        text: limitOutputText(text)
+        text: timing ? formatTimedOutput(text, timing) : limitOutputText(text)
       }
     ],
     isError
@@ -308,7 +320,62 @@ function normalizeArgs(value) {
   return { ...value };
 }
 
-function routeSearchTool(name, rawArgs) {
+function createToolTiming(tool) {
+  return {
+    tool,
+    startedAt: performance.now(),
+    queueMs: 0,
+    providerProcessMs: 0,
+    providerCoreMs: null,
+    adapterMs: 0,
+    mergeMs: 0,
+    readMs: 0,
+    providerAttempts: 0
+  };
+}
+
+function measureToolPhase(timing, field, action) {
+  const startedAt = performance.now();
+  try {
+    return action();
+  } finally {
+    timing[field] += performance.now() - startedAt;
+  }
+}
+
+function parseProviderCoreTiming(stderr) {
+  const pattern = /codebase-mcp timing total:\s*([0-9]+(?:\.[0-9]+)?)s/gi;
+  let match;
+  let totalMs = null;
+  while ((match = pattern.exec(String(stderr ?? ""))) !== null) {
+    totalMs = Number.parseFloat(match[1]) * 1000;
+  }
+  return Number.isFinite(totalMs) ? totalMs : null;
+}
+
+function formatTimedOutput(value, timing) {
+  const text = String(value ?? "");
+  const metrics = {
+    schema_version: 1,
+    tool: timing.tool,
+    total_ms: roundMilliseconds(performance.now() - timing.startedAt),
+    queue_ms: roundMilliseconds(timing.queueMs),
+    provider_process_ms: roundMilliseconds(timing.providerProcessMs),
+    provider_core_ms: timing.providerCoreMs === null ? null : roundMilliseconds(timing.providerCoreMs),
+    adapter_ms: roundMilliseconds(timing.adapterMs),
+    merge_ms: roundMilliseconds(timing.mergeMs),
+    read_ms: roundMilliseconds(timing.readMs),
+    provider_attempts: timing.providerAttempts,
+    output_bytes: Buffer.byteLength(text, "utf8")
+  };
+  return limitOutputText(text, `[TIMING] ${JSON.stringify(metrics)}`);
+}
+
+function roundMilliseconds(value) {
+  return Math.round(Math.max(0, Number(value) || 0) * 100) / 100;
+}
+
+function routeSearchTool(name, rawArgs, timing) {
   const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = getLimit(args.limit);
@@ -320,10 +387,10 @@ function routeSearchTool(name, rawArgs) {
     return `[NO HIT] excluded path scope: ${args.path_glob}`;
   }
 
-  return formatUnifiedSearchResult(name, query, collectUnifiedSearchEntries(name, args, limit));
+  return formatUnifiedSearchResult(name, query, collectUnifiedSearchEntries(name, args, limit, timing));
 }
 
-function routeReadTool(args) {
+function routeReadTool(args, timing) {
   const targetPath = normalizeRelativePath(args.path);
   if (!targetPath) {
     throw new Error("codedb_read requires a relative path.");
@@ -334,13 +401,13 @@ function routeReadTool(args) {
   }
 
   if (isAdapterPath(targetPath) || isShaderLanguage(args.language)) {
-    return formatAdapterRead(targetPath, args);
+    return measureToolPhase(timing, "readMs", () => formatAdapterRead(targetPath, args));
   }
 
-  return formatProjectRead(targetPath, args);
+  return measureToolPhase(timing, "readMs", () => formatProjectRead(targetPath, args));
 }
 
-function routeContextTool(rawArgs) {
+function routeContextTool(rawArgs, timing) {
   const args = normalizeSearchArgs(rawArgs);
   const query = getQueryText(args);
   const limit = Math.min(getLimit(args.limit), 5);
@@ -352,7 +419,7 @@ function routeContextTool(rawArgs) {
     return `[NO HIT] excluded path scope: ${args.path_glob}`;
   }
 
-  const search = collectUnifiedSearchEntries("codedb_text_search", args, limit);
+  const search = collectUnifiedSearchEntries("codedb_text_search", args, limit, timing);
   if (search.entries.length === 0) {
     return [...search.diagnostics, `[NO HIT] CodeDB context found no match for: ${query}`]
       .filter(Boolean)
@@ -364,10 +431,10 @@ function routeContextTool(rawArgs) {
     const line = Math.max(1, entry.startLine ?? 1);
     const label = isAdapterPath(entry.path) ? "Shader adapter" : "CodeDB";
     try {
-      sections.push(formatLocalRead(entry.path, {
-        start_line: Math.max(1, line - 3),
-        end_line: line + 5
-      }, label));
+      sections.push(measureToolPhase(timing, "readMs", () => formatLocalRead(entry.path, {
+          start_line: Math.max(1, line - 3),
+          end_line: line + 5
+        }, label)));
     } catch (error) {
       sections.push(`[READ ERROR] ${entry.path}: ${error.message}`);
     }
@@ -519,7 +586,7 @@ function stripWrapperOnlyArgs(args) {
   return clone;
 }
 
-function collectUnifiedSearchEntries(name, args, limit) {
+function collectUnifiedSearchEntries(name, args, limit, timing) {
   const lanes = resolveSearchLanes(args);
   const diagnostics = [];
   const candidates = [];
@@ -528,7 +595,7 @@ function collectUnifiedSearchEntries(name, args, limit) {
 
   if (lanes.provider) {
     try {
-      const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args));
+      const providerOutput = invokeProviderTool(name, stripWrapperOnlyArgs(args), timing);
       const parsed = parseProviderSearchOutput(name, providerOutput);
       diagnostics.push(...parsed.diagnostics);
       candidates.push(...parsed.entries);
@@ -546,7 +613,10 @@ function collectUnifiedSearchEntries(name, args, limit) {
   if (lanes.adapter) {
     try {
       const adapterFetchLimit = Math.min(MAX_LIMIT, limit + 1);
-      const matches = findAdapterMatches(getQueryText(args), args, adapterFetchLimit);
+      const matches = measureToolPhase(
+        timing,
+        "adapterMs",
+        () => findAdapterMatches(getQueryText(args), args, adapterFetchLimit));
       adapterMayHaveMore = limit < MAX_LIMIT && matches.length > limit;
       for (const match of matches) {
         candidates.push({
@@ -565,6 +635,7 @@ function collectUnifiedSearchEntries(name, args, limit) {
     }
   }
 
+  const mergeStartedAt = performance.now();
   const scoped = candidates.filter((entry) => {
     if (!entry.path || isExcludedScope(entry.path)) {
       return false;
@@ -572,6 +643,7 @@ function collectUnifiedSearchEntries(name, args, limit) {
     return !args.path_glob || matchesGlob(entry.path, args.path_glob);
   });
   const deduplicated = mergeSearchEntries(name, scoped);
+  timing.mergeMs += performance.now() - mergeStartedAt;
   const hasMore = deduplicated.length > limit
     || adapterMayHaveMore
     || providerReportedTotal > providerParsedCount;
@@ -789,7 +861,7 @@ function formatSearchLocation(entry) {
   return `${entry.path}:${entry.startLine}`;
 }
 
-function invokeProviderTool(name, args) {
+function invokeProviderTool(name, args, timing) {
   assertFileExists(context.providerExecutablePath, "provider executable");
   const providerConfigPath = getActiveProviderConfigPath(true);
   assertFileExists(providerConfigPath, "active provider config");
@@ -797,6 +869,7 @@ function invokeProviderTool(name, args) {
   const startedAt = Date.now();
   let transientFailures = 0;
   while (true) {
+    const providerStartedAt = performance.now();
     const result = spawnSync(context.providerExecutablePath, [
       "tool",
       name,
@@ -812,6 +885,12 @@ function invokeProviderTool(name, args) {
       timeout: 120000,
       windowsHide: true
     });
+    timing.providerProcessMs += performance.now() - providerStartedAt;
+    timing.providerAttempts += 1;
+    const providerCoreMs = parseProviderCoreTiming(result.stderr);
+    if (providerCoreMs !== null) {
+      timing.providerCoreMs = (timing.providerCoreMs ?? 0) + providerCoreMs;
+    }
 
     if (result.error) {
       throw result.error;
@@ -1175,21 +1254,25 @@ function getAliasedPositiveInteger(args, snakeName, camelName, defaultValue) {
   return parsed;
 }
 
-function limitOutputText(value) {
+function limitOutputText(value, suffix = "") {
   const text = String(value ?? "");
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.length <= MAX_OUTPUT_BYTES) {
-    return text;
+  const suffixText = suffix ? `${text ? "\n" : ""}${suffix}` : "";
+  const combined = `${text}${suffixText}`;
+  const combinedBytes = Buffer.from(combined, "utf8");
+  if (combinedBytes.length <= MAX_OUTPUT_BYTES) {
+    return combined;
   }
 
   const notice = `\n[TRUNCATED] Wrapper output exceeded ${MAX_OUTPUT_BYTES} UTF-8 bytes.`;
-  const budget = Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(notice, "utf8"));
+  const trailer = `${notice}${suffix ? `\n${suffix}` : ""}`;
+  const bytes = Buffer.from(text, "utf8");
+  const budget = Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(trailer, "utf8"));
   let end = budget;
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
     end -= 1;
   }
   const prefix = bytes.subarray(0, end).toString("utf8").trimEnd();
-  return `${prefix}${notice}`;
+  return `${prefix}${trailer}`;
 }
 
 function normalizeRelativePath(value) {

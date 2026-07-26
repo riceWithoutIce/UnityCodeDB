@@ -367,6 +367,7 @@ public static class CodedbMaterializerFixtureProvider
             Console.Error.WriteLine("Fixture provider tool call is missing --config.");
             return 2;
         }
+        Console.Error.WriteLine("codebase-mcp timing total: 0.007s");
         Console.WriteLine("[FIXTURE PROVIDER] active_config=" + Path.GetFileName(args[configIndex + 1]));
         string toolName = args.Length > 1 ? args[1] : String.Empty;
         string toolArguments = args.Length > 2 ? args[2] : String.Empty;
@@ -914,6 +915,23 @@ function Invoke-WrapperRpcError {
     return $response
 }
 
+function Get-WrapperTiming {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $matches = [regex]::Matches($Text, '(?m)^\[TIMING\] (?<json>\{.*\})\s*$')
+    if ($matches.Count -ne 1) {
+        throw "$Label expected exactly one machine-readable timing footer, found $($matches.Count)."
+    }
+    try {
+        return $matches[0].Groups["json"].Value | ConvertFrom-Json
+    } catch {
+        throw "$Label timing footer is not valid JSON: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-WrapperWatchProbe {
     param(
         [Parameter(Mandatory = $true)][string]$WrapperPath,
@@ -1355,8 +1373,8 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.12" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 12 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.13" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 13 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1536,6 +1554,11 @@ try {
         )) {
             Assert-True -Condition ($statusText.Contains($expectedStatus)) -Message "Materialized wrapper status is missing '$expectedStatus'."
         }
+        $statusTiming = Get-WrapperTiming -Text $statusText -Label "Wrapper status"
+        Assert-Equal -Actual $statusTiming.schema_version -Expected 1 -Message "Wrapper timing schema mismatch."
+        Assert-Equal -Actual $statusTiming.tool -Expected "codedb_status" -Message "Wrapper status timing tool mismatch."
+        Assert-Equal -Actual $statusTiming.queue_ms -Expected 0 -Message "One-shot wrapper status unexpectedly reported queue time."
+        Assert-Equal -Actual $statusTiming.provider_attempts -Expected 0 -Message "Wrapper status unexpectedly invoked the Provider."
 
         $searchRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -1548,6 +1571,10 @@ try {
         })
         $searchText = [string]$searchRpc.result.content[0].text
         Assert-True -Condition ($searchText.Contains("[HIT] Assets/MaterializerProbe.shader:2")) -Message "Materialized wrapper did not find the Shader fixture token."
+        $adapterSearchTiming = Get-WrapperTiming -Text $searchText -Label "Shader adapter search"
+        Assert-Equal -Actual $adapterSearchTiming.tool -Expected "codedb_text_search" -Message "Shader adapter timing tool mismatch."
+        Assert-True -Condition ($adapterSearchTiming.adapter_ms -ge 0) -Message "Shader adapter timing is negative."
+        Assert-Equal -Actual $adapterSearchTiming.provider_attempts -Expected 0 -Message "Shader-only search unexpectedly invoked the Provider."
 
         $readRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -1561,6 +1588,9 @@ try {
         $readText = [string]$readRpc.result.content[0].text
         Assert-True -Condition ($readText.Contains("lines 2-2")) -Message "Materialized wrapper did not preserve the requested read window."
         Assert-True -Condition ($readText.Contains("CODEDB_MATERIALIZER_ADAPTER_PROBE")) -Message "Materialized wrapper read omitted the Shader fixture token."
+        $readTiming = Get-WrapperTiming -Text $readText -Label "Shader adapter read"
+        Assert-Equal -Actual $readTiming.tool -Expected "codedb_read" -Message "Shader read timing tool mismatch."
+        Assert-True -Condition ($readTiming.read_ms -ge 0) -Message "Shader read timing is negative."
 
         $csharpReadRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -1606,6 +1636,8 @@ try {
         $largeReadBytes = [System.Text.Encoding]::UTF8.GetByteCount($largeReadText)
         Assert-True -Condition ($largeReadBytes -le 65536) -Message "Wrapper output exceeded its 64 KiB UTF-8 ceiling: $largeReadBytes bytes."
         Assert-True -Condition ($largeReadText.Contains("[TRUNCATED] Wrapper output exceeded 65536 UTF-8 bytes.")) -Message "Wrapper output ceiling did not disclose truncation."
+        $largeReadTiming = Get-WrapperTiming -Text $largeReadText -Label "Truncated wrapper read"
+        Assert-True -Condition ($largeReadTiming.output_bytes -gt 65536) -Message "Truncated wrapper timing did not report the uncapped body size."
 
         $escapedReadRpc = Invoke-WrapperRpcError -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -1800,6 +1832,15 @@ try {
     Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Outside/OutsideProbe.cs")) -Message "Scoped text search leaked a Provider result outside path_glob."
     Assert-True -Condition (-not $scopedTextSearch.Contains("Assets/Scoped/SecondScopedProbe.cs")) -Message "Scoped text search exceeded its global result limit."
     Assert-True -Condition ($scopedTextSearch.Contains("[LIMIT] Global result limit 2 applied")) -Message "Scoped text search did not disclose global limiting."
+    $scopedTextSearchTiming = Get-WrapperTiming -Text $scopedTextSearch -Label "Scoped dual-lane text search"
+    Assert-Equal -Actual $scopedTextSearchTiming.tool -Expected "codedb_text_search" -Message "Scoped text search timing tool mismatch."
+    Assert-Equal -Actual $scopedTextSearchTiming.queue_ms -Expected 0 -Message "One-shot Provider path unexpectedly reported queue time."
+    Assert-True -Condition ($scopedTextSearchTiming.provider_process_ms -gt 0) -Message "Scoped text search did not report Provider process wall time."
+    Assert-Equal -Actual $scopedTextSearchTiming.provider_core_ms -Expected 7 -Message "Scoped text search did not parse Provider core timing."
+    Assert-Equal -Actual $scopedTextSearchTiming.provider_attempts -Expected 1 -Message "Scoped text search Provider attempt count mismatch."
+    Assert-True -Condition ($scopedTextSearchTiming.adapter_ms -ge 0) -Message "Scoped text search adapter timing is negative."
+    Assert-True -Condition ($scopedTextSearchTiming.merge_ms -ge 0) -Message "Scoped text search merge timing is negative."
+    Assert-True -Condition ($scopedTextSearchTiming.total_ms -ge $scopedTextSearchTiming.provider_process_ms) -Message "Scoped text search total timing is below Provider process time."
 
     $scopedSemanticSearch = Invoke-WrapperToolProbe `
         -WrapperPath $materializedWrapper `
