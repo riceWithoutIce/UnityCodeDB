@@ -9,8 +9,12 @@
 Rice AI CodeDB is an Editor-only package for setting up and operating a
 project-local CodeDB index from the Unity Editor.
 
-The approved post-setup automatic-refresh and shared-query direction is
-recorded in the [v0.2.0 roadmap](v0.2.0-roadmap.md).
+The implemented post-setup automatic-refresh and shared-query baseline is
+recorded in the [v0.2.0 roadmap](v0.2.0-roadmap.md). Approved future work is
+split into:
+
+- [v0.2.1 lifecycle and correctness](v0.2.1-roadmap.md);
+- [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
 ## Supported Environment
 
