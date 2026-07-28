@@ -1,4 +1,5 @@
 using System.IO;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -181,11 +182,16 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
-        /// Ensures the default project-local automatic refresh lifecycle is ready when Setup is complete.
+        /// Reconciles the Editor-owned watcher lifecycle without blocking the Unity main thread.
         /// </summary>
-        internal static AICodedbCommandResult RunEnsureWatcher()
+        internal static Task<AICodedbCommandResult> RunEnsureWatcherAsync()
         {
-            return RunScript("Codedb Ensure Watcher", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, "-Action", "Ensure");
+            var scriptPath = AICodedbPaths.WatchManageScriptPath;
+            return AICodedbProcessRunner.RunPowerShellScriptAsync(
+                scriptPath,
+                RefreshIndexTimeoutMilliseconds,
+                "-Action",
+                "Ensure");
         }
 
         /// <summary>

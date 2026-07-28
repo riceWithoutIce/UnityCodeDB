@@ -122,6 +122,9 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase("[OK] Watch opt-in: DISABLED\n[OK] Automatic refresh: PENDING\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Automatic / Waiting")]
         [TestCase("[OK] Watch opt-in: ENABLED\n[STALE] codedb watch coordinator stale.", AICodedbStatusState.Warning, "Enabled / Stale")]
         [TestCase("[OK] Watch opt-in: DISABLED\n[OK] codedb watch coordinator running.", AICodedbStatusState.Warning, "Off / Running")]
+        [TestCase("[OK] Watch opt-in: ENABLED\n[OK] Editor demand: ONLINE (1)\n[OK] Automatic refresh: STARTING\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Enabled / Starting")]
+        [TestCase("[OK] Watch opt-in: ENABLED\n[OK] Editor demand: OFFLINE (0)\n[OK] Automatic refresh: EDITOR_OFFLINE\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Enabled / Editor Offline")]
+        [TestCase("[OK] Watch opt-in: UNKNOWN\n[OK] Automatic refresh: PENDING\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Setup Pending")]
         [TestCase("[OK] Watch command completed.", AICodedbStatusState.Warning, "Unknown")]
         [TestCase("[OK] Watch opt-in: ENABLED", AICodedbStatusState.Warning, "Unknown")]
         [TestCase("[OK] Watch opt-in: DISABLED", AICodedbStatusState.Warning, "Unknown")]
@@ -175,6 +178,24 @@ namespace Rice.AI.Codedb.Editor.Tests
             AICodedbWatcherState.DisabledRunning,
             AICodedbStatusState.Warning,
             true,
+            false)]
+        [TestCase(
+            "[OK] Watch opt-in: ENABLED\n[OK] Editor demand: ONLINE (1)\n[OK] Automatic refresh: STARTING\n[STOPPED] codedb watch coordinator stopped.",
+            AICodedbWatcherState.Starting,
+            AICodedbStatusState.Inactive,
+            true,
+            true)]
+        [TestCase(
+            "[OK] Watch opt-in: ENABLED\n[OK] Editor demand: OFFLINE (0)\n[OK] Automatic refresh: EDITOR_OFFLINE\n[STOPPED] codedb watch coordinator stopped.",
+            AICodedbWatcherState.EditorOffline,
+            AICodedbStatusState.Inactive,
+            true,
+            true)]
+        [TestCase(
+            "[OK] Watch opt-in: UNKNOWN\n[OK] Automatic refresh: PENDING\n[STOPPED] codedb watch coordinator stopped.",
+            AICodedbWatcherState.Pending,
+            AICodedbStatusState.Inactive,
+            false,
             false)]
         [TestCase(
             "[OK] Watch command completed.",

@@ -32,7 +32,134 @@ function Write-Utf8NoBom {
 
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+    $temporaryPath = Join-Path $parent ("." + [System.IO.Path]::GetFileName($Path) + "." + [Guid]::NewGuid().ToString("N") + ".tmp")
+    $backupPath = Join-Path $parent ("." + [System.IO.Path]::GetFileName($Path) + "." + [Guid]::NewGuid().ToString("N") + ".bak")
+    try {
+        $stream = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Content)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } finally {
+            $stream.Dispose()
+        }
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporaryPath, $Path, $backupPath)
+            Remove-Item -LiteralPath $backupPath -Force
+        } else {
+            [System.IO.File]::Move($temporaryPath, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force
+        }
+    }
+}
+
+function Get-ProjectIdentity {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $canonical = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+    } finally {
+        $sha256.Dispose()
+    }
+    return "sha256:" + (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
+function Read-DesiredState {
+    if (-not (Test-Path -LiteralPath $desiredStatePath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $document = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
+    } catch {
+        throw "CodeDB desired state is unreadable: $($_.Exception.Message)"
+    }
+    if ([int]$document.schema_version -ne 1 -or
+        -not [string]::Equals([string]$document.managed_by, "com.rice.ai-codedb", [StringComparison]::Ordinal) -or
+        [string]$document.desired_state -notin @("enabled", "disabled") -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath([string]$document.project_root), [System.IO.Path]::GetFullPath($context.UnityRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$document.project_identity, $projectIdentity, [StringComparison]::Ordinal)) {
+        throw "CodeDB desired state has invalid identity or schema."
+    }
+    return $document
+}
+
+function Write-DesiredState {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("enabled", "disabled")][string]$State,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $document = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        desired_state = $State
+        project_root = [System.IO.Path]::GetFullPath($context.UnityRoot).TrimEnd('\', '/')
+        project_identity = $projectIdentity
+        updated_at_utc = [DateTime]::UtcNow.ToString("o")
+        updated_by = $Reason
+    } | ConvertTo-Json -Depth 4
+    Write-Utf8NoBom -Path $desiredStatePath -Content ($document + "`n")
+}
+
+function Remove-LegacyPreferenceMarkers {
+    foreach ($path in @($enabledMarkerPath, $pausedMarkerPath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+}
+
+function Initialize-DesiredState {
+    $existing = Read-DesiredState
+    if ($null -ne $existing) {
+        return [string]$existing.desired_state
+    }
+
+    if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
+        Write-DesiredState -State "disabled" -Reason "legacy-pause-migration"
+        Remove-LegacyPreferenceMarkers
+        return "disabled"
+    }
+
+    if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
+        Write-DesiredState -State "enabled" -Reason "legacy-enabled-migration"
+        Remove-LegacyPreferenceMarkers
+        return "enabled"
+    }
+
+    try {
+        $null = Assert-ProjectCodedbProviderFiles -Context $context
+        if (-not (Test-Path -LiteralPath $context.TextAdapterManifestPath -PathType Leaf)) {
+            return $null
+        }
+    } catch {
+        return $null
+    }
+
+    Write-DesiredState -State "enabled" -Reason "valid-setup-default"
+    return "enabled"
+}
+
+function Get-DesiredStateForStatus {
+    $existing = Read-DesiredState
+    if ($null -ne $existing) {
+        return [string]$existing.desired_state
+    }
+    if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
+        return "disabled"
+    }
+    if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
+        return "enabled"
+    }
+    return "unknown"
 }
 
 function Enter-WatchManagementLock {
@@ -70,7 +197,12 @@ function Invoke-CoordinatorCli {
         [string]$StopExpectedLifecycleId
     )
 
-    $arguments = @($coordinatorScript, $Command, "--runtime", $coordinatorRuntime)
+    $arguments = @(
+        $coordinatorScript,
+        $Command,
+        "--runtime", $coordinatorRuntime,
+        "--root", $context.UnityRoot
+    )
     if ($Command -eq "start") {
         $arguments += @(
             "--root", $context.UnityRoot,
@@ -124,10 +256,14 @@ $adapterWorkerPath = Join-Path $context.CodedbRoot "scripts\run-codedb-project-t
 $watchConfigPath = Join-Path $context.ProviderConfigRoot "codedb-mcp.watch.toml"
 $watchRoot = Join-Path $context.ProviderRoot "watch"
 $coordinatorRuntime = Join-Path $watchRoot "coordinator"
+$lifecycleRoot = Join-Path $watchRoot "lifecycle"
+$desiredStatePath = Join-Path $lifecycleRoot "desired-state.json"
+$editorLeaseRoot = Join-Path $lifecycleRoot "editor-leases"
 $enabledMarkerPath = Join-Path $watchRoot "auto-start.json"
 $pausedMarkerPath = Join-Path $watchRoot "automatic-refresh-paused.json"
 $managementLockPath = Join-Path $watchRoot "management.lock"
 $refreshIfStaleScript = Join-Path $context.CodedbRoot "scripts\refresh-codedb-project-if-stale.ps1"
+$projectIdentity = Get-ProjectIdentity -ProjectRoot $context.UnityRoot
 
 if ($Action -in @("Ensure", "Start")) {
     if ($ExpectedLifecycleId) {
@@ -147,6 +283,9 @@ foreach ($path in @($coordinatorScript, $watchPrepareScript, $adapterBuilderPath
     }
 }
 Assert-CodedbPathInside -Path $watchRoot -Root $context.ProviderRoot -Label "watch runtime"
+Assert-CodedbPathInside -Path $lifecycleRoot -Root $context.ProviderRoot -Label "watch lifecycle runtime"
+Assert-CodedbPathInside -Path $desiredStatePath -Root $context.ProviderRoot -Label "watch desired state"
+Assert-CodedbPathInside -Path $editorLeaseRoot -Root $context.ProviderRoot -Label "Editor lease runtime"
 Assert-CodedbPathInside -Path $managementLockPath -Root $context.ProviderRoot -Label "watch management lock"
 
 $managementLock = $null
@@ -157,50 +296,44 @@ try {
     switch ($Action) {
     { $_ -in @("Ensure", "Start") } {
         $isAutomaticEnsure = $Action -eq "Ensure"
-        if ($isAutomaticEnsure -and (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf)) {
-            Write-Host "[SKIP] Automatic refresh is paused for this project."
-            Write-Host "[OK] Automatic refresh: PAUSED"
-            $status = Invoke-CoordinatorCli -Command status
-            break
-        }
-        if ($isAutomaticEnsure -and (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf)) {
-            $existingMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
-            if (-not [string]::IsNullOrWhiteSpace([string]$existingMarker.lifecycle_id)) {
-                $LifecycleId = [string]$existingMarker.lifecycle_id
-            }
-            if ($existingMarker.exclusive_lifecycle -eq $true) {
-                $ExclusiveOwner = $true
-            }
-            $existingDebounceMilliseconds = 0
-            if ([int]::TryParse([string]$existingMarker.adapter_debounce_ms, [ref]$existingDebounceMilliseconds) -and
-                $existingDebounceMilliseconds -ge 100 -and
-                $existingDebounceMilliseconds -le 10000) {
-                $AdapterDebounceMilliseconds = $existingDebounceMilliseconds
-            }
-
-            $existingStatus = Invoke-CoordinatorCli -Command status
-            $adapterOperational = [string]$existingStatus.adapter_state -in @("watching", "pending", "building")
-            if ($existingStatus.action -eq "running" -and
-                $existingStatus.provider_state -eq "ready" -and
-                $adapterOperational) {
-                Write-Host "[OK] Watch opt-in: ENABLED"
-                Write-Host "[OK] Automatic refresh: ACTIVE"
+        if ($isAutomaticEnsure) {
+            $desiredState = Initialize-DesiredState
+            if ($null -eq $desiredState) {
+                Write-Host "[SKIP] Automatic refresh is waiting for completed Setup."
+                Write-Host "[OK] Watch opt-in: UNKNOWN"
+                Write-Host "[OK] Automatic refresh: PENDING"
+                $status = Invoke-CoordinatorCli -Command status
                 break
             }
+            if ($desiredState -eq "disabled") {
+                Write-Host "[SKIP] CodeDB is disabled for this project."
+                Write-Host "[OK] Watch opt-in: DISABLED"
+                Write-Host "[OK] Automatic refresh: DISABLED"
+                $status = Invoke-CoordinatorCli -Command status
+                break
+            }
+        } else {
+            Write-DesiredState -State "enabled" -Reason "manual-enable"
+            Remove-LegacyPreferenceMarkers
         }
+
+        $existingStatus = Invoke-CoordinatorCli -Command status
+        $adapterOperational = [string]$existingStatus.adapter_state -in @("watching", "pending", "building")
+        if ($existingStatus.action -eq "running" -and
+            $existingStatus.provider_state -eq "ready" -and
+            $adapterOperational) {
+            Write-Host "[OK] Watch opt-in: ENABLED"
+            Write-Host "[OK] Automatic refresh: ACTIVE"
+            break
+        }
+
         try {
             if ($isAutomaticEnsure) {
-                try {
-                    $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
-                    $global:LASTEXITCODE = 0
-                    & $refreshIfStaleScript
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Freshness repair failed with exit code $LASTEXITCODE."
-                    }
-                } catch {
-                    Write-Host "[SKIP] Automatic refresh is waiting for completed Setup: $($_.Exception.Message)"
-                    Write-Host "[OK] Automatic refresh: PENDING"
-                    break
+                $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
+                $global:LASTEXITCODE = 0
+                & $refreshIfStaleScript
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Freshness repair failed with exit code $LASTEXITCODE."
                 }
             }
             $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
@@ -226,119 +359,67 @@ try {
             if ($ExclusiveOwner -and $status.exclusive_lifecycle -ne $true) {
                 throw "Watch coordinator did not preserve exclusive lifecycle ownership."
             }
-
-            $marker = [ordered]@{
-                schema_version = 1
-                enabled_at_utc = [DateTime]::UtcNow.ToString("o")
-                project_root = "."
-                watch_config = ConvertTo-CodedbProjectRelativePath -Context $context -Path $watchConfigPath
-                coordinator_runtime = ConvertTo-CodedbProjectRelativePath -Context $context -Path $coordinatorRuntime
-                adapter_builder = ConvertTo-CodedbProjectRelativePath -Context $context -Path $adapterBuilderPath
-                adapter_worker = ConvertTo-CodedbProjectRelativePath -Context $context -Path $adapterWorkerPath
-                adapter_manifest = ConvertTo-CodedbProjectRelativePath -Context $context -Path $context.TextAdapterManifestPath
-                adapter_debounce_ms = $AdapterDebounceMilliseconds
-                lifecycle_id = $status.lifecycle_id
-                exclusive_lifecycle = $status.exclusive_lifecycle -eq $true
-            } | ConvertTo-Json -Depth 6
-            Write-Utf8NoBom -Path $enabledMarkerPath -Content $marker
-            if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
-                Remove-Item -LiteralPath $pausedMarkerPath -Force
-            }
+            Remove-LegacyPreferenceMarkers
             Write-Host "[OK] Watch opt-in: ENABLED"
             Write-Host "[OK] Automatic refresh: ACTIVE"
-            Write-Host "[OK] Wrapper auto-attach marker: $(ConvertTo-CodedbProjectRelativePath -Context $context -Path $enabledMarkerPath)"
             Write-Output ($status | ConvertTo-Json -Depth 8 -Compress)
         } catch {
             $startError = $_
             try {
                 $cleanupStatus = Invoke-CoordinatorCli -Command status
-                if ([string]::Equals([string]$cleanupStatus.lifecycle_id, $LifecycleId, [StringComparison]::Ordinal)) {
-                    if ($cleanupStatus.action -eq "stale") {
-                        $null = Invoke-CoordinatorCli -Command start -StartLifecycleId $LifecycleId -RequireNew -Exclusive:($cleanupStatus.exclusive_lifecycle -eq $true)
-                    }
-                    if ($cleanupStatus.action -in @("running", "stale")) {
-                        $null = Invoke-CoordinatorCli -Command stop -StopExpectedLifecycleId $LifecycleId
-                    }
+                if ([string]::Equals([string]$cleanupStatus.lifecycle_id, $LifecycleId, [StringComparison]::Ordinal) -and
+                    $cleanupStatus.action -in @("running", "stale")) {
+                    $null = Invoke-CoordinatorCli -Command stop -StopExpectedLifecycleId $LifecycleId
                 }
             } catch {
                 Write-Warning "Watch coordinator cleanup after failed start also failed: $($_.Exception.Message)"
-            }
-            if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
-                try {
-                    $currentMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
-                    if ([string]::Equals([string]$currentMarker.lifecycle_id, $LifecycleId, [StringComparison]::Ordinal)) {
-                        Remove-Item -LiteralPath $enabledMarkerPath -Force
-                    }
-                } catch {
-                    Write-Warning "Watch marker cleanup after failed start was skipped: $($_.Exception.Message)"
-                }
             }
             throw $startError
         }
     }
     "Status" {
-        $markerState = if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) { "ENABLED" } else { "DISABLED" }
-        Write-Host "[OK] Watch opt-in: $markerState"
-        $automaticState = if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
-            "PAUSED"
-        } elseif ($markerState -eq "ENABLED") {
+        $desiredState = Get-DesiredStateForStatus
+        $preferenceLabel = switch ($desiredState) {
+            "enabled" { "ENABLED" }
+            "disabled" { "DISABLED" }
+            default { "UNKNOWN" }
+        }
+        Write-Host "[OK] Watch opt-in: $preferenceLabel"
+        $status = Invoke-CoordinatorCli -Command status
+        $editorDemand = if ([int]$status.editor_session_count -gt 0) { "ONLINE" } else { "OFFLINE" }
+        Write-Host "[OK] Editor demand: $editorDemand ($([int]$status.editor_session_count))"
+        $adapterOperational = [string]$status.adapter_state -in @("watching", "pending", "building")
+        $automaticState = if ($desiredState -eq "disabled") {
+            "DISABLED"
+        } elseif ($desiredState -ne "enabled") {
+            "PENDING"
+        } elseif ($editorDemand -eq "OFFLINE") {
+            "EDITOR_OFFLINE"
+        } elseif ($status.action -eq "running" -and $status.provider_state -eq "ready" -and $adapterOperational) {
             "ACTIVE"
         } else {
-            "PENDING"
+            "STARTING"
         }
         Write-Host "[OK] Automatic refresh: $automaticState"
-        $status = Invoke-CoordinatorCli -Command status
-        $adapterOperational = [string]$status.adapter_state -in @("watching", "pending", "building")
-        if ($markerState -eq "ENABLED" -and ($status.action -ne "running" -or $status.provider_state -ne "ready" -or -not $adapterOperational)) {
-            Write-Warning "Watch opt-in is enabled but provider/adapter coordination is not ready. The wrapper will attempt recovery on its next startup."
+        if ($desiredState -eq "enabled" -and $editorDemand -eq "ONLINE" -and $automaticState -ne "ACTIVE") {
+            Write-Warning "CodeDB is enabled and the Editor is online, but provider/adapter coordination is not ready."
         }
     }
     { $_ -in @("Pause", "Stop") } {
         $isPause = $Action -eq "Pause"
-        $effectiveExpectedLifecycleId = $ExpectedLifecycleId
-        if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
-            $currentMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
-            if ($ExpectedLifecycleId) {
-                if (-not [string]::Equals([string]$currentMarker.lifecycle_id, $ExpectedLifecycleId, [StringComparison]::Ordinal)) {
-                    throw "Refusing to remove a watch marker owned by another lifecycle."
-                }
-            } elseif ($currentMarker.exclusive_lifecycle -eq $true) {
-                throw "Exclusive watch lifecycle requires -ExpectedLifecycleId for Stop."
-            } elseif (-not [string]::IsNullOrWhiteSpace([string]$currentMarker.lifecycle_id)) {
-                $effectiveExpectedLifecycleId = [string]$currentMarker.lifecycle_id
-            }
+        if ($isPause) {
+            Write-DesiredState -State "disabled" -Reason "manual-disable"
+            Remove-LegacyPreferenceMarkers
         }
-        if ($effectiveExpectedLifecycleId) {
-            $null = Invoke-CoordinatorCli -Command stop -StopExpectedLifecycleId $effectiveExpectedLifecycleId
-            if (Test-Path -LiteralPath $enabledMarkerPath -PathType Leaf) {
-                $currentMarker = Get-Content -LiteralPath $enabledMarkerPath -Raw | ConvertFrom-Json
-                if ([string]::Equals([string]$currentMarker.lifecycle_id, $effectiveExpectedLifecycleId, [StringComparison]::Ordinal)) {
-                    Remove-Item -LiteralPath $enabledMarkerPath -Force
-                } else {
-                    throw "Watch marker ownership changed after Stop; the replacement marker was preserved."
-                }
-            }
+        if ($ExpectedLifecycleId) {
+            $null = Invoke-CoordinatorCli -Command stop -StopExpectedLifecycleId $ExpectedLifecycleId
         } else {
-            if (Test-Path -LiteralPath $enabledMarkerPath) {
-                Remove-Item -LiteralPath $enabledMarkerPath -Force
-            }
             $null = Invoke-CoordinatorCli -Command stop
         }
-        if ($isPause) {
-            $pauseMarker = [ordered]@{
-                schema_version = 1
-                paused_at_utc = [DateTime]::UtcNow.ToString("o")
-                project_root = "."
-            } | ConvertTo-Json -Depth 4
-            Write-Utf8NoBom -Path $pausedMarkerPath -Content $pauseMarker
-            Write-Host "[OK] Automatic refresh: PAUSED"
-        } else {
-            if (Test-Path -LiteralPath $pausedMarkerPath -PathType Leaf) {
-                Remove-Item -LiteralPath $pausedMarkerPath -Force
-            }
-            Write-Host "[OK] Automatic refresh: PENDING"
-        }
-        Write-Host "[OK] Watch opt-in: DISABLED"
+        $desiredState = Get-DesiredStateForStatus
+        $preferenceLabel = if ($desiredState -eq "enabled") { "ENABLED" } else { "DISABLED" }
+        Write-Host "[OK] Watch opt-in: $preferenceLabel"
+        Write-Host "[OK] Automatic refresh: $(if ($desiredState -eq 'enabled') { 'STOPPED' } else { 'DISABLED' })"
         Write-Host "[OK] Watch coordinator stop completed."
     }
     }

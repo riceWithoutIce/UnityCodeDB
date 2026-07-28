@@ -27,6 +27,9 @@ namespace Rice.AI.Codedb.Editor
         internal static string WatchConfigRelativePath => RuntimeRelativePath + "/config/codedb-mcp.watch.toml";
         internal static string WatchRuntimeRelativePath => RuntimeRelativePath + "/watch";
         internal static string WatchCoordinatorRuntimeRelativePath => WatchRuntimeRelativePath + "/coordinator";
+        internal static string WatchLifecycleRelativePath => WatchRuntimeRelativePath + "/lifecycle";
+        internal static string WatchDesiredStateRelativePath => WatchLifecycleRelativePath + "/desired-state.json";
+        internal static string WatchEditorLeasesRelativePath => WatchLifecycleRelativePath + "/editor-leases";
         internal static string WatchEnabledMarkerRelativePath => WatchRuntimeRelativePath + "/auto-start.json";
         internal static string WatchPausedMarkerRelativePath => WatchRuntimeRelativePath + "/automatic-refresh-paused.json";
         internal static string IndexRelativePath => RuntimeRelativePath + "/index";

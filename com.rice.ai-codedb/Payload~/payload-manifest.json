@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
-  "package_version": "0.2.0",
-  "payload_version": "poc.17",
-  "payload_sequence": 17,
+  "package_version": "0.2.1",
+  "payload_version": "poc.20",
+  "payload_sequence": 20,
   "retired_targets": [],
   "files": [
     {
@@ -19,7 +19,7 @@
     {
       "source": "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
       "target": "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
-      "sha256": "08321510aba09a75dc2e3550a53649181d34857d11ec07a71e33cc9aa5412be4"
+      "sha256": "25263081f8a11e8e63cafd96437045796f197fc486f16af2704d75f1a7b3a9a9"
     },
     {
       "source": "AIWork/codedb/scripts/build-codedb-project-text-adapter.ps1",
@@ -39,7 +39,7 @@
     {
       "source": "AIWork/codedb/scripts/codedb-project-common.ps1",
       "target": "AIWork/codedb/scripts/codedb-project-common.ps1",
-      "sha256": "827d177ff339cd2264d1bc39b5b8b26484145bee46f61b6eb9bcd95347b62d16"
+      "sha256": "9ed46d47129ee7d098a0d6a275a119a377271fc08ab69cf4780e9037be57a75b"
     },
     {
       "source": "AIWork/codedb/scripts/emit-codedb-mcp-registration-draft.ps1",
@@ -49,7 +49,7 @@
     {
       "source": "AIWork/codedb/scripts/manage-codedb-project-watch.ps1",
       "target": "AIWork/codedb/scripts/manage-codedb-project-watch.ps1",
-      "sha256": "0967845e3e12564a0d0442a6b54b78bd1c3a4b2093bb383641797284c5ca840d"
+      "sha256": "607cda3e42dc06107383f4ce4cc8faea95e1636af9c830658cfff0ebf1df4df7"
     },
     {
       "source": "AIWork/codedb/scripts/prepare-codedb-project-runtime.ps1",
@@ -109,7 +109,7 @@
     {
       "source": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
       "target": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
-      "sha256": "7e6badbdf62c6f3585bdffe28d80716390d5f0104f2b7c63a618f40951a1b4f5"
+      "sha256": "14ea2d9fc64bdefe77846bbbc8d595138ea3938f4d248ee0e006bd7875ea0b90"
     }
   ]
 }

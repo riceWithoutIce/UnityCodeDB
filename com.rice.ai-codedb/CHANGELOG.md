@@ -1,11 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-07-28
 
-- Began the v0.2.1 correctness work by pinning project MCP registrations to
+- Pinned project MCP registrations to
   `cwd = "."`, making the installed wrapper path authoritative for Unity-root
   resolution, validating Unity markers before host-use writes, rejecting
   direct Provider registration, and preserving Provider `regex` arguments.
+- Made interactive Unity Editor sessions the sole backend demand owners through
+  heartbeat leases. The final valid lease stops the coordinator, Provider, and
+  adapter; BatchMode stays inactive and manual disablement remains persistent.
+- Removed Manager and wrapper lifecycle side effects. Offline status observes
+  stale leases without reclaiming them; wrappers no longer call `Ensure` or
+  launch one-shot Providers, and disabled, Editor-offline, or starting states
+  return stable reason codes with zero Provider attempts.
+- Moved Editor PID start-identity checks off the coordinator event loop and
+  added bounded Windows retries for atomic state replacement during concurrent
+  status reads.
+- Validated automatic startup, persistent Pause/Start, Domain Reload continuity,
+  cold restart, and final-Editor shutdown in Unity 2022.3.20; the package
+  EditMode suite now passes 74/74 tests.
 
 ## 0.2.0 - 2026-07-26
 

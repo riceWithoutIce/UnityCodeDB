@@ -6,7 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import readline from "node:readline";
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { acquireCodedbHostUseLease } from "../shared/codedb-host-use-gate.mjs";
 
@@ -14,6 +14,8 @@ const STATE_FILE = "coordinator-state.json";
 const LOCK_FILE = "coordinator.lock";
 const ERROR_FILE = "coordinator-error.json";
 const LOG_FILE = "coordinator.log";
+const DESIRED_STATE_FILE = "desired-state.json";
+const EDITOR_LEASE_DIRECTORY = "editor-leases";
 const IPC_TIMEOUT_MS = 1500;
 const PROVIDER_REQUEST_TIMEOUT_MS = 90000;
 const PROVIDER_STOP_TIMEOUT_MS = 5000;
@@ -25,6 +27,14 @@ const MAX_ADAPTER_WORKER_RESTARTS = 3;
 const DEFAULT_ADAPTER_DEBOUNCE_MS = 750;
 const MAX_ADAPTER_OUTPUT_CHARS = 8192;
 const MAX_IPC_REQUEST_BYTES = 64 * 1024;
+const EDITOR_LEASE_SCAN_INTERVAL_MS = 2000;
+const EDITOR_LEASE_STALE_AFTER_MS = 90000;
+const EDITOR_LEASE_FUTURE_TOLERANCE_MS = 30000;
+const ATOMIC_RENAME_RETRY_DELAYS_MS = [5, 10, 20, 40, 80];
+const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const ATOMIC_RENAME_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+const LIFECYCLE_SCHEMA_VERSION = 1;
+const MANAGED_BY = "com.rice.ai-codedb";
 const ADAPTER_WATCH_ROOTS = ["Assets", "Packages", "ProjectSettings"];
 const ADAPTER_EXTENSIONS = new Set([".shader", ".hlsl", ".compute", ".cginc"]);
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
@@ -54,7 +64,8 @@ async function main() {
     if (command === "daemon" && options.runtime) {
       writeDaemonError(path.resolve(options.runtime), error);
     }
-    process.stderr.write(`[ERROR] ${error.message}\n`);
+    const code = error.code ? `${error.code}: ` : "";
+    process.stderr.write(`[ERROR] ${code}${error.message}\n`);
     process.exitCode = 1;
   }
 }
@@ -82,8 +93,12 @@ function buildRuntimeContext(rawOptions) {
     throw new Error("--runtime is required.");
   }
   const runtime = path.resolve(rawOptions.runtime);
+  const lifecycleRoot = path.join(path.dirname(runtime), "lifecycle");
   return {
     runtime,
+    lifecycleRoot,
+    desiredStatePath: path.join(lifecycleRoot, DESIRED_STATE_FILE),
+    editorLeaseRoot: path.join(lifecycleRoot, EDITOR_LEASE_DIRECTORY),
     statePath: path.join(runtime, STATE_FILE),
     lockPath: path.join(runtime, LOCK_FILE),
     errorPath: path.join(runtime, ERROR_FILE),
@@ -99,7 +114,8 @@ function buildLaunchContext(rawOptions) {
     }
   }
 
-  context.root = path.resolve(rawOptions.root);
+  context.root = fs.realpathSync(path.resolve(rawOptions.root));
+  context.projectIdentity = createProjectIdentity(context.root);
   context.provider = path.resolve(rawOptions.provider);
   context.config = path.resolve(rawOptions.config);
   context.startupTimeoutMs = parsePositiveInteger(rawOptions.startupTimeoutMs, 30000);
@@ -131,6 +147,7 @@ function buildLaunchContext(rawOptions) {
   assertFile(context.provider, "provider executable");
   assertFile(context.config, "provider config");
   assertPathInside(context.runtime, context.root, "coordinator runtime");
+  assertPathInside(context.lifecycleRoot, context.root, "lifecycle runtime");
   if (context.adapterEnabled) {
     assertFile(context.adapterBuilder, "adapter builder");
     assertFile(context.adapterManifest, "adapter manifest");
@@ -200,6 +217,172 @@ function assertPathInside(targetPath, rootPath, label) {
   throw new Error(`${label} must stay inside the project root. Path=${targetPath} Root=${rootPath}`);
 }
 
+function attachOptionalProjectContext(context, rawOptions) {
+  if (!rawOptions.root) {
+    return context;
+  }
+  context.root = fs.realpathSync(path.resolve(rawOptions.root));
+  assertDirectory(context.root, "project root");
+  assertPathInside(context.runtime, context.root, "coordinator runtime");
+  assertPathInside(context.lifecycleRoot, context.root, "lifecycle runtime");
+  context.projectIdentity = createProjectIdentity(context.root);
+  return context;
+}
+
+function createProjectIdentity(rootPath) {
+  const canonical = normalizePath(fs.realpathSync(rootPath)).replace(/\/+$/, "");
+  const hash = crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+  return `sha256:${hash}`;
+}
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function readDesiredState(context) {
+  const document = readJsonFile(context.desiredStatePath);
+  const valid = document?.schema_version === LIFECYCLE_SCHEMA_VERSION
+    && document?.managed_by === MANAGED_BY
+    && (document?.desired_state === "enabled" || document?.desired_state === "disabled")
+    && (!context.root || normalizePath(document?.project_root) === normalizePath(context.root))
+    && (!context.projectIdentity || document?.project_identity === context.projectIdentity);
+  return valid ? document : null;
+}
+
+async function inspectEditorLeases(context, removeInvalid = true) {
+  if (!context.root || !context.projectIdentity || !fs.existsSync(context.editorLeaseRoot)) {
+    return { leases: [], invalid: [] };
+  }
+
+  let leasePaths;
+  try {
+    leasePaths = fs.readdirSync(context.editorLeaseRoot, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+      .map((entry) => path.join(context.editorLeaseRoot, entry.name));
+  } catch {
+    return { leases: [], invalid: [] };
+  }
+
+  const now = Date.now();
+  const candidates = [];
+  const invalid = [];
+  for (const leasePath of leasePaths) {
+    const lease = readJsonFile(leasePath);
+    const sessionId = path.basename(leasePath, path.extname(leasePath));
+    const heartbeatMs = Date.parse(lease?.heartbeat_at_utc ?? "");
+    const createdMs = Date.parse(lease?.created_at_utc ?? "");
+    const pid = Number(lease?.editor_pid);
+    const structurallyValid = lease?.schema_version === LIFECYCLE_SCHEMA_VERSION
+      && lease?.managed_by === MANAGED_BY
+      && typeof lease?.session_id === "string"
+      && /^[A-Za-z0-9._-]{1,128}$/.test(lease.session_id)
+      && lease.session_id === sessionId
+      && Number.isInteger(pid)
+      && pid > 0
+      && typeof lease?.process_start_ticks === "string"
+      && /^[0-9]+$/.test(lease.process_start_ticks)
+      && normalizePath(lease?.project_root) === normalizePath(context.root)
+      && lease?.project_identity === context.projectIdentity
+      && Number.isFinite(createdMs)
+      && Number.isFinite(heartbeatMs)
+      && createdMs <= heartbeatMs
+      && heartbeatMs <= now + EDITOR_LEASE_FUTURE_TOLERANCE_MS
+      && now - heartbeatMs <= EDITOR_LEASE_STALE_AFTER_MS;
+    if (!structurallyValid) {
+      invalid.push({ path: leasePath, sessionId, reason: "invalid_or_stale" });
+      continue;
+    }
+    candidates.push({ path: leasePath, lease, pid });
+  }
+
+  const processSnapshot = await getProcessStartTicks(candidates.map((candidate) => candidate.pid));
+  const leases = [];
+  for (const candidate of candidates) {
+    const actualStartTicks = processSnapshot.starts.get(candidate.pid);
+    const processMissing = processSnapshot.available
+      ? !actualStartTicks
+      : !isProcessAlive(candidate.pid);
+    const identityMismatch = processSnapshot.available
+      && actualStartTicks !== candidate.lease.process_start_ticks;
+    if (processMissing || identityMismatch) {
+      invalid.push({ path: candidate.path, sessionId: candidate.lease.session_id, reason: "process_identity" });
+      continue;
+    }
+    leases.push(candidate.lease);
+  }
+
+  if (removeInvalid) {
+    for (const entry of invalid) {
+      try {
+        fs.rmSync(entry.path, { force: true });
+      } catch {
+        // A concurrent heartbeat or another coordinator may already have handled it.
+      }
+    }
+  }
+  return { leases, invalid };
+}
+
+async function getProcessStartTicks(processIds) {
+  const ids = [...new Set(processIds.map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+  const starts = new Map();
+  if (ids.length === 0) {
+    return { available: true, starts };
+  }
+  if (process.platform !== "win32") {
+    return { available: false, starts };
+  }
+
+  const script = `$rows = foreach ($id in @(${ids.join(",")})) { try { $p = Get-Process -Id $id -ErrorAction Stop; [pscustomobject]@{ pid = [int]$p.Id; start_ticks = $p.StartTime.ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture) } } catch {} }; ConvertTo-Json -Compress -InputObject @($rows)`;
+  const command = await new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024
+    }, (error, stdout) => resolve({ error, stdout: stdout ?? "" }));
+  });
+  if (command.error || !command.stdout.trim()) {
+    return { available: false, starts };
+  }
+
+  try {
+    const rows = JSON.parse(command.stdout.trim());
+    for (const row of Array.isArray(rows) ? rows : [rows]) {
+      const pid = Number(row?.pid);
+      if (Number.isInteger(pid) && pid > 0 && typeof row?.start_ticks === "string") {
+        starts.set(pid, row.start_ticks);
+      }
+    }
+  } catch {
+    return { available: false, starts: new Map() };
+  }
+  return { available: true, starts };
+}
+
+async function readLifecycleSnapshot(context, removeInvalid = true) {
+  const desired = readDesiredState(context);
+  const inspection = await inspectEditorLeases(context, removeInvalid);
+  return {
+    desiredState: desired?.desired_state ?? "unknown",
+    leases: inspection.leases,
+    invalid: inspection.invalid
+  };
+}
+
+async function assertLifecycleDemand(context) {
+  const lifecycle = await readLifecycleSnapshot(context);
+  if (lifecycle.desiredState !== "enabled") {
+    throw codedError("SERVICE_DISABLED", "CodeDB desired state is not enabled for this project.");
+  }
+  if (lifecycle.leases.length === 0) {
+    throw codedError("EDITOR_OFFLINE", "No valid interactive Unity Editor lease is active for this project.");
+  }
+  return lifecycle;
+}
+
 function createPipeName(root, runtime) {
   const hash = crypto.createHash("sha256").update(`${normalizePath(root)}\n${normalizePath(runtime)}`).digest("hex").slice(0, 20);
   if (process.platform === "win32") {
@@ -256,6 +439,7 @@ function assertStatusMatchesContext(status, context, label) {
 
 async function runStart(rawOptions) {
   const context = buildLaunchContext(rawOptions);
+  await assertLifecycleDemand(context);
   const lifecycleId = context.lifecycleId ?? crypto.randomUUID();
   fs.mkdirSync(context.runtime, { recursive: true });
   const live = await requestCoordinator(context, "status", IPC_TIMEOUT_MS);
@@ -347,7 +531,7 @@ function assertAttachAllowed(status, context, lifecycleId) {
 }
 
 async function runStatus(rawOptions) {
-  const context = buildRuntimeContext(rawOptions);
+  const context = attachOptionalProjectContext(buildRuntimeContext(rawOptions), rawOptions);
   const response = await requestCoordinator(context, "status", IPC_TIMEOUT_MS);
   if (response?.ok) {
     printResult("OK", { action: "running", ...response.status });
@@ -356,8 +540,18 @@ async function runStatus(rawOptions) {
 
   const state = readJsonFile(context.statePath);
   const action = state ? "stale" : "stopped";
+  const lifecycle = context.root
+    ? await readLifecycleSnapshot(context, false)
+    : { desiredState: "unknown", leases: [], invalid: [] };
+  const reasonCode = lifecycle.desiredState === "disabled"
+    ? "SERVICE_DISABLED"
+    : (lifecycle.leases.length === 0 ? "EDITOR_OFFLINE" : "STARTING");
   printResult(action === "stale" ? "STALE" : "STOPPED", {
     action,
+    reason_code: reasonCode,
+    desired_state: lifecycle.desiredState,
+    editor_demand: lifecycle.leases.length > 0 ? "online" : "offline",
+    editor_session_count: lifecycle.leases.length,
     coordinator_pid: state?.coordinator_pid ?? null,
     lifecycle_id: state?.lifecycle_id ?? null,
     exclusive_lifecycle: state?.exclusive_lifecycle === true,
@@ -403,6 +597,7 @@ async function runStop(rawOptions) {
 
 async function runDaemon(rawOptions) {
   const context = buildLaunchContext(rawOptions);
+  await assertLifecycleDemand(context);
   const hostUseLease = acquireCodedbHostUseLease(context.root, "watcher");
   try {
     await runOwnedDaemon(context);
@@ -413,6 +608,7 @@ async function runDaemon(rawOptions) {
 
 async function runOwnedDaemon(context) {
   fs.mkdirSync(context.runtime, { recursive: true });
+  const initialLifecycle = await assertLifecycleDemand(context);
   const recovery = await recoverStaleRuntime(context);
   if (recovery.blocked) {
     if (recovery.benign) {
@@ -432,7 +628,7 @@ async function runOwnedDaemon(context) {
   }
 
   fs.rmSync(context.errorPath, { force: true });
-  const daemonState = createDaemonState(context, recovery);
+  const daemonState = createDaemonState(context, recovery, initialLifecycle);
   const log = (message) => appendLog(context.logPath, message);
   let server;
   let provider = null;
@@ -457,6 +653,8 @@ async function runOwnedDaemon(context) {
   const providerQueryFlights = new Map();
   let providerQueryTail = Promise.resolve();
   let adapterInitializing = false;
+  let editorLeaseScanTimer = null;
+  let editorLeaseScanInFlight = false;
 
   const persistState = () => writeJsonFile(context.statePath, daemonState);
   const publicStatus = () => sanitizeStatus(daemonState);
@@ -957,6 +1155,10 @@ async function runOwnedDaemon(context) {
         clearTimeout(adapterDebounceTimer);
         adapterDebounceTimer = null;
       }
+      if (editorLeaseScanTimer) {
+        clearInterval(editorLeaseScanTimer);
+        editorLeaseScanTimer = null;
+      }
       closeAdapterWatchers();
       persistState();
       const serverClosed = server
@@ -983,6 +1185,49 @@ async function runOwnedDaemon(context) {
       process.exitCode = exitCode;
     })();
     return shutdownPromise;
+  };
+
+  const scanEditorDemand = async () => {
+    if (stopping || editorLeaseScanInFlight) {
+      return;
+    }
+    editorLeaseScanInFlight = true;
+    try {
+      const lifecycle = await readLifecycleSnapshot(context);
+      if (stopping) {
+        return;
+      }
+      daemonState.desired_state = lifecycle.desiredState;
+      daemonState.editor_session_count = lifecycle.leases.length;
+      daemonState.editor_demand = lifecycle.leases.length > 0 ? "online" : "offline";
+      daemonState.editor_session_ids = lifecycle.leases.map((lease) => lease.session_id).sort();
+      daemonState.last_lease_scan_at_utc = new Date().toISOString();
+      if (lifecycle.invalid.length > 0) {
+        log(`editor_leases_reclaimed count=${lifecycle.invalid.length} reasons=${lifecycle.invalid.map((entry) => entry.reason).join(",")}`);
+      }
+      persistState();
+      if (lifecycle.desiredState !== "enabled") {
+        void cleanup("service_disabled");
+      } else if (lifecycle.leases.length === 0) {
+        void cleanup("last_editor_lease_gone");
+      }
+    } catch (error) {
+      if (!stopping) {
+        daemonState.last_error = `Editor lease scan failed: ${error.message}`;
+        daemonState.last_event = "editor_lease_scan_failed";
+        persistState();
+        log(`editor_lease_scan_failed error=${error.stack ?? error.message}`);
+      }
+    } finally {
+      editorLeaseScanInFlight = false;
+    }
+  };
+
+  const startEditorLeaseWatchdog = () => {
+    void scanEditorDemand();
+    if (!stopping) {
+      editorLeaseScanTimer = setInterval(() => void scanEditorDemand(), EDITOR_LEASE_SCAN_INTERVAL_MS);
+    }
   };
 
   const scheduleProviderRestart = (reason) => {
@@ -1152,7 +1397,7 @@ async function runOwnedDaemon(context) {
     const initialize = await providerRpc.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "codedb-watch-coordinator", version: "0.2.0" }
+      clientInfo: { name: "codedb-watch-coordinator", version: "0.2.1" }
     }, PROVIDER_REQUEST_TIMEOUT_MS);
     if (!initialize?.serverInfo?.name) {
       throw new Error("Provider initialize did not return server information.");
@@ -1199,6 +1444,7 @@ async function runOwnedDaemon(context) {
     await launchAdapterWorker();
     startAdapterWatchers();
     await launchProvider();
+    startEditorLeaseWatchdog();
 
     process.on("SIGINT", () => void cleanup("sigint"));
     process.on("SIGTERM", () => void cleanup("sigterm"));
@@ -1220,9 +1466,9 @@ async function runOwnedDaemon(context) {
   }
 }
 
-function createDaemonState(context, recovery) {
+function createDaemonState(context, recovery, lifecycle) {
   return {
-    schema_version: 1,
+    schema_version: 2,
     coordinator_pid: process.pid,
     lifecycle_id: context.lifecycleId,
     exclusive_lifecycle: context.exclusiveLifecycle,
@@ -1234,6 +1480,11 @@ function createDaemonState(context, recovery) {
     provider_executable: context.provider,
     provider_config: context.config,
     runtime: context.runtime,
+    desired_state: lifecycle.desiredState,
+    editor_demand: lifecycle.leases.length > 0 ? "online" : "offline",
+    editor_session_count: lifecycle.leases.length,
+    editor_session_ids: lifecycle.leases.map((lease) => lease.session_id).sort(),
+    last_lease_scan_at_utc: new Date().toISOString(),
     pipe_name: context.pipeName,
     auth_token: crypto.randomBytes(24).toString("hex"),
     started_at_utc: new Date().toISOString(),
@@ -1945,6 +2196,11 @@ function sanitizeStatus(state) {
     provider_executable: state.provider_executable,
     provider_config: state.provider_config,
     runtime: state.runtime,
+    desired_state: state.desired_state,
+    editor_demand: state.editor_demand,
+    editor_session_count: state.editor_session_count,
+    editor_session_ids: state.editor_session_ids,
+    last_lease_scan_at_utc: state.last_lease_scan_at_utc,
     started_at_utc: state.started_at_utc,
     provider_ready_at_utc: state.provider_ready_at_utc,
     provider_query_count: state.provider_query_count,
@@ -2050,7 +2306,39 @@ function readJsonFile(filePath) {
 }
 
 function writeJsonFile(filePath, value) {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const temporaryPath = path.join(directory, `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    const fd = fs.openSync(temporaryPath, "wx");
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    replaceFileAtomic(temporaryPath, filePath);
+  } finally {
+    fs.rmSync(temporaryPath, { force: true });
+  }
+}
+
+function replaceFileAtomic(sourcePath, targetPath) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(sourcePath, targetPath);
+      return;
+    } catch (error) {
+      const delayMs = ATOMIC_RENAME_RETRY_DELAYS_MS[attempt];
+      const retryable = process.platform === "win32"
+        && ATOMIC_RENAME_RETRYABLE_CODES.has(error?.code)
+        && delayMs !== undefined;
+      if (!retryable) {
+        throw error;
+      }
+      Atomics.wait(ATOMIC_RENAME_WAIT_BUFFER, 0, 0, delayMs);
+    }
+  }
 }
 
 function writeDaemonError(runtime, error) {

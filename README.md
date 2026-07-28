@@ -21,7 +21,7 @@ project's ignored runtime instead of sharing state across projects.
 ## Package
 
 - Package name: `com.rice.ai-codedb`
-- Latest release: `v0.2.0`
+- Latest release: `v0.2.1`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -32,7 +32,7 @@ Add the package to the Unity project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.1"
   }
 }
 ```
@@ -57,8 +57,11 @@ vendor its source or redistribute its binary.
    flow described in the package README.
 4. Prepare the project-local runtime and provide the external provider.
 5. Generate and review project-level MCP registration guidance.
-6. Automatic refresh starts after Setup completes. Use Pause when the project
-   must remain stopped; Resume clears that persistent pause.
+6. After Setup completes, each interactive Unity Editor session publishes
+   project demand and starts CodeDB asynchronously. Use Pause when the project
+   must remain stopped; Resume clears that persistent preference.
+7. Closing the final Editor session stops that project's backend without
+   changing its preference. BatchMode sessions do not auto-start CodeDB.
 
 ## Ownership Boundaries
 
@@ -76,7 +79,8 @@ vendor its source or redistribute its binary.
   a language merge Provider and Shader hits under one deduplicated global limit.
 - Ready MCP wrappers share the project coordinator's persistent Provider.
   Identical concurrent searches join one execution; distinct work is queued
-  without implicit batching, and paused/unavailable states fall back one-shot.
+  without implicit batching. Disabled, Editor-offline, and starting states do
+  not launch a Provider and return a stable reason instead.
 
 See [the package README](com.rice.ai-codedb/README.md) and
 [package documentation](com.rice.ai-codedb/Documentation~/index.md) for the

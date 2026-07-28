@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -30,11 +30,10 @@ const EXCLUDED_FRAGMENTS = ["/Library/PackageCache/", "/AIWork/.runtime/"];
 const MAX_LIMIT = 200;
 const MAX_READ_LINES = 200;
 const MAX_OUTPUT_BYTES = 64 * 1024;
-const TRANSIENT_READ_RETRY_DELAY_MS = 100;
-const TRANSIENT_READ_RETRY_MAX_MS = 2000;
 const COORDINATOR_QUERY_TIMEOUT_MS = 95000;
 const MAX_COORDINATOR_RESPONSE_BYTES = 1024 * 1024;
-const AUTOMATIC_WATCH_ENSURE_THROTTLE_MS = 5000;
+const EDITOR_LEASE_STALE_AFTER_MS = 90000;
+const EDITOR_LEASE_MONITOR_INTERVAL_MS = 2000;
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
 
 const context = createContext(process.argv.slice(2));
@@ -49,11 +48,20 @@ if (context.printContext) {
 }
 
 const hostUseLease = acquireCodedbHostUseLease(context.unityRoot, "mcp");
-process.once("exit", () => hostUseLease.release());
-
-let lastAutomaticWatchEnsureAttemptMs = 0;
-let automaticWatchEnsureInFlight = false;
-tryEnsureAutomaticWatch();
+let editorLeaseObserved = hasActiveEditorLease();
+const editorLeaseMonitor = setInterval(() => {
+  const editorOnline = hasActiveEditorLease();
+  if (editorOnline) {
+    editorLeaseObserved = true;
+  } else if (editorLeaseObserved) {
+    process.exit(0);
+  }
+}, EDITOR_LEASE_MONITOR_INTERVAL_MS);
+editorLeaseMonitor.unref();
+process.once("exit", () => {
+  clearInterval(editorLeaseMonitor);
+  hostUseLease.release();
+});
 
 const tools = [
   {
@@ -155,17 +163,17 @@ function createContext(args) {
 
   return {
     unityRoot,
+    projectIdentity: createProjectIdentity(unityRoot),
     projectSlug,
     providerName,
     printContext: options.printContext === true,
     providerExecutablePath: path.join(runtimeRoot, "bin", "codebase-mcp.exe"),
     providerConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.toml"),
     watchConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.watch.toml"),
-    watchEnabledMarkerPath: path.join(runtimeRoot, "watch", "auto-start.json"),
-    watchPausedMarkerPath: path.join(runtimeRoot, "watch", "automatic-refresh-paused.json"),
+    desiredStatePath: path.join(runtimeRoot, "watch", "lifecycle", "desired-state.json"),
+    editorLeaseRoot: path.join(runtimeRoot, "watch", "lifecycle", "editor-leases"),
     watchCoordinatorRuntimePath: path.join(runtimeRoot, "watch", "coordinator"),
     watchCoordinatorStatePath: path.join(runtimeRoot, "watch", "coordinator", "coordinator-state.json"),
-    watchManageScriptPath: path.join(__dirname, "..", "scripts", "manage-codedb-project-watch.ps1"),
     adapterBuilderPath: path.join(__dirname, "..", "scripts", "build-codedb-project-text-adapter.ps1"),
     adapterWorkerPath: path.join(__dirname, "..", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
     providerIndexRoot: path.join(runtimeRoot, "index"),
@@ -209,6 +217,11 @@ function createProjectSlug(value) {
   }
 
   return result.replace(/-+$/, "") || "unity-project";
+}
+
+function createProjectIdentity(rootPath) {
+  const canonical = normalizeAbsolutePath(rootPath).replace(/\/+$/, "");
+  return `sha256:${crypto.createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 function parseArgs(args) {
@@ -280,7 +293,7 @@ async function handleRequest(message) {
         },
         serverInfo: {
           name: "codedb-project-wrapper",
-          version: "0.2.0"
+          version: "0.2.1"
         }
       };
     case "tools/list":
@@ -891,81 +904,20 @@ function formatSearchLocation(entry) {
 }
 
 async function invokeProviderTool(name, args, timing) {
-  assertFileExists(context.providerExecutablePath, "provider executable");
-  if (!isAutomaticRefreshPaused()) {
-    const readyState = getReadyWatchCoordinatorState();
-    if (readyState) {
-      const response = await requestCoordinatorQuery(readyState, name, args);
-      if (response?.ok && response.lifecycle_id === readyState.lifecycle_id) {
-        applyCoordinatorTiming(timing, response.timing);
-        return String(response.output ?? "");
-      }
-      if (response?.error_code === "PROVIDER_TOOL_ERROR") {
-        throw new Error(response.error ?? `provider tool ${name} failed.`);
-      }
-      writeLog(`Shared coordinator query unavailable for ${name}; falling back to one-shot Provider.`);
-    } else {
-      tryEnsureAutomaticWatch();
-    }
+  const readyState = getReadyWatchCoordinatorState();
+  if (!readyState) {
+    throw createLifecycleUnavailableError();
   }
 
-  return invokeProviderToolOneShot(name, args, timing);
-}
-
-function invokeProviderToolOneShot(name, args, timing) {
-  timing.providerRoute = "one-shot";
-  timing.providerShared = false;
-  const providerConfigPath = getActiveProviderConfigPath(false);
-  assertFileExists(providerConfigPath, "active provider config");
-
-  const startedAt = Date.now();
-  let transientFailures = 0;
-  while (true) {
-    const providerStartedAt = performance.now();
-    const result = spawnSync(context.providerExecutablePath, [
-      "tool",
-      name,
-      JSON.stringify(args),
-      "--root",
-      context.unityRoot,
-      "--config",
-      providerConfigPath,
-      "--no-watch"
-    ], {
-      cwd: context.unityRoot,
-      encoding: "utf8",
-      timeout: 120000,
-      windowsHide: true
-    });
-    timing.providerProcessMs += performance.now() - providerStartedAt;
-    timing.providerAttempts += 1;
-    const providerCoreMs = parseProviderCoreTiming(result.stderr);
-    if (providerCoreMs !== null) {
-      timing.providerCoreMs = (timing.providerCoreMs ?? 0) + providerCoreMs;
-    }
-
-    if (result.error) {
-      throw result.error;
-    }
-
-    if (result.status === 0) {
-      if (transientFailures > 0) {
-        writeLog(`Recovered provider ${name} after ${transientFailures} transient read failure(s) in ${Date.now() - startedAt} ms.`);
-      }
-      return result.stdout || "";
-    }
-
-    const detail = (result.stderr || result.stdout || "").trim();
-    const canRetry = isWatchCoordinatorReady()
-      && isTransientProviderReadFailure(detail)
-      && Date.now() - startedAt < TRANSIENT_READ_RETRY_MAX_MS;
-    if (!canRetry) {
-      throw new Error(`provider tool ${name} failed with exit code ${result.status}. ${detail}`);
-    }
-
-    transientFailures += 1;
-    sleepSync(TRANSIENT_READ_RETRY_DELAY_MS);
+  const response = await requestCoordinatorQuery(readyState, name, args);
+  if (response?.ok && response.lifecycle_id === readyState.lifecycle_id) {
+    applyCoordinatorTiming(timing, response.timing);
+    return String(response.output ?? "");
   }
+  if (response?.error_code === "PROVIDER_TOOL_ERROR") {
+    throw new Error(response.error ?? `provider tool ${name} failed.`);
+  }
+  throw lifecycleError("STARTING", response?.error ?? "CodeDB coordinator query is temporarily unavailable.");
 }
 
 function applyCoordinatorTiming(timing, metrics) {
@@ -1042,57 +994,22 @@ function requestCoordinatorQuery(state, name, args) {
   });
 }
 
-function getActiveProviderConfigPath(ensureCoordinator) {
-  if (ensureCoordinator && !isAutomaticRefreshPaused() && !isWatchCoordinatorReady()) {
-    tryEnsureAutomaticWatch();
-  }
-  return isWatchCoordinatorReady() ? context.watchConfigPath : context.providerConfigPath;
-}
-
-function isWatchOptInEnabled() {
-  return readWatchOptInMarker() !== null;
-}
-
-function readWatchOptInMarker() {
-  if (!fs.existsSync(context.watchEnabledMarkerPath) || !fs.existsSync(context.watchConfigPath)) {
-    return null;
-  }
-  try {
-    const marker = JSON.parse(fs.readFileSync(context.watchEnabledMarkerPath, "utf8"));
-    const debounceMs = Number(marker.adapter_debounce_ms);
-    const valid = marker.schema_version === 1
-      && typeof marker.lifecycle_id === "string"
-      && /^[A-Za-z0-9._-]{1,128}$/.test(marker.lifecycle_id)
-      && typeof marker.exclusive_lifecycle === "boolean"
-      && normalizeRelativePath(marker.watch_config) === toUnityRelativePath(context.watchConfigPath)
-      && normalizeRelativePath(marker.coordinator_runtime) === toUnityRelativePath(context.watchCoordinatorRuntimePath)
-      && normalizeRelativePath(marker.adapter_builder) === toUnityRelativePath(context.adapterBuilderPath)
-      && normalizeRelativePath(marker.adapter_worker) === toUnityRelativePath(context.adapterWorkerPath)
-      && normalizeRelativePath(marker.adapter_manifest) === toUnityRelativePath(context.textAdapterManifestPath)
-      && Number.isInteger(debounceMs)
-      && debounceMs > 0;
-    return valid ? marker : null;
-  } catch {
-    return null;
-  }
-}
-
 function isWatchCoordinatorReady() {
   return getReadyWatchCoordinatorState() !== null;
 }
 
 function getReadyWatchCoordinatorState() {
-  const marker = readWatchOptInMarker();
+  const desired = readDesiredState();
   const state = readWatchCoordinatorState();
-  if (!marker || !state) {
+  if (desired?.desired_state !== "enabled" || !state) {
     return null;
   }
   const ready = state.provider_state === "ready"
-    && state.lifecycle_id === marker.lifecycle_id
-    && state.exclusive_lifecycle === marker.exclusive_lifecycle
+    && state.desired_state === "enabled"
+    && state.editor_demand === "online"
+    && Number(state.editor_session_count) > 0
     && state.adapter_enabled === true
     && ADAPTER_OPERATIONAL_STATES.has(state.adapter_state)
-    && Number(state.adapter_debounce_ms) === Number(marker.adapter_debounce_ms)
     && normalizeAbsolutePath(state.root) === normalizeAbsolutePath(context.unityRoot)
     && normalizeAbsolutePath(state.provider_executable) === normalizeAbsolutePath(context.providerExecutablePath)
     && normalizeAbsolutePath(state.provider_config) === normalizeAbsolutePath(context.watchConfigPath)
@@ -1117,62 +1034,68 @@ function readWatchCoordinatorState() {
   }
 }
 
-function isAutomaticRefreshPaused() {
-  return fs.existsSync(context.watchPausedMarkerPath);
+function readDesiredState() {
+  try {
+    const document = JSON.parse(fs.readFileSync(context.desiredStatePath, "utf8"));
+    const valid = document?.schema_version === 1
+      && document?.managed_by === "com.rice.ai-codedb"
+      && (document?.desired_state === "enabled" || document?.desired_state === "disabled")
+      && normalizeAbsolutePath(document?.project_root) === normalizeAbsolutePath(context.unityRoot)
+      && document?.project_identity === context.projectIdentity;
+    return valid ? document : null;
+  } catch {
+    return null;
+  }
 }
 
-function tryEnsureAutomaticWatch() {
-  if (isAutomaticRefreshPaused() || isWatchCoordinatorReady()) {
-    return isWatchCoordinatorReady();
-  }
-
-  if (automaticWatchEnsureInFlight) {
+function hasActiveEditorLease() {
+  let names;
+  try {
+    names = fs.readdirSync(context.editorLeaseRoot);
+  } catch {
     return false;
   }
+
   const now = Date.now();
-  if (now - lastAutomaticWatchEnsureAttemptMs < AUTOMATIC_WATCH_ENSURE_THROTTLE_MS) {
-    return false;
-  }
-  lastAutomaticWatchEnsureAttemptMs = now;
-
-  if (!fs.existsSync(context.watchManageScriptPath)) {
-    writeLog(`Automatic refresh is pending; missing watch manager: ${toUnityRelativePath(context.watchManageScriptPath)}`);
-    return false;
-  }
-
-  const powershell = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  const child = spawn(powershell, [
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-File", context.watchManageScriptPath,
-    "-Action", "Ensure"
-  ], {
-    cwd: context.unityRoot,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  automaticWatchEnsureInFlight = true;
-  child.once("error", (error) => {
-    automaticWatchEnsureInFlight = false;
-    writeLog(`Automatic refresh ensure failed: ${error.message}`);
-  });
-  child.once("exit", (code) => {
-    automaticWatchEnsureInFlight = false;
-    if (code !== 0) {
-      writeLog(`Automatic refresh ensure exited with code ${code}.`);
+  for (const name of names) {
+    if (!name.toLowerCase().endsWith(".json")) {
+      continue;
     }
-  });
-  child.unref();
-  return isWatchCoordinatorReady();
+    try {
+      const lease = JSON.parse(fs.readFileSync(path.join(context.editorLeaseRoot, name), "utf8"));
+      const heartbeatMs = Date.parse(lease?.heartbeat_at_utc ?? "");
+      const valid = lease?.schema_version === 1
+        && lease?.managed_by === "com.rice.ai-codedb"
+        && `${lease?.session_id}.json` === name
+        && normalizeAbsolutePath(lease?.project_root) === normalizeAbsolutePath(context.unityRoot)
+        && lease?.project_identity === context.projectIdentity
+        && Number.isFinite(heartbeatMs)
+        && heartbeatMs <= now + 30000
+        && now - heartbeatMs <= EDITOR_LEASE_STALE_AFTER_MS
+        && isProcessAlive(lease?.editor_pid);
+      if (valid) {
+        return true;
+      }
+    } catch {
+      // The coordinator owns malformed/stale lease reclamation.
+    }
+  }
+  return false;
 }
 
-function isTransientProviderReadFailure(message) {
-  return /failed(?:_|\s+)to(?:_|\s+)read/i.test(String(message ?? ""));
+function lifecycleError(code, message) {
+  return new Error(`[${code}] ${message}`);
 }
 
-function sleepSync(milliseconds) {
-  const buffer = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(buffer), 0, 0, milliseconds);
+function createLifecycleUnavailableError() {
+  const desired = readDesiredState();
+  if (desired?.desired_state === "disabled") {
+    return lifecycleError("SERVICE_DISABLED", "CodeDB is disabled for this Unity project.");
+  }
+  if (!hasActiveEditorLease()) {
+    return lifecycleError("EDITOR_OFFLINE", "No interactive Unity Editor session is online for this project.");
+  }
+  return lifecycleError("STARTING", "CodeDB is enabled and the Unity Editor is online, but the backend is not ready yet.");
 }
 
 function isProcessAlive(pid) {
@@ -1194,20 +1117,28 @@ function normalizeAbsolutePath(value) {
 
 function getStatusText() {
   const watchState = readWatchCoordinatorState();
-  const automaticRefreshState = isAutomaticRefreshPaused()
-    ? "paused"
-    : (isWatchCoordinatorReady() ? "active" : "pending");
+  const desiredState = readDesiredState()?.desired_state ?? "unknown";
+  const editorOnline = hasActiveEditorLease();
+  const coordinatorReady = isWatchCoordinatorReady();
+  const automaticRefreshState = desiredState === "disabled"
+    ? "disabled"
+    : (!editorOnline ? "editor_offline" : (coordinatorReady ? "active" : "starting"));
+  const reasonCode = desiredState === "disabled"
+    ? "SERVICE_DISABLED"
+    : (!editorOnline ? "EDITOR_OFFLINE" : (coordinatorReady ? "READY" : "STARTING"));
   const lines = [
     `[OK] ${context.providerName} wrapper ready.`,
     `Unity root: ${toUnityRelativePath(context.unityRoot)}`,
     `Provider executable: ${fileState(context.providerExecutablePath)}`,
     `Provider config: ${fileState(context.providerConfigPath)}`,
-    `Watch opt-in: ${isWatchOptInEnabled() ? "enabled" : "disabled"}`,
+    `Desired state: ${desiredState}`,
+    `Editor demand: ${editorOnline ? "online" : "offline"}`,
     `Automatic refresh: ${automaticRefreshState}`,
+    `Lifecycle reason: ${reasonCode}`,
     `Watch config: ${fileState(context.watchConfigPath)}`,
-    `Watch coordinator: ${isWatchCoordinatorReady() ? "ready" : "stopped"}`,
+    `Watch coordinator: ${coordinatorReady ? "ready" : "stopped"}`,
     `Shader watcher: ${watchState?.adapter_state ?? "stopped"}`,
-    `Active provider config: ${toUnityRelativePath(getActiveProviderConfigPath(false))}`,
+    `Active provider config: ${coordinatorReady ? toUnityRelativePath(context.watchConfigPath) : "none"}`,
     `Provider index: ${fileState(context.providerIndexRoot)}`,
     `Shader adapter manifest: ${fileState(context.textAdapterManifestPath)}`,
     "Tool profile: Discover Read only"

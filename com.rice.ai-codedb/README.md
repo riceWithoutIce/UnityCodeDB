@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. Version `0.2.0` targets Unity `2022.3` on
+and bounded MCP discovery surface. Version `0.2.1` targets Unity `2022.3` on
 Windows.
 
 Install the published release from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.1`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The current `0.2.0` release materializes reviewed process tooling into the host
+The current `0.2.1` release materializes reviewed process tooling into the host
 project. Manager actions resolve tracked scripts, wrapper files, and templates
 under `AIWork/codedb/`, while generated provider binaries, configs, indexes,
 logs, and watcher state remain under ignored `AIWork/.runtime/`. The external
@@ -69,9 +69,9 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.2.0",
-  "payload_version": "poc.17",
-  "payload_sequence": 17,
+  "package_version": "0.2.1",
+  "payload_version": "poc.20",
+  "payload_sequence": 20,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -95,9 +95,10 @@ index, watch, and probe actions continue to resolve the materialized host paths.
 This package still does not include the external CodeDB provider, host
 acceptance probes, MCP client configuration, generated project data, or any
 host-owned compatibility entry. Those ownership boundaries remain unchanged.
-The fixture validates a disabled formal watch config, automatic post-Setup
-startup, persistent Pause, explicit Resume/Status/Stop ownership, wrapper
-recovery, read-only provider guidance, ignored-runtime
+The fixture validates a disabled formal watch config, interactive Editor-owned
+post-Setup startup, persistent Pause, explicit Resume/Status/Stop ownership,
+same-project Editor lease sharing, final-lease shutdown, wrapper read-only
+attachment, read-only provider guidance, ignored-runtime
 verification, formal `--no-watch` refresh, generated ignore parity, and
 index-only cleanup against an isolated runtime-built provider executable. It
 also proves wrapper-local C#/Shader reads return only the requested line window,
@@ -107,13 +108,14 @@ normalizes the legacy `path` search alias to `path_glob`, filters Provider hits
 again at the wrapper boundary, and verifies no-language directory searches
 merge Provider and Shader lanes with deduplication and one global limit. It
 appends a bounded, machine-readable `[TIMING]` footer to every tool response,
-including one-shot queue, Provider process/core, adapter, merge, local-read,
+including coordinator queue, Provider process/core, adapter, merge, local-read,
 attempt-count, end-to-end, and uncapped-body byte metrics. The footer remains
 present when the body is truncated to the 64 KiB response ceiling. It also
 routes Provider searches through the ready project coordinator's persistent
 MCP process using a token-authenticated, 64 KiB-limited local pipe request.
-The coordinator exposes only the three read-only search tools; paused,
-starting, stale, or unavailable coordinator states retain the one-shot
+The coordinator exposes only the three read-only search tools. Disabled,
+Editor-offline, starting, stale, or unavailable states return a stable reason
+without starting a Provider; wrappers never call `Ensure` or use a one-shot
 fallback. The shared path serializes distinct Provider work and joins identical
 in-flight tool/argument keys without implicit batching. Timing identifies the
 Provider route, whether work was shared, actual execution attempts, and real
@@ -135,6 +137,6 @@ no payload-file EOL normalization occurs in the materializer. Ownership markers
 are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
 also passed with exact host restoration. Manager integration passes static
-build, package-neutral, full materializer fixture, real Unity import, and 59/59
+build, package-neutral, full materializer fixture, real Unity import, and 74/74
 package EditMode tests. Wide, minimum-width floating, and docked Compact visual
 acceptance also passes as recorded in the host handoff.

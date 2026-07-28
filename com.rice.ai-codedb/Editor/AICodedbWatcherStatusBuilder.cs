@@ -8,6 +8,8 @@ namespace Rice.AI.Codedb.Editor
         Disabled,
         Paused,
         Pending,
+        EditorOffline,
+        Starting,
         Ready,
         Stale,
         DisabledRunning,
@@ -86,6 +88,11 @@ namespace Rice.AI.Codedb.Editor
             var disabled = Contains(output, "Watch opt-in: DISABLED");
             var automaticPaused = Contains(output, "Automatic refresh: PAUSED");
             var automaticPending = Contains(output, "Automatic refresh: PENDING");
+            var automaticDisabled = Contains(output, "Automatic refresh: DISABLED");
+            var automaticStarting = Contains(output, "Automatic refresh: STARTING");
+            var automaticEditorOffline = Contains(output, "Automatic refresh: EDITOR_OFFLINE");
+            var editorOnline = Contains(output, "Editor demand: ONLINE");
+            var editorOffline = Contains(output, "Editor demand: OFFLINE");
             var providerReady = Contains(output, "\"provider_state\":\"ready\"");
             var adapterOperational = Contains(output, "\"adapter_state\":\"watching\"")
                                      || Contains(output, "\"adapter_state\":\"pending\"")
@@ -98,13 +105,18 @@ namespace Rice.AI.Codedb.Editor
             var stopped = Contains(output, "watch coordinator stopped")
                           || Contains(output, "watch coordinator already_stopped");
             var stale = Contains(output, "[STALE]") || Contains(output, "\"action\":\"stale\"");
-            var coordinatorStateReported = Contains(output, "\"provider_state\":")
-                                           || Contains(output, "\"adapter_state\":")
-                                           || Contains(output, "watch coordinator running")
-                                           || stopped
-                                           || stale;
+            if (enabled && editorOnline && automaticStarting && !adapterFailed && !stale)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Starting,
+                    AICodedbStatusState.Inactive,
+                    "Enabled / Starting",
+                    "The Editor owns CodeDB demand and the backend is starting.",
+                    true,
+                    true);
+            }
 
-            if (stale || adapterFailed || (enabled && coordinatorStateReported && !ready))
+            if (stale || adapterFailed || (enabled && running && !ready))
             {
                 return new AICodedbWatcherStatus(
                     AICodedbWatcherState.Stale,
@@ -150,6 +162,41 @@ namespace Rice.AI.Codedb.Editor
                     true);
             }
 
+            if ((automaticDisabled || disabled) && disabled && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Disabled,
+                    AICodedbStatusState.Inactive,
+                    "Off",
+                    editorOnline
+                        ? "CodeDB is disabled; this Editor session remains online."
+                        : "CodeDB is disabled and the coordinator is stopped.",
+                    true,
+                    false);
+            }
+
+            if (enabled && (automaticEditorOffline || editorOffline) && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.EditorOffline,
+                    AICodedbStatusState.Inactive,
+                    "Enabled / Editor Offline",
+                    "CodeDB will start when an interactive Unity Editor session is online.",
+                    true,
+                    true);
+            }
+
+            if (automaticPending && !enabled && !disabled && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Pending,
+                    AICodedbStatusState.Inactive,
+                    "Setup Pending",
+                    "Automatic refresh will initialize after project Setup is complete.",
+                    false,
+                    false);
+            }
+
             if (enabled && ready)
             {
                 return new AICodedbWatcherStatus(
@@ -159,17 +206,6 @@ namespace Rice.AI.Codedb.Editor
                     "Automatic refresh is enabled and provider/adapter coordination is ready.",
                     true,
                     true);
-            }
-
-            if (disabled && stopped)
-            {
-                return new AICodedbWatcherStatus(
-                    AICodedbWatcherState.Disabled,
-                    AICodedbStatusState.Inactive,
-                    "Off",
-                    "Automatic refresh is disabled and the coordinator is stopped.",
-                    true,
-                    false);
             }
 
             return AICodedbWatcherStatus.Unknown("Watcher state could not be determined from the command output.");

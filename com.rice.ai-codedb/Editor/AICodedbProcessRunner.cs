@@ -189,6 +189,64 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Runs a project-local PowerShell script on a worker thread so Editor initialization stays responsive.
+        /// </summary>
+        /// <param name="scriptPath">Absolute path to a script under the Unity project root.</param>
+        /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
+        /// <param name="scriptArguments">Optional arguments passed to the PowerShell script.</param>
+        internal static Task<AICodedbCommandResult> RunPowerShellScriptAsync(
+            string scriptPath,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+            {
+                return Task.FromResult(new AICodedbCommandResult(
+                    -1,
+                    string.Empty,
+                    "PowerShell codedb scripts are currently supported only in the Windows Editor.",
+                    false));
+            }
+
+            if (timeoutMilliseconds <= 0)
+                timeoutMilliseconds = DefaultTimeoutMilliseconds;
+
+            var normalizedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
+            if (!AICodedbPaths.IsInsideProject(normalizedScriptPath))
+            {
+                return Task.FromResult(new AICodedbCommandResult(
+                    -1,
+                    string.Empty,
+                    $"Refusing to run a script outside the Unity project: {normalizedScriptPath}",
+                    false));
+            }
+
+            if (!File.Exists(normalizedScriptPath))
+            {
+                return Task.FromResult(new AICodedbCommandResult(
+                    -1,
+                    string.Empty,
+                    $"Script not found: {AICodedbPaths.ToProjectRelativeDisplayPath(normalizedScriptPath)}",
+                    false));
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = BuildPowerShellArguments(normalizedScriptPath, scriptArguments),
+                WorkingDirectory = AICodedbPaths.ProjectRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            var effectiveTimeout = timeoutMilliseconds;
+            return Task.Run(() => RunProcess(startInfo, effectiveTimeout));
+        }
+
+        /// <summary>
         /// Builds the PowerShell command line used to run a project script.
         /// </summary>
         /// <param name="scriptPath">Absolute script path.</param>

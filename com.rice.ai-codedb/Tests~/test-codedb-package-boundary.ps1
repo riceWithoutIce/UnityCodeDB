@@ -69,7 +69,7 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.0" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected "0.2.1" -Label "Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
@@ -129,8 +129,8 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.17" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 17 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.20" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 20 -Label "Payload sequence"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 21 -Label "Payload target count"
 Assert-Equal -Actual @($payloadManifest.retired_targets).Count -Expected 0 -Label "Retired target count"
 

@@ -10,11 +10,10 @@ Rice AI CodeDB is an Editor-only package for setting up and operating a
 project-local CodeDB index from the Unity Editor.
 
 The implemented post-setup automatic-refresh and shared-query baseline is
-recorded in the [v0.2.0 roadmap](v0.2.0-roadmap.md). Approved future work is
-split into:
-
-- [v0.2.1 lifecycle and correctness](v0.2.1-roadmap.md);
-- [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
+recorded in the [v0.2.0 roadmap](v0.2.0-roadmap.md). The Editor-owned lifecycle
+and correctness release is recorded in the
+[v0.2.1 roadmap](v0.2.1-roadmap.md). Approved future work continues in the
+[v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
 ## Supported Environment
 
@@ -34,7 +33,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.0"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.1"
   }
 }
 ```
@@ -71,8 +70,12 @@ does not generate, persist, infer, or delete that authorization.
 
 ## Safety Boundaries
 
-- After Setup completes, project-local automatic refresh starts and recovers on
-  Manager or MCP wrapper use. Pause is explicit and persistent until Resume.
+- After Setup completes, interactive Editor sessions own project demand and
+  start the backend asynchronously. Pause is explicit and persistent until
+  Resume; closing the final Editor stops the backend without changing that
+  preference. BatchMode does not auto-start CodeDB.
+- Opening or refreshing the Manager is read-only. MCP wrappers attach only to
+  an Editor-owned ready coordinator and never start a one-shot Provider.
 - The tracked provider config remains `watch=false`; the coordinator owns a
   generated watch-enabled config and the Shader/HLSL adapter lifecycle.
 - Provider watch and the Shader/HLSL adapter have separate ownership.

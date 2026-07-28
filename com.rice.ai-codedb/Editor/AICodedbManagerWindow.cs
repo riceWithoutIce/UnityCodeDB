@@ -956,8 +956,8 @@ namespace Rice.AI.Codedb.Editor
         {
             if (!EditorUtility.DisplayDialog(
                     "Enable automatic refresh",
-                    "Resume the project-local automatic refresh lifecycle? Pausing it stops the coordinator until it is resumed explicitly.",
-                    "Resume",
+                    "Enable CodeDB for this project? The preference persists across Editor restarts, while the backend runs only when an interactive Editor is online.",
+                    "Enable",
                     "Cancel"))
             {
                 return;
@@ -1103,9 +1103,7 @@ namespace Rice.AI.Codedb.Editor
 
         private void RefreshWatcherStatusSilently()
         {
-            var result = Application.isBatchMode
-                ? AICodedbActions.RunWatcherStatus()
-                : AICodedbActions.RunEnsureWatcher();
+            var result = AICodedbActions.RunWatcherStatus();
             _watcherStatus = AICodedbWatcherStatusBuilder.Build(result);
             _watcherStatusLoaded = true;
             ApplyWatcherDisclosurePolicy();

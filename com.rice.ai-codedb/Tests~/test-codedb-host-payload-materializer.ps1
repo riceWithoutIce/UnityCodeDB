@@ -205,6 +205,73 @@ function Write-Utf8File {
     [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
 }
 
+function Get-TestProjectIdentity {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $canonical = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+    } finally {
+        $sha256.Dispose()
+    }
+    return "sha256:" + (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
+function New-TestEditorLease {
+    param(
+        [Parameter(Mandatory = $true)][string]$LeaseRoot,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$SessionId = ([guid]::NewGuid().ToString("N")),
+        [int]$ProcessId = $PID,
+        [string]$ProcessStartTicks,
+        [DateTime]$HeartbeatUtc = [DateTime]::UtcNow
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ProcessStartTicks)) {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        $ProcessStartTicks = $process.StartTime.ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    $lease = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        session_id = $SessionId
+        editor_pid = $ProcessId
+        process_start_ticks = $ProcessStartTicks
+        project_root = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+        project_identity = Get-TestProjectIdentity -Root $Root
+        created_at_utc = $HeartbeatUtc.AddSeconds(-1).ToString("o")
+        heartbeat_at_utc = $HeartbeatUtc.ToString("o")
+    }
+    $leasePath = Join-Path $LeaseRoot ($SessionId + ".json")
+    Write-Utf8File -Path $leasePath -Content (($lease | ConvertTo-Json -Depth 5) + "`n")
+    return $leasePath
+}
+
+function Wait-ForEditorSessionCount {
+    param(
+        [Parameter(Mandatory = $true)][string]$StatePath,
+        [Parameter(Mandatory = $true)][int]$Count,
+        [int]$TimeoutMilliseconds = 10000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+            try {
+                $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+                if ([int]$state.editor_session_count -eq $Count) {
+                    return $true
+                }
+            } catch {
+                # Retry an atomic state replacement race.
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Invoke-PowerShellAction {
     param([Parameter(Mandatory = $true)][scriptblock]$Action)
 
@@ -1202,6 +1269,61 @@ function Invoke-WrapperToolProbe {
     }
 }
 
+function Invoke-WrapperToolErrorProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$WrapperPath,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$ToolName,
+        [Parameter(Mandatory = $true)]$Arguments
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $nodePath
+    $startInfo.Arguments = "`"$WrapperPath`" --root `"$Root`""
+    $startInfo.WorkingDirectory = $Root
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        $null = $process.Start()
+        $started = $true
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $null = Invoke-WrapperRpc -Process $process -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 301
+            method = "initialize"
+            params = [ordered]@{ protocolVersion = "2024-11-05" }
+        })
+        $response = Invoke-WrapperRpcError -Process $process -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 302
+            method = "tools/call"
+            params = [ordered]@{ name = $ToolName; arguments = $Arguments }
+        })
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(10000)) {
+            $process.Kill()
+            throw "Materialized wrapper error probe did not exit after stdin closed."
+        }
+        $stderr = $stderrTask.Result.Trim()
+        if ($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+            throw "Materialized wrapper error probe exited with code $($process.ExitCode).`n$stderr"
+        }
+        return [string]$response.error.message
+    } finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+        }
+        $process.Dispose()
+    }
+}
+
 function Invoke-ConcurrentWrapperQueries {
     param(
         [Parameter(Mandatory = $true)][string]$WrapperPath,
@@ -1605,9 +1727,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.0" -Message "Marker package version mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.17" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 17 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.1" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.20" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 20 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1805,7 +1927,7 @@ try {
             params = [ordered]@{ protocolVersion = "2024-11-05" }
         })
         Assert-Equal -Actual $initializeRpc.result.serverInfo.name -Expected "codedb-project-wrapper" -Message "Materialized wrapper server name mismatch."
-        Assert-Equal -Actual $initializeRpc.result.serverInfo.version -Expected "0.2.0" -Message "Materialized wrapper server version mismatch."
+        Assert-Equal -Actual $initializeRpc.result.serverInfo.version -Expected "0.2.1" -Message "Materialized wrapper server version mismatch."
 
         $toolsRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -1834,8 +1956,10 @@ try {
         foreach ($expectedStatus in @(
             "[OK] codedb-fixture wrapper ready.",
             "Provider executable: missing",
-            "Watch opt-in: disabled",
-            "Automatic refresh: pending",
+            "Desired state: unknown",
+            "Editor demand: offline",
+            "Automatic refresh: editor_offline",
+            "Lifecycle reason: EDITOR_OFFLINE",
             "Watch coordinator: stopped",
             "Shader adapter manifest: present",
             "Shader adapter files: 2",
@@ -1846,7 +1970,7 @@ try {
         $statusTiming = Get-WrapperTiming -Text $statusText -Label "Wrapper status"
         Assert-Equal -Actual $statusTiming.schema_version -Expected 1 -Message "Wrapper timing schema mismatch."
         Assert-Equal -Actual $statusTiming.tool -Expected "codedb_status" -Message "Wrapper status timing tool mismatch."
-        Assert-Equal -Actual $statusTiming.queue_ms -Expected 0 -Message "One-shot wrapper status unexpectedly reported queue time."
+        Assert-Equal -Actual $statusTiming.queue_ms -Expected 0 -Message "Status-only wrapper unexpectedly reported queue time."
         Assert-Equal -Actual $statusTiming.provider_attempts -Expected 0 -Message "Wrapper status unexpectedly invoked the Provider."
 
         $searchRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
@@ -2043,6 +2167,9 @@ try {
     $watchConfigPath = Join-Path $hostRoot "AIWork\.runtime\codedb\codedb-fixture\config\codedb-mcp.watch.toml"
     $watchMarkerPath = Join-Path $fixtureWatchRoot "auto-start.json"
     $watchPausedMarkerPath = Join-Path $fixtureWatchRoot "automatic-refresh-paused.json"
+    $lifecycleRoot = Join-Path $fixtureWatchRoot "lifecycle"
+    $desiredStatePath = Join-Path $lifecycleRoot "desired-state.json"
+    $editorLeaseRoot = Join-Path $lifecycleRoot "editor-leases"
     $coordinatorRuntime = Join-Path $fixtureWatchRoot "coordinator"
     $coordinatorStatePath = Join-Path $coordinatorRuntime "coordinator-state.json"
     $materializedProviderGuidance = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/show-codedb-project-provider-guidance.ps1"
@@ -2073,22 +2200,52 @@ try {
 
     Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Formal fixture config must remain watch-disabled."
     $activeWatchManagerPath = $materializedWatchManager
-    $automaticWatchProbe = Invoke-WrapperWatchProbe `
-        -WrapperPath $materializedWrapper `
-        -Root $hostRoot `
-        -WaitForCoordinatorStatePath $coordinatorStatePath `
-        -WaitForWatchMarkerPath $watchMarkerPath
+    $primaryEditorLeasePath = New-TestEditorLease -LeaseRoot $editorLeaseRoot -Root $hostRoot -SessionId "fixture-editor-primary"
+
+    Write-Utf8File -Path $watchMarkerPath -Content "{`"schema_version`":1}`n"
+    Write-Utf8File -Path $watchPausedMarkerPath -Content "{`"schema_version`":1}`n"
+    $pauseMigration = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Ensure
+    }
+    Assert-Result -Result $pauseMigration -ExitCode 0 -Label "Legacy Pause migration"
+    Assert-True -Condition ($pauseMigration.Text.Contains("[OK] Watch opt-in: DISABLED")) -Message "Legacy Pause did not win over the old enabled marker."
+    $migratedDesired = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $migratedDesired.desired_state -Expected "disabled" -Message "Legacy Pause did not migrate to disabled."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchMarkerPath)) -Message "Legacy enabled marker remained after migration."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchPausedMarkerPath)) -Message "Legacy Pause marker remained after migration."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $coordinatorStatePath)) -Message "Disabled migration started a coordinator."
+
+    Remove-Item -LiteralPath $desiredStatePath -Force
+    $defaultEnableResult = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Ensure
+    }
+    Assert-Result -Result $defaultEnableResult -ExitCode 0 -Label "Valid Setup default enable"
+    $automaticStatus = Get-LastJsonObject -Result $defaultEnableResult -Label "Valid Setup default enable"
+    Assert-Equal -Actual $automaticStatus.action -Expected "started" -Message "Editor-owned Ensure did not start the coordinator."
+    Assert-Equal -Actual $automaticStatus.provider_state -Expected "ready" -Message "Automatic watcher provider did not reach ready."
+    Assert-Equal -Actual $automaticStatus.adapter_state -Expected "watching" -Message "Automatic watcher adapter did not reach watching."
+    Assert-Equal -Actual $automaticStatus.editor_session_count -Expected 1 -Message "Automatic watcher did not observe the Editor lease."
+    $automaticLifecycleId = [string]$automaticStatus.lifecycle_id
+    $activeWatchLifecycleId = $automaticLifecycleId
+
+    $desiredState = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $desiredState.desired_state -Expected "enabled" -Message "Valid Setup did not default desired state to enabled."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchMarkerPath)) -Message "Editor-owned startup recreated the legacy enabled marker."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchPausedMarkerPath)) -Message "Editor-owned startup recreated the legacy Pause marker."
+
+    $automaticWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
     Assert-True -Condition ($automaticWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.watch.toml")) -Message "First post-Setup wrapper did not route reads through automatic watch."
     foreach ($expectedStatus in @(
-        "Watch opt-in: enabled",
+        "Desired state: enabled",
+        "Editor demand: online",
         "Automatic refresh: active",
+        "Lifecycle reason: READY",
         "Watch coordinator: ready",
         "Shader watcher: watching"
     )) {
         Assert-True -Condition ($automaticWatchProbe.StatusText.Contains($expectedStatus)) -Message "Automatic wrapper status is missing '$expectedStatus'."
     }
     Assert-True -Condition (Test-Path -LiteralPath $watchConfigPath -PathType Leaf) -Message "Automatic watch did not generate the watch config."
-    Assert-True -Condition (Test-Path -LiteralPath $watchMarkerPath -PathType Leaf) -Message "Automatic watch did not create its lifecycle marker."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Automatic watch changed the formal provider config."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $watchConfigPath -Section "watch" -Key "enabled").Trim() -Expected "true" -Message "Generated watch config did not enable native watch."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $watchConfigPath -Section "watch" -Key "poll_interval_seconds").Trim() -Expected "1" -Message "Generated watch config poll interval mismatch."
@@ -2103,9 +2260,7 @@ try {
     Assert-Equal -Actual $automaticStatus.provider_state -Expected "ready" -Message "Automatic watcher provider did not reach ready."
     Assert-Equal -Actual $automaticStatus.adapter_state -Expected "watching" -Message "Automatic watcher adapter did not reach watching."
     Assert-True -Condition ($automaticStatus.provider_query_count -ge 1) -Message "Automatic wrapper did not route its Provider query through the coordinator."
-    $automaticLifecycleId = [string]$automaticStatus.lifecycle_id
     $activeWatchManagerPath = $materializedWatchManager
-    $activeWatchLifecycleId = $automaticLifecycleId
 
     $coordinatorState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
     $unauthorizedQuery = Invoke-CoordinatorPipeRequest -StatePath $coordinatorStatePath -Request ([ordered]@{
@@ -2133,8 +2288,7 @@ try {
         -Root $hostRoot `
         -ToolName "codedb_text_search" `
         -Arguments ([ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; path = "Assets/Scoped"; limit = 2; regex = $true }) `
-        -WaitForCoordinatorStatePath $coordinatorStatePath `
-        -WaitForWatchMarkerPath $watchMarkerPath
+        -WaitForCoordinatorStatePath $coordinatorStatePath
     Assert-True -Condition ($scopedTextSearch.Contains('"path_glob":"Assets/Scoped/**"')) -Message "Wrapper did not normalize path to a directory path_glob before Provider routing."
     Assert-True -Condition (-not $scopedTextSearch.Contains('"path":"Assets/Scoped"')) -Message "Wrapper forwarded the legacy path alias to the Provider."
     Assert-True -Condition ($scopedTextSearch.Contains('"regex":true')) -Message "Wrapper stripped the regex flag before Provider routing."
@@ -2225,32 +2379,51 @@ try {
     Assert-Equal -Actual $afterSingleFlight.provider_pid -Expected $automaticStatus.provider_pid -Message "Concurrent queries replaced the persistent Provider process."
     Write-Host "[OK] Three concurrent wrappers reused one Provider, joined identical work, and reported real queue time without implicit batching."
 
+    $secondaryEditorLeasePath = New-TestEditorLease -LeaseRoot $editorLeaseRoot -Root $hostRoot -SessionId "fixture-editor-secondary"
+    Assert-True -Condition (Wait-ForEditorSessionCount -StatePath $coordinatorStatePath -Count 2) -Message "Coordinator did not observe both same-project Editor leases."
+    $twoEditorState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $twoEditorState.provider_pid -Expected $automaticStatus.provider_pid -Message "Second same-project Editor lease replaced the shared Provider."
+    Remove-Item -LiteralPath $primaryEditorLeasePath -Force
+    Assert-True -Condition (Wait-ForEditorSessionCount -StatePath $coordinatorStatePath -Count 1) -Message "Coordinator did not release only the closed Editor session."
+    $oneEditorState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $oneEditorState.coordinator_pid -Expected $twoEditorState.coordinator_pid -Message "Closing one Editor replaced the shared coordinator."
+    Assert-Equal -Actual $oneEditorState.provider_pid -Expected $twoEditorState.provider_pid -Message "Closing one Editor replaced the shared Provider."
+    Write-Host "[OK] Two same-project Editor leases shared one coordinator and closing one kept the backend ready."
+
     $pauseResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Pause -ExpectedLifecycleId $automaticLifecycleId
     }
     Assert-Result -Result $pauseResult -ExitCode 0 -Label "Materialized watcher Pause"
     $activeWatchManagerPath = $null
     $activeWatchLifecycleId = $null
-    Assert-True -Condition ($pauseResult.Text.Contains("[OK] Automatic refresh: PAUSED")) -Message "Pause did not report the persisted automatic-refresh state."
-    Assert-True -Condition (Wait-ForPathState -Path $watchPausedMarkerPath -Present $true) -Message "Pause did not create its persistent marker."
-    Assert-True -Condition (Wait-ForPathState -Path $watchMarkerPath -Present $false) -Message "Pause left the watch lifecycle marker behind."
+    Assert-True -Condition ($pauseResult.Text.Contains("[OK] Automatic refresh: DISABLED")) -Message "Pause did not report the persisted disabled state."
+    $disabledDesired = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $disabledDesired.desired_state -Expected "disabled" -Message "Pause did not persist disabled desired state."
+    Assert-True -Condition (Test-Path -LiteralPath $secondaryEditorLeasePath -PathType Leaf) -Message "Pause removed the online Editor lease."
     Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false) -Message "Pause left coordinator state behind."
 
-    $pausedWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
-    Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.toml")) -Message "Paused wrapper did not fall back to the formal provider config."
-    Assert-True -Condition ($pausedWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] mode=tool pid=")) -Message "Paused wrapper did not use the one-shot Provider path."
-    $pausedSearchTiming = Get-WrapperTiming -Text $pausedWatchProbe.SearchText -Label "Paused one-shot search"
-    Assert-Equal -Actual $pausedSearchTiming.queue_ms -Expected 0 -Message "Paused one-shot search unexpectedly reported queue time."
-    Assert-Equal -Actual $pausedSearchTiming.provider_route -Expected "one-shot" -Message "Paused search reported the wrong Provider route."
-    Assert-Equal -Actual $pausedSearchTiming.provider_shared -Expected $false -Message "Paused one-shot search unexpectedly reported shared work."
-    Assert-Equal -Actual $pausedSearchTiming.provider_core_ms -Expected 7 -Message "Paused one-shot search did not parse Provider core timing."
-    Assert-Equal -Actual $pausedSearchTiming.provider_attempts -Expected 1 -Message "Paused one-shot Provider attempt count mismatch."
+    $pausedSearchError = Invoke-WrapperToolErrorProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_search" `
+        -Arguments ([ordered]@{ query = "FixtureProviderProbe"; language = "CSharp"; limit = 1 })
+    Assert-True -Condition ($pausedSearchError.Contains("[SERVICE_DISABLED]")) -Message "Disabled wrapper query did not return SERVICE_DISABLED."
+    $pausedSearchTiming = Get-WrapperTiming -Text $pausedSearchError -Label "Disabled Provider query"
+    Assert-Equal -Actual $pausedSearchTiming.provider_route -Expected "none" -Message "Disabled query reported a Provider route."
+    Assert-Equal -Actual $pausedSearchTiming.provider_attempts -Expected 0 -Message "Disabled query started a Provider attempt."
+    $pausedStatusText = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_status" `
+        -Arguments ([ordered]@{})
     foreach ($expectedStatus in @(
-        "Watch opt-in: disabled",
-        "Automatic refresh: paused",
+        "Desired state: disabled",
+        "Editor demand: online",
+        "Automatic refresh: disabled",
+        "Lifecycle reason: SERVICE_DISABLED",
         "Watch coordinator: stopped"
     )) {
-        Assert-True -Condition ($pausedWatchProbe.StatusText.Contains($expectedStatus)) -Message "Paused wrapper status is missing '$expectedStatus'."
+        Assert-True -Condition ($pausedStatusText.Contains($expectedStatus)) -Message "Disabled wrapper status is missing '$expectedStatus'."
     }
     Assert-True -Condition (-not (Test-Path -LiteralPath $watchMarkerPath)) -Message "A wrapper restarted automatic watch while paused."
     Assert-True -Condition (-not (Test-Path -LiteralPath $coordinatorStatePath)) -Message "A wrapper recreated coordinator state while paused."
@@ -2263,25 +2436,21 @@ try {
             -Action Start `
             -PollIntervalSeconds 1 `
             -AdapterDebounceMilliseconds 200 `
-            -LifecycleId $watchLifecycleId `
-            -RequireNewOwner `
-            -ExclusiveOwner
+            -LifecycleId $watchLifecycleId
     }
     Assert-Result -Result $startResult -ExitCode 0 -Label "Materialized watcher Start"
     $startStatus = Get-LastJsonObject -Result $startResult -Label "Materialized watcher Start"
     Assert-Equal -Actual $startStatus.action -Expected "started" -Message "Materialized watcher did not create a new coordinator lifecycle."
     Assert-Equal -Actual $startStatus.lifecycle_id -Expected $watchLifecycleId -Message "Materialized watcher lifecycle id mismatch."
-    Assert-Equal -Actual $startStatus.exclusive_lifecycle -Expected $true -Message "Materialized watcher did not preserve exclusive ownership."
+    Assert-Equal -Actual $startStatus.exclusive_lifecycle -Expected $false -Message "Normal Editor-owned start unexpectedly enabled exclusive ownership."
     Assert-Equal -Actual $startStatus.provider_state -Expected "ready" -Message "Materialized watcher provider did not reach ready."
     Assert-Equal -Actual $startStatus.adapter_state -Expected "watching" -Message "Materialized watcher adapter did not reach watching."
     Assert-Equal -Actual $startStatus.adapter_worker_state -Expected "ready" -Message "Materialized watcher adapter worker did not reach ready."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $watchPausedMarkerPath)) -Message "Resume left the automatic-refresh pause marker behind."
-    Assert-True -Condition (Wait-ForPathState -Path $watchMarkerPath -Present $true) -Message "Materialized watcher did not create the opt-in marker."
-
-    $marker = Get-Content -LiteralPath $watchMarkerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual $marker.lifecycle_id -Expected $watchLifecycleId -Message "Watch marker lifecycle id mismatch."
-    Assert-Equal -Actual $marker.exclusive_lifecycle -Expected $true -Message "Watch marker exclusive ownership mismatch."
-    Assert-Equal -Actual $marker.watch_config -Expected "AIWork/.runtime/codedb/codedb-fixture/config/codedb-mcp.watch.toml" -Message "Watch marker config path mismatch."
+    Assert-Equal -Actual $startStatus.editor_session_count -Expected 1 -Message "Resumed watcher lost the remaining Editor lease."
+    $resumedDesired = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $resumedDesired.desired_state -Expected "enabled" -Message "Manual Start did not persist enabled desired state."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchPausedMarkerPath)) -Message "Resume recreated the legacy Pause marker."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $watchMarkerPath)) -Message "Resume recreated the legacy enabled marker."
 
     $statusResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Status
@@ -2319,40 +2488,66 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Direct fixture coordinator stop failed before wrapper recovery.`n$($directStopOutput -join [Environment]::NewLine)"
     }
-    Assert-True -Condition (Test-Path -LiteralPath $watchMarkerPath -PathType Leaf) -Message "Direct coordinator stop unexpectedly removed the host-owned opt-in marker."
+    Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false) -Message "Direct coordinator stop left state behind."
+    Assert-Equal -Actual (Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json).desired_state -Expected "enabled" -Message "Direct coordinator stop changed the desired state."
 
-    $wrapperWatchProbe = Invoke-WrapperWatchProbe `
+    $stoppedSearchError = Invoke-WrapperToolErrorProbe `
         -WrapperPath $materializedWrapper `
         -Root $hostRoot `
-        -WaitForCoordinatorStatePath $coordinatorStatePath `
-        -WaitForWatchMarkerPath $watchMarkerPath
+        -ToolName "codedb_search" `
+        -Arguments ([ordered]@{ query = "FixtureProviderProbe"; language = "CSharp"; limit = 1 })
+    Assert-True -Condition ($stoppedSearchError.Contains("[STARTING]")) -Message "Wrapper query did not report STARTING while Editor demand remained online."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $coordinatorStatePath)) -Message "Wrapper query restarted the stopped coordinator."
+    $stoppedTiming = Get-WrapperTiming -Text $stoppedSearchError -Label "Stopped coordinator query"
+    Assert-Equal -Actual $stoppedTiming.provider_attempts -Expected 0 -Message "Stopped coordinator query started a Provider attempt."
+
+    $editorReconcile = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Ensure
+    }
+    Assert-Result -Result $editorReconcile -ExitCode 0 -Label "Editor-owned watcher reconcile"
+    $recoveredState = Get-LastJsonObject -Result $editorReconcile -Label "Editor-owned watcher reconcile"
+    Assert-Equal -Actual $recoveredState.action -Expected "started" -Message "Editor owner did not recover the stopped coordinator."
+    Assert-True -Condition (-not [string]::Equals([string]$recoveredState.lifecycle_id, $watchLifecycleId, [StringComparison]::Ordinal)) -Message "Recovered coordinator reused a completed lifecycle id."
+    Assert-Equal -Actual $recoveredState.exclusive_lifecycle -Expected $false -Message "Editor reconcile changed exclusive ownership."
+    Assert-Equal -Actual $recoveredState.provider_state -Expected "ready" -Message "Editor reconcile provider state mismatch."
+    Assert-Equal -Actual $recoveredState.adapter_state -Expected "watching" -Message "Editor reconcile adapter state mismatch."
+    $watchLifecycleId = [string]$recoveredState.lifecycle_id
+    $activeWatchLifecycleId = $watchLifecycleId
+
+    $wrapperWatchProbe = Invoke-WrapperWatchProbe -WrapperPath $materializedWrapper -Root $hostRoot
     Assert-True -Condition ($wrapperWatchProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.watch.toml")) -Message "Materialized wrapper did not route provider reads through the watch config."
     foreach ($expectedStatus in @(
-        "Watch opt-in: enabled",
+        "Desired state: enabled",
+        "Editor demand: online",
         "Watch coordinator: ready",
         "Shader watcher: watching",
         "Active provider config: AIWork/.runtime/codedb/codedb-fixture/config/codedb-mcp.watch.toml"
     )) {
         Assert-True -Condition ($wrapperWatchProbe.StatusText.Contains($expectedStatus)) -Message "Recovered wrapper status is missing '$expectedStatus'."
     }
-    $recoveredStatusResult = Invoke-PowerShellAction -Action {
-        & $materializedWatchManager -Action Status
+    $activeCommonPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/codedb-project-common.ps1"
+    $activeReadConfig = Invoke-PowerShellAction -Action {
+        . $activeCommonPath
+        $activeContext = Get-ProjectCodedbContext
+        Get-ProjectCodedbActiveReadConfigPath -Context $activeContext
     }
-    Assert-Result -Result $recoveredStatusResult -ExitCode 0 -Label "Wrapper-recovered watcher Status"
-    $recoveredState = Get-LastJsonObject -Result $recoveredStatusResult -Label "Wrapper-recovered watcher Status"
-    Assert-Equal -Actual $recoveredState.lifecycle_id -Expected $watchLifecycleId -Message "Wrapper recovery changed lifecycle ownership."
-    Assert-Equal -Actual $recoveredState.exclusive_lifecycle -Expected $true -Message "Wrapper recovery changed exclusive ownership."
-    Assert-Equal -Actual $recoveredState.provider_state -Expected "ready" -Message "Wrapper recovery provider state mismatch."
-    Assert-Equal -Actual $recoveredState.adapter_state -Expected "watching" -Message "Wrapper recovery adapter state mismatch."
-    Write-Host "[OK] Materialized wrapper recovered and attached to the same opt-in lifecycle."
+    Assert-Result -Result $activeReadConfig -ExitCode 0 -Label "Active read-config selection"
+    Assert-Equal -Actual $activeReadConfig.Text.Trim() -Expected ([System.IO.Path]::GetFullPath($watchConfigPath)) -Message "Active read-config selection did not return the live watch config."
+    $activeProviderProbePath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/probe-codedb-project-index.ps1"
+    $activeProviderProbe = Invoke-PowerShellAction -Action {
+        & $activeProviderProbePath -Check CSharpProbe
+    }
+    Assert-Result -Result $activeProviderProbe -ExitCode 0 -Label "Active watcher provider probe"
+    Assert-True -Condition ($activeProviderProbe.Text.Contains("[OK] C# probe passed")) -Message "Active provider probe did not complete against the live watch config."
+    Write-Host "[OK] Wrapper stayed read-only while the Editor owner recovered a stopped coordinator."
 
     $wrongLifecycleId = "foreign-" + [guid]::NewGuid().ToString("N")
     $wrongStopResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Stop -ExpectedLifecycleId $wrongLifecycleId
     }
     Assert-True -Condition ($wrongStopResult.ExitCode -ne 0) -Message "Materialized watcher accepted a foreign lifecycle Stop."
-    Assert-True -Condition ($wrongStopResult.Text.Contains("another lifecycle")) -Message "Foreign lifecycle Stop did not report marker ownership refusal."
-    Assert-True -Condition (Test-Path -LiteralPath $watchMarkerPath -PathType Leaf) -Message "Foreign lifecycle Stop removed the owned marker."
+    Assert-True -Condition ($wrongStopResult.Text.Contains("another lifecycle")) -Message "Foreign lifecycle Stop did not report coordinator ownership refusal."
+    Assert-Equal -Actual (Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json).desired_state -Expected "enabled" -Message "Foreign lifecycle Stop changed desired state."
     $statusAfterWrongStop = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Status
     }
@@ -2360,14 +2555,84 @@ try {
     $stateAfterWrongStop = Get-LastJsonObject -Result $statusAfterWrongStop -Label "Post-refusal watcher Status"
     Assert-Equal -Actual $stateAfterWrongStop.lifecycle_id -Expected $watchLifecycleId -Message "Foreign lifecycle Stop changed the live coordinator owner."
 
-    $stopResult = Invoke-PowerShellAction -Action {
-        & $materializedWatchManager -Action Stop -ExpectedLifecycleId $watchLifecycleId
+    $wrapperMonitorStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $wrapperMonitorStartInfo.FileName = $nodePath
+    $wrapperMonitorStartInfo.Arguments = "`"$materializedWrapper`" --root `"$hostRoot`""
+    $wrapperMonitorStartInfo.WorkingDirectory = $hostRoot
+    $wrapperMonitorStartInfo.UseShellExecute = $false
+    $wrapperMonitorStartInfo.CreateNoWindow = $true
+    $wrapperMonitorStartInfo.RedirectStandardInput = $true
+    $wrapperMonitorStartInfo.RedirectStandardOutput = $true
+    $wrapperMonitorStartInfo.RedirectStandardError = $true
+    $wrapperMonitorProcess = [System.Diagnostics.Process]::new()
+    $wrapperMonitorProcess.StartInfo = $wrapperMonitorStartInfo
+    $null = $wrapperMonitorProcess.Start()
+    $activeMcpProcess = $wrapperMonitorProcess
+    $wrapperMonitorStderr = $wrapperMonitorProcess.StandardError.ReadToEndAsync()
+    $null = Invoke-WrapperRpc -Process $wrapperMonitorProcess -Request ([ordered]@{
+        jsonrpc = "2.0"
+        id = 401
+        method = "initialize"
+        params = [ordered]@{ protocolVersion = "2024-11-05" }
+    })
+    Remove-Item -LiteralPath $secondaryEditorLeasePath -Force
+    Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false -TimeoutMilliseconds 10000) -Message "Last Editor lease removal did not stop the coordinator."
+    if (-not $wrapperMonitorProcess.WaitForExit(10000)) {
+        $wrapperMonitorProcess.Kill()
+        throw "Wrapper did not exit after its observed Editor lease disappeared."
     }
-    Assert-Result -Result $stopResult -ExitCode 0 -Label "Materialized watcher Stop"
+    Assert-Equal -Actual $wrapperMonitorProcess.ExitCode -Expected 0 -Message "Wrapper exited with an error after the last Editor lease disappeared."
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace($wrapperMonitorStderr.Result)) -Message "Wrapper reported stderr while following the last Editor lease."
+    $wrapperMonitorProcess.Dispose()
+    $activeMcpProcess = $null
     $activeWatchManagerPath = $null
     $activeWatchLifecycleId = $null
-    Assert-True -Condition (Wait-ForPathState -Path $watchMarkerPath -Present $false -TimeoutMilliseconds 10000) -Message "Materialized watcher Stop left the opt-in marker behind."
-    Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false -TimeoutMilliseconds 10000) -Message "Materialized watcher Stop left coordinator state behind."
+
+    $offlineSearchError = Invoke-WrapperToolErrorProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_search" `
+        -Arguments ([ordered]@{ query = "FixtureProviderProbe"; language = "CSharp"; limit = 1 })
+    Assert-True -Condition ($offlineSearchError.Contains("[EDITOR_OFFLINE]")) -Message "Offline wrapper query did not return EDITOR_OFFLINE."
+    $offlineTiming = Get-WrapperTiming -Text $offlineSearchError -Label "Offline Provider query"
+    Assert-Equal -Actual $offlineTiming.provider_attempts -Expected 0 -Message "Offline query started a Provider attempt."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $coordinatorStatePath)) -Message "Offline wrapper query started the coordinator."
+
+    $staleHeartbeatLease = New-TestEditorLease `
+        -LeaseRoot $editorLeaseRoot `
+        -Root $hostRoot `
+        -SessionId "fixture-editor-stale-heartbeat" `
+        -HeartbeatUtc ([DateTime]::UtcNow.AddSeconds(-91))
+    $staleHeartbeatStatus = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Status
+    }
+    Assert-Result -Result $staleHeartbeatStatus -ExitCode 0 -Label "Read-only stale-heartbeat Status"
+    Assert-True -Condition (Test-Path -LiteralPath $staleHeartbeatLease -PathType Leaf) -Message "Read-only Status reclaimed an Editor lease."
+    Assert-True -Condition ($staleHeartbeatStatus.Text.Contains("Editor demand: OFFLINE (0)")) -Message "Read-only Status counted a stale Editor heartbeat as online."
+    $staleHeartbeatEnsure = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Ensure
+    }
+    Assert-True -Condition ($staleHeartbeatEnsure.ExitCode -ne 0) -Message "Coordinator accepted an Editor heartbeat older than 90 seconds."
+    Assert-True -Condition ($staleHeartbeatEnsure.Text.Contains("EDITOR_OFFLINE")) -Message "Stale heartbeat rejection did not report EDITOR_OFFLINE."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $staleHeartbeatLease)) -Message "Coordinator did not reclaim the stale heartbeat lease."
+    Write-Host "[OK] Offline Status preserved stale leases while the Editor-owned Ensure path reclaimed them."
+
+    $mismatchedIdentityLease = New-TestEditorLease `
+        -LeaseRoot $editorLeaseRoot `
+        -Root $hostRoot `
+        -SessionId "fixture-editor-wrong-start" `
+        -ProcessStartTicks "1"
+    $mismatchedIdentityEnsure = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Ensure
+    }
+    Assert-True -Condition ($mismatchedIdentityEnsure.ExitCode -ne 0) -Message "Coordinator accepted a mismatched Editor process-start identity."
+    Assert-True -Condition ($mismatchedIdentityEnsure.Text.Contains("EDITOR_OFFLINE")) -Message "Process identity rejection did not report EDITOR_OFFLINE."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $mismatchedIdentityLease)) -Message "Coordinator did not reclaim the mismatched process lease."
+
+    $disableFinal = Invoke-PowerShellAction -Action {
+        & $materializedWatchManager -Action Pause
+    }
+    Assert-Result -Result $disableFinal -ExitCode 0 -Label "Final manual disable"
 
     $finalStatusResult = Invoke-PowerShellAction -Action {
         & $materializedWatchManager -Action Status
@@ -2378,8 +2643,10 @@ try {
     Assert-Equal -Actual $finalStatus.action -Expected "stopped" -Message "Final watcher Status did not report stopped."
     Assert-Equal -Actual $finalStatus.coordinator_pid -Expected $null -Message "Final watcher Status retained a coordinator PID."
     Assert-Equal -Actual $finalStatus.adapter_state -Expected "stopped" -Message "Final watcher adapter state mismatch."
+    Assert-Equal -Actual $finalStatus.desired_state -Expected "disabled" -Message "Final watcher desired state mismatch."
+    Assert-Equal -Actual $finalStatus.editor_session_count -Expected 0 -Message "Final watcher retained an Editor lease."
     Assert-Equal -Actual (Get-TomlSectionValue -Path $generatedConfig -Section "watch" -Key "enabled").Trim() -Expected "false" -Message "Watcher lifecycle changed the formal provider config."
-    Write-Host "[OK] Materialized watcher rejected foreign ownership and ended DISABLED / STOPPED."
+    Write-Host "[OK] Last Editor exit stopped all backend ownership, stale leases were rejected, and manual disable persisted."
 
     $materializedProjectVerify = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/verify-codedb-project.ps1"
     $materializedProjectRefresh = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/refresh-codedb-project.ps1"

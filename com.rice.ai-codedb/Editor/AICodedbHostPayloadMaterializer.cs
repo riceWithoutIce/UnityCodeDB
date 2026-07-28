@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEditor;
 
 namespace Rice.AI.Codedb.Editor
@@ -21,6 +22,13 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult ReadStatus()
         {
             return Run(AICodedbHostPayloadAction.DryRun, string.Empty, false, false);
+        }
+
+        internal static Task<AICodedbCommandResult> ReadStatusAsync()
+        {
+            var scriptPath = AICodedbPaths.HostPayloadMaterializerScriptPath;
+            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.DryRun, string.Empty, false);
+            return AICodedbProcessRunner.RunPowerShellScriptAsync(scriptPath, ReadTimeoutMilliseconds, arguments);
         }
 
         internal static AICodedbCommandResult RunDryRun()

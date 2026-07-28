@@ -427,10 +427,10 @@ function Get-ProjectCodedbActiveReadConfigPath {
     $adapterBuilderPath = Join-Path $Context.CodedbRoot "scripts\build-codedb-project-text-adapter.ps1"
     $adapterWorkerPath = Join-Path $Context.CodedbRoot "scripts\run-codedb-project-text-adapter-worker.ps1"
     $watchRoot = Join-Path $Context.ProviderRoot "watch"
-    $markerPath = Join-Path $watchRoot "auto-start.json"
+    $desiredStatePath = Join-Path $watchRoot "lifecycle\desired-state.json"
     $coordinatorRuntime = Join-Path $watchRoot "coordinator"
     $statePath = Join-Path $coordinatorRuntime "coordinator-state.json"
-    foreach ($path in @($watchConfigPath, $Context.TextAdapterManifestPath, $markerPath, $coordinatorRuntime, $statePath)) {
+    foreach ($path in @($watchConfigPath, $Context.TextAdapterManifestPath, $desiredStatePath, $coordinatorRuntime, $statePath)) {
         Assert-CodedbPathInside -Path $path -Root $Context.ProviderRoot -Label "watch read config state"
     }
     foreach ($path in @($adapterBuilderPath, $adapterWorkerPath)) {
@@ -440,34 +440,25 @@ function Get-ProjectCodedbActiveReadConfigPath {
     if (-not (Test-Path -LiteralPath $watchConfigPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $adapterBuilderPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $Context.TextAdapterManifestPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $desiredStatePath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
         return $providerPaths.ConfigPath
     }
 
     try {
-        $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+        $desired = Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        $expectedWatchConfig = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $watchConfigPath
-        $expectedCoordinatorRuntime = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $coordinatorRuntime
-        $expectedAdapterBuilder = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $adapterBuilderPath
-        $expectedAdapterWorker = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $adapterWorkerPath
-        $expectedAdapterManifest = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $Context.TextAdapterManifestPath
         $adapterOperational = [string]$state.adapter_state -in @("watching", "pending", "building")
-        if ([int]$marker.schema_version -ne 1 -or
-            -not [string]::Equals([string]$marker.watch_config, $expectedWatchConfig, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$marker.coordinator_runtime, $expectedCoordinatorRuntime, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$marker.adapter_builder, $expectedAdapterBuilder, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$marker.adapter_worker, $expectedAdapterWorker, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$marker.adapter_manifest, $expectedAdapterManifest, [StringComparison]::OrdinalIgnoreCase) -or
-            [string]::IsNullOrWhiteSpace([string]$marker.lifecycle_id) -or
-            [int]$marker.adapter_debounce_ms -le 0 -or
-            -not [string]::Equals([string]$state.lifecycle_id, [string]$marker.lifecycle_id, [StringComparison]::Ordinal) -or
-            [bool]$state.exclusive_lifecycle -ne [bool]$marker.exclusive_lifecycle -or
+        if ([int]$desired.schema_version -ne 1 -or
+            -not [string]::Equals([string]$desired.managed_by, "com.rice.ai-codedb", [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$desired.desired_state, "enabled", [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$state.desired_state, "enabled", [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$state.editor_demand, "online", [StringComparison]::Ordinal) -or
+            [int]$state.editor_session_count -le 0 -or
             -not [string]::Equals([string]$state.provider_state, "ready", [StringComparison]::OrdinalIgnoreCase) -or
             -not [bool]$state.adapter_enabled -or
             -not $adapterOperational -or
-            [int]$state.adapter_debounce_ms -ne [int]$marker.adapter_debounce_ms -or
+            [int]$state.adapter_debounce_ms -le 0 -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.root), [System.IO.Path]::GetFullPath($Context.UnityRoot), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.provider_executable), [System.IO.Path]::GetFullPath($providerPaths.ExecutablePath), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.provider_config), [System.IO.Path]::GetFullPath($watchConfigPath), [StringComparison]::OrdinalIgnoreCase) -or
