@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2 - 2026-07-28
+
+- Made Ready coordinator queries reliable across Windows elevation boundaries
+  by treating permission-denied PID probes as indeterminate, confirming health
+  over the authenticated pipe, retrying short connection races, and returning
+  bounded unreachable/timeout/protocol diagnostics without Provider fallback.
+- Validated existing generated Provider configs before reuse. Missing or
+  invalid `[logging].flush_interval_ms` now reports `UPDATE_REQUIRED` without
+  rewriting runtime state; regeneration remains an explicit `-Force` action.
+- Split Manager host-payload truth into `SETUP_REQUIRED`, `UPDATE_REQUIRED`,
+  conflict, and active host-use blocker outcomes, including pre-Sync PID
+  guidance from read-only DryRun.
+- Added a dedicated padded tab icon and sourced the window title version from
+  Unity Package Manager metadata with a versionless refresh fallback.
+
 ## 0.2.1 - 2026-07-28
 
 - Pinned project MCP registrations to

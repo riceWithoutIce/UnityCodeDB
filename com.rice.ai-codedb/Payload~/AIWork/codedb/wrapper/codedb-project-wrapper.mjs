@@ -31,6 +31,9 @@ const MAX_LIMIT = 200;
 const MAX_READ_LINES = 200;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COORDINATOR_QUERY_TIMEOUT_MS = 95000;
+const COORDINATOR_STATUS_TIMEOUT_MS = 2000;
+const COORDINATOR_CONNECT_RETRY_DELAYS_MS = [0, 50, 150];
+const COORDINATOR_RETRYABLE_TRANSPORT_CODES = new Set(["EBUSY", "ECONNREFUSED", "ECONNRESET", "ENOENT", "EPIPE"]);
 const MAX_COORDINATOR_RESPONSE_BYTES = 1024 * 1024;
 const EDITOR_LEASE_STALE_AFTER_MS = 90000;
 const EDITOR_LEASE_MONITOR_INTERVAL_MS = 2000;
@@ -293,7 +296,7 @@ async function handleRequest(message) {
         },
         serverInfo: {
           name: "codedb-project-wrapper",
-          version: "0.2.1"
+          version: "0.2.2"
         }
       };
     case "tools/list":
@@ -316,7 +319,7 @@ async function callTool(params) {
     let text;
     switch (name) {
       case "codedb_status":
-        text = getStatusText();
+        text = await getStatusText();
         break;
       case "codedb_search":
       case "codedb_text_search":
@@ -917,7 +920,12 @@ async function invokeProviderTool(name, args, timing) {
   if (response?.error_code === "PROVIDER_TOOL_ERROR") {
     throw new Error(response.error ?? `provider tool ${name} failed.`);
   }
-  throw lifecycleError("STARTING", response?.error ?? "CodeDB coordinator query is temporarily unavailable.");
+  if (response?.ok && response.lifecycle_id !== readyState.lifecycle_id) {
+    throw lifecycleError("COORDINATOR_STATE_CHANGED", "CodeDB coordinator lifecycle changed while handling the query.");
+  }
+  throw lifecycleError(
+    response?.error_code ?? "COORDINATOR_UNREACHABLE",
+    response?.error ?? "CodeDB coordinator query is unavailable.");
 }
 
 function applyCoordinatorTiming(timing, metrics) {
@@ -938,9 +946,44 @@ function toNonNegativeNumber(value) {
 }
 
 function requestCoordinatorQuery(state, name, args) {
+  return requestCoordinatorCommand(state, {
+    schema_version: 1,
+    auth_token: state?.auth_token,
+    command: "query",
+    tool: name,
+    arguments: args
+  }, COORDINATOR_QUERY_TIMEOUT_MS);
+}
+
+function requestCoordinatorStatus(state) {
+  return requestCoordinatorCommand(state, {
+    auth_token: state?.auth_token,
+    command: "status"
+  }, COORDINATOR_STATUS_TIMEOUT_MS);
+}
+
+async function requestCoordinatorCommand(state, request, timeoutMs) {
   if (!state?.pipe_name || !state?.auth_token) {
-    return Promise.resolve(null);
+    return createCoordinatorFailure(
+      "COORDINATOR_STATE_INVALID",
+      "Coordinator state is missing its authenticated pipe endpoint.",
+      state,
+      "INVALID_STATE");
   }
+  let response = null;
+  for (const retryDelayMs of COORDINATOR_CONNECT_RETRY_DELAYS_MS) {
+    if (retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+    response = await requestCoordinatorCommandOnce(state, request, timeoutMs);
+    if (response?.transport_retryable !== true) {
+      return response;
+    }
+  }
+  return response;
+}
+
+function requestCoordinatorCommandOnce(state, request, timeoutMs) {
   return new Promise((resolve) => {
     const socket = net.createConnection(state.pipe_name);
     let settled = false;
@@ -954,21 +997,23 @@ function requestCoordinatorQuery(state, name, args) {
       socket.destroy();
       resolve(value);
     };
-    const timer = setTimeout(() => finish(null), COORDINATOR_QUERY_TIMEOUT_MS);
+    const timer = setTimeout(() => finish(createCoordinatorFailure(
+      "COORDINATOR_TIMEOUT",
+      "Timed out waiting for the coordinator response.",
+      state,
+      "TIMEOUT")), timeoutMs);
     socket.setEncoding("utf8");
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({
-        schema_version: 1,
-        auth_token: state.auth_token,
-        command: "query",
-        tool: name,
-        arguments: args
-      })}\n`);
+      socket.write(`${JSON.stringify(request)}\n`);
     });
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > MAX_COORDINATOR_RESPONSE_BYTES) {
-        finish(null);
+        finish(createCoordinatorFailure(
+          "COORDINATOR_PROTOCOL_ERROR",
+          "Coordinator response exceeded the bounded response limit.",
+          state,
+          "RESPONSE_TOO_LARGE"));
         return;
       }
       const newline = buffer.indexOf("\n");
@@ -978,24 +1023,65 @@ function requestCoordinatorQuery(state, name, args) {
       try {
         finish(JSON.parse(buffer.slice(0, newline)));
       } catch {
-        finish(null);
+        finish(createCoordinatorFailure(
+          "COORDINATOR_PROTOCOL_ERROR",
+          "Coordinator returned invalid JSON.",
+          state,
+          "INVALID_JSON"));
       }
     });
-    socket.on("error", () => finish(null));
+    socket.on("error", (error) => finish(createCoordinatorFailure(
+      "COORDINATOR_UNREACHABLE",
+      "Could not connect to the Ready coordinator pipe.",
+      state,
+      error?.code ?? "UNKNOWN",
+      COORDINATOR_RETRYABLE_TRANSPORT_CODES.has(error?.code))));
     socket.on("end", () => {
       if (!settled && buffer.trim()) {
         try {
           finish(JSON.parse(buffer.trim()));
         } catch {
-          finish(null);
+          finish(createCoordinatorFailure(
+            "COORDINATOR_PROTOCOL_ERROR",
+            "Coordinator closed with an invalid JSON response.",
+            state,
+            "INVALID_JSON"));
         }
+      } else if (!settled) {
+        finish(createCoordinatorFailure(
+          "COORDINATOR_UNREACHABLE",
+          "Coordinator closed without a response.",
+          state,
+          "CONNECTION_CLOSED",
+          true));
       }
     });
   });
 }
 
-function isWatchCoordinatorReady() {
-  return getReadyWatchCoordinatorState() !== null;
+function createCoordinatorFailure(errorCode, message, state, transportCode, retryable = false) {
+  const stateTimestampMs = Date.parse(state?.last_lease_scan_at_utc ?? state?.provider_ready_at_utc ?? state?.started_at_utc ?? "");
+  const stateAgeMs = Number.isFinite(stateTimestampMs) ? Math.max(0, Date.now() - stateTimestampMs) : null;
+  const pipeValue = String(state?.pipe_name ?? "");
+  const pipeId = pipeValue
+    ? `sha256-${crypto.createHash("sha256").update(pipeValue, "utf8").digest("hex").slice(0, 12)}`
+    : "unknown";
+  const diagnostics = [
+    `transport_code=${sanitizeDiagnosticToken(transportCode)}`,
+    `pipe_id=${sanitizeDiagnosticToken(pipeId)}`,
+    `lifecycle_id=${sanitizeDiagnosticToken(state?.lifecycle_id)}`,
+    `state_age_ms=${stateAgeMs ?? "unknown"}`
+  ].join(", ");
+  return {
+    ok: false,
+    error_code: errorCode,
+    error: `${message} (${diagnostics}).`,
+    transport_retryable: retryable
+  };
+}
+
+function sanitizeDiagnosticToken(value) {
+  return String(value ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "unknown";
 }
 
 function getReadyWatchCoordinatorState() {
@@ -1017,9 +1103,9 @@ function getReadyWatchCoordinatorState() {
     && normalizeAbsolutePath(state.adapter_worker) === normalizeAbsolutePath(context.adapterWorkerPath)
     && normalizeAbsolutePath(state.adapter_manifest) === normalizeAbsolutePath(context.textAdapterManifestPath)
     && state.adapter_worker_state === "ready"
-    && isProcessAlive(state.coordinator_pid)
-    && isProcessAlive(state.provider_pid)
-    && isProcessAlive(state.adapter_worker_pid);
+    && processMayBeAlive(state.coordinator_pid)
+    && processMayBeAlive(state.provider_pid)
+    && processMayBeAlive(state.adapter_worker_pid);
   return ready ? state : null;
 }
 
@@ -1072,7 +1158,7 @@ function hasActiveEditorLease() {
         && Number.isFinite(heartbeatMs)
         && heartbeatMs <= now + 30000
         && now - heartbeatMs <= EDITOR_LEASE_STALE_AFTER_MS
-        && isProcessAlive(lease?.editor_pid);
+        && processMayBeAlive(lease?.editor_pid);
       if (valid) {
         return true;
       }
@@ -1098,16 +1184,20 @@ function createLifecycleUnavailableError() {
   return lifecycleError("STARTING", "CodeDB is enabled and the Unity Editor is online, but the backend is not ready yet.");
 }
 
-function isProcessAlive(pid) {
+function processMayBeAlive(pid) {
+  return probeProcess(pid) !== "missing";
+}
+
+function probeProcess(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) {
-    return false;
+    return "missing";
   }
   try {
     process.kill(numericPid, 0);
-    return true;
-  } catch {
-    return false;
+    return "alive";
+  } catch (error) {
+    return ["ENOENT", "ESRCH"].includes(error?.code) ? "missing" : "indeterminate";
   }
 }
 
@@ -1115,17 +1205,21 @@ function normalizeAbsolutePath(value) {
   return path.resolve(String(value ?? "")).replace(/^\\\\\?\\/, "").replace(/\\/g, "/").toLowerCase();
 }
 
-function getStatusText() {
+async function getStatusText() {
   const watchState = readWatchCoordinatorState();
   const desiredState = readDesiredState()?.desired_state ?? "unknown";
   const editorOnline = hasActiveEditorLease();
-  const coordinatorReady = isWatchCoordinatorReady();
+  const readyState = getReadyWatchCoordinatorState();
+  const coordinatorResponse = readyState ? await requestCoordinatorStatus(readyState) : null;
+  const coordinatorReady = coordinatorResponse?.ok === true
+    && coordinatorResponse?.status?.lifecycle_id === readyState?.lifecycle_id;
+  const coordinatorUnreachable = readyState !== null && !coordinatorReady;
   const automaticRefreshState = desiredState === "disabled"
     ? "disabled"
-    : (!editorOnline ? "editor_offline" : (coordinatorReady ? "active" : "starting"));
+    : (!editorOnline ? "editor_offline" : (coordinatorReady ? "active" : (coordinatorUnreachable ? "unreachable" : "starting")));
   const reasonCode = desiredState === "disabled"
     ? "SERVICE_DISABLED"
-    : (!editorOnline ? "EDITOR_OFFLINE" : (coordinatorReady ? "READY" : "STARTING"));
+    : (!editorOnline ? "EDITOR_OFFLINE" : (coordinatorReady ? "READY" : (coordinatorUnreachable ? "COORDINATOR_UNREACHABLE" : "STARTING")));
   const lines = [
     `[OK] ${context.providerName} wrapper ready.`,
     `Unity root: ${toUnityRelativePath(context.unityRoot)}`,
@@ -1136,7 +1230,7 @@ function getStatusText() {
     `Automatic refresh: ${automaticRefreshState}`,
     `Lifecycle reason: ${reasonCode}`,
     `Watch config: ${fileState(context.watchConfigPath)}`,
-    `Watch coordinator: ${coordinatorReady ? "ready" : "stopped"}`,
+    `Watch coordinator: ${coordinatorReady ? "ready" : (coordinatorUnreachable ? "unreachable" : "stopped")}`,
     `Shader watcher: ${watchState?.adapter_state ?? "stopped"}`,
     `Active provider config: ${coordinatorReady ? toUnityRelativePath(context.watchConfigPath) : "none"}`,
     `Provider index: ${fileState(context.providerIndexRoot)}`,
@@ -1146,6 +1240,9 @@ function getStatusText() {
 
   if (watchState?.adapter_last_error) {
     lines.push(`[WARN] Shader watcher last error: ${watchState.adapter_last_error}`);
+  }
+  if (coordinatorUnreachable && coordinatorResponse?.error) {
+    lines.push(`Coordinator diagnostic: ${coordinatorResponse.error}`);
   }
 
   if (fs.existsSync(context.textAdapterManifestPath)) {

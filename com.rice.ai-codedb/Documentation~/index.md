@@ -12,7 +12,8 @@ project-local CodeDB index from the Unity Editor.
 The implemented post-setup automatic-refresh and shared-query baseline is
 recorded in the [v0.2.0 roadmap](v0.2.0-roadmap.md). The Editor-owned lifecycle
 and correctness release is recorded in the
-[v0.2.1 roadmap](v0.2.1-roadmap.md). Approved future work continues in the
+[v0.2.1 roadmap](v0.2.1-roadmap.md). The Windows query, upgrade, and Manager UI
+patch is tracked in the [v0.2.2 roadmap](v0.2.2-roadmap.md). Approved future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
 ## Supported Environment
@@ -33,7 +34,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.1"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.2"
   }
 }
 ```

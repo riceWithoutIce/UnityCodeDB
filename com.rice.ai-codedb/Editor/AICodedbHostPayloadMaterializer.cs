@@ -136,10 +136,11 @@ namespace Rice.AI.Codedb.Editor
     internal enum AICodedbHostPayloadState
     {
         Unknown,
-        NotInstalled,
+        SetupRequired,
         Current,
-        Stale,
-        Conflict
+        UpdateRequired,
+        Conflict,
+        Blocked
     }
 
     internal readonly struct AICodedbHostPayloadStatus
@@ -192,7 +193,7 @@ namespace Rice.AI.Codedb.Editor
                 return new AICodedbHostPayloadStatus(
                     AICodedbHostPayloadState.Conflict,
                     AICodedbStatusState.Error,
-                    markerExists ? "Installed / Conflict" : "Conflict",
+                    "CONFLICT",
                     FirstMatchingLine(combined, "[CONFLICT]", "Host payload has conflicts"));
             }
 
@@ -211,16 +212,25 @@ namespace Rice.AI.Codedb.Editor
                 return new AICodedbHostPayloadStatus(
                     AICodedbHostPayloadState.Current,
                     AICodedbStatusState.Ok,
-                    "Installed / Current",
+                    "CURRENT",
                     AICodedbProjectSettings.HostPayloadMarkerRelativePath);
+            }
+
+            if (Contains(output, "[BLOCKED]"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.Blocked,
+                    AICodedbStatusState.Error,
+                    markerExists ? "UPDATE_REQUIRED / BLOCKED" : "SETUP_REQUIRED / BLOCKED",
+                    FirstMatchingLine(output, "[ACTIVE]", "[BLOCKED]"));
             }
 
             if (Contains(output, "[STALE] Host payload can be synchronized"))
             {
                 return new AICodedbHostPayloadStatus(
-                    markerExists ? AICodedbHostPayloadState.Stale : AICodedbHostPayloadState.NotInstalled,
+                    markerExists ? AICodedbHostPayloadState.UpdateRequired : AICodedbHostPayloadState.SetupRequired,
                     AICodedbStatusState.Warning,
-                    markerExists ? "Installed / Stale" : "Not Installed",
+                    markerExists ? "UPDATE_REQUIRED" : "SETUP_REQUIRED",
                     LastMarkedLine(output));
             }
 

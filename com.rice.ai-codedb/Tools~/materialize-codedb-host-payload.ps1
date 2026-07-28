@@ -1066,6 +1066,106 @@ function Test-MaterializerProcessAlive {
     }
 }
 
+function Get-MaterializerHostUseLeaseReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$LeaseRoot,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $liveLeases = New-Object System.Collections.Generic.List[string]
+    $staleLeases = New-Object System.Collections.Generic.List[object]
+    $invalidLeases = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $LeaseRoot)) {
+        return [pscustomobject]@{
+            Live = $liveLeases.ToArray()
+            Stale = $staleLeases.ToArray()
+            Invalid = $invalidLeases.ToArray()
+        }
+    }
+    if (-not (Test-Path -LiteralPath $LeaseRoot -PathType Container)) {
+        $invalidLeases.Add($LeaseRoot)
+        return [pscustomobject]@{
+            Live = $liveLeases.ToArray()
+            Stale = $staleLeases.ToArray()
+            Invalid = $invalidLeases.ToArray()
+        }
+    }
+
+    Assert-NoReparsePoint -Path $LeaseRoot -Root $ProjectRoot -Label "host-use lease root"
+    foreach ($item in @(Get-ChildItem -LiteralPath $LeaseRoot -Force | Sort-Object Name)) {
+        $nameMatch = [regex]::Match($item.Name, '^(mcp|watcher)-([0-9]+)-([0-9a-f]{32})\.json$')
+        if ($item.PSIsContainer -or -not $nameMatch.Success) {
+            $invalidLeases.Add($item.FullName)
+            continue
+        }
+
+        $fileOwner = $nameMatch.Groups[1].Value
+        $fileProcessId = [int]$nameMatch.Groups[2].Value
+        $fileToken = $nameMatch.Groups[3].Value
+        try {
+            Assert-NoReparsePoint -Path $item.FullName -Root $LeaseRoot -Label "host-use lease"
+            $lease = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+            $owner = [string]$lease.owner
+            $processId = [int]$lease.pid
+            $leaseId = [string]$lease.lease_id
+            $valid = [int]$lease.schema_version -eq 1 -and
+                [int]$lease.host_use_gate_version -eq $script:HostUseGateVersion -and
+                [string]::Equals([string]$lease.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -and
+                [string]::Equals($owner, $fileOwner, [StringComparison]::Ordinal) -and
+                $processId -eq $fileProcessId -and
+                [string]::Equals($leaseId, [System.IO.Path]::GetFileNameWithoutExtension($item.Name), [StringComparison]::Ordinal) -and
+                [string]::Equals($leaseId, "$fileOwner-$fileProcessId-$fileToken", [StringComparison]::Ordinal) -and
+                [string]::Equals(
+                    [System.IO.Path]::GetFullPath([string]$lease.project_root),
+                    [System.IO.Path]::GetFullPath($ProjectRoot),
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                -not [string]::IsNullOrWhiteSpace([string]$lease.created_at_utc)
+        } catch {
+            $valid = $false
+        }
+        if (-not $valid) {
+            $invalidLeases.Add($item.FullName)
+            continue
+        }
+
+        if (Test-MaterializerProcessAlive -ProcessId $processId) {
+            $liveLeases.Add("$owner PID $processId")
+        } else {
+            $staleLeases.Add([pscustomobject]@{
+                Owner = $owner
+                ProcessId = $processId
+                Path = $item.FullName
+            })
+        }
+    }
+
+    return [pscustomobject]@{
+        Live = $liveLeases.ToArray()
+        Stale = $staleLeases.ToArray()
+        Invalid = $invalidLeases.ToArray()
+    }
+}
+
+function Write-HostUseLeaseGuidance {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $runtimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label "materializer runtime"
+    $leaseRoot = Join-Path $runtimeRoot $script:HostUseLeaseDirectoryName
+    $report = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    foreach ($path in $report.Invalid) {
+        Write-Host "[BLOCKED] Host-use lease requires manual review: $path"
+    }
+    foreach ($lease in $report.Live) {
+        Write-Host "[ACTIVE] $lease"
+    }
+    if ($report.Live.Count -gt 0) {
+        Write-Host "[BLOCKED] Host payload Sync/Remove is blocked while CodeDB host tooling is active. Pause the watcher and disconnect project MCP sessions first."
+    }
+    foreach ($lease in $report.Stale) {
+        Write-Host "[STALE-LEASE] $($lease.Owner) PID $($lease.ProcessId) will be reclaimed by the next authorized mutation."
+    }
+}
+
 function ConvertTo-MaterializerProjectSlug {
     param([Parameter(Mandatory = $true)][string]$Value)
 
@@ -1207,57 +1307,17 @@ function Assert-NoLiveHostUseLeases {
     )
 
     $leaseRoot = Join-Path $Lock.Root $script:HostUseLeaseDirectoryName
-    if (-not (Test-Path -LiteralPath $leaseRoot)) {
-        return
+    $report = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    if ($report.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Host-use lease is invalid and requires manual review: $($report.Invalid[0])" -ExitCode 7
     }
-    if (-not (Test-Path -LiteralPath $leaseRoot -PathType Container)) {
-        Throw-MaterializerError -Message "Host-use lease root is not a directory: $leaseRoot" -ExitCode 7
-    }
-    Assert-NoReparsePoint -Path $leaseRoot -Root $ProjectRoot -Label "host-use lease root"
-
-    $liveLeases = New-Object System.Collections.Generic.List[string]
-    foreach ($item in @(Get-ChildItem -LiteralPath $leaseRoot -Force | Sort-Object Name)) {
-        if ($item.PSIsContainer -or $item.Name -notmatch '^(mcp|watcher)-([0-9]+)-([0-9a-f]{32})\.json$') {
-            Throw-MaterializerError -Message "Unknown host-use lease artifact requires manual review: $($item.FullName)" -ExitCode 7
-        }
-        $fileOwner = $Matches[1]
-        $fileProcessId = [int]$Matches[2]
-        $fileToken = $Matches[3]
-        Assert-NoReparsePoint -Path $item.FullName -Root $leaseRoot -Label "host-use lease"
-        try {
-            $lease = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
-            $owner = [string]$lease.owner
-            $processId = [int]$lease.pid
-            $leaseId = [string]$lease.lease_id
-            $valid = [int]$lease.schema_version -eq 1 -and
-                [int]$lease.host_use_gate_version -eq $script:HostUseGateVersion -and
-                [string]::Equals([string]$lease.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -and
-                [string]::Equals($owner, $fileOwner, [StringComparison]::Ordinal) -and
-                $processId -eq $fileProcessId -and
-                [string]::Equals($leaseId, [System.IO.Path]::GetFileNameWithoutExtension($item.Name), [StringComparison]::Ordinal) -and
-                [string]::Equals($leaseId, "$fileOwner-$fileProcessId-$fileToken", [StringComparison]::Ordinal) -and
-                [string]::Equals(
-                    [System.IO.Path]::GetFullPath([string]$lease.project_root),
-                    [System.IO.Path]::GetFullPath($ProjectRoot),
-                    [StringComparison]::OrdinalIgnoreCase) -and
-                -not [string]::IsNullOrWhiteSpace([string]$lease.created_at_utc)
-        } catch {
-            $valid = $false
-        }
-        if (-not $valid) {
-            Throw-MaterializerError -Message "Host-use lease is invalid and requires manual review: $($item.FullName)" -ExitCode 7
-        }
-
-        if (Test-MaterializerProcessAlive -ProcessId $processId) {
-            $liveLeases.Add("$owner PID $processId")
-        } else {
-            Remove-Item -LiteralPath $item.FullName -Force
-            Write-Host "[RECOVERED] Removed stale $owner host-use lease for PID $processId."
-        }
+    foreach ($lease in $report.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Write-Host "[RECOVERED] Removed stale $($lease.Owner) host-use lease for PID $($lease.ProcessId)."
     }
 
-    if ($liveLeases.Count -gt 0) {
-        foreach ($lease in $liveLeases) {
+    if ($report.Live.Count -gt 0) {
+        foreach ($lease in $report.Live) {
             Write-Host "[ACTIVE] $lease"
         }
         Throw-MaterializerError -Message "Host payload mutation is blocked while CodeDB host tooling is active." -ExitCode 4
@@ -2058,6 +2118,7 @@ try {
         "DryRun" {
             $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
             Write-MaterializationPlan -Plan $plan
+            Write-HostUseLeaseGuidance -ProjectRoot $projectRootPath
             if ($plan.IsCurrent) {
                 Write-Host "[OK] Host payload is current."
             } elseif ($plan.HasConflict) {

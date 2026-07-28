@@ -36,7 +36,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbHostPayloadMaterializer.ReadStatus());
             HostPayload = HostPayloadStatus.ToStatusItem();
             ProviderExecutable = CreateFileStatus("Provider executable", AICodedbProjectSettings.ProviderExecutableRelativePath);
-            ProviderConfig = CreateFileStatus("Provider config", AICodedbProjectSettings.ProviderConfigRelativePath);
+            ProviderConfig = CreateProviderConfigStatus();
             RuntimeConfigTemplate = CreateFileStatus("Runtime config template", AICodedbProjectSettings.RuntimeConfigTemplateRelativePath);
             RuntimeDirectory = CreateDirectoryStatus("Runtime directory", AICodedbProjectSettings.RuntimeRelativePath);
             IndexDirectory = CreateDirectoryStatus("Index directory", AICodedbProjectSettings.IndexRelativePath);
@@ -244,6 +244,74 @@ namespace Rice.AI.Codedb.Editor
                 return AICodedbStatusItem.Ok(label, "Found", relativePath);
 
             return AICodedbStatusItem.Warning(label, "Missing", relativePath);
+        }
+
+        private static AICodedbStatusItem CreateProviderConfigStatus()
+        {
+            var relativePath = AICodedbProjectSettings.ProviderConfigRelativePath;
+            var path = AICodedbPaths.GetProjectPath(relativePath);
+            if (!File.Exists(path))
+                return BuildProviderConfigStatus(false, string.Empty, relativePath);
+
+            try
+            {
+                return BuildProviderConfigStatus(true, File.ReadAllText(path), relativePath);
+            }
+            catch (Exception exception)
+            {
+                return AICodedbStatusItem.Error("Provider config", "Check failed", exception.Message);
+            }
+        }
+
+        internal static AICodedbStatusItem BuildProviderConfigStatus(bool exists, string config, string detail)
+        {
+            if (!exists)
+                return AICodedbStatusItem.Warning("Provider config", "Missing", detail);
+
+            var currentSection = string.Empty;
+            var flushIntervalCount = 0;
+            var flushIntervalValid = false;
+            using (var reader = new StringReader(config ?? string.Empty))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    var commentIndex = line.IndexOf('#');
+                    var content = (commentIndex >= 0 ? line.Substring(0, commentIndex) : line).Trim();
+                    if (content.StartsWith("[", StringComparison.Ordinal)
+                        && content.EndsWith("]", StringComparison.Ordinal)
+                        && content.Length > 2)
+                    {
+                        currentSection = content.Substring(1, content.Length - 2).Trim();
+                        continue;
+                    }
+
+                    if (!string.Equals(currentSection, "logging", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var separatorIndex = content.IndexOf('=');
+                    if (separatorIndex < 0
+                        || !string.Equals(content.Substring(0, separatorIndex).Trim(), "flush_interval_ms", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    flushIntervalCount++;
+                    int flushIntervalMilliseconds;
+                    flushIntervalValid = int.TryParse(content.Substring(separatorIndex + 1).Trim(), out flushIntervalMilliseconds)
+                                         && flushIntervalMilliseconds > 0;
+                }
+            }
+
+            if (flushIntervalCount != 1 || !flushIntervalValid)
+            {
+                return AICodedbStatusItem.Warning(
+                    "Provider config",
+                    "Update Required",
+                    detail + " is missing a valid [logging].flush_interval_ms. Use Regenerate.");
+            }
+
+            return AICodedbStatusItem.Ok("Provider config", "Found", detail);
         }
 
         /// <summary>

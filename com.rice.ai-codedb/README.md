@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. Version `0.2.1` targets Unity `2022.3` on
+and bounded MCP discovery surface. Version `0.2.2` targets Unity `2022.3` on
 Windows.
 
 Install the published release from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.1`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.2`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The current `0.2.1` release materializes reviewed process tooling into the host
+The current `0.2.2` release materializes reviewed process tooling into the host
 project. Manager actions resolve tracked scripts, wrapper files, and templates
 under `AIWork/codedb/`, while generated provider binaries, configs, indexes,
 logs, and watcher state remain under ignored `AIWork/.runtime/`. The external
@@ -69,9 +69,9 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.2.1",
-  "payload_version": "poc.20",
-  "payload_sequence": 20,
+  "package_version": "0.2.2",
+  "payload_version": "poc.21",
+  "payload_sequence": 21,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -87,8 +87,10 @@ active-process, staged-index, conflict, and transaction gates still apply.
 
 The package materializer is wired into the Manager Setup tab for read-only
 status/DryRun, strict Verify, and explicitly authorized Sync/Remove. Manager
-status distinguishes installed/current, not-installed, stale, conflict, and
-check-failed outcomes. It does not create, persist, infer, or delete production
+status distinguishes `CURRENT`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, conflict,
+active host-use blockers, and check-failed outcomes. DryRun reports the active
+MCP or watcher PID before an authorized mutation is attempted. It does not
+create, persist, infer, or delete production
 authorization files; the selected path and optional legacy-MCP confirmation are
 session-only and are cleared after each mutation attempt. Existing runtime,
 index, watch, and probe actions continue to resolve the materialized host paths.

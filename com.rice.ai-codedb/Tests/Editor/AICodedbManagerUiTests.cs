@@ -59,16 +59,55 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(icon, Is.Not.Null);
             Assert.That(icon.width, Is.EqualTo(48));
             Assert.That(icon.height, Is.EqualTo(48));
+
+            Assert.That(
+                AICodedbBrandAssets.TabIconAssetPath,
+                Is.EqualTo("Packages/com.rice.ai-codedb/Editor/Icons/CodedbTabIcon.png"));
+            var tabIcon = AICodedbBrandAssets.TabIcon;
+            Assert.That(tabIcon, Is.Not.Null);
+            Assert.That(tabIcon.width, Is.EqualTo(48));
+            Assert.That(tabIcon.height, Is.EqualTo(48));
+            Assert.That(tabIcon, Is.Not.SameAs(icon));
         }
 
         [Test]
-        public void WindowTitleContent_UsesBrandIcon()
+        public void WindowTitleContent_UsesPackageVersionAndTabIcon()
         {
-            var content = AICodedbBrandAssets.CreateWindowTitleContent();
+            var content = AICodedbBrandAssets.CreateWindowTitleContent("0.2.2");
+
+            Assert.That(content.text, Is.EqualTo("Codedb Manager v0.2.2"));
+            Assert.That(content.tooltip, Is.EqualTo("Rice AI CodeDB v0.2.2"));
+            Assert.That(content.image, Is.SameAs(AICodedbBrandAssets.TabIcon));
+        }
+
+        [Test]
+        public void WindowTitleContent_FallsBackWithoutUnavailableVersion()
+        {
+            var content = AICodedbBrandAssets.CreateWindowTitleContent(string.Empty);
 
             Assert.That(content.text, Is.EqualTo("Codedb Manager"));
             Assert.That(content.tooltip, Is.EqualTo("Rice AI CodeDB"));
-            Assert.That(content.image, Is.SameAs(AICodedbBrandAssets.Icon));
+        }
+    }
+
+    internal sealed class AICodedbRuntimeConfigStatusTests
+    {
+        [TestCase("[logging]\nflush_interval_ms = 500", AICodedbStatusState.Ok, "Found")]
+        [TestCase("[logging]\nflush_interval_ms = 100 # milliseconds", AICodedbStatusState.Ok, "Found")]
+        [TestCase("[logging] # runtime logging\nflush_interval_ms = 500", AICodedbStatusState.Ok, "Found")]
+        [TestCase("[logging]\nenabled = true", AICodedbStatusState.Warning, "Update Required")]
+        [TestCase("[logging]\nflush_interval_ms = 0", AICodedbStatusState.Warning, "Update Required")]
+        [TestCase("[logging]\nflush_interval_ms = 500\nflush_interval_ms = 100", AICodedbStatusState.Warning, "Update Required")]
+        [TestCase("[other]\nflush_interval_ms = 500", AICodedbStatusState.Warning, "Update Required")]
+        public void BuildProviderConfigStatus_ValidatesRequiredLoggingField(
+            string config,
+            AICodedbStatusState expectedState,
+            string expectedSummary)
+        {
+            var status = AICodedbStatusSnapshot.BuildProviderConfigStatus(true, config, "runtime.toml");
+
+            Assert.That(status.State, Is.EqualTo(expectedState));
+            Assert.That(status.Summary, Is.EqualTo(expectedSummary));
         }
     }
 
@@ -272,12 +311,12 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Current));
             Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Ok));
-            Assert.That(status.Summary, Is.EqualTo("Installed / Current"));
+            Assert.That(status.Summary, Is.EqualTo("CURRENT"));
             Assert.That(status.IsCurrent, Is.True);
         }
 
-        [TestCase(false, AICodedbHostPayloadState.NotInstalled, "Not Installed")]
-        [TestCase(true, AICodedbHostPayloadState.Stale, "Installed / Stale")]
+        [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]
+        [TestCase(true, AICodedbHostPayloadState.UpdateRequired, "UPDATE_REQUIRED")]
         public void Build_UsesMarkerToDistinguishMissingAndStale(
             bool markerExists,
             AICodedbHostPayloadState expectedState,
@@ -301,8 +340,21 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Conflict));
             Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
-            Assert.That(status.Summary, Is.EqualTo("Installed / Conflict"));
+            Assert.That(status.Summary, Is.EqualTo("CONFLICT"));
             Assert.That(status.Detail, Does.StartWith("[CONFLICT]"));
+        }
+
+        [Test]
+        public void Build_MapsActiveLeaseToBlockedUpdate()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result("[PLAN] Upgradeable: AIWork/codedb/example.ps1\n[ACTIVE] watcher PID 1234\n[BLOCKED] Host payload Sync/Remove is blocked.\n[STALE] Host payload can be synchronized without overwriting unowned changes."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(status.Summary, Is.EqualTo("UPDATE_REQUIRED / BLOCKED"));
+            Assert.That(status.Detail, Is.EqualTo("[ACTIVE] watcher PID 1234"));
         }
 
         [Test]

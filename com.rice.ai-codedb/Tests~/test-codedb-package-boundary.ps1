@@ -69,7 +69,7 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.1" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected "0.2.2" -Label "Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
@@ -104,9 +104,15 @@ foreach ($file in $textFiles) {
 
 $iconSourcePath = Join-Path $packageRoot "Documentation~\images\codedb-icon.svg"
 $iconTexturePath = Join-Path $packageRoot "Editor\Icons\CodedbIcon.png"
+$iconTextureMetaPath = "$iconTexturePath.meta"
+$tabIconTexturePath = Join-Path $packageRoot "Editor\Icons\CodedbTabIcon.png"
+$tabIconTextureMetaPath = "$tabIconTexturePath.meta"
 $thirdPartyNoticesPath = Join-Path $packageRoot "Third Party Notices.md"
 Assert-True -Condition (Test-Path -LiteralPath $iconSourcePath -PathType Leaf) -Message "Brand SVG source is missing."
 Assert-True -Condition (Test-Path -LiteralPath $iconTexturePath -PathType Leaf) -Message "Brand PNG is missing."
+Assert-True -Condition (Test-Path -LiteralPath $iconTextureMetaPath -PathType Leaf) -Message "Brand PNG metadata is missing."
+Assert-True -Condition (Test-Path -LiteralPath $tabIconTexturePath -PathType Leaf) -Message "Tab PNG is missing."
+Assert-True -Condition (Test-Path -LiteralPath $tabIconTextureMetaPath -PathType Leaf) -Message "Tab PNG metadata is missing."
 
 [xml]$iconSource = Get-Content -LiteralPath $iconSourcePath -Raw
 $iconPaths = @($iconSource.svg.g.path)
@@ -120,6 +126,23 @@ Assert-Equal -Actual (($iconBytes[0..7] -join ",")) -Expected "137,80,78,71,13,1
 Assert-Equal -Actual (($iconBytes[16..19] -join ",")) -Expected "0,0,0,48" -Label "Brand PNG width"
 Assert-Equal -Actual (($iconBytes[20..23] -join ",")) -Expected "0,0,0,48" -Label "Brand PNG height"
 
+$tabIconBytes = [System.IO.File]::ReadAllBytes($tabIconTexturePath)
+Assert-True -Condition ($tabIconBytes.Length -ge 24) -Message "Tab PNG is truncated."
+Assert-Equal -Actual (($tabIconBytes[0..7] -join ",")) -Expected "137,80,78,71,13,10,26,10" -Label "Tab PNG signature"
+Assert-Equal -Actual (($tabIconBytes[16..19] -join ",")) -Expected "0,0,0,48" -Label "Tab PNG width"
+Assert-Equal -Actual (($tabIconBytes[20..23] -join ",")) -Expected "0,0,0,48" -Label "Tab PNG height"
+Assert-True `
+    -Condition ((Get-FileHash -LiteralPath $tabIconTexturePath -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $iconTexturePath -Algorithm SHA256).Hash) `
+    -Message "Tab PNG must be an independent padded resource, not a duplicate of the brand PNG."
+
+$iconMeta = Get-Content -LiteralPath $iconTextureMetaPath -Raw
+$tabIconMeta = Get-Content -LiteralPath $tabIconTextureMetaPath -Raw
+$iconGuidMatch = [regex]::Match($iconMeta, '(?m)^guid:\s*([0-9a-f]{32})\s*$')
+$tabIconGuidMatch = [regex]::Match($tabIconMeta, '(?m)^guid:\s*([0-9a-f]{32})\s*$')
+Assert-True -Condition $iconGuidMatch.Success -Message "Brand PNG metadata has no valid GUID."
+Assert-True -Condition $tabIconGuidMatch.Success -Message "Tab PNG metadata has no valid GUID."
+Assert-True -Condition ($tabIconGuidMatch.Groups[1].Value -ne $iconGuidMatch.Groups[1].Value) -Message "Tab PNG must have an independent Unity asset GUID."
+
 $thirdPartyNotices = Get-Content -LiteralPath $thirdPartyNoticesPath -Raw
 Assert-True -Condition ($thirdPartyNotices.IndexOf("Streamline", [StringComparison]::Ordinal) -ge 0) -Message "Streamline attribution is missing."
 Assert-True -Condition ($thirdPartyNotices.IndexOf("CC BY 4.0", [StringComparison]::Ordinal) -ge 0) -Message "Streamline license is missing."
@@ -129,8 +152,8 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.20" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 20 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.21" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 21 -Label "Payload sequence"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 21 -Label "Payload target count"
 Assert-Equal -Actual @($payloadManifest.retired_targets).Count -Expected 0 -Label "Retired target count"
 

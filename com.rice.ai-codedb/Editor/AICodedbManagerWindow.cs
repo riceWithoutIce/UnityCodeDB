@@ -802,8 +802,10 @@ namespace Rice.AI.Codedb.Editor
             _confirmLegacyMcpStopped = EditorGUILayout.ToggleLeft(
                 "Confirm all legacy MCP sessions are stopped (initial adoption only)",
                 _confirmLegacyMcpStopped);
+            if (_statusSnapshot.HostPayloadStatus.State == AICodedbHostPayloadState.Blocked)
+                EditorGUILayout.HelpBox(_statusSnapshot.HostPayloadStatus.Detail, MessageType.Warning);
             EditorGUILayout.HelpBox(
-                "DryRun and Verify are read-only. Sync and Remove require a reviewed ignored/untracked authorization file. The Manager never creates or deletes authorization files.",
+                "DryRun and Verify are read-only. Sync and Remove require a reviewed ignored/untracked authorization file, no active project MCP session, and a paused watcher. The Manager never creates or deletes authorization files.",
                 MessageType.Info);
         }
 
@@ -1275,6 +1277,9 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetHeaderTitle()
         {
+            if (!_statusSnapshot.IsHostPayloadCurrent())
+                return AICodedbProjectSettings.ProjectDisplayName + " · " + GetHostPayloadLabel();
+
             var state = _statusSnapshot.OverallState;
             var label = state == AICodedbStatusState.Ok
                 ? "Ready"
@@ -1299,6 +1304,18 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetOverviewStatusTitle()
         {
+            switch (_statusSnapshot.HostPayloadStatus.State)
+            {
+                case AICodedbHostPayloadState.SetupRequired:
+                    return "SETUP_REQUIRED";
+                case AICodedbHostPayloadState.UpdateRequired:
+                    return "UPDATE_REQUIRED";
+                case AICodedbHostPayloadState.Conflict:
+                    return "HOST FILE CONFLICT";
+                case AICodedbHostPayloadState.Blocked:
+                    return "HOST UPDATE BLOCKED";
+            }
+
             switch (_statusSnapshot.OverallState)
             {
                 case AICodedbStatusState.Ok:
@@ -1312,8 +1329,17 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetOverviewStatusDescription()
         {
-            if (!_statusSnapshot.IsHostPayloadCurrent())
-                return "Inspect the package-managed host files before relying on discovery.";
+            switch (_statusSnapshot.HostPayloadStatus.State)
+            {
+                case AICodedbHostPayloadState.SetupRequired:
+                    return "Install the package-managed host files before relying on discovery.";
+                case AICodedbHostPayloadState.UpdateRequired:
+                    return "Update the installed host files to match this package.";
+                case AICodedbHostPayloadState.Conflict:
+                    return "Review the reported host-file conflict before attempting Sync.";
+                case AICodedbHostPayloadState.Blocked:
+                    return _statusSnapshot.HostPayloadStatus.Detail;
+            }
             if (_statusSnapshot.IsReady())
                 return "All discovery backends are current.";
             return "Verify the project-local runtime and resolve the reported status.";
@@ -1325,12 +1351,14 @@ namespace Rice.AI.Codedb.Editor
             {
                 case AICodedbHostPayloadState.Current:
                     return "Current";
-                case AICodedbHostPayloadState.NotInstalled:
-                    return "Not installed";
-                case AICodedbHostPayloadState.Stale:
-                    return "Stale";
+                case AICodedbHostPayloadState.SetupRequired:
+                    return "SETUP_REQUIRED";
+                case AICodedbHostPayloadState.UpdateRequired:
+                    return "UPDATE_REQUIRED";
                 case AICodedbHostPayloadState.Conflict:
-                    return "Conflict";
+                    return "CONFLICT";
+                case AICodedbHostPayloadState.Blocked:
+                    return "BLOCKED";
                 default:
                     return "Unknown";
             }

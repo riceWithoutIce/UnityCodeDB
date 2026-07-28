@@ -1134,7 +1134,8 @@ function Invoke-WrapperWatchProbe {
         [Parameter(Mandatory = $true)][string]$WrapperPath,
         [Parameter(Mandatory = $true)][string]$Root,
         [string]$WaitForCoordinatorStatePath,
-        [string]$WaitForWatchMarkerPath
+        [string]$WaitForWatchMarkerPath,
+        [hashtable]$EnvironmentVariables = @{}
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -1146,6 +1147,9 @@ function Invoke-WrapperWatchProbe {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    foreach ($entry in $EnvironmentVariables.GetEnumerator()) {
+        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+    }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $started = $false
@@ -1727,9 +1731,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.1" -Message "Marker package version mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.20" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 20 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.2" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.21" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 21 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1751,32 +1755,37 @@ try {
     Write-Host "[OK] Legacy installed marker upgrade required explicit MCP-stop confirmation."
 
     $materializedPrepare = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/prepare-codedb-project-runtime.ps1"
-    $prepareStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $prepareStartInfo.FileName = $powershellPath
-    $prepareStartInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$materializedPrepare`""
-    $prepareStartInfo.WorkingDirectory = $hostRoot
-    $prepareStartInfo.UseShellExecute = $false
-    $prepareStartInfo.CreateNoWindow = $true
-    $prepareStartInfo.RedirectStandardOutput = $true
-    $prepareStartInfo.RedirectStandardError = $true
-    $prepareProcess = [System.Diagnostics.Process]::new()
-    $prepareProcess.StartInfo = $prepareStartInfo
-    $null = $prepareProcess.Start()
-    $prepareStdoutTask = $prepareProcess.StandardOutput.ReadToEndAsync()
-    $prepareStderrTask = $prepareProcess.StandardError.ReadToEndAsync()
-    $prepareProcess.WaitForExit()
-    $prepareOutput = ($prepareStdoutTask.Result + $prepareStderrTask.Result).Trim()
-    $prepareExitCode = $prepareProcess.ExitCode
-    $prepareProcess.Dispose()
-    if ($prepareExitCode -ne 0) {
-        throw "Materialized prepare-runtime returned $prepareExitCode.`n$prepareOutput"
-    }
+    $prepareResult = Invoke-NativeProcess `
+        -FilePath $powershellPath `
+        -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$materializedPrepare`"" `
+        -WorkingDirectory $hostRoot
+    Assert-Result -Result $prepareResult -ExitCode 0 -Label "Initial runtime config preparation"
     $generatedConfig = Join-Path $hostRoot "AIWork\.runtime\codedb\codedb-fixture\config\codedb-mcp.toml"
     Assert-True -Condition (Test-Path -LiteralPath $generatedConfig -PathType Leaf) -Message "Materialized prepare-runtime did not generate the fixture config."
     $generatedConfigText = Get-Content -LiteralPath $generatedConfig -Raw
     Assert-True -Condition ($generatedConfigText.Contains("AIWork/.runtime/codedb/codedb-fixture/index")) -Message "Materialized prepare-runtime resolved the wrong Unity project slug."
     Assert-True -Condition (-not $generatedConfigText.Contains("__CODEDB_PROVIDER_SLUG__")) -Message "Materialized prepare-runtime left an unresolved template token."
-    Write-Host "[OK] Materialized common, prepare-runtime, and TOML template execute from the host path."
+    Assert-True -Condition ($generatedConfigText.Contains("flush_interval_ms = 500")) -Message "Generated runtime config omitted the required logging flush interval."
+
+    $legacyConfigText = [regex]::Replace($generatedConfigText, '(?m)^\s*flush_interval_ms\s*=.*\r?\n?', '')
+    Write-Utf8File -Path $generatedConfig -Content $legacyConfigText
+    $legacyConfigBeforeCheck = Get-Content -LiteralPath $generatedConfig -Raw
+    $legacyConfigCheck = Invoke-NativeProcess `
+        -FilePath $powershellPath `
+        -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$materializedPrepare`"" `
+        -WorkingDirectory $hostRoot
+    Assert-Result -Result $legacyConfigCheck -ExitCode 3 -Label "Legacy runtime config compatibility check"
+    Assert-True -Condition ($legacyConfigCheck.Text.Contains("[UPDATE_REQUIRED]")) -Message "Legacy runtime config did not report UPDATE_REQUIRED."
+    Assert-True -Condition ($legacyConfigCheck.Text.Contains("[logging].flush_interval_ms")) -Message "Legacy runtime config did not identify the missing required field."
+    Assert-Equal -Actual (Get-Content -LiteralPath $generatedConfig -Raw) -Expected $legacyConfigBeforeCheck -Message "Compatibility check rewrote the legacy runtime config."
+
+    $legacyConfigRegeneration = Invoke-NativeProcess `
+        -FilePath $powershellPath `
+        -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$materializedPrepare`" -Force" `
+        -WorkingDirectory $hostRoot
+    Assert-Result -Result $legacyConfigRegeneration -ExitCode 0 -Label "Explicit legacy runtime config regeneration"
+    Assert-True -Condition ((Get-Content -LiteralPath $generatedConfig -Raw).Contains("flush_interval_ms = 500")) -Message "Explicit regeneration did not restore the required logging flush interval."
+    Write-Host "[OK] Materialized runtime preparation detected an old config without writing it and regenerated only with -Force."
 
     $materializedCoordinator = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs"
     $coordinatorCheckOutput = @(& $nodePath --check $materializedCoordinator 2>&1)
@@ -1927,7 +1936,7 @@ try {
             params = [ordered]@{ protocolVersion = "2024-11-05" }
         })
         Assert-Equal -Actual $initializeRpc.result.serverInfo.name -Expected "codedb-project-wrapper" -Message "Materialized wrapper server name mismatch."
-        Assert-Equal -Actual $initializeRpc.result.serverInfo.version -Expected "0.2.1" -Message "Materialized wrapper server version mismatch."
+        Assert-Equal -Actual $initializeRpc.result.serverInfo.version -Expected "0.2.2" -Message "Materialized wrapper server version mismatch."
 
         $toolsRpc = Invoke-WrapperRpc -Process $wrapperProcess -Request ([ordered]@{
             jsonrpc = "2.0"
@@ -2463,6 +2472,13 @@ try {
     Assert-Equal -Actual $runningStatus.adapter_state -Expected "watching" -Message "Materialized watcher Status adapter mismatch."
     Assert-True -Condition (Wait-ForHostUseLease -Owner "watcher" -ProcessId ([int]$runningStatus.coordinator_pid) -Present $true) -Message "Watcher daemon did not publish its host-use lease."
 
+    $beforeActiveWatcherDryRun = Get-FileSnapshot -Root (Join-Path $hostRoot "AIWork\codedb")
+    $activeWatcherDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $activeWatcherDryRun -ExitCode 0 -Label "Active watcher DryRun guidance"
+    Assert-True -Condition ($activeWatcherDryRun.Text.Contains("[ACTIVE] watcher PID $($runningStatus.coordinator_pid)")) -Message "DryRun did not identify the active watcher lease before Sync."
+    Assert-True -Condition ($activeWatcherDryRun.Text.Contains("[BLOCKED] Host payload Sync/Remove is blocked")) -Message "DryRun did not explain the active host-use blocker."
+    Assert-Equal -Actual (Get-FileSnapshot -Root (Join-Path $hostRoot "AIWork\codedb")) -Expected $beforeActiveWatcherDryRun -Message "DryRun lease guidance changed managed host tooling."
+
     $beforeActiveWatcherGate = Get-FileSnapshot -Root (Join-Path $hostRoot "AIWork\codedb")
     $activeWatcherSync = Invoke-Materializer -Action "Sync" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $activeWatcherSync -ExitCode 4 -Label "Active watcher Sync gate"
@@ -2483,6 +2499,7 @@ try {
     Assert-Equal -Actual (Get-FileSnapshot -Root (Join-Path $hostRoot "AIWork\codedb")) -Expected $beforeActiveWatcherGate -Message "Legacy watcher state gate changed managed host tooling."
     Write-Host "[OK] Materialized watcher reached ready and blocked Sync/Remove through lease and legacy PID gates."
 
+    $readyCoordinatorState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
     $global:LASTEXITCODE = 0
     $directStopOutput = @(& $nodePath $materializedCoordinator stop --runtime $coordinatorRuntime --expected-lifecycle-id $watchLifecycleId 2>&1)
     if ($LASTEXITCODE -ne 0) {
@@ -2490,6 +2507,39 @@ try {
     }
     Assert-True -Condition (Wait-ForPathState -Path $coordinatorStatePath -Present $false) -Message "Direct coordinator stop left state behind."
     Assert-Equal -Actual (Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json).desired_state -Expected "enabled" -Message "Direct coordinator stop changed the desired state."
+
+    $readyCoordinatorState.coordinator_pid = $PID
+    $readyCoordinatorState.provider_pid = $PID
+    $readyCoordinatorState.adapter_worker_pid = $PID
+    $readyCoordinatorState.pipe_name = "\\.\pipe\codedb-watch-unreachable-fixture"
+    $readyCoordinatorState.last_lease_scan_at_utc = [DateTime]::UtcNow.ToString("o")
+    Write-Utf8File -Path $coordinatorStatePath -Content (($readyCoordinatorState | ConvertTo-Json -Depth 8) + "`n")
+    $unreachableSearchError = Invoke-WrapperToolErrorProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_search" `
+        -Arguments ([ordered]@{ query = "FixtureProviderProbe"; language = "CSharp"; limit = 1 })
+    Assert-True -Condition ($unreachableSearchError.Contains("[COORDINATOR_UNREACHABLE]")) -Message "Ready state with an unreachable pipe did not return COORDINATOR_UNREACHABLE."
+    Assert-True -Condition ($unreachableSearchError.Contains("transport_code=")) -Message "Unreachable coordinator error omitted its bounded transport code."
+    Assert-True -Condition ($unreachableSearchError.Contains("pipe_id=sha256-")) -Message "Unreachable coordinator error omitted its hashed pipe identifier."
+    Assert-True -Condition (-not $unreachableSearchError.Contains("codedb-watch-unreachable-fixture")) -Message "Unreachable coordinator error exposed the raw pipe name."
+    $unreachableTiming = Get-WrapperTiming -Text $unreachableSearchError -Label "Unreachable coordinator query"
+    Assert-Equal -Actual $unreachableTiming.provider_attempts -Expected 0 -Message "Unreachable coordinator query started a Provider attempt."
+    $unreachableStatus = Invoke-WrapperToolProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -ToolName "codedb_status" `
+        -Arguments ([ordered]@{})
+    foreach ($expectedStatus in @(
+        "Automatic refresh: unreachable",
+        "Lifecycle reason: COORDINATOR_UNREACHABLE",
+        "Watch coordinator: unreachable",
+        "Coordinator diagnostic: Could not connect to the Ready coordinator pipe."
+    )) {
+        Assert-True -Condition ($unreachableStatus.Contains($expectedStatus)) -Message "Unreachable coordinator status is missing '$expectedStatus'."
+    }
+    Remove-Item -LiteralPath $coordinatorStatePath -Force
+    Write-Host "[OK] Ready metadata with an unreachable pipe failed explicitly without a Provider fallback."
 
     $stoppedSearchError = Invoke-WrapperToolErrorProbe `
         -WrapperPath $materializedWrapper `
@@ -2525,6 +2575,41 @@ try {
     )) {
         Assert-True -Condition ($wrapperWatchProbe.StatusText.Contains($expectedStatus)) -Message "Recovered wrapper status is missing '$expectedStatus'."
     }
+    $permissionProbeHookPath = Join-Path $coordinatorRuntime "fixture-wrapper-eperm.cjs"
+    Write-Utf8File -Path $permissionProbeHookPath -Content @'
+const originalKill = process.kill.bind(process);
+const deniedPids = new Set(String(process.env.CODEDB_TEST_EPERM_PIDS ?? "").split(",").filter(Boolean));
+process.kill = (pid, signal) => {
+  if ((signal === 0 || signal === "0") && deniedPids.has(String(pid))) {
+    const error = new Error("Fixture permission-denied process probe.");
+    error.code = "EPERM";
+    throw error;
+  }
+  return originalKill(pid, signal);
+};
+'@
+    $permissionState = Get-Content -LiteralPath $coordinatorStatePath -Raw | ConvertFrom-Json
+    $permissionProbe = Invoke-WrapperWatchProbe `
+        -WrapperPath $materializedWrapper `
+        -Root $hostRoot `
+        -EnvironmentVariables @{
+            NODE_OPTIONS = "--require=$permissionProbeHookPath"
+            CODEDB_TEST_EPERM_PIDS = @(
+                $PID,
+                $permissionState.coordinator_pid,
+                $permissionState.provider_pid,
+                $permissionState.adapter_worker_pid
+            ) -join ","
+        }
+    Assert-True -Condition ($permissionProbe.SearchText.Contains("[FIXTURE PROVIDER] active_config=codedb-mcp.watch.toml")) -Message "Permission-denied PID probes prevented a Ready coordinator query."
+    foreach ($expectedStatus in @(
+        "Editor demand: online",
+        "Lifecycle reason: READY",
+        "Watch coordinator: ready"
+    )) {
+        Assert-True -Condition ($permissionProbe.StatusText.Contains($expectedStatus)) -Message "Permission-denied wrapper status is missing '$expectedStatus'."
+    }
+    Write-Host "[OK] Permission-denied PID probes deferred to the authenticated Ready coordinator."
     $activeCommonPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/scripts/codedb-project-common.ps1"
     $activeReadConfig = Invoke-PowerShellAction -Action {
         . $activeCommonPath

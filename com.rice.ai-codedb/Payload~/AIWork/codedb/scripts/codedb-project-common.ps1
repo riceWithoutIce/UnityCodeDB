@@ -295,6 +295,30 @@ function Assert-ProjectCodedbRuntimeConfig {
     if ($config.IndexOf($expectedIndex, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw "Runtime config $relativeConfig must store indexes under $expectedIndex."
     }
+
+    $currentSection = ""
+    $flushIntervalValues = @()
+    foreach ($line in ($config -split "`r?`n")) {
+        if ($line -match '^\s*\[([^\]]+)\]\s*(?:#.*)?$') {
+            $currentSection = $Matches[1].Trim()
+            continue
+        }
+        if ([string]::Equals($currentSection, "logging", [System.StringComparison]::OrdinalIgnoreCase) -and
+            $line -match '^\s*([A-Za-z0-9_]+)\s*=\s*([^#]*?)\s*(?:#.*)?$' -and
+            [string]::Equals($Matches[1], "flush_interval_ms", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $flushIntervalValues += $Matches[2].Trim()
+        }
+    }
+
+    if ($flushIntervalValues.Count -ne 1) {
+        throw "Runtime config $relativeConfig is missing required [logging].flush_interval_ms."
+    }
+
+    $flushIntervalMilliseconds = 0
+    if (-not [int]::TryParse($flushIntervalValues[0], [ref]$flushIntervalMilliseconds) -or
+        $flushIntervalMilliseconds -le 0) {
+        throw "Runtime config $relativeConfig must define [logging].flush_interval_ms as a positive integer."
+    }
 }
 
 function Test-ProjectCodedbRuntimeFileOperations {
