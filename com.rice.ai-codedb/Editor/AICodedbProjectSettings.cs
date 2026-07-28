@@ -58,6 +58,7 @@ namespace Rice.AI.Codedb.Editor
             var builder = new StringBuilder();
             builder.AppendLine("[mcp_servers." + ProviderSlug + "]");
             builder.AppendLine("command = \"node\"");
+            builder.AppendLine("cwd = \".\"");
             builder.AppendLine("args = [\"" + McpWrapperScriptRelativePath + "\", \"--root\", \".\"]");
             builder.Append("startup_timeout_sec = 120");
             return builder.ToString();

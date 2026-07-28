@@ -6,7 +6,10 @@ import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { acquireCodedbHostUseLease } from "../shared/codedb-host-use-gate.mjs";
+import {
+  acquireCodedbHostUseLease,
+  assertCodedbUnityProjectRoot
+} from "../shared/codedb-host-use-gate.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -145,8 +148,7 @@ function createSearchSchema() {
 
 function createContext(args) {
   const options = parseArgs(args);
-  const defaultUnityRoot = path.resolve(__dirname, "..", "..", "..");
-  const unityRoot = path.resolve(process.cwd(), options.root ?? defaultUnityRoot);
+  const unityRoot = resolveWrapperUnityRoot(options.root);
   const projectSlug = createProjectSlug(path.basename(unityRoot));
   const providerName = `codedb-${projectSlug}`;
   const runtimeRoot = path.join(unityRoot, "AIWork", ".runtime", "codedb", providerName);
@@ -174,6 +176,20 @@ function createContext(args) {
   };
 }
 
+function resolveWrapperUnityRoot(rootAssertion) {
+  const wrapperUnityRoot = assertCodedbUnityProjectRoot(path.resolve(__dirname, "..", "..", ".."));
+  if (rootAssertion === undefined) {
+    return wrapperUnityRoot;
+  }
+
+  const assertedRoot = assertCodedbUnityProjectRoot(path.resolve(process.cwd(), rootAssertion));
+  if (normalizeAbsolutePath(assertedRoot) !== normalizeAbsolutePath(wrapperUnityRoot)) {
+    throw new Error(`--root must match wrapper-owned Unity root ${wrapperUnityRoot}; received ${assertedRoot}.`);
+  }
+
+  return wrapperUnityRoot;
+}
+
 function createProjectSlug(value) {
   let result = "";
   let previousWasSeparator = false;
@@ -199,7 +215,13 @@ function parseArgs(args) {
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "--root" && index + 1 < args.length) {
+    if (arg === "--root") {
+      if (index + 1 >= args.length) {
+        throw new Error("--root requires a path assertion.");
+      }
+      if (options.root !== undefined) {
+        throw new Error("--root may be specified only once.");
+      }
       options.root = args[index + 1];
       index += 1;
     } else if (arg === "--print-context") {
@@ -590,7 +612,6 @@ function normalizeSearchScope(value) {
 function stripWrapperOnlyArgs(args) {
   const clone = { ...args };
   delete clone.language;
-  delete clone.regex;
   return clone;
 }
 

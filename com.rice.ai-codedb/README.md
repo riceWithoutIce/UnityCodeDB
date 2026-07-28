@@ -70,8 +70,8 @@ name. Its closed schema is:
   "git_head": "<current repository HEAD>",
   "action": "Sync",
   "package_version": "0.2.0",
-  "payload_version": "poc.16",
-  "payload_sequence": 16,
+  "payload_version": "poc.17",
+  "payload_sequence": 17,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 21,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."

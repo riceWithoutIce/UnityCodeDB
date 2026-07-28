@@ -8,6 +8,35 @@ const MATERIALIZER_RUNTIME = path.join("AIWork", ".runtime", "codedb", "payload-
 const ACTIVE_MARKER = "materialize-active.json";
 const LEASE_DIRECTORY = "host-use-leases";
 const LEASE_OWNERS = new Set(["mcp", "watcher"]);
+const UNITY_PROJECT_MARKERS = ["Assets", "Packages", "ProjectSettings"];
+
+export function assertCodedbUnityProjectRoot(unityRoot) {
+  const candidate = String(unityRoot ?? "").trim();
+  if (!candidate) {
+    throw new Error("CodeDB requires a Unity project root.");
+  }
+
+  const resolvedRoot = path.resolve(candidate);
+  let root;
+  try {
+    root = fs.realpathSync(resolvedRoot);
+  } catch (error) {
+    throw new Error(`Invalid Unity project root ${resolvedRoot}: ${error.message}`);
+  }
+
+  if (!fs.statSync(root).isDirectory()) {
+    throw new Error(`Invalid Unity project root ${root}: expected a directory.`);
+  }
+
+  for (const marker of UNITY_PROJECT_MARKERS) {
+    const markerPath = path.join(root, marker);
+    if (!fs.existsSync(markerPath) || !fs.statSync(markerPath).isDirectory()) {
+      throw new Error(`Invalid Unity project root ${root}: missing ${marker} directory.`);
+    }
+  }
+
+  return root;
+}
 
 export function acquireCodedbHostUseLease(unityRoot, owner) {
   const normalizedOwner = String(owner ?? "").trim().toLowerCase();
@@ -15,7 +44,7 @@ export function acquireCodedbHostUseLease(unityRoot, owner) {
     throw new Error(`Unsupported CodeDB host-use lease owner: ${owner}`);
   }
 
-  const root = path.resolve(String(unityRoot ?? ""));
+  const root = assertCodedbUnityProjectRoot(unityRoot);
   const runtimeRoot = path.join(root, MATERIALIZER_RUNTIME);
   assertPathInside(runtimeRoot, root, "CodeDB host-use gate runtime");
   const activeMarkerPath = path.join(runtimeRoot, ACTIVE_MARKER);

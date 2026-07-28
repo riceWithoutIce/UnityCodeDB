@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Began the v0.2.1 correctness work by pinning project MCP registrations to
+  `cwd = "."`, making the installed wrapper path authoritative for Unity-root
+  resolution, validating Unity markers before host-use writes, rejecting
+  direct Provider registration, and preserving Provider `regex` arguments.
+
 ## 0.2.0 - 2026-07-26
 
 - Added the attributed Streamline Plump Free brand icon to the Manager window,

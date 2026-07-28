@@ -28,6 +28,22 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbProjectSettings.TrackedHostAuthorizationRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/authorizations"));
             Assert.That(AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath, Is.EqualTo("Tools~/materialize-codedb-host-payload.ps1"));
         }
+
+        [Test]
+        public void ProjectMcpRegistrationSnippet_PinsUnityProjectWorkingDirectory()
+        {
+            var snippet = AICodedbProjectSettings.BuildProjectMcpRegistrationSnippet()
+                .Replace("\r\n", "\n");
+
+            Assert.That(
+                snippet,
+                Is.EqualTo(
+                    "[mcp_servers." + AICodedbProjectSettings.ProviderSlug + "]\n" +
+                    "command = \"node\"\n" +
+                    "cwd = \".\"\n" +
+                    "args = [\"AIWork/codedb/wrapper/codedb-project-wrapper.mjs\", \"--root\", \".\"]\n" +
+                    "startup_timeout_sec = 120"));
+        }
     }
 
     internal sealed class AICodedbBrandAssetsTests

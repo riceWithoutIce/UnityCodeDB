@@ -229,6 +229,49 @@ function Invoke-PowerShellAction {
     }
 }
 
+function Invoke-NativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [int]$TimeoutMilliseconds = 10000
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $Arguments
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        $null = $process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "Native process timed out after $TimeoutMilliseconds ms: $FilePath $Arguments"
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = $stdout
+            StandardError = $stderr
+            Text = ($stdout + $stderr).Trim()
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Get-LastJsonObject {
     param(
         [Parameter(Mandatory = $true)]$Result,
@@ -728,6 +771,7 @@ public static class CodedbMaterializerFreshnessProbe {
 # config sentinel
 [mcp_servers.codedb-fixture]
 command = "node"
+cwd = "."
 args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]
 startup_timeout_sec = 120
 "@
@@ -1562,8 +1606,8 @@ try {
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
     Assert-Equal -Actual $marker.package_version -Expected "0.2.0" -Message "Marker package version mismatch."
-    Assert-Equal -Actual $marker.payload_version -Expected "poc.16" -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 16 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_version -Expected "poc.17" -Message "Marker payload version mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 17 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual @($marker.files).Count -Expected 21 -Message "Marker file count mismatch."
     Assert-NoMaterializerResidue
@@ -1674,6 +1718,61 @@ try {
     Assert-Equal -Actual $wrapperContext.project_slug -Expected "fixture" -Message "Materialized wrapper project slug mismatch."
     Assert-Equal -Actual $wrapperContext.provider_name -Expected "codedb-fixture" -Message "Materialized wrapper provider name mismatch."
     Assert-Equal -Actual $wrapperContext.runtime_root -Expected "AIWork/.runtime/codedb/codedb-fixture" -Message "Materialized wrapper runtime root mismatch."
+
+    $outerWorkingRoot = Join-Path $runRoot "wrapper-outer-cwd"
+    New-Item -ItemType Directory -Force -Path $outerWorkingRoot | Out-Null
+    $outerContextProbe = Invoke-NativeProcess `
+        -FilePath $nodePath `
+        -Arguments "`"$materializedWrapper`" --print-context" `
+        -WorkingDirectory $outerWorkingRoot
+    Assert-Equal -Actual $outerContextProbe.ExitCode -Expected 0 -Message "Wrapper self-path root probe failed."
+    $outerContext = $outerContextProbe.StandardOutput | ConvertFrom-Json
+    Assert-Equal -Actual $outerContext.provider_name -Expected "codedb-fixture" -Message "Wrapper did not derive its project from its installed path."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $outerWorkingRoot "AIWork"))) -Message "Wrapper self-path context probe created outer AIWork state."
+
+    $outerRootAssertion = Invoke-NativeProcess `
+        -FilePath $nodePath `
+        -Arguments "`"$materializedWrapper`" --root ." `
+        -WorkingDirectory $outerWorkingRoot
+    Assert-True -Condition ($outerRootAssertion.ExitCode -ne 0) -Message "Wrapper accepted an invalid outer-working-directory root assertion."
+    Assert-True -Condition ($outerRootAssertion.Text -like "*Invalid Unity project root*") -Message "Invalid outer root did not report Unity marker validation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $outerWorkingRoot "AIWork"))) -Message "Invalid outer root created AIWork before validation."
+
+    $materializedHostUseGate = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/shared/codedb-host-use-gate.mjs"
+    $hostUseGateUri = ([System.Uri]::new($materializedHostUseGate)).AbsoluteUri
+    $hostUseGateProbePath = Join-Path $runRoot "invalid-host-use-gate-probe.mjs"
+    Write-Utf8File -Path $hostUseGateProbePath -Content @"
+import { acquireCodedbHostUseLease } from "$hostUseGateUri";
+
+try {
+  const lease = acquireCodedbHostUseLease(process.argv[2], "mcp");
+  lease.release();
+  process.stderr.write("Host-use gate accepted an invalid Unity root.\n");
+  process.exit(2);
+} catch (error) {
+  process.stderr.write(String(error.message) + "\n");
+}
+"@
+    $hostUseGateProbe = Invoke-NativeProcess `
+        -FilePath $nodePath `
+        -Arguments "`"$hostUseGateProbePath`" `"$outerWorkingRoot`"" `
+        -WorkingDirectory $outerWorkingRoot
+    Assert-Equal -Actual $hostUseGateProbe.ExitCode -Expected 0 -Message "Host-use gate invalid-root probe failed."
+    Assert-True -Condition ($hostUseGateProbe.Text -like "*Invalid Unity project root*") -Message "Host-use gate did not validate Unity markers before lease creation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $outerWorkingRoot "AIWork"))) -Message "Host-use gate created runtime directories before Unity-root validation."
+
+    $wrongUnityRoot = Join-Path $runRoot "wrong-unity-root"
+    New-Item -ItemType Directory -Force -Path (Join-Path $wrongUnityRoot "Assets") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $wrongUnityRoot "Packages") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $wrongUnityRoot "ProjectSettings") | Out-Null
+    $wrongRootAssertion = Invoke-NativeProcess `
+        -FilePath $nodePath `
+        -Arguments "`"$materializedWrapper`" --root `"$wrongUnityRoot`"" `
+        -WorkingDirectory $hostRoot
+    Assert-True -Condition ($wrongRootAssertion.ExitCode -ne 0) -Message "Wrapper accepted another valid Unity project as its root assertion."
+    Assert-True -Condition ($wrongRootAssertion.Text -like "*--root must match wrapper-owned Unity root*") -Message "Wrong Unity root did not report the wrapper ownership mismatch."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $wrongUnityRoot "AIWork"))) -Message "Wrong Unity root created AIWork before ownership validation."
+    Write-Host "[OK] Wrapper root authority rejected outer and wrong-project roots without runtime writes."
 
     $readEscapeRoot = Join-Path $runRoot "read-escape-source"
     New-Item -ItemType Directory -Force -Path $readEscapeRoot | Out-Null
@@ -2033,11 +2132,12 @@ try {
         -WrapperPath $materializedWrapper `
         -Root $hostRoot `
         -ToolName "codedb_text_search" `
-        -Arguments ([ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; path = "Assets/Scoped"; limit = 2 }) `
+        -Arguments ([ordered]@{ query = "CODEDB_SCOPE_CONTRACT"; path = "Assets/Scoped"; limit = 2; regex = $true }) `
         -WaitForCoordinatorStatePath $coordinatorStatePath `
         -WaitForWatchMarkerPath $watchMarkerPath
     Assert-True -Condition ($scopedTextSearch.Contains('"path_glob":"Assets/Scoped/**"')) -Message "Wrapper did not normalize path to a directory path_glob before Provider routing."
     Assert-True -Condition (-not $scopedTextSearch.Contains('"path":"Assets/Scoped"')) -Message "Wrapper forwarded the legacy path alias to the Provider."
+    Assert-True -Condition ($scopedTextSearch.Contains('"regex":true')) -Message "Wrapper stripped the regex flag before Provider routing."
     Assert-Equal -Actual ([regex]::Matches($scopedTextSearch, '(?m)^\[HIT\] ').Count) -Expected 2 -Message "Merged text search did not enforce one global limit."
     Assert-True -Condition ($scopedTextSearch.Contains("Assets/Scoped/ScopedProbe.cs:1 [provider]")) -Message "Scoped text search omitted the Provider C# lane."
     Assert-True -Condition ($scopedTextSearch.Contains("Assets/Scoped/ScopedProbe.shader:2 [provider+shader-adapter]")) -Message "Scoped text search did not deduplicate and merge the Shader lanes."
@@ -2576,6 +2676,7 @@ try {
         "- Target file: .codex/config.toml",
         "[mcp_servers.codedb-fixture]",
         'command = "node"',
+        'cwd = "."',
         'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
         '"registrationPolicy"',
         '"manual-review-only"'
@@ -2589,6 +2690,7 @@ try {
     }
     Assert-Result -Result $mcpValidationResult -ExitCode 0 -Label "Materialized MCP project config validation"
     foreach ($expected in @(
+        "OK: MCP working directory matches expected project-level value.",
         "OK: Project config uses the package-neutral wrapper MCP command shape.",
         "OK: Shader/HLSL text adapter manifest is present for wrapper routing.",
         "OK: .codex/config.toml uses relative paths only.",
@@ -2596,8 +2698,52 @@ try {
     )) {
         Assert-True -Condition ($mcpValidationResult.Text.Contains($expected)) -Message "MCP project config validation is missing '$expected'."
     }
+
+    $fixtureMcpConfigPath = Join-Path $hostRoot ".codex\config.toml"
+    $validMcpConfig = Get-Content -LiteralPath $fixtureMcpConfigPath -Raw
+    $validMcpConfigLastWriteTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($fixtureMcpConfigPath)
+    try {
+        $missingCwdConfig = $validMcpConfig -replace '(?m)^\s*cwd\s*=\s*"\."\s*\r?\n', ''
+        Write-Utf8File -Path $fixtureMcpConfigPath -Content $missingCwdConfig
+        $missingCwdValidation = Invoke-PowerShellAction -Action {
+            & $materializedMcpValidator
+        }
+        Assert-Result -Result $missingCwdValidation -ExitCode 1 -Label "Missing-cwd MCP project config validation"
+        Assert-True `
+            -Condition ($missingCwdValidation.Text.Contains("FAIL: MCP working directory must appear exactly once in the project MCP section.")) `
+            -Message "MCP validator accepted a project registration without cwd."
+
+        $wrongCwdConfig = $validMcpConfig.Replace('cwd = "."', 'cwd = ".."')
+        Write-Utf8File -Path $fixtureMcpConfigPath -Content $wrongCwdConfig
+        $wrongCwdValidation = Invoke-PowerShellAction -Action {
+            & $materializedMcpValidator
+        }
+        Assert-Result -Result $wrongCwdValidation -ExitCode 1 -Label "Wrong-cwd MCP project config validation"
+        Assert-True `
+            -Condition ($wrongCwdValidation.Text.Contains('FAIL: MCP working directory differs from the required project-level value: cwd = "."')) `
+            -Message "MCP validator accepted a project registration with the wrong cwd."
+
+        Write-Utf8File -Path $fixtureMcpConfigPath -Content @"
+# config sentinel
+[mcp_servers.codedb-fixture]
+command = "AIWork/.runtime/codedb/codedb-fixture/bin/codebase-mcp.exe"
+cwd = "."
+args = ["mcp", "--root", ".", "--config", "AIWork/.runtime/codedb/codedb-fixture/config/codedb-mcp.toml", "--no-watch"]
+startup_timeout_sec = 120
+"@
+        $directProviderValidation = Invoke-PowerShellAction -Action {
+            & $materializedMcpValidator
+        }
+        Assert-Result -Result $directProviderValidation -ExitCode 1 -Label "Direct-Provider MCP project config validation"
+        Assert-True `
+            -Condition ($directProviderValidation.Text.Contains("FAIL: Direct Provider registration is not accepted for formal project MCP configuration. Use the project wrapper.")) `
+            -Message "MCP validator accepted the direct Provider transition shape."
+    } finally {
+        Write-Utf8File -Path $fixtureMcpConfigPath -Content $validMcpConfig
+        [System.IO.File]::SetLastWriteTimeUtc($fixtureMcpConfigPath, $validMcpConfigLastWriteTimeUtc)
+    }
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeMcpGuidance -Message "MCP project config validation changed host files."
-    Write-Host "[OK] Materialized MCP draft and project config validation preserved host-owned configuration."
+    Write-Host "[OK] Materialized MCP draft enforced cwd and wrapper-only registration without mutating host configuration."
 
     $verify = Invoke-Materializer -Action "Verify" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $verify -ExitCode 0 -Label "Current Verify"

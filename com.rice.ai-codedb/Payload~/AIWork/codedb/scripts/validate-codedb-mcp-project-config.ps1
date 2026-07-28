@@ -31,21 +31,66 @@ function Test-ContainsLiteral {
     return $Content.IndexOf($Literal, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
-function Assert-LiteralLine {
+function Get-TomlSection {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Content,
         [Parameter(Mandatory = $true)]
-        [string]$Literal,
+        [string]$Name
+    )
+
+    $foundCount = 0
+    $capture = $false
+    $sectionLines = @()
+    foreach ($line in [regex]::Split($Content, '\r\n|\n|\r')) {
+        $sectionMatch = [regex]::Match($line, '^\s*\[([^\]]+)\]\s*(?:#.*)?$')
+        if ($sectionMatch.Success) {
+            $capture = [string]::Equals($sectionMatch.Groups[1].Value, $Name, [StringComparison]::OrdinalIgnoreCase)
+            if ($capture) {
+                $foundCount += 1
+                $capture = $foundCount -eq 1
+            }
+            continue
+        }
+
+        if ($capture) {
+            $sectionLines += $line
+        }
+    }
+
+    return [pscustomobject]@{
+        Count = $foundCount
+        Content = $sectionLines -join "`n"
+    }
+}
+
+function Assert-TomlSectionValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SectionContent,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedValue,
         [Parameter(Mandatory = $true)]
         [string]$Label
     )
 
-    if (Test-ContainsLiteral -Content $Content -Literal $Literal) {
-        Record-Pass "$Label matches expected project-level value."
-    } else {
-        Record-Failure "$Label is missing or differs from expected value: $Literal"
+    $escapedKey = [regex]::Escape($Key)
+    $assignmentPattern = "(?im)^\s*$escapedKey\s*="
+    $expectedPattern = "(?im)^\s*$escapedKey\s*=\s*$([regex]::Escape($ExpectedValue))\s*(?:#.*)?$"
+    $assignments = [regex]::Matches($SectionContent, $assignmentPattern)
+    if ($assignments.Count -ne 1) {
+        Record-Failure "$Label must appear exactly once in the project MCP section."
+        return
     }
+
+    if (-not [regex]::IsMatch($SectionContent, $expectedPattern)) {
+        Record-Failure "$Label differs from the required project-level value: $Key = $ExpectedValue"
+        return
+    }
+
+    Record-Pass "$Label matches expected project-level value."
 }
 
 function Test-HasMachineLocalPath {
@@ -82,41 +127,48 @@ if (-not (Test-Path -LiteralPath $projectConfigPath)) {
     $compatibilityWrapperPath = Join-Path $context.CodedbRoot "wrapper\codedb-$($context.ProjectSlug)-wrapper.mjs"
     $relativeCompatibilityWrapperPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $compatibilityWrapperPath
 
-    Assert-LiteralLine -Content $config -Literal "[mcp_servers.$($context.ProviderName)]" -Label "MCP server section"
-    Assert-LiteralLine -Content $config -Literal "startup_timeout_sec = 120" -Label "Startup timeout"
-
-    $usesProjectWrapper = Test-ContainsLiteral -Content $config -Literal "args = [`"$relativeWrapperPath`", `"--root`", `".`"]"
-    $usesCompatibilityWrapper = (Test-Path -LiteralPath $compatibilityWrapperPath -PathType Leaf) -and
-        (Test-ContainsLiteral -Content $config -Literal "args = [`"$relativeCompatibilityWrapperPath`", `"--root`", `".`"]")
-    $usesWrapper = (Test-ContainsLiteral -Content $config -Literal 'command = "node"') -and
-        ($usesProjectWrapper -or $usesCompatibilityWrapper)
-    $usesDirectProvider = (Test-ContainsLiteral -Content $config -Literal "command = `"$relativeExePath`"") -and
-        (Test-ContainsLiteral -Content $config -Literal "args = [`"mcp`", `"--root`", `".`", `"--config`", `"$relativeConfigPath`", `"--no-watch`"]")
-
-    if ($usesWrapper) {
-        if ($usesProjectWrapper) {
-            Record-Pass "Project config uses the package-neutral wrapper MCP command shape."
-        } else {
-            Record-Pass "Project config uses the host compatibility wrapper MCP command shape."
-        }
-
-        $referencedWrapperPath = if ($usesProjectWrapper) { $context.WrapperScriptPath } else { $compatibilityWrapperPath }
-        $referencedRelativeWrapperPath = if ($usesProjectWrapper) { $relativeWrapperPath } else { $relativeCompatibilityWrapperPath }
-        if (Test-Path -LiteralPath $referencedWrapperPath -PathType Leaf) {
-            Record-Pass "Referenced wrapper script exists under tracked codedb files."
-        } else {
-            Record-Failure "Missing wrapper script: $referencedRelativeWrapperPath"
-        }
-
-        if (Test-Path -LiteralPath $context.TextAdapterManifestPath -PathType Leaf) {
-            Record-Pass "Shader/HLSL text adapter manifest is present for wrapper routing."
-        } else {
-            Record-Failure "Missing Shader/HLSL text adapter manifest. Build the adapter before registering the wrapper."
-        }
-    } elseif ($usesDirectProvider) {
-        Record-Pass "Project config still uses the direct provider command shape; accepted only as a transition before wrapper registration."
+    $serverSectionName = "mcp_servers.$($context.ProviderName)"
+    $serverSection = Get-TomlSection -Content $config -Name $serverSectionName
+    if ($serverSection.Count -ne 1) {
+        Record-Failure "MCP server section [$serverSectionName] must appear exactly once."
     } else {
-        Record-Failure "Project config must use either the wrapper command shape or the direct provider transition shape."
+        Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "command" -ExpectedValue '"node"' -Label "MCP command"
+        Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "cwd" -ExpectedValue '"."' -Label "MCP working directory"
+        Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "startup_timeout_sec" -ExpectedValue "120" -Label "Startup timeout"
+
+        $usesProjectWrapper = Test-ContainsLiteral -Content $serverSection.Content -Literal "args = [`"$relativeWrapperPath`", `"--root`", `".`"]"
+        $usesCompatibilityWrapper = (Test-Path -LiteralPath $compatibilityWrapperPath -PathType Leaf) -and
+            (Test-ContainsLiteral -Content $serverSection.Content -Literal "args = [`"$relativeCompatibilityWrapperPath`", `"--root`", `".`"]")
+        $usesWrapper = (Test-ContainsLiteral -Content $serverSection.Content -Literal 'command = "node"') -and
+            ($usesProjectWrapper -or $usesCompatibilityWrapper)
+        $usesDirectProvider = (Test-ContainsLiteral -Content $serverSection.Content -Literal "command = `"$relativeExePath`"") -and
+            (Test-ContainsLiteral -Content $serverSection.Content -Literal "args = [`"mcp`", `"--root`", `".`", `"--config`", `"$relativeConfigPath`", `"--no-watch`"]")
+
+        if ($usesWrapper) {
+            if ($usesProjectWrapper) {
+                Record-Pass "Project config uses the package-neutral wrapper MCP command shape."
+            } else {
+                Record-Pass "Project config uses the host compatibility wrapper MCP command shape."
+            }
+
+            $referencedWrapperPath = if ($usesProjectWrapper) { $context.WrapperScriptPath } else { $compatibilityWrapperPath }
+            $referencedRelativeWrapperPath = if ($usesProjectWrapper) { $relativeWrapperPath } else { $relativeCompatibilityWrapperPath }
+            if (Test-Path -LiteralPath $referencedWrapperPath -PathType Leaf) {
+                Record-Pass "Referenced wrapper script exists under tracked codedb files."
+            } else {
+                Record-Failure "Missing wrapper script: $referencedRelativeWrapperPath"
+            }
+
+            if (Test-Path -LiteralPath $context.TextAdapterManifestPath -PathType Leaf) {
+                Record-Pass "Shader/HLSL text adapter manifest is present for wrapper routing."
+            } else {
+                Record-Failure "Missing Shader/HLSL text adapter manifest. Build the adapter before registering the wrapper."
+            }
+        } elseif ($usesDirectProvider) {
+            Record-Failure "Direct Provider registration is not accepted for formal project MCP configuration. Use the project wrapper."
+        } else {
+            Record-Failure "Project config must use the project wrapper command shape."
+        }
     }
 
     if (Test-HasMachineLocalPath -Content $config) {

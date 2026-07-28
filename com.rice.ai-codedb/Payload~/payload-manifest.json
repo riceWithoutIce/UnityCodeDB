@@ -2,8 +2,8 @@
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
   "package_version": "0.2.0",
-  "payload_version": "poc.16",
-  "payload_sequence": 16,
+  "payload_version": "poc.17",
+  "payload_sequence": 17,
   "retired_targets": [],
   "files": [
     {
@@ -44,7 +44,7 @@
     {
       "source": "AIWork/codedb/scripts/emit-codedb-mcp-registration-draft.ps1",
       "target": "AIWork/codedb/scripts/emit-codedb-mcp-registration-draft.ps1",
-      "sha256": "cea8c232181ed8e5409fad1152f929ae2f14876c79eb5558438aa6f5a29bdc38"
+      "sha256": "892f72ec6692c8a8ec38b30fe64b2126020db710410f8ef8d462a1e3ee8d440d"
     },
     {
       "source": "AIWork/codedb/scripts/manage-codedb-project-watch.ps1",
@@ -94,7 +94,7 @@
     {
       "source": "AIWork/codedb/scripts/validate-codedb-mcp-project-config.ps1",
       "target": "AIWork/codedb/scripts/validate-codedb-mcp-project-config.ps1",
-      "sha256": "50c3cad7339643de25f3e36a78aa3feca632f8494f4cb51aa93c398f98dac5c7"
+      "sha256": "887f3d134048b9a588e29b02c2c7083f92f313ff3686bc822da33e77d62547ca"
     },
     {
       "source": "AIWork/codedb/scripts/verify-codedb-project.ps1",
@@ -104,12 +104,12 @@
     {
       "source": "AIWork/codedb/shared/codedb-host-use-gate.mjs",
       "target": "AIWork/codedb/shared/codedb-host-use-gate.mjs",
-      "sha256": "02dd874649e5d7a4d0ebfc1e6d1af8ea4362672c9cd617d742a157f294fcd8b3"
+      "sha256": "c5d74b434c5a2140fa798511051c51fe4d5de3af36c8133219bdb8773c50efdb"
     },
     {
       "source": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
       "target": "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
-      "sha256": "283e7bd53630a0bd04d009d6151305388c9ccd3f8eaf47c77268f1cff939a167"
+      "sha256": "7e6badbdf62c6f3585bdffe28d80716390d5f0104f2b7c63a618f40951a1b4f5"
     }
   ]
 }

@@ -38,6 +38,7 @@ $projectConfigPath = ".codex/config.toml"
 $projectConfigDraft = @"
 [mcp_servers.$($context.ProviderName)]
 command = "node"
+cwd = "."
 args = ["$relativeWrapperPath", "--root", "."]
 startup_timeout_sec = 120
 "@
