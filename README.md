@@ -14,6 +14,10 @@ The current release targets Unity `2022.3` on Windows. It keeps every generated
 index, provider binary, log, and watcher state inside the consuming Unity
 project's ignored runtime instead of sharing state across projects.
 
+<p align="center">
+  <img src="com.rice.ai-codedb/Documentation~/images/meme.png" width="256" alt="RG versus CodeDB meme">
+</p>
+
 ## Package
 
 - Package name: `com.rice.ai-codedb`
