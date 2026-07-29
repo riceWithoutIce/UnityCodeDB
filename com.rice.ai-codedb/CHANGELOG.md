@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.3 - 2026-07-29
+
+- Added immutable project-local host generations and atomic `current.json`
+  selection. Owned v0.2.2 installations can upgrade automatically while
+  existing MCP sessions drain, with durable rollback evidence and no process
+  termination of Unity, Codex, or the MCP client transport and no manual lease
+  cleanup. Watcher handoff gracefully stops the old backend after its request
+  leases drain.
+- Kept the stable MCP stdio bridge alive while Unity is offline. Tool calls pin
+  one generation, acquire generation-scoped leases, and reattach to the
+  Editor-owned backend after Unity reopens in the same client session.
+- Split persistent `Start with Unity Editor` policy from Start, Stop, and
+  Restart commands scoped to the Editor cohort present when they are issued.
+  Added an independent automatic-host-update policy, multi-owner diagnostics,
+  generation status, draining state, and last-known-good/upgrade-state
+  visibility in the Manager.
+- Hardened multi-Editor upgrade election, watcher handoff, crash recovery,
+  PID-reuse handling, legacy watcher identity checks, and transactional Remove
+  cleanup for current, candidate, and last-known-good generations.
+
 ## 0.2.2 - 2026-07-28
 
 - Made Ready coordinator queries reliable across Windows elevation boundaries

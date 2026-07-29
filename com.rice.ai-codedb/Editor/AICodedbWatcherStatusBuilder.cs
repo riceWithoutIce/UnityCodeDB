@@ -8,6 +8,7 @@ namespace Rice.AI.Codedb.Editor
         Disabled,
         Paused,
         Pending,
+        ManualStopped,
         EditorOffline,
         Starting,
         Ready,
@@ -24,6 +25,9 @@ namespace Rice.AI.Codedb.Editor
         internal string Detail { get; }
         internal bool HasKnownOptIn { get; }
         internal bool IsOptInEnabled { get; }
+        internal string ManualMode { get; }
+        internal bool IsManualStopped => string.Equals(ManualMode, "stopped", StringComparison.Ordinal);
+        internal bool IsManualStarted => string.Equals(ManualMode, "started", StringComparison.Ordinal);
         internal bool NeedsRepair => State == AICodedbWatcherState.Stale || State == AICodedbWatcherState.DisabledRunning;
 
         internal AICodedbWatcherStatus(
@@ -33,6 +37,18 @@ namespace Rice.AI.Codedb.Editor
             string detail,
             bool hasKnownOptIn,
             bool isOptInEnabled)
+            : this(state, displayState, label, detail, hasKnownOptIn, isOptInEnabled, "none")
+        {
+        }
+
+        internal AICodedbWatcherStatus(
+            AICodedbWatcherState state,
+            AICodedbStatusState displayState,
+            string label,
+            string detail,
+            bool hasKnownOptIn,
+            bool isOptInEnabled,
+            string manualMode)
         {
             State = state;
             DisplayState = displayState;
@@ -40,6 +56,7 @@ namespace Rice.AI.Codedb.Editor
             Detail = detail ?? string.Empty;
             HasKnownOptIn = hasKnownOptIn;
             IsOptInEnabled = isOptInEnabled;
+            ManualMode = string.IsNullOrWhiteSpace(manualMode) ? "none" : manualMode;
         }
 
         internal static AICodedbWatcherStatus Unknown(string detail)
@@ -84,8 +101,13 @@ namespace Rice.AI.Codedb.Editor
             }
 
             var output = result.StandardOutput ?? string.Empty;
-            var enabled = Contains(output, "Watch opt-in: ENABLED");
-            var disabled = Contains(output, "Watch opt-in: DISABLED");
+            var enabled = Contains(output, "Start with Unity Editor: ENABLED")
+                          || Contains(output, "Watch opt-in: ENABLED");
+            var disabled = Contains(output, "Start with Unity Editor: DISABLED")
+                           || Contains(output, "Watch opt-in: DISABLED");
+            var manualStopped = Contains(output, "Manual runtime: STOPPED");
+            var manualStarted = Contains(output, "Manual runtime: STARTED");
+            var manualMode = manualStopped ? "stopped" : manualStarted ? "started" : "none";
             var automaticPaused = Contains(output, "Automatic refresh: PAUSED");
             var automaticPending = Contains(output, "Automatic refresh: PENDING");
             var automaticDisabled = Contains(output, "Automatic refresh: DISABLED");
@@ -101,10 +123,40 @@ namespace Rice.AI.Codedb.Editor
                                 || Contains(output, "adapter_build_failed")
                                 || Contains(output, "adapter_watcher_failed");
             var ready = providerReady && adapterOperational;
-            var running = providerReady || Contains(output, "watch coordinator running");
+            var running = providerReady
+                          || Contains(output, "watch coordinator running")
+                          || Contains(output, "\"action\":\"running\"")
+                          || Contains(output, "Watch coordinator: ready")
+                          || Contains(output, "Watch coordinator: unreachable");
             var stopped = Contains(output, "watch coordinator stopped")
-                          || Contains(output, "watch coordinator already_stopped");
+                          || Contains(output, "watch coordinator already_stopped")
+                          || Contains(output, "Watch coordinator: stopped")
+                          || Contains(output, "\"action\":\"stopped\"");
             var stale = Contains(output, "[STALE]") || Contains(output, "\"action\":\"stale\"");
+            if (manualStopped && (running || stale))
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Stale,
+                    AICodedbStatusState.Warning,
+                    "Stop incomplete",
+                    "The current Editor session requested Stop now, but the coordinator is still running.",
+                    enabled || disabled,
+                    enabled,
+                    manualMode);
+            }
+
+            if (manualStopped && stopped)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.ManualStopped,
+                    AICodedbStatusState.Inactive,
+                    "Stopped now",
+                    "CodeDB is suppressed for the current Editor session.",
+                    enabled || disabled,
+                    enabled,
+                    manualMode);
+            }
+
             if (enabled && editorOnline && automaticStarting && !adapterFailed && !stale)
             {
                 return new AICodedbWatcherStatus(
@@ -116,7 +168,7 @@ namespace Rice.AI.Codedb.Editor
                     true);
             }
 
-            if (stale || adapterFailed || (enabled && running && !ready))
+            if (stale || adapterFailed || ((enabled || manualStarted) && running && !ready))
             {
                 return new AICodedbWatcherStatus(
                     AICodedbWatcherState.Stale,
@@ -125,8 +177,21 @@ namespace Rice.AI.Codedb.Editor
                     adapterFailed
                         ? "Automatic refresh is enabled, but the Shader adapter watcher failed."
                         : "Automatic refresh is enabled, but provider/adapter coordination is not ready.",
+                    enabled || disabled,
                     enabled,
-                    enabled);
+                    manualMode);
+            }
+
+            if (manualStarted && ready)
+            {
+                return new AICodedbWatcherStatus(
+                    AICodedbWatcherState.Ready,
+                    AICodedbStatusState.Ok,
+                    "Started now / Ready",
+                    "CodeDB is running for the current Editor session without changing persistent policy.",
+                    enabled || disabled,
+                    enabled,
+                    manualMode);
             }
 
             if (disabled && running)
@@ -215,6 +280,8 @@ namespace Rice.AI.Codedb.Editor
         {
             return Contains(actionTitle, "Watcher")
                    || Contains(output, "Watch opt-in:")
+                   || Contains(output, "Start with Unity Editor:")
+                   || Contains(output, "Manual runtime:")
                    || Contains(output, "Automatic refresh:");
         }
 

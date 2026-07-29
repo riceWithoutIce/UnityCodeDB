@@ -25,6 +25,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbProjectSettings.TextAdapterProbeScriptRelativePath, Is.EqualTo("AIWork/codedb/scripts/probe-codedb-project-text-adapter.ps1"));
             Assert.That(AICodedbProjectSettings.PackageName, Is.EqualTo("com.rice.ai-codedb"));
             Assert.That(AICodedbProjectSettings.HostPayloadMarkerRelativePath, Is.EqualTo("AIWork/codedb/.rice-ai-codedb-payload.json"));
+            Assert.That(AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath, Is.EqualTo("AIWork/.runtime/codedb/host/last-known-good.json"));
+            Assert.That(AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/upgrade-state.json"));
             Assert.That(AICodedbProjectSettings.TrackedHostAuthorizationRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/authorizations"));
             Assert.That(AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath, Is.EqualTo("Tools~/materialize-codedb-host-payload.ps1"));
         }
@@ -43,6 +45,38 @@ namespace Rice.AI.Codedb.Editor.Tests
                     "cwd = \".\"\n" +
                     "args = [\"AIWork/codedb/wrapper/codedb-project-wrapper.mjs\", \"--root\", \".\"]\n" +
                     "startup_timeout_sec = 120"));
+        }
+    }
+
+    internal sealed class AICodedbHostManagementStatusTests
+    {
+        [TestCase(AICodedbStatusState.Ok, AICodedbStatusState.Ok)]
+        [TestCase(AICodedbStatusState.Inactive, AICodedbStatusState.Ok)]
+        [TestCase(AICodedbStatusState.Warning, AICodedbStatusState.Warning)]
+        [TestCase(AICodedbStatusState.Error, AICodedbStatusState.Error)]
+        public void GetHostManagementState_IncludesUpgradeSeverity(
+            AICodedbStatusState upgradeState,
+            AICodedbStatusState expected)
+        {
+            Assert.That(
+                AICodedbStatusSnapshot.GetHostManagementState(
+                    AICodedbStatusState.Ok,
+                    AICodedbStatusState.Ok,
+                    upgradeState,
+                    AICodedbStatusState.Ok),
+                Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void GetHostManagementState_IncludesInvalidUpdatePolicy()
+        {
+            Assert.That(
+                AICodedbStatusSnapshot.GetHostManagementState(
+                    AICodedbStatusState.Ok,
+                    AICodedbStatusState.Ok,
+                    AICodedbStatusState.Inactive,
+                    AICodedbStatusState.Error),
+                Is.EqualTo(AICodedbStatusState.Error));
         }
     }
 
@@ -151,6 +185,44 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(timedOut.StatusLabel, Is.EqualTo("Timed Out"));
         }
 
+        [Test]
+        public void Build_HostUpgradeRetainsInstallingAndSwitchingStages()
+        {
+            var summary = AICodedbActivitySummaryBuilder.Build(
+                "Host Payload Upgrade",
+                Result(
+                    "[INSTALLING] Published immutable generation poc.22.\n" +
+                    "[INSTALLING] Retained generation poc.21 as last known good.\n" +
+                    "[SWITCHING] Published current generation pointer for poc.22.\n" +
+                    "[OK] Start with Unity Editor: ENABLED\n" +
+                    "[OK] Host payload upgrade completed."));
+
+            Assert.That(summary.State, Is.EqualTo(AICodedbStatusState.Ok));
+            Assert.That(summary.StatusLabel, Is.EqualTo("Switched"));
+            Assert.That(summary.ItemsTitle, Is.EqualTo("Upgrade stages"));
+            Assert.That(summary.Items, Has.Length.EqualTo(3));
+            Assert.That(summary.Items[1], Does.Contain("last known good"));
+        }
+
+        [Test]
+        public void Build_HostUpgradeSurfacesRollbackStage()
+        {
+            var summary = AICodedbActivitySummaryBuilder.Build(
+                "Host Payload Upgrade",
+                new AICodedbCommandResult(
+                    6,
+                    "[INSTALLING] Published immutable generation poc.22.\n" +
+                    "[SWITCHING] Published current generation pointer for poc.22.\n" +
+                    "[ROLLBACK] Restoring the previous watcher selection.",
+                    "Upgrade failed and was rolled back.",
+                    false));
+
+            Assert.That(summary.State, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(summary.StatusLabel, Is.EqualTo("Rolled Back"));
+            Assert.That(summary.Detail, Does.Contain("previous watcher selection"));
+            Assert.That(summary.Items, Has.Length.EqualTo(3));
+        }
+
         [TestCase("[OK] Watch opt-in: ENABLED\n{\"provider_state\":\"ready\",\"adapter_state\":\"watching\"}", AICodedbStatusState.Ok, "Enabled / Ready")]
         [TestCase("[OK] Watch opt-in: ENABLED\n{\"provider_state\":\"ready\",\"adapter_state\":\"pending\"}", AICodedbStatusState.Ok, "Enabled / Ready")]
         [TestCase("[OK] Watch opt-in: ENABLED\n{\"provider_state\":\"ready\",\"adapter_state\":\"building\"}", AICodedbStatusState.Ok, "Enabled / Ready")]
@@ -164,6 +236,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase("[OK] Watch opt-in: ENABLED\n[OK] Editor demand: ONLINE (1)\n[OK] Automatic refresh: STARTING\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Enabled / Starting")]
         [TestCase("[OK] Watch opt-in: ENABLED\n[OK] Editor demand: OFFLINE (0)\n[OK] Automatic refresh: EDITOR_OFFLINE\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Enabled / Editor Offline")]
         [TestCase("[OK] Watch opt-in: UNKNOWN\n[OK] Automatic refresh: PENDING\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Setup Pending")]
+        [TestCase("[OK] Start with Unity Editor: ENABLED\n[OK] Manual runtime: STOPPED\n[OK] Automatic refresh: MANUAL_STOPPED\n[STOPPED] codedb watch coordinator stopped.", AICodedbStatusState.Inactive, "Stopped now")]
         [TestCase("[OK] Watch command completed.", AICodedbStatusState.Warning, "Unknown")]
         [TestCase("[OK] Watch opt-in: ENABLED", AICodedbStatusState.Warning, "Unknown")]
         [TestCase("[OK] Watch opt-in: DISABLED", AICodedbStatusState.Warning, "Unknown")]
@@ -272,6 +345,27 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(timedOut.Label, Is.EqualTo("Timed Out"));
         }
 
+        [Test]
+        public void Build_ManualStoppedRequiresStoppedCoordinator()
+        {
+            var stopped = AICodedbWatcherStatusBuilder.Build(Result(
+                "[OK] Start with Unity Editor: ENABLED\n" +
+                "[OK] Manual runtime: STOPPED\n" +
+                "[OK] Automatic refresh: MANUAL_STOPPED\n" +
+                "[STOPPED] codedb watch coordinator stopped."));
+            var running = AICodedbWatcherStatusBuilder.Build(Result(
+                "[OK] Start with Unity Editor: ENABLED\n" +
+                "[OK] Manual runtime: STOPPED\n" +
+                "[OK] Automatic refresh: MANUAL_STOPPED\n" +
+                "{\"action\":\"running\",\"provider_state\":\"starting\"}"));
+
+            Assert.That(stopped.State, Is.EqualTo(AICodedbWatcherState.ManualStopped));
+            Assert.That(stopped.DisplayState, Is.EqualTo(AICodedbStatusState.Inactive));
+            Assert.That(stopped.IsManualStopped, Is.True);
+            Assert.That(running.State, Is.EqualTo(AICodedbWatcherState.Stale));
+            Assert.That(running.DisplayState, Is.EqualTo(AICodedbStatusState.Warning));
+        }
+
         private static AICodedbCommandResult Result(string output)
         {
             return new AICodedbCommandResult(0, output, string.Empty, false, 10);
@@ -313,6 +407,54 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Ok));
             Assert.That(status.Summary, Is.EqualTo("CURRENT"));
             Assert.That(status.IsCurrent, Is.True);
+        }
+
+        [Test]
+        public void Build_CurrentGenerationOwnersRemainCurrentAndAreAllRetained()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[ACTIVE] generation poc.22 mcp PID 101\n" +
+                    "[ACTIVE] generation poc.22 watcher PID 202\n" +
+                    "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
+                    "[OK] Host payload is current."),
+                "poc.22");
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Current));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Ok));
+            Assert.That(status.ActiveOwners, Is.EqualTo(new[]
+            {
+                "[ACTIVE] generation poc.22 mcp PID 101",
+                "[ACTIVE] generation poc.22 watcher PID 202"
+            }));
+            Assert.That(status.LegacyMcpSessionCount, Is.Zero);
+        }
+
+        [Test]
+        public void Build_LegacyAndPreviousGenerationOwnersMapCurrentPayloadToDraining()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[ACTIVE] mcp PID 101\n" +
+                    "[ACTIVE] watcher PID 202\n" +
+                    "[ACTIVE] generation poc.21 mcp PID 303\n" +
+                    "[ACTIVE] generation poc.22 watcher PID 404\n" +
+                    "[OK] Host payload is current."),
+                "poc.22");
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Draining));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(status.IsCurrent, Is.True);
+            Assert.That(status.ActiveOwners, Is.EqualTo(new[]
+            {
+                "[ACTIVE] mcp PID 101",
+                "[ACTIVE] watcher PID 202",
+                "[ACTIVE] generation poc.21 mcp PID 303",
+                "[ACTIVE] generation poc.22 watcher PID 404"
+            }));
+            Assert.That(status.LegacyMcpSessionCount, Is.EqualTo(1));
         }
 
         [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]
@@ -380,6 +522,7 @@ namespace Rice.AI.Codedb.Editor.Tests
     {
         [TestCase(AICodedbHostPayloadAction.DryRun)]
         [TestCase(AICodedbHostPayloadAction.Verify)]
+        [TestCase(AICodedbHostPayloadAction.Upgrade)]
         public void BuildScriptArguments_ReadOnlyActionsHaveNoAuthorization(
             AICodedbHostPayloadAction action)
         {
@@ -436,6 +579,124 @@ namespace Rice.AI.Codedb.Editor.Tests
                 authorizationPath,
                 "-ConfirmLegacyMcpStopped"
             }));
+        }
+
+        [Test]
+        public void BuildScriptArguments_UpgradeUsesExactActionAndProjectRoot()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.Upgrade,
+                string.Empty,
+                false);
+
+            Assert.That(arguments, Is.EqualTo(new[]
+            {
+                "-Action",
+                "Upgrade",
+                "-ProjectRoot",
+                AICodedbPaths.ProjectRoot
+            }));
+        }
+    }
+
+    internal sealed class AICodedbHostUpgradeStatusStoreTests
+    {
+        [TestCase("INSTALLING", AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning)]
+        [TestCase("SWITCHING", AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning)]
+        [TestCase("ROLLBACK", AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error)]
+        [TestCase("CURRENT", AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok)]
+        [TestCase("CHECK_FAILED", AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error)]
+        public void Parse_MapsPersistedUpgradePhase(
+            string phase,
+            AICodedbHostUpgradePhase expectedPhase,
+            AICodedbStatusState expectedState)
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson(phase, projectRoot),
+                projectRoot,
+                "upgrade-state.json");
+
+            Assert.That(status.Phase, Is.EqualTo(expectedPhase));
+            Assert.That(status.DisplayState, Is.EqualTo(expectedState));
+            Assert.That(status.Summary, Is.EqualTo(phase + " / poc.22"));
+            Assert.That(status.Detail, Is.EqualTo("upgrade detail"));
+        }
+
+        [Test]
+        public void Parse_FailsClosedForWrongProjectIdentity()
+        {
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", Path.Combine(AICodedbPaths.ProjectRoot, "other")),
+                AICodedbPaths.ProjectRoot,
+                "upgrade-state.json");
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+        }
+
+        [Test]
+        public void ToStatusItem_MarksPersistedCurrentAsHistoricalWithoutInstalledMarker()
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", projectRoot),
+                projectRoot,
+                "upgrade-state.json");
+
+            var item = status.ToStatusItem(false);
+
+            Assert.That(item.State, Is.EqualTo(AICodedbStatusState.Inactive));
+            Assert.That(item.Summary, Is.EqualTo("Historical CURRENT / poc.22"));
+            Assert.That(item.Detail, Does.StartWith("No installed host payload marker exists."));
+        }
+
+        private static string UpgradeStateJson(string phase, string projectRoot)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot);
+            return "{\"schema_version\":1," +
+                   "\"managed_by\":\"com.rice.ai-codedb\"," +
+                   "\"project_root\":\"" + normalizedRoot + "\"," +
+                   "\"state\":\"" + phase + "\"," +
+                   "\"generation_id\":\"poc.22\"," +
+                   "\"updated_at_utc\":\"" + DateTime.UtcNow.ToString("o") + "\"," +
+                   "\"message\":\"upgrade detail\"}";
+        }
+    }
+
+    internal sealed class AICodedbLifecycleControlTests
+    {
+        [TestCase("Enable")]
+        [TestCase("Disable")]
+        [TestCase("Start")]
+        [TestCase("Stop")]
+        [TestCase("Restart")]
+        public void BuildWatcherScriptArguments_UsesExactAction(string action)
+        {
+            Assert.That(
+                AICodedbActions.BuildWatcherScriptArguments(action),
+                Is.EqualTo(new[] { "-Action", action }));
+        }
+
+        [Test]
+        public void LegacyGenerationDisablesLifecycleAndRepairActions()
+        {
+            Assert.That(
+                AICodedbManagerWindow.CanUseLifecycleControls(AICodedbHostGenerationState.Legacy),
+                Is.False);
+            Assert.That(
+                AICodedbManagerWindow.ResolveWatcherRepairLabel(
+                    AICodedbHostGenerationState.Legacy,
+                    AICodedbWatcherState.Stale),
+                Is.Empty);
+            Assert.That(
+                AICodedbManagerWindow.CanUseLifecycleControls(AICodedbHostGenerationState.Current),
+                Is.True);
+            Assert.That(
+                AICodedbManagerWindow.ResolveWatcherRepairLabel(
+                    AICodedbHostGenerationState.Current,
+                    AICodedbWatcherState.Stale),
+                Is.EqualTo("Repair watcher"));
         }
     }
 

@@ -10,6 +10,14 @@ namespace Rice.AI.Codedb.Editor
         internal const string DisplayName = "Rice AI Codedb";
         internal const string MenuRoot = "Tools/Rice AI/Codedb/";
         internal const string DefaultToolProfile = "Discover Read";
+        internal const string CurrentPackageVersion = "0.2.3";
+        internal const string CurrentPayloadVersion = "poc.22";
+        internal const string CurrentGenerationId = "poc.22";
+        internal const int CurrentPayloadSequence = 22;
+        internal const int CurrentBootstrapProtocol = 1;
+        internal const string LegacyPackageVersion = "0.2.2";
+        internal const string LegacyPayloadVersion = "poc.21";
+        internal const int LegacyPayloadSequence = 21;
 
         internal static string ProjectDisplayName => GetUnityProjectName();
         internal static string ProjectSlug => CreateSlug(ProjectDisplayName);
@@ -18,8 +26,16 @@ namespace Rice.AI.Codedb.Editor
         internal static string RuntimeRelativePath => "AIWork/.runtime/codedb/" + ProviderSlug;
         internal static string ScriptRootRelativePath => "AIWork/codedb/scripts";
         internal static string PackageProjectRelativePath => "Packages/" + PackageName;
+        internal static string LegacyHostRootRelativePath => "AIWork/codedb";
         internal static string HostPayloadMarkerRelativePath => "AIWork/codedb/.rice-ai-codedb-payload.json";
+        internal static string HostRuntimeRelativePath => "AIWork/.runtime/codedb/host";
+        internal static string HostGenerationsRelativePath => HostRuntimeRelativePath + "/generations";
+        internal static string HostCurrentPointerRelativePath => HostRuntimeRelativePath + "/current.json";
+        internal static string HostLastKnownGoodPointerRelativePath => HostRuntimeRelativePath + "/last-known-good.json";
+        internal static string HostUpdatePolicyRelativePath => HostRuntimeRelativePath + "/update-policy.json";
+        internal static string HostUnavailableRelativePath => HostRuntimeRelativePath + "/unavailable";
         internal static string HostPayloadMaterializerRuntimeRelativePath => "AIWork/.runtime/codedb/payload-materializer";
+        internal static string HostPayloadUpgradeStateRelativePath => HostPayloadMaterializerRuntimeRelativePath + "/upgrade-state.json";
         internal static string TrackedHostAuthorizationRelativePath => HostPayloadMaterializerRuntimeRelativePath + "/authorizations";
         internal static string HostPayloadMaterializerScriptPackageRelativePath => "Tools~/materialize-codedb-host-payload.ps1";
         internal static string ProviderExecutableRelativePath => RuntimeRelativePath + "/bin/codebase-mcp.exe";

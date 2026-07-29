@@ -38,6 +38,24 @@ function Get-RelativePath {
     return $Path.Substring($Root.TrimEnd('\', '/').Length + 1).Replace('\', '/')
 }
 
+function Assert-SafeRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($Path)) -Message "$Label is empty."
+    Assert-True -Condition (-not [System.IO.Path]::IsPathRooted($Path)) -Message "$Label is rooted: $Path"
+    $normalized = $Path.Replace('\', '/')
+    Assert-True -Condition (-not $normalized.StartsWith("/", [StringComparison]::Ordinal)) -Message "$Label starts at a root: $Path"
+    foreach ($segment in $normalized.Split('/')) {
+        Assert-True `
+            -Condition (-not [string]::IsNullOrWhiteSpace($segment) -and $segment -ne "." -and $segment -ne "..") `
+            -Message "$Label contains an invalid path segment: $Path"
+    }
+    return $normalized
+}
+
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
@@ -69,7 +87,7 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.2" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected "0.2.3" -Label "Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
@@ -152,33 +170,142 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.21" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 21 -Label "Payload sequence"
-Assert-Equal -Actual @($payloadManifest.files).Count -Expected 21 -Label "Payload target count"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.22" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 22 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.22" -Label "Payload generation"
+Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
+Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
+Assert-Equal -Actual @($payloadManifest.files).Count -Expected 43 -Label "Payload target count"
 Assert-Equal -Actual @($payloadManifest.retired_targets).Count -Expected 0 -Label "Retired target count"
 
+$flatTargetPrefix = "AIWork/codedb/"
+$generationSourcePrefix = "Generations/poc.22/"
+$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.22"
+$generationTargetPrefix = $generationTargetRoot + "/"
+$currentPointerSource = "host-current.json"
+$currentPointerTarget = "AIWork/.runtime/codedb/host/current.json"
 $manifestSources = @()
+$flatSources = @()
+$generationSources = @()
+$currentPointerSources = @()
+$seenSources = @{}
+$seenTargets = @{}
+$hashMismatches = New-Object System.Collections.Generic.List[string]
 foreach ($entry in $payloadManifest.files) {
-    $source = [string]$entry.source
-    $target = [string]$entry.target
-    Assert-Equal -Actual $source -Expected $target -Label "Payload source and target"
-    Assert-True -Condition $source.StartsWith("AIWork/codedb/", [StringComparison]::Ordinal) -Message "Payload target escapes AIWork/codedb: $source"
-    Assert-True -Condition ($source.IndexOf("..", [StringComparison]::Ordinal) -lt 0) -Message "Payload target contains traversal: $source"
+    $source = Assert-SafeRelativePath -Path ([string]$entry.source) -Label "Payload source"
+    $target = Assert-SafeRelativePath -Path ([string]$entry.target) -Label "Payload target"
+    Assert-True -Condition (-not $seenSources.ContainsKey($source)) -Message "Duplicate payload source: $source"
+    Assert-True -Condition (-not $seenTargets.ContainsKey($target)) -Message "Duplicate payload target: $target"
+    $seenSources[$source] = $true
+    $seenTargets[$target] = $true
 
     $sourcePath = Join-Path $payloadRoot $source.Replace('/', '\')
     Assert-True -Condition (Test-Path -LiteralPath $sourcePath -PathType Leaf) -Message "Payload source is missing: $source"
+    $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
+    Assert-True -Condition ($expectedHash -match '^[0-9a-f]{64}$') -Message "Payload hash is invalid: $source"
     $actualHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Assert-Equal -Actual $actualHash -Expected ([string]$entry.sha256).ToLowerInvariant() -Label "Payload hash for $source"
+    if (-not [string]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        $hashMismatches.Add("Payload manifest: $source expected $expectedHash, got $actualHash")
+    }
+
+    if ($target.StartsWith($flatTargetPrefix, [StringComparison]::Ordinal)) {
+        Assert-Equal -Actual $source -Expected $target -Label "Flat payload source and target"
+        $flatSources += $source
+    } elseif ($target.StartsWith($generationTargetPrefix, [StringComparison]::Ordinal)) {
+        $generationSuffix = $target.Substring($generationTargetPrefix.Length)
+        Assert-Equal -Actual $source -Expected ($generationSourcePrefix + $generationSuffix) -Label "Generation payload source and target"
+        $generationSources += $source
+    } elseif ([string]::Equals($target, $currentPointerTarget, [StringComparison]::Ordinal)) {
+        Assert-Equal -Actual $source -Expected $currentPointerSource -Label "Current pointer source"
+        $currentPointerSources += $source
+    } else {
+        throw "Payload target is outside the reviewed flat, generation, and pointer scopes: $target"
+    }
     $manifestSources += $source
 }
 
-$payloadSourceRoot = Join-Path $payloadRoot "AIWork\codedb"
-$payloadSources = @(Get-ChildItem -LiteralPath $payloadSourceRoot -Recurse -File | ForEach-Object {
+Assert-Equal -Actual $flatSources.Count -Expected 21 -Label "Flat payload target count"
+Assert-Equal -Actual $generationSources.Count -Expected 21 -Label "Generation payload target count"
+Assert-Equal -Actual $currentPointerSources.Count -Expected 1 -Label "Current pointer target count"
+
+$flatSourceRoot = Join-Path $payloadRoot "AIWork\codedb"
+$actualFlatSources = @(Get-ChildItem -LiteralPath $flatSourceRoot -Recurse -File | ForEach-Object {
     Get-RelativePath -Root $payloadRoot -Path $_.FullName
 } | Sort-Object)
-Assert-Equal -Actual ($payloadSources -join "|") -Expected (($manifestSources | Sort-Object) -join "|") -Label "Payload source closure"
+Assert-Equal -Actual ($actualFlatSources -join "|") -Expected (($flatSources | Sort-Object) -join "|") -Label "Flat payload source closure"
 
-$runtimeTemplate = Get-Content -LiteralPath (Join-Path $payloadRoot "AIWork\codedb\codedb-mcp.runtime.example.toml") -Raw
+$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.22"
+$actualGenerationSources = @(Get-ChildItem -LiteralPath $generationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $payloadRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual ($actualGenerationSources -join "|") -Expected (($generationSources | Sort-Object) -join "|") -Label "Generation payload source closure"
+Assert-True -Condition (Test-Path -LiteralPath (Join-Path $payloadRoot $currentPointerSource) -PathType Leaf) -Message "Current pointer source is missing."
+
+$generationManifestPath = Join-Path $generationSourceRoot "generation-manifest.json"
+$generationManifest = Get-Content -LiteralPath $generationManifestPath -Raw | ConvertFrom-Json
+Assert-Equal -Actual $generationManifest.schema_version -Expected 1 -Label "Generation manifest schema"
+Assert-Equal -Actual $generationManifest.managed_by -Expected $payloadManifest.managed_by -Label "Generation manifest manager"
+Assert-Equal -Actual $generationManifest.generation_id -Expected $payloadManifest.generation_id -Label "Generation manifest generation"
+Assert-Equal -Actual $generationManifest.package_version -Expected $payloadManifest.package_version -Label "Generation manifest package version"
+Assert-Equal -Actual $generationManifest.payload_version -Expected $payloadManifest.payload_version -Label "Generation manifest payload version"
+Assert-Equal -Actual $generationManifest.payload_sequence -Expected $payloadManifest.payload_sequence -Label "Generation manifest payload sequence"
+Assert-Equal -Actual $generationManifest.bootstrap_protocol -Expected $payloadManifest.bootstrap_protocol -Label "Generation manifest bootstrap protocol"
+Assert-Equal -Actual @($generationManifest.files).Count -Expected 20 -Label "Generation manifest file count"
+
+$generationManifestPaths = @()
+$seenGenerationPaths = @{}
+foreach ($entry in $generationManifest.files) {
+    $relativePath = Assert-SafeRelativePath -Path ([string]$entry.path) -Label "Generation file"
+    Assert-True -Condition (-not $seenGenerationPaths.ContainsKey($relativePath)) -Message "Duplicate generation file: $relativePath"
+    $seenGenerationPaths[$relativePath] = $true
+    $generationManifestPaths += $relativePath
+
+    $generationFilePath = Join-Path $generationSourceRoot $relativePath.Replace('/', '\')
+    Assert-True -Condition (Test-Path -LiteralPath $generationFilePath -PathType Leaf) -Message "Generation file is missing: $relativePath"
+    $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
+    Assert-True -Condition ($expectedHash -match '^[0-9a-f]{64}$') -Message "Generation file hash is invalid: $relativePath"
+    $actualHash = (Get-FileHash -LiteralPath $generationFilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not [string]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        $hashMismatches.Add("Generation manifest: $relativePath expected $expectedHash, got $actualHash")
+    }
+
+    $mainSource = $generationSourcePrefix + $relativePath
+    $mainEntries = @($payloadManifest.files | Where-Object { [string]::Equals([string]$_.source, $mainSource, [StringComparison]::Ordinal) })
+    Assert-Equal -Actual $mainEntries.Count -Expected 1 -Label "Main manifest entry count for $mainSource"
+    Assert-Equal -Actual ([string]$mainEntries[0].target) -Expected ($generationTargetPrefix + $relativePath) -Label "Main generation target for $relativePath"
+    Assert-Equal -Actual ([string]$mainEntries[0].sha256).ToLowerInvariant() -Expected $expectedHash -Label "Main generation hash for $relativePath"
+}
+
+$actualGenerationImplementationPaths = @(Get-ChildItem -LiteralPath $generationSourceRoot -Recurse -File | Where-Object {
+    -not [string]::Equals($_.FullName, $generationManifestPath, [StringComparison]::OrdinalIgnoreCase)
+} | ForEach-Object {
+    Get-RelativePath -Root $generationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal `
+    -Actual ($actualGenerationImplementationPaths -join "|") `
+    -Expected (($generationManifestPaths | Sort-Object) -join "|") `
+    -Label "Generation manifest source closure"
+
+$currentPointerPath = Join-Path $payloadRoot $currentPointerSource
+$currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
+Assert-Equal -Actual $currentPointer.schema_version -Expected 1 -Label "Current pointer schema"
+Assert-Equal -Actual $currentPointer.managed_by -Expected $payloadManifest.managed_by -Label "Current pointer manager"
+Assert-Equal -Actual $currentPointer.package_version -Expected $payloadManifest.package_version -Label "Current pointer package version"
+Assert-Equal -Actual $currentPointer.payload_version -Expected $payloadManifest.payload_version -Label "Current pointer payload version"
+Assert-Equal -Actual $currentPointer.payload_sequence -Expected $payloadManifest.payload_sequence -Label "Current pointer payload sequence"
+Assert-Equal -Actual $currentPointer.generation_id -Expected $payloadManifest.generation_id -Label "Current pointer generation"
+Assert-Equal -Actual $currentPointer.generation_relative_path -Expected $generationTargetRoot -Label "Current pointer generation path"
+Assert-Equal -Actual $currentPointer.bootstrap_protocol -Expected $payloadManifest.bootstrap_protocol -Label "Current pointer bootstrap protocol"
+$generationManifestHash = (Get-FileHash -LiteralPath $generationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not [string]::Equals(
+        ([string]$currentPointer.generation_manifest_sha256).ToLowerInvariant(),
+        $generationManifestHash,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    $hashMismatches.Add(
+        "Current pointer: generation-manifest.json expected $(([string]$currentPointer.generation_manifest_sha256).ToLowerInvariant()), got $generationManifestHash")
+}
+
+$runtimeTemplate = Get-Content -LiteralPath (Join-Path $generationSourceRoot "codedb-mcp.runtime.example.toml") -Raw
 Assert-True -Condition ($runtimeTemplate -match '(?ms)^\[watch\]\s*$.*?^enabled\s*=\s*false\s*$') -Message "Tracked provider template must keep watch disabled by default."
 Assert-True -Condition ($runtimeTemplate.IndexOf("__CODEDB_PROVIDER_SLUG__", [StringComparison]::Ordinal) -ge 0) -Message "Runtime template is missing the project provider slug token."
 
@@ -191,6 +318,10 @@ foreach ($requiredRule in @(
     "Tests~/**/*.ps1 text eol=lf"
 )) {
     Assert-True -Condition ($packageAttributes.IndexOf($requiredRule, [StringComparison]::Ordinal) -ge 0) -Message "Missing package EOL rule: $requiredRule"
+}
+
+if ($hashMismatches.Count -gt 0) {
+    throw "Payload hash validation failed:`n - $($hashMismatches -join "`n - ")"
 }
 
 Write-Host "[OK] Standalone CodeDB package boundary passed."

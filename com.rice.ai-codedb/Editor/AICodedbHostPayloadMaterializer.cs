@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using UnityEditor;
 
@@ -10,6 +11,7 @@ namespace Rice.AI.Codedb.Editor
     {
         DryRun,
         Verify,
+        Upgrade,
         Sync,
         Remove
     }
@@ -41,6 +43,18 @@ namespace Rice.AI.Codedb.Editor
             return Run(AICodedbHostPayloadAction.Verify, string.Empty, false, true);
         }
 
+        internal static AICodedbCommandResult RunUpgrade()
+        {
+            return Run(AICodedbHostPayloadAction.Upgrade, string.Empty, false, true);
+        }
+
+        internal static Task<AICodedbCommandResult> RunUpgradeAsync()
+        {
+            var scriptPath = AICodedbPaths.HostPayloadMaterializerScriptPath;
+            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.Upgrade, string.Empty, false);
+            return AICodedbProcessRunner.RunPowerShellScriptAsync(scriptPath, MutationTimeoutMilliseconds, arguments);
+        }
+
         internal static AICodedbCommandResult RunSync(string authorizationPath, bool confirmLegacyMcpStopped)
         {
             return Run(AICodedbHostPayloadAction.Sync, authorizationPath, confirmLegacyMcpStopped, true);
@@ -64,7 +78,7 @@ namespace Rice.AI.Codedb.Editor
                 throw new ArgumentException("Tracked-host authorization path must be absolute.", nameof(authorizationPath));
 
             if (!requiresAuthorization && !string.IsNullOrWhiteSpace(authorizationPath))
-                throw new ArgumentException("DryRun and Verify do not accept tracked-host authorization.", nameof(authorizationPath));
+                throw new ArgumentException("DryRun, Verify, and Upgrade do not accept tracked-host authorization.", nameof(authorizationPath));
 
             if (!requiresAuthorization && confirmLegacyMcpStopped)
                 throw new ArgumentException("Legacy MCP confirmation is valid only for Sync or Remove.", nameof(confirmLegacyMcpStopped));
@@ -93,6 +107,11 @@ namespace Rice.AI.Codedb.Editor
             return action == AICodedbHostPayloadAction.Sync || action == AICodedbHostPayloadAction.Remove;
         }
 
+        private static bool IsMutation(AICodedbHostPayloadAction action)
+        {
+            return action == AICodedbHostPayloadAction.Upgrade || RequiresAuthorization(action);
+        }
+
         private static AICodedbCommandResult Run(
             AICodedbHostPayloadAction action,
             string authorizationPath,
@@ -119,7 +138,7 @@ namespace Rice.AI.Codedb.Editor
 
             try
             {
-                var timeout = RequiresAuthorization(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
+                var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
                 return AICodedbProcessRunner.RunPowerShellScript(
                     AICodedbPaths.HostPayloadMaterializerScriptPath,
                     timeout,
@@ -138,6 +157,8 @@ namespace Rice.AI.Codedb.Editor
         Unknown,
         SetupRequired,
         Current,
+        Draining,
+        UpgradeReady,
         UpdateRequired,
         Conflict,
         Blocked
@@ -149,18 +170,26 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbStatusState DisplayState { get; }
         internal string Summary { get; }
         internal string Detail { get; }
-        internal bool IsCurrent => State == AICodedbHostPayloadState.Current;
+        internal string[] ActiveOwners { get; }
+        internal int LegacyMcpSessionCount { get; }
+        internal bool IsCurrent => State == AICodedbHostPayloadState.Current || State == AICodedbHostPayloadState.Draining;
+        internal bool IsDraining => State == AICodedbHostPayloadState.Draining;
+        internal bool CanUpgradeAutomatically => State == AICodedbHostPayloadState.UpgradeReady;
 
         internal AICodedbHostPayloadStatus(
             AICodedbHostPayloadState state,
             AICodedbStatusState displayState,
             string summary,
-            string detail)
+            string detail,
+            string[] activeOwners = null,
+            int legacyMcpSessionCount = 0)
         {
             State = state;
             DisplayState = displayState;
             Summary = summary ?? string.Empty;
             Detail = detail ?? string.Empty;
+            ActiveOwners = activeOwners ?? Array.Empty<string>();
+            LegacyMcpSessionCount = Math.Max(0, legacyMcpSessionCount);
         }
 
         internal AICodedbStatusItem ToStatusItem()
@@ -179,7 +208,17 @@ namespace Rice.AI.Codedb.Editor
 
     internal static class AICodedbHostPayloadStatusBuilder
     {
-        internal static AICodedbHostPayloadStatus Build(bool markerExists, AICodedbCommandResult result)
+        private static readonly Regex GenerationOwnerPattern = new Regex(
+            @"^\[ACTIVE\]\s+generation\s+([A-Za-z0-9._-]{1,64})\s+(mcp|watcher)\s+PID\s+[0-9]+\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex LegacyOwnerPattern = new Regex(
+            @"^\[ACTIVE\]\s+(mcp|watcher)\s+PID\s+[0-9]+\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        internal static AICodedbHostPayloadStatus Build(
+            bool markerExists,
+            AICodedbCommandResult result,
+            string currentGenerationId = "")
         {
             if (result == null)
                 return Unknown("Materializer status has not been checked.");
@@ -187,6 +226,8 @@ namespace Rice.AI.Codedb.Editor
             var output = result.StandardOutput ?? string.Empty;
             var error = result.StandardError ?? string.Empty;
             var combined = output + "\n" + error;
+            var activeOwners = MatchingLines(combined, "[ACTIVE]");
+            var legacyMcpSessionCount = CountLegacyMcpSessions(activeOwners);
 
             if (Contains(combined, "[CONFLICT]") || Contains(combined, "Host payload has conflicts"))
             {
@@ -209,11 +250,27 @@ namespace Rice.AI.Codedb.Editor
             if (Contains(output, "[OK] Host payload is current.")
                 || Contains(output, "[OK] Host payload marker and managed files are current."))
             {
+                var draining = HasDrainingOwners(activeOwners, currentGenerationId);
                 return new AICodedbHostPayloadStatus(
-                    AICodedbHostPayloadState.Current,
-                    AICodedbStatusState.Ok,
-                    "CURRENT",
-                    AICodedbProjectSettings.HostPayloadMarkerRelativePath);
+                    draining ? AICodedbHostPayloadState.Draining : AICodedbHostPayloadState.Current,
+                    draining ? AICodedbStatusState.Warning : AICodedbStatusState.Ok,
+                    draining ? "CURRENT / DRAINING" : "CURRENT",
+                    draining
+                        ? "The current generation is active while legacy or previous-generation sessions finish."
+                        : AICodedbProjectSettings.HostPayloadMarkerRelativePath,
+                    activeOwners,
+                    legacyMcpSessionCount);
+            }
+
+            if (Contains(output, "[UPGRADE_READY]"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.UpgradeReady,
+                    AICodedbStatusState.Warning,
+                    "UPGRADE_READY",
+                    FirstMatchingLine(output, "[UPGRADE_READY]"),
+                    activeOwners,
+                    legacyMcpSessionCount);
             }
 
             if (Contains(output, "[BLOCKED]"))
@@ -222,7 +279,11 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbHostPayloadState.Blocked,
                     AICodedbStatusState.Error,
                     markerExists ? "UPDATE_REQUIRED / BLOCKED" : "SETUP_REQUIRED / BLOCKED",
-                    FirstMatchingLine(output, "[ACTIVE]", "[BLOCKED]"));
+                    activeOwners.Length > 0
+                        ? string.Join("\n", activeOwners)
+                        : FirstMatchingLine(output, "[BLOCKED]"),
+                    activeOwners,
+                    legacyMcpSessionCount);
             }
 
             if (Contains(output, "[STALE] Host payload can be synchronized"))
@@ -231,7 +292,9 @@ namespace Rice.AI.Codedb.Editor
                     markerExists ? AICodedbHostPayloadState.UpdateRequired : AICodedbHostPayloadState.SetupRequired,
                     AICodedbStatusState.Warning,
                     markerExists ? "UPDATE_REQUIRED" : "SETUP_REQUIRED",
-                    LastMarkedLine(output));
+                    LastMarkedLine(output),
+                    activeOwners,
+                    legacyMcpSessionCount);
             }
 
             return Unknown("Materializer DryRun returned an unrecognized result.");
@@ -258,6 +321,50 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return FirstNonEmptyLine(text);
+        }
+
+        private static string[] MatchingLines(string text, string value)
+        {
+            var matches = new List<string>();
+            foreach (var line in SplitLines(text))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith(value, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(trimmed);
+            }
+            return matches.ToArray();
+        }
+
+        private static bool HasDrainingOwners(string[] activeOwners, string currentGenerationId)
+        {
+            foreach (var owner in activeOwners)
+            {
+                var generationMatch = GenerationOwnerPattern.Match(owner);
+                if (generationMatch.Success)
+                {
+                    if (!string.Equals(generationMatch.Groups[1].Value, currentGenerationId, StringComparison.Ordinal))
+                        return true;
+                    continue;
+                }
+
+                // Legacy host-use leases do not carry a generation. Unknown owner syntax
+                // also fails closed so a changed materializer contract remains visible.
+                return true;
+            }
+            return false;
+        }
+
+        private static int CountLegacyMcpSessions(string[] activeOwners)
+        {
+            var count = 0;
+            foreach (var owner in activeOwners)
+            {
+                var match = LegacyOwnerPattern.Match(owner);
+                if (match.Success
+                    && string.Equals(match.Groups[1].Value, "mcp", StringComparison.OrdinalIgnoreCase))
+                    count++;
+            }
+            return count;
         }
 
         private static string LastMarkedLine(string text)
@@ -296,6 +403,215 @@ namespace Rice.AI.Codedb.Editor
         {
             return !string.IsNullOrWhiteSpace(text)
                    && text.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
+    internal enum AICodedbHostUpgradePhase
+    {
+        Unavailable,
+        Installing,
+        Switching,
+        Rollback,
+        Current,
+        CheckFailed,
+        Invalid
+    }
+
+    internal readonly struct AICodedbHostUpgradeStatus
+    {
+        internal AICodedbHostUpgradePhase Phase { get; }
+        internal AICodedbStatusState DisplayState { get; }
+        internal string Summary { get; }
+        internal string Detail { get; }
+
+        internal AICodedbHostUpgradeStatus(
+            AICodedbHostUpgradePhase phase,
+            AICodedbStatusState displayState,
+            string summary,
+            string detail)
+        {
+            Phase = phase;
+            DisplayState = displayState;
+            Summary = summary ?? string.Empty;
+            Detail = detail ?? string.Empty;
+        }
+
+        internal AICodedbStatusItem ToStatusItem(bool hostPayloadMarkerExists)
+        {
+            if (!hostPayloadMarkerExists
+                && Phase != AICodedbHostUpgradePhase.Unavailable
+                && Phase != AICodedbHostUpgradePhase.Invalid)
+            {
+                return AICodedbStatusItem.Inactive(
+                    "Host upgrade",
+                    "Historical " + Summary,
+                    "No installed host payload marker exists. " + Detail);
+            }
+            switch (DisplayState)
+            {
+                case AICodedbStatusState.Ok:
+                    return AICodedbStatusItem.Ok("Host upgrade", Summary, Detail);
+                case AICodedbStatusState.Inactive:
+                    return AICodedbStatusItem.Inactive("Host upgrade", Summary, Detail);
+                case AICodedbStatusState.Warning:
+                    return AICodedbStatusItem.Warning("Host upgrade", Summary, Detail);
+                default:
+                    return AICodedbStatusItem.Error("Host upgrade", Summary, Detail);
+            }
+        }
+    }
+
+    internal static class AICodedbHostUpgradeStatusStore
+    {
+        private const string ManagedBy = "com.rice.ai-codedb";
+
+        internal static AICodedbHostUpgradeStatus Read(string projectRoot)
+        {
+            try
+            {
+                var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+                var path = AICodedbPaths.NormalizePath(Path.Combine(
+                    normalizedRoot,
+                    AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath));
+                AssertSafeStatePath(normalizedRoot, path);
+                if (!File.Exists(path))
+                {
+                    return new AICodedbHostUpgradeStatus(
+                        AICodedbHostUpgradePhase.Unavailable,
+                        AICodedbStatusState.Inactive,
+                        "No recorded upgrade",
+                        AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
+                }
+
+                var fileInfo = new FileInfo(path);
+                if (fileInfo.Length <= 0 || fileInfo.Length > 64 * 1024)
+                    throw new InvalidOperationException("Host upgrade state has an invalid size.");
+                return Parse(File.ReadAllText(path), normalizedRoot, path);
+            }
+            catch (Exception exception)
+            {
+                return Invalid(exception.Message);
+            }
+        }
+
+        internal static AICodedbHostUpgradeStatus Parse(
+            string json,
+            string projectRoot,
+            string detailPath)
+        {
+            try
+            {
+                var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+                var document = UnityEngine.JsonUtility.FromJson<HostUpgradeStateDocument>(json);
+                DateTime updatedAt;
+                if (document == null
+                    || document.schema_version != 1
+                    || !string.Equals(document.managed_by, ManagedBy, StringComparison.Ordinal)
+                    || !string.Equals(
+                        AICodedbPaths.NormalizePath(document.project_root).TrimEnd('/'),
+                        normalizedRoot,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !IsValidGenerationId(document.generation_id)
+                    || !DateTime.TryParse(document.updated_at_utc, out updatedAt)
+                    || (document.message != null && document.message.Length > 512))
+                    throw new InvalidOperationException("Host upgrade state has invalid identity or schema.");
+
+                var detail = string.IsNullOrWhiteSpace(document.message)
+                    ? (detailPath ?? string.Empty)
+                    : document.message.Trim();
+                switch (document.state)
+                {
+                    case "INSTALLING":
+                        return Create(AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning, document, detail);
+                    case "SWITCHING":
+                        return Create(AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning, document, detail);
+                    case "ROLLBACK":
+                        return Create(AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error, document, detail);
+                    case "CURRENT":
+                        return Create(AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok, document, detail);
+                    case "CHECK_FAILED":
+                        return Create(AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error, document, detail);
+                    default:
+                        throw new InvalidOperationException("Host upgrade state has an unsupported phase.");
+                }
+            }
+            catch (Exception exception)
+            {
+                return Invalid(exception.Message);
+            }
+        }
+
+        private static AICodedbHostUpgradeStatus Create(
+            AICodedbHostUpgradePhase phase,
+            AICodedbStatusState displayState,
+            HostUpgradeStateDocument document,
+            string detail)
+        {
+            return new AICodedbHostUpgradeStatus(
+                phase,
+                displayState,
+                document.state + " / " + document.generation_id,
+                detail);
+        }
+
+        private static AICodedbHostUpgradeStatus Invalid(string detail)
+        {
+            return new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Invalid,
+                AICodedbStatusState.Error,
+                "CHECK_FAILED",
+                detail);
+        }
+
+        private static bool IsValidGenerationId(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 64)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < 'A' || character > 'Z')
+                    && (character < 'a' || character > 'z')
+                    && (character < '0' || character > '9')
+                    && character != '.'
+                    && character != '_'
+                    && character != '-')
+                    return false;
+            }
+            return true;
+        }
+
+        private static void AssertSafeStatePath(string projectRoot, string path)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var current = AICodedbPaths.NormalizePath(path).TrimEnd('/');
+            if (!current.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Host upgrade state escapes the Unity project.");
+
+            while (!string.Equals(current, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                if (File.Exists(current) || Directory.Exists(current))
+                {
+                    var attributes = File.GetAttributes(current);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("Host upgrade state contains a reparse point.");
+                }
+                var parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrWhiteSpace(parent))
+                    throw new InvalidOperationException("Host upgrade state has no valid parent.");
+                current = AICodedbPaths.NormalizePath(parent).TrimEnd('/');
+            }
+        }
+
+        [Serializable]
+        private sealed class HostUpgradeStateDocument
+        {
+            public int schema_version;
+            public string managed_by;
+            public string project_root;
+            public string state;
+            public string generation_id;
+            public string updated_at_utc;
+            public string message;
         }
     }
 }

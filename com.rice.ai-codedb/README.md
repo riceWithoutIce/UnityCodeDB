@@ -8,20 +8,23 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. Version `0.2.2` targets Unity `2022.3` on
-Windows.
+and bounded MCP discovery surface. The `0.2.3` prerelease targets Unity
+`2022.3` on Windows.
 
-Install the published release from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.2`.
+Install the latest prerelease from the repository subfolder with
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.3`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The current `0.2.2` release materializes reviewed process tooling into the host
-project. Manager actions resolve tracked scripts, wrapper files, and templates
-under `AIWork/codedb/`, while generated provider binaries, configs, indexes,
-logs, and watcher state remain under ignored `AIWork/.runtime/`. The external
-`killop/codedb-mcp` provider and Node.js are prerequisites and are not bundled.
+The `0.2.3` package keeps a tracked stable wrapper and byte-exact
+v0.2.2 compatibility files under `AIWork/codedb/`, then materializes immutable
+implementation generations under ignored
+`AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
+active generation. Generated provider binaries, configs, indexes, logs,
+watcher state, generation leases, and rollback evidence remain under ignored
+`AIWork/.runtime/`. The external `killop/codedb-mcp` provider and Node.js are
+prerequisites and are not bundled.
 
-`Payload~`, `Tools~`, and `Tests~` contain a twenty-one-file host-payload
+`Payload~`, `Tools~`, and `Tests~` contain a 43-target host-payload
 materialization POC. Its canonical payload is intentionally limited to the
 shared PowerShell helper, runtime preparation and TOML template, the
 project-neutral watch coordinator, watch-config generator and watch manager,
@@ -49,11 +52,14 @@ reject staged changes to package-managed targets or the ownership marker;
 staged files outside that exact ownership scope remain untouched and do not
 block the operation. Lower payload sequences and same-sequence payload identity
 or hash collisions are conflicts for both Sync and Remove.
-Before recovery or planning, mutations publish a materializer-active marker,
-hold existing watcher management locks, prune only dead host-use leases, and
-reject live MCP, coordinator, provider, adapter-worker, or adapter-build PIDs.
-Legacy or unowned wrappers require explicit `-ConfirmLegacyMcpStopped` before
-their first gated adoption or upgrade.
+Before recovery or planning, strict Sync and Remove publish a
+materializer-active marker, hold existing watcher management locks, prune only
+dead host-use leases, and reject live MCP, coordinator, provider,
+adapter-worker, or adapter-build PIDs. Owned lower-version Upgrade uses a
+separate generation path: it verifies byte ownership, publishes an immutable
+generation, switches the pointer at a request boundary, and rolls back the
+selection and watcher if readiness fails. Legacy or unowned wrappers still
+require explicit `-ConfirmLegacyMcpStopped` for first adoption or strict Sync.
 
 A tracked-host authorization must be a direct child of
 `AIWork/.runtime/codedb/payload-materializer/authorizations/`, must remain Git
@@ -69,11 +75,11 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.2.2",
-  "payload_version": "poc.21",
-  "payload_sequence": 21,
+  "package_version": "0.2.3",
+  "payload_version": "poc.22",
+  "payload_sequence": 22,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
-  "target_count": 21,
+  "target_count": 43,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
 }
 ```
@@ -87,9 +93,15 @@ active-process, staged-index, conflict, and transaction gates still apply.
 
 The package materializer is wired into the Manager Setup tab for read-only
 status/DryRun, strict Verify, and explicitly authorized Sync/Remove. Manager
-status distinguishes `CURRENT`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, conflict,
-active host-use blockers, and check-failed outcomes. DryRun reports the active
-MCP or watcher PID before an authorized mutation is attempted. It does not
+status distinguishes `INSTALLING`, `SWITCHING`, `CURRENT`, `DRAINING`,
+`ROLLBACK`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, conflict, active host-use
+blockers, and check-failed outcomes. It shows selected/watcher generations,
+bootstrap protocol, legacy session count, and all active owners. The Index view
+separates the persistent `Start with Unity Editor` policy from Start, Stop, and
+Restart commands associated with the Editor cohort present when they are
+issued; automatic host updates have an independent persistent policy. DryRun
+reports every active MCP or watcher owner before an authorized mutation is
+attempted. It does not
 create, persist, infer, or delete production
 authorization files; the selected path and optional legacy-MCP confirmation are
 session-only and are cleared after each mutation attempt. Existing runtime,
@@ -97,13 +109,15 @@ index, watch, and probe actions continue to resolve the materialized host paths.
 This package still does not include the external CodeDB provider, host
 acceptance probes, MCP client configuration, generated project data, or any
 host-owned compatibility entry. Those ownership boundaries remain unchanged.
-The fixture validates a disabled formal watch config, interactive Editor-owned
-post-Setup startup, persistent Pause, explicit Resume/Status/Stop ownership,
+The standalone fixture contains assertions for a disabled formal watch config,
+interactive Editor-owned
+post-Setup startup, persistent startup policy, explicit Start/Stop/Restart
+command-time Editor-cohort ownership,
 same-project Editor lease sharing, final-lease shutdown, wrapper read-only
 attachment, read-only provider guidance, ignored-runtime
 verification, formal `--no-watch` refresh, generated ignore parity, and
 index-only cleanup against an isolated runtime-built provider executable. It
-also proves wrapper-local C#/Shader reads return only the requested line window,
+also checks that wrapper-local C#/Shader reads return only the requested line window,
 cap one read at 200 lines, reject resolved paths outside the Unity root, and
 limit every tool or error text response to 64 KiB with explicit truncation. It
 normalizes the legacy `path` search alias to `path_glob`, filters Provider hits
@@ -126,19 +140,23 @@ validates provider and adapter status/search/read probes, hit/no-hit
 reporting, `OK`/`STALE`/`UNKNOWN` freshness, exact fresh no-op behavior, and
 independent provider-only or adapter-only refresh. It also verifies copy-only
 project-level registration guidance and read-only project-config validation
-without changing `.codex/config.toml` or any other fixture file. The
-fixture suite also proves hard-crash recovery and concurrent readers observing
-only complete old or new file hashes. It now also proves active MCP and watcher
-refusal, legacy watcher-state refusal, normal lease cleanup, hard-kill stale
+without changing `.codex/config.toml` or any other fixture file. The fixture
+suite also checks hard-crash recovery and concurrent readers observing only
+complete old or new file hashes. The v0.2.3 coverage adds immutable generation
+publication, request leases, same-transport Unity offline/reopen behavior,
+v0.2.2 migration with live legacy owners, watcher handoff rollback, automatic
+journal recovery, PID-reuse handling, manual state, and exact candidate/LKG
+Remove cleanup. It also checks active MCP and watcher refusal for strict
+mutations, legacy watcher-state refusal, normal lease cleanup, hard-kill stale
 lease recovery, legacy adoption confirmation, staged-index refusal including
 interrupted recovery, scoped unrelated-stage preservation, downgrade/sequence
-collision refusal, and exact LF-versus-CRLF conflict behavior. It now also
+collision refusal, and exact LF-versus-CRLF conflict behavior. It also
 validates tracked-host authorization refusal plus exact authorized Sync and
 Remove in a separate nested Git project. Payload hashes remain byte exact and
 no payload-file EOL normalization occurs in the materializer. Ownership markers
 are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
-also passed with exact host restoration. Manager integration passes static
-build, package-neutral, full materializer fixture, real Unity import, and 74/74
-package EditMode tests. Wide, minimum-width floating, and docked Compact visual
-acceptance also passes as recorded in the host handoff.
+also passed with exact host restoration. v0.2.2 completed real Unity import,
+74/74 package EditMode tests, and wide/minimum/docked visual acceptance.
+v0.2.3 Unity runtime and visual acceptance remain release gates until the
+current validation cycle is complete.

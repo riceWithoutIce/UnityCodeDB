@@ -184,6 +184,7 @@ namespace Rice.AI.Codedb.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
+            startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = AICodedbPaths.ProjectRoot;
 
             return RunProcess(startInfo, timeoutMilliseconds);
         }
@@ -242,6 +243,7 @@ namespace Rice.AI.Codedb.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
+            startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = AICodedbPaths.ProjectRoot;
             var effectiveTimeout = timeoutMilliseconds;
             return Task.Run(() => RunProcess(startInfo, effectiveTimeout));
         }

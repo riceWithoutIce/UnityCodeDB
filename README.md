@@ -21,7 +21,7 @@ project's ignored runtime instead of sharing state across projects.
 ## Package
 
 - Package name: `com.rice.ai-codedb`
-- Latest release: `v0.2.2`
+- Latest prerelease: `v0.2.3`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -32,7 +32,7 @@ Add the package to the Unity project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.2"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.3"
   }
 }
 ```
@@ -58,8 +58,10 @@ vendor its source or redistribute its binary.
 4. Prepare the project-local runtime and provide the external provider.
 5. Generate and review project-level MCP registration guidance.
 6. After Setup completes, each interactive Unity Editor session publishes
-   project demand and starts CodeDB asynchronously. Use Pause when the project
-   must remain stopped; Resume clears that persistent preference.
+   project demand and starts CodeDB asynchronously. `Start with Unity Editor`
+   controls the persistent policy; Start, Stop, and Restart control the Editor
+   session cohort present when the command is issued without silently changing
+   that policy.
 7. Closing the final Editor session stops that project's backend without
    changing its preference. BatchMode sessions do not auto-start CodeDB.
 
@@ -70,6 +72,8 @@ vendor its source or redistribute its binary.
 - Each Unity project owns tracked operational files under `AIWork/codedb/`.
 - Generated runtime stays under ignored
   `AIWork/.runtime/codedb/<project-provider-slug>/`.
+- Immutable host generations, their atomic pointer, and generation leases stay
+  under ignored `AIWork/.runtime/codedb/host/`.
 - MCP registration is workspace-local or project-level first. The package does
   not silently edit global client configuration.
 - Provider watch and the Shader/HLSL text adapter remain separate owners.
@@ -77,7 +81,9 @@ vendor its source or redistribute its binary.
   requested lines, and all wrapper text responses are capped at 64 KiB.
 - Search `path` aliases are normalized to `path_glob`; directory queries without
   a language merge Provider and Shader hits under one deduplicated global limit.
-- Ready MCP wrappers share the project coordinator's persistent Provider.
+- Ready MCP wrappers share the project coordinator's persistent Provider. The
+  v0.2.3 bridge stays dormant with zero Provider attempts while Unity is
+  offline and reattaches after Unity returns without recreating the MCP session.
   Identical concurrent searches join one execution; distinct work is queued
   without implicit batching. Disabled, Editor-offline, and starting states do
   not launch a Provider and return a stable reason instead.

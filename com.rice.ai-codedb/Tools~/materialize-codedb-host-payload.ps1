@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Verify", "Sync", "Remove")]
+    [ValidateSet("DryRun", "Verify", "Upgrade", "Sync", "Remove")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -20,7 +20,11 @@ param(
     [int]$TestFailAfterMutation = 0,
 
     [ValidateRange(0, 1000)]
-    [int]$TestCrashAfterMutation = 0
+    [int]$TestCrashAfterMutation = 0,
+
+    [switch]$TestFailWatcherHandoff,
+
+    [switch]$TestCrashBeforeWatcherHandoff
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +33,12 @@ $ErrorActionPreference = "Stop"
 $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:TargetPrefix = "AIWork/codedb/"
+$script:GenerationId = "poc.22"
+$script:BootstrapProtocol = 1
+$script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
+$script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
+$script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
+$script:GenerationLeaseRelativePath = "AIWork/.runtime/codedb/host/leases"
 $script:RuntimeRelativePath = "AIWork/.runtime/codedb/payload-materializer"
 $script:PocFixtureMarkerName = ".rice-ai-codedb-poc-fixture.json"
 $script:TrackedHostAuthorizationDirectoryName = "authorizations"
@@ -37,12 +47,15 @@ $script:TrackedHostAuthorizationPurpose = "tracked-host-payload-mutation"
 $script:TrackedHostAuthorizationAcknowledgement = "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
 $script:HostUseGateVersion = 1
 $script:ActiveMarkerName = "materialize-active.json"
+$script:UpgradeStateName = "upgrade-state.json"
+$script:UpgradeStateRelativePath = "$($script:RuntimeRelativePath)/$($script:UpgradeStateName)"
 $script:HostUseLeaseDirectoryName = "host-use-leases"
 $script:TransactionPrefix = "txn-v1-"
 $script:TransactionJournalName = "transaction.json"
 $script:RequestedExitCode = 0
 $script:MutationCount = 0
 $script:AllowedTargetPaths = @{}
+$script:AllowedGenerationRelativePaths = @{}
 foreach ($allowedTarget in @(
     "AIWork/codedb/codedb-mcp.runtime.example.toml",
     "AIWork/codedb/codedbignore.example",
@@ -68,6 +81,33 @@ foreach ($allowedTarget in @(
 )) {
     $script:AllowedTargetPaths[$allowedTarget] = $true
 }
+foreach ($generationTarget in @(
+    "codedb-mcp.runtime.example.toml",
+    "codedbignore.example",
+    "coordinator/codedb-watch-coordinator.mjs",
+    "generation-manifest.json",
+    "scripts/build-codedb-project-text-adapter.ps1",
+    "scripts/check-codedb-project-freshness.ps1",
+    "scripts/clear-codedb-project-index.ps1",
+    "scripts/codedb-project-common.ps1",
+    "scripts/emit-codedb-mcp-registration-draft.ps1",
+    "scripts/manage-codedb-project-watch.ps1",
+    "scripts/prepare-codedb-project-runtime.ps1",
+    "scripts/prepare-codedb-project-watch-config.ps1",
+    "scripts/probe-codedb-project-index.ps1",
+    "scripts/probe-codedb-project-text-adapter.ps1",
+    "scripts/refresh-codedb-project-if-stale.ps1",
+    "scripts/refresh-codedb-project.ps1",
+    "scripts/run-codedb-project-text-adapter-worker.ps1",
+    "scripts/show-codedb-project-provider-guidance.ps1",
+    "scripts/validate-codedb-mcp-project-config.ps1",
+    "scripts/verify-codedb-project.ps1",
+    "shared/codedb-host-use-gate.mjs"
+)) {
+    $script:AllowedGenerationRelativePaths[$generationTarget] = $true
+    $script:AllowedTargetPaths[$script:GenerationTargetPrefix + $generationTarget] = $true
+}
+$script:AllowedTargetPaths[$script:CurrentPointerRelativePath] = $true
 
 function Throw-MaterializerError {
     param(
@@ -217,6 +257,32 @@ function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Read-BoundedJsonDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][int64]$MaximumBytes
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Throw-MaterializerError -Message "$Label does not exist: $Path" -ExitCode 2
+    }
+    $file = Get-Item -LiteralPath $Path -Force
+    if ($file.Length -le 0 -or $file.Length -gt $MaximumBytes) {
+        Throw-MaterializerError -Message "$Label size is outside the accepted range: $Path" -ExitCode 2
+    }
+    try {
+        $text = Get-Content -LiteralPath $Path -Raw
+        $document = $text | ConvertFrom-Json
+    } catch {
+        Throw-MaterializerError -Message "$Label is not valid JSON: $($_.Exception.Message)" -ExitCode 2
+    }
+    if ($null -eq $document -or $document.GetType() -ne [System.Management.Automation.PSCustomObject]) {
+        Throw-MaterializerError -Message "$Label must contain one JSON object." -ExitCode 2
+    }
+    return [pscustomobject]@{ Text = $text; Document = $document }
 }
 
 function Assert-UnityProjectRoot {
@@ -369,9 +435,18 @@ function Assert-TargetRelativePath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $normalized = ConvertTo-SafeRelativePath -Path $Path -Label "payload target"
-    if (-not $normalized.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($normalized, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
-        -not $script:AllowedTargetPaths.ContainsKey($normalized)) {
+    $allowed = $script:AllowedTargetPaths.ContainsKey($normalized)
+    if (-not $allowed) {
+        $generationMatch = [regex]::Match(
+            $normalized,
+            '^AIWork/\.runtime/codedb/host/generations/(?<generation>[A-Za-z0-9._-]{1,64})/(?<relative>.+)$',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($generationMatch.Success) {
+            $generationRelativePath = ConvertTo-SafeRelativePath -Path $generationMatch.Groups['relative'].Value -Label "generation payload target"
+            $allowed = $script:AllowedGenerationRelativePaths.ContainsKey($generationRelativePath)
+        }
+    }
+    if ([string]::Equals($normalized, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or -not $allowed) {
         Throw-MaterializerError -Message "Payload target is outside the audited production allowlist: $Path" -ExitCode 2
     }
 
@@ -395,17 +470,17 @@ function Read-PayloadManifest {
         Throw-MaterializerError -Message "Payload manifest does not exist: $manifestPath" -ExitCode 2
     }
 
-    try {
-        $document = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    } catch {
-        Throw-MaterializerError -Message "Payload manifest is not valid JSON: $($_.Exception.Message)" -ExitCode 2
-    }
+    $manifestJson = Read-BoundedJsonDocument -Path $manifestPath -Label "payload manifest" -MaximumBytes (1024 * 1024)
+    $document = $manifestJson.Document
 
     $schemaVersion = [int](Get-RequiredProperty -Object $document -Name "schema_version" -Label "payload manifest")
     $managedBy = [string](Get-RequiredProperty -Object $document -Name "managed_by" -Label "payload manifest")
     $packageVersion = [string](Get-RequiredProperty -Object $document -Name "package_version" -Label "payload manifest")
     $payloadVersion = [string](Get-RequiredProperty -Object $document -Name "payload_version" -Label "payload manifest")
     $payloadSequence = [int](Get-RequiredProperty -Object $document -Name "payload_sequence" -Label "payload manifest")
+    $generationId = [string](Get-RequiredProperty -Object $document -Name "generation_id" -Label "payload manifest")
+    $bootstrapProtocol = [int](Get-RequiredProperty -Object $document -Name "bootstrap_protocol" -Label "payload manifest")
+    $currentPointerTarget = Assert-TargetRelativePath -Path ([string](Get-RequiredProperty -Object $document -Name "current_pointer_target" -Label "payload manifest"))
     $retiredTargets = @(Get-RequiredProperty -Object $document -Name "retired_targets" -Label "payload manifest")
     $manifestFiles = @(Get-RequiredProperty -Object $document -Name "files" -Label "payload manifest")
 
@@ -414,6 +489,9 @@ function Read-PayloadManifest {
         [string]::IsNullOrWhiteSpace($packageVersion) -or
         [string]::IsNullOrWhiteSpace($payloadVersion) -or
         $payloadSequence -lt 1 -or
+        -not [string]::Equals($generationId, $script:GenerationId, [StringComparison]::Ordinal) -or
+        $bootstrapProtocol -ne $script:BootstrapProtocol -or
+        -not [string]::Equals($currentPointerTarget, $script:CurrentPointerRelativePath, [StringComparison]::Ordinal) -or
         $manifestFiles.Count -eq 0) {
         Throw-MaterializerError -Message "Payload manifest identity, version, or file list is invalid." -ExitCode 2
     }
@@ -429,6 +507,8 @@ function Read-PayloadManifest {
         $retiredTargetMap[$retiredTarget] = $true
     }
     $files = New-Object System.Collections.Generic.List[object]
+    $sourceMap = @{}
+    $targetMap = @{}
     foreach ($entry in $manifestFiles) {
         $source = ConvertTo-SafeRelativePath -Path ([string](Get-RequiredProperty -Object $entry -Name "source" -Label "payload file")) -Label "payload source"
         $target = Assert-TargetRelativePath -Path ([string](Get-RequiredProperty -Object $entry -Name "target" -Label "payload file"))
@@ -457,26 +537,111 @@ function Read-PayloadManifest {
 
         $targetPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $target -Label "payload target"
         Assert-NoReparsePoint -Path $targetPath -Root $ProjectRoot -Label "payload target"
-        $files.Add([pscustomobject]@{
+        $model = [pscustomobject]@{
             Source = $source
             SourcePath = $sourcePath
             Target = $target
             TargetPath = $targetPath
             Sha256 = $expectedHash
-        })
+        }
+        $files.Add($model)
+        $sourceMap[$source] = $model
+        $targetMap[$target] = $model
     }
 
-    return [pscustomobject]@{
+    $manifest = [pscustomobject]@{
         SchemaVersion = $schemaVersion
         ManagedBy = $managedBy
         PackageVersion = $packageVersion
         PayloadVersion = $payloadVersion
         PayloadSequence = $payloadSequence
+        GenerationId = $generationId
+        BootstrapProtocol = $bootstrapProtocol
+        CurrentPointerTarget = $currentPointerTarget
         RetiredTargets = @($retiredTargetMap.Keys | Sort-Object)
         RetiredTargetMap = $retiredTargetMap
         Root = $fullRoot
         ManifestPath = $manifestPath
+        ManifestSha256 = Get-FileSha256 -Path $manifestPath
         Files = @($files | Sort-Object Target)
+        SourceMap = $sourceMap
+        TargetMap = $targetMap
+    }
+    $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
+    $usesGenerationContract = $payloadSequence -ge 22 -or
+        $targetMap.ContainsKey($generationManifestTarget) -or
+        $targetMap.ContainsKey($script:CurrentPointerRelativePath)
+    $manifest | Add-Member -NotePropertyName UsesGenerationContract -NotePropertyValue $usesGenerationContract
+    if ($usesGenerationContract) {
+        Assert-PayloadGenerationContract -Manifest $manifest
+    }
+    return $manifest
+}
+
+function Assert-PayloadGenerationContract {
+    param([Parameter(Mandatory = $true)]$Manifest)
+
+    $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
+    if (-not $Manifest.TargetMap.ContainsKey($generationManifestTarget) -or
+        -not $Manifest.TargetMap.ContainsKey($script:CurrentPointerRelativePath)) {
+        Throw-MaterializerError -Message "Payload manifest is missing its generation manifest or current pointer target." -ExitCode 2
+    }
+
+    $generationManifestFile = $Manifest.TargetMap[$generationManifestTarget]
+    $pointerFile = $Manifest.TargetMap[$script:CurrentPointerRelativePath]
+    if (-not [string]::Equals($generationManifestFile.Source, "Generations/$($script:GenerationId)/generation-manifest.json", [StringComparison]::Ordinal) -or
+        -not [string]::Equals($pointerFile.Source, "host-current.json", [StringComparison]::Ordinal)) {
+        Throw-MaterializerError -Message "Payload generation metadata sources do not match the audited package layout." -ExitCode 2
+    }
+
+    $generationJson = Read-BoundedJsonDocument -Path $generationManifestFile.SourcePath -Label "generation manifest" -MaximumBytes (1024 * 1024)
+    $generation = $generationJson.Document
+    $generationFiles = @(Get-RequiredProperty -Object $generation -Name "files" -Label "generation manifest")
+    if ([int](Get-RequiredProperty -Object $generation -Name "schema_version" -Label "generation manifest") -ne 1 -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "managed_by" -Label "generation manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "generation_id" -Label "generation manifest"), $Manifest.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "package_version" -Label "generation manifest"), $Manifest.PackageVersion, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "payload_version" -Label "generation manifest"), $Manifest.PayloadVersion, [StringComparison]::Ordinal) -or
+        [int](Get-RequiredProperty -Object $generation -Name "payload_sequence" -Label "generation manifest") -ne $Manifest.PayloadSequence -or
+        [int](Get-RequiredProperty -Object $generation -Name "bootstrap_protocol" -Label "generation manifest") -ne $Manifest.BootstrapProtocol -or
+        $generationFiles.Count -eq 0) {
+        Throw-MaterializerError -Message "Generation manifest identity does not match the payload manifest." -ExitCode 2
+    }
+
+    $generationTargetFiles = @($Manifest.Files | Where-Object {
+        $_.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($_.Target, $generationManifestTarget, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($generationFiles.Count -ne $generationTargetFiles.Count) {
+        Throw-MaterializerError -Message "Generation manifest file closure does not match the payload manifest." -ExitCode 2
+    }
+    $seenGenerationFiles = @{}
+    foreach ($entry in $generationFiles) {
+        $relativePath = ConvertTo-SafeRelativePath -Path ([string](Get-RequiredProperty -Object $entry -Name "path" -Label "generation file")) -Label "generation file"
+        $expectedHash = ([string](Get-RequiredProperty -Object $entry -Name "sha256" -Label "generation file")).ToLowerInvariant()
+        $target = $script:GenerationTargetPrefix + $relativePath
+        if ($expectedHash -notmatch '^[0-9a-f]{64}$' -or
+            $seenGenerationFiles.ContainsKey($relativePath) -or
+            -not $Manifest.TargetMap.ContainsKey($target) -or
+            -not [string]::Equals($Manifest.TargetMap[$target].Sha256, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            Throw-MaterializerError -Message "Generation manifest contains an invalid, duplicate, or mismatched file: $relativePath" -ExitCode 2
+        }
+        $seenGenerationFiles[$relativePath] = $true
+    }
+
+    $pointerJson = Read-BoundedJsonDocument -Path $pointerFile.SourcePath -Label "generation pointer" -MaximumBytes (64 * 1024)
+    $pointer = $pointerJson.Document
+    $expectedGenerationRoot = $script:GenerationTargetPrefix.TrimEnd('/')
+    if ([int](Get-RequiredProperty -Object $pointer -Name "schema_version" -Label "generation pointer") -ne 1 -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "managed_by" -Label "generation pointer"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "package_version" -Label "generation pointer"), $Manifest.PackageVersion, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "payload_version" -Label "generation pointer"), $Manifest.PayloadVersion, [StringComparison]::Ordinal) -or
+        [int](Get-RequiredProperty -Object $pointer -Name "payload_sequence" -Label "generation pointer") -ne $Manifest.PayloadSequence -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "generation_id" -Label "generation pointer"), $Manifest.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "generation_relative_path" -Label "generation pointer"), $expectedGenerationRoot, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "generation_manifest_sha256" -Label "generation pointer"), $generationManifestFile.Sha256, [StringComparison]::OrdinalIgnoreCase) -or
+        [int](Get-RequiredProperty -Object $pointer -Name "bootstrap_protocol" -Label "generation pointer") -ne $Manifest.BootstrapProtocol) {
+        Throw-MaterializerError -Message "Generation pointer identity does not match the payload and generation manifests." -ExitCode 2
     }
 }
 
@@ -723,6 +888,26 @@ function Read-InstalledMarker {
             Throw-MaterializerError -Message "Installed payload marker has an invalid host-use gate version." -ExitCode 2
         }
     }
+    $generationLeaseVersion = 0
+    $generationId = $null
+    $bootstrapProtocol = 0
+    $generationLeaseProperty = $document.PSObject.Properties["generation_lease_version"]
+    $generationIdProperty = $document.PSObject.Properties["generation_id"]
+    $bootstrapProtocolProperty = $document.PSObject.Properties["bootstrap_protocol"]
+    if ($null -ne $generationLeaseProperty -or $null -ne $generationIdProperty -or $null -ne $bootstrapProtocolProperty) {
+        try {
+            $generationLeaseVersion = [int]$generationLeaseProperty.Value
+            $generationId = [string]$generationIdProperty.Value
+            $bootstrapProtocol = [int]$bootstrapProtocolProperty.Value
+        } catch {
+            Throw-MaterializerError -Message "Installed payload marker has invalid generation metadata." -ExitCode 2
+        }
+        if ($generationLeaseVersion -lt 2 -or
+            $generationId -notmatch '^[A-Za-z0-9._-]{1,64}$' -or
+            $bootstrapProtocol -lt 1) {
+            Throw-MaterializerError -Message "Installed payload marker has invalid generation metadata." -ExitCode 2
+        }
+    }
     $markerFiles = @(Get-RequiredProperty -Object $document -Name "files" -Label "installed payload marker")
     if ($schemaVersion -ne 1 -or
         -not [string]::Equals($managedBy, $script:ManagedBy, [StringComparison]::Ordinal) -or
@@ -761,6 +946,9 @@ function Read-InstalledMarker {
         PayloadVersion = $payloadVersion
         PayloadSequence = $payloadSequence
         HostUseGateVersion = $hostUseGateVersion
+        GenerationLeaseVersion = $generationLeaseVersion
+        GenerationId = $generationId
+        BootstrapProtocol = $bootstrapProtocol
         Files = @($files | Sort-Object Target)
         Map = $map
     }
@@ -969,6 +1157,93 @@ function Write-MaterializationPlan {
     }
 }
 
+function Get-AutomaticUpgradeEligibility {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    $marker = $Plan.Marker
+    if ($null -eq $marker) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "first adoption requires explicit Sync authorization" }
+    }
+    if ($Plan.HasConflict -or $Plan.StagedTargets.Count -gt 0) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "conflict or staged target requires explicit review" }
+    }
+    foreach ($retired in $Plan.Retired) {
+        $immutableGenerationTarget = $retired.Target -match '^AIWork/\.runtime/codedb/host/generations/[A-Za-z0-9._-]{1,64}/'
+        if (-not $immutableGenerationTarget -or $retired.Status -ne "Retirable") {
+            return [pscustomobject]@{ Eligible = $false; Reason = "non-generation retired target requires explicit review" }
+        }
+    }
+    $knownLegacy = $marker.PayloadSequence -eq 21 -and
+        [string]::Equals($marker.PackageVersion, "0.2.2", [StringComparison]::Ordinal) -and
+        [string]::Equals($marker.PayloadVersion, "poc.21", [StringComparison]::Ordinal) -and
+        $marker.HostUseGateVersion -eq 1 -and
+        $Manifest.PayloadSequence -eq 22 -and
+        [string]::Equals($Manifest.GenerationId, $script:GenerationId, [StringComparison]::Ordinal)
+    $knownGenerationUpgrade = $marker.PayloadSequence -ge 22 -and
+        $marker.PayloadSequence -lt $Manifest.PayloadSequence -and
+        $marker.GenerationLeaseVersion -ge 2 -and
+        $marker.GenerationId -match '^[A-Za-z0-9._-]{1,64}$' -and
+        $marker.BootstrapProtocol -ge 1 -and
+        $marker.BootstrapProtocol -eq $Manifest.BootstrapProtocol -and
+        -not [string]::Equals($marker.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal)
+    if (-not $knownLegacy -and -not $knownGenerationUpgrade) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "installed payload is not a supported owned generation upgrade source" }
+    }
+
+    $wrapperTarget = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+    foreach ($item in $Plan.Files) {
+        if ([string]::Equals($item.Target, $wrapperTarget, [StringComparison]::OrdinalIgnoreCase)) {
+            $ownedWrapperTransition = if ($knownLegacy) {
+                $item.Status -eq "Upgradeable" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
+                    [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
+            } else {
+                # A generation-only update must not replace the stable bridge.
+                # Bootstrap protocol migrations require their own reviewed path.
+                $item.Status -eq "Current"
+            }
+            if (-not $ownedWrapperTransition) {
+                return [pscustomobject]@{ Eligible = $false; Reason = "bootstrap wrapper is not byte-exact at a supported protocol transition" }
+            }
+            continue
+        }
+        if ($item.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($item.Status -notin @("Missing", "Adoptable")) {
+                return [pscustomobject]@{ Eligible = $false; Reason = "new generation target already exists and requires collision review" }
+            }
+            continue
+        }
+        if ([string]::Equals($item.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
+            $ownedPointerTransition = if ($knownLegacy) {
+                $item.Status -eq "Missing"
+            } else {
+                $item.Status -eq "Upgradeable" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
+                    [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
+            }
+            if (-not $ownedPointerTransition) {
+                return [pscustomobject]@{ Eligible = $false; Reason = "new generation pointer already exists and requires collision review" }
+            }
+            continue
+        }
+        $ownedUnmodifiedTarget = $item.Status -eq "Current" -and
+            -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
+            [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
+        if (-not $ownedUnmodifiedTarget) {
+            return [pscustomobject]@{ Eligible = $false; Reason = "existing bootstrap payload is not fully owned and byte-exact" }
+        }
+    }
+    $reason = if ($knownLegacy) {
+        "owned poc.21 bootstrap can migrate without replacing active legacy scripts"
+    } else {
+        "owned immutable generation can switch while its leases remain protected"
+    }
+    return [pscustomobject]@{ Eligible = $true; Reason = $reason }
+}
+
 function New-MarkerJson {
     param([Parameter(Mandatory = $true)]$Manifest)
 
@@ -985,6 +1260,10 @@ function New-MarkerJson {
         payload_version = $Manifest.PayloadVersion
         payload_sequence = $Manifest.PayloadSequence
         host_use_gate_version = $script:HostUseGateVersion
+        generation_lease_version = 2
+        generation_id = $Manifest.GenerationId
+        bootstrap_protocol = $Manifest.BootstrapProtocol
+        current_pointer = $Manifest.CurrentPointerTarget
         files = $files
     }
     $json = $document | ConvertTo-Json -Depth 8
@@ -1054,16 +1333,67 @@ function Exit-MaterializerLock {
 function Test-MaterializerProcessAlive {
     param([AllowNull()]$ProcessId)
 
+    return (Get-MaterializerProcessIdentity -ProcessId $ProcessId).Alive
+}
+
+function Get-MaterializerProcessIdentity {
+    param([AllowNull()]$ProcessId)
+
     try {
         $numericProcessId = [int]$ProcessId
         if ($numericProcessId -le 0) {
-            return $false
+            return [pscustomobject]@{ Alive = $false; StartTicks = $null; StartUnixMilliseconds = $null }
         }
-        $process = Get-Process -Id $numericProcessId -ErrorAction Stop
-        return -not $process.HasExited
     } catch {
+        return [pscustomobject]@{ Alive = $false; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($numericProcessId)
+    } catch [System.ArgumentException] {
+        return [pscustomobject]@{ Alive = $false; StartTicks = $null; StartUnixMilliseconds = $null }
+    } catch {
+        # Failure to inspect a possibly elevated process is indeterminate and
+        # must remain a live safety owner.
+        return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+    try {
+        if ($process.HasExited) {
+            return [pscustomobject]@{ Alive = $false; StartTicks = $null; StartUnixMilliseconds = $null }
+        }
+    } catch {
+        return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+
+    try {
+        $startUtc = $process.StartTime.ToUniversalTime()
+        $startOffset = [DateTimeOffset]::new($startUtc)
+        return [pscustomobject]@{
+            Alive = $true
+            StartTicks = $startUtc.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+            StartUnixMilliseconds = $startOffset.ToUnixTimeMilliseconds()
+        }
+    } catch {
+        # Cross-elevation process metadata may be unavailable. A visible PID is
+        # still treated as live, but it cannot prove an identity mismatch.
+        return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+}
+
+function Test-MaterializerGenerationProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$ProcessIdentity,
+        [Parameter(Mandatory = $true)][string]$LeaseIdentity
+    )
+
+    [int64]$leaseStartMilliseconds = 0
+    if (-not [int64]::TryParse($LeaseIdentity, [ref]$leaseStartMilliseconds) -or $leaseStartMilliseconds -le 0) {
         return $false
     }
+    if (-not $ProcessIdentity.Alive -or $null -eq $ProcessIdentity.StartUnixMilliseconds) {
+        return $null
+    }
+    return [Math]::Abs([int64]$ProcessIdentity.StartUnixMilliseconds - $leaseStartMilliseconds) -le 2000
 }
 
 function Get-MaterializerHostUseLeaseReport {
@@ -1128,7 +1458,8 @@ function Get-MaterializerHostUseLeaseReport {
             continue
         }
 
-        if (Test-MaterializerProcessAlive -ProcessId $processId) {
+        $processIdentity = Get-MaterializerProcessIdentity -ProcessId $processId
+        if ($processIdentity.Alive) {
             $liveLeases.Add("$owner PID $processId")
         } else {
             $staleLeases.Add([pscustomobject]@{
@@ -1146,23 +1477,129 @@ function Get-MaterializerHostUseLeaseReport {
     }
 }
 
+function Get-MaterializerGenerationLeaseReport {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $liveLeases = New-Object System.Collections.Generic.List[string]
+    $liveLeaseDetails = New-Object System.Collections.Generic.List[object]
+    $staleLeases = New-Object System.Collections.Generic.List[object]
+    $invalidLeases = New-Object System.Collections.Generic.List[string]
+    $leasesRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:GenerationLeaseRelativePath -Label "generation lease root"
+    if (-not (Test-Path -LiteralPath $leasesRoot)) {
+        return [pscustomobject]@{ Live = $liveLeases.ToArray(); LiveDetails = $liveLeaseDetails.ToArray(); Stale = $staleLeases.ToArray(); Invalid = $invalidLeases.ToArray() }
+    }
+    if (-not (Test-Path -LiteralPath $leasesRoot -PathType Container)) {
+        $invalidLeases.Add($leasesRoot)
+        return [pscustomobject]@{ Live = $liveLeases.ToArray(); LiveDetails = $liveLeaseDetails.ToArray(); Stale = $staleLeases.ToArray(); Invalid = $invalidLeases.ToArray() }
+    }
+
+    Assert-NoReparsePoint -Path $leasesRoot -Root $ProjectRoot -Label "generation lease root"
+    $now = [DateTime]::UtcNow
+    foreach ($generationDirectory in @(Get-ChildItem -LiteralPath $leasesRoot -Force)) {
+        if (-not $generationDirectory.PSIsContainer -or $generationDirectory.Name -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+            $invalidLeases.Add($generationDirectory.FullName)
+            continue
+        }
+        Assert-NoReparsePoint -Path $generationDirectory.FullName -Root $leasesRoot -Label "generation lease directory"
+        foreach ($item in @(Get-ChildItem -LiteralPath $generationDirectory.FullName -Force)) {
+            $nameMatch = [regex]::Match($item.Name, '^(mcp|watcher)-([0-9]+)-([0-9a-f]{32})\.json$')
+            $temporaryNameMatch = [regex]::Match($item.Name, '^\.(mcp|watcher)-([0-9]+)-([0-9a-f]{32})\.json\.([0-9]+)\.[0-9a-fA-F-]{36}\.tmp$')
+            if (-not $item.PSIsContainer -and $temporaryNameMatch.Success) {
+                try {
+                    Assert-NoReparsePoint -Path $item.FullName -Root $generationDirectory.FullName -Label "generation lease temporary file"
+                    if ($item.LastWriteTimeUtc -lt $now.AddMinutes(-5)) {
+                        $staleLeases.Add([pscustomobject]@{
+                            GenerationId = $generationDirectory.Name
+                            Owner = "temporary"
+                            ProcessId = [int]$temporaryNameMatch.Groups[4].Value
+                            Path = $item.FullName
+                        })
+                    }
+                } catch {
+                    $invalidLeases.Add($item.FullName)
+                }
+                continue
+            }
+            if ($item.PSIsContainer -or -not $nameMatch.Success) {
+                $invalidLeases.Add($item.FullName)
+                continue
+            }
+            try {
+                Assert-NoReparsePoint -Path $item.FullName -Root $generationDirectory.FullName -Label "generation lease"
+                $lease = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+                $owner = [string]$lease.owner
+                $processId = [int]$lease.pid
+                $generationId = [string]$lease.generation_id
+                $heartbeat = [DateTime]::Parse([string]$lease.heartbeat_at_utc).ToUniversalTime()
+                $leaseProcessStartIdentity = [string]$lease.process_start_identity
+                $valid = [int]$lease.schema_version -eq 2 -and
+                    [int]$lease.generation_lease_version -eq 2 -and
+                    [string]::Equals([string]$lease.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -and
+                    [string]::Equals($generationId, $generationDirectory.Name, [StringComparison]::Ordinal) -and
+                    [string]::Equals($owner, $nameMatch.Groups[1].Value, [StringComparison]::Ordinal) -and
+                    $processId -eq [int]$nameMatch.Groups[2].Value -and
+                    [string]::Equals([string]$lease.lease_id, [System.IO.Path]::GetFileNameWithoutExtension($item.Name), [StringComparison]::Ordinal) -and
+                    $leaseProcessStartIdentity -match '^[0-9]{1,20}$' -and
+                    [string]::Equals([System.IO.Path]::GetFullPath([string]$lease.project_root), [System.IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -and
+                    $heartbeat -le $now.AddSeconds(30)
+            } catch {
+                $valid = $false
+            }
+            if (-not $valid) {
+                $invalidLeases.Add($item.FullName)
+                continue
+            }
+
+            $processIdentity = Get-MaterializerProcessIdentity -ProcessId $processId
+            $identityMatches = Test-MaterializerGenerationProcessIdentity -ProcessIdentity $processIdentity -LeaseIdentity $leaseProcessStartIdentity
+            if ($processIdentity.Alive -and ($null -eq $identityMatches -or $identityMatches)) {
+                $liveLeases.Add("generation $generationId $owner PID $processId")
+                $liveLeaseDetails.Add([pscustomobject]@{
+                    GenerationId = $generationId
+                    Owner = $owner
+                    ProcessId = $processId
+                    Path = $item.FullName
+                })
+            } else {
+                $staleLeases.Add([pscustomobject]@{
+                    GenerationId = $generationId
+                    Owner = $owner
+                    ProcessId = $processId
+                    Path = $item.FullName
+                })
+            }
+        }
+    }
+    return [pscustomobject]@{ Live = $liveLeases.ToArray(); LiveDetails = $liveLeaseDetails.ToArray(); Stale = $staleLeases.ToArray(); Invalid = $invalidLeases.ToArray() }
+}
+
 function Write-HostUseLeaseGuidance {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
     $runtimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label "materializer runtime"
     $leaseRoot = Join-Path $runtimeRoot $script:HostUseLeaseDirectoryName
     $report = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
     foreach ($path in $report.Invalid) {
         Write-Host "[BLOCKED] Host-use lease requires manual review: $path"
     }
     foreach ($lease in $report.Live) {
         Write-Host "[ACTIVE] $lease"
     }
-    if ($report.Live.Count -gt 0) {
+    foreach ($path in $generationReport.Invalid) {
+        Write-Host "[BLOCKED] Generation lease requires manual review: $path"
+    }
+    foreach ($lease in $generationReport.Live) {
+        Write-Host "[ACTIVE] $lease"
+    }
+    if ($report.Live.Count -gt 0 -or $generationReport.Live.Count -gt 0) {
         Write-Host "[BLOCKED] Host payload Sync/Remove is blocked while CodeDB host tooling is active. Pause the watcher and disconnect project MCP sessions first."
     }
     foreach ($lease in $report.Stale) {
         Write-Host "[STALE-LEASE] $($lease.Owner) PID $($lease.ProcessId) will be reclaimed by the next authorized mutation."
+    }
+    foreach ($lease in $generationReport.Stale) {
+        Write-Host "[STALE-LEASE] generation $($lease.GenerationId) $($lease.Owner) PID $($lease.ProcessId) will be reclaimed by the next authorized mutation."
     }
 }
 
@@ -1222,6 +1659,9 @@ function Assert-ExistingMaterializerActiveMarker {
     Assert-NoReparsePoint -Path $Lock.ActiveMarkerPath -Root $ProjectRoot -Label "materializer active marker"
     try {
         $marker = Get-Content -LiteralPath $Lock.ActiveMarkerPath -Raw | ConvertFrom-Json
+        $markerProcessIdentity = Get-MaterializerProcessIdentity -ProcessId $marker.pid
+        $processStartProperty = $marker.PSObject.Properties["process_start_ticks"]
+        $markerProcessStartTicks = if ($null -eq $processStartProperty) { "" } else { [string]$processStartProperty.Value }
         $valid = [int]$marker.schema_version -eq 1 -and
             [int]$marker.host_use_gate_version -eq $script:HostUseGateVersion -and
             [string]::Equals([string]$marker.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -and
@@ -1229,31 +1669,52 @@ function Assert-ExistingMaterializerActiveMarker {
             [string]::Equals(
                 [System.IO.Path]::GetFullPath([string]$marker.project_root),
                 [System.IO.Path]::GetFullPath($ProjectRoot),
-                [StringComparison]::OrdinalIgnoreCase)
+                [StringComparison]::OrdinalIgnoreCase) -and
+            ([string]::IsNullOrWhiteSpace($markerProcessStartTicks) -or $markerProcessStartTicks -match '^[0-9]{1,20}$')
     } catch {
         $valid = $false
     }
     if (-not $valid) {
         Throw-MaterializerError -Message "Materializer active marker is invalid and requires manual review: $($Lock.ActiveMarkerPath)" -ExitCode 7
     }
-    if ([int]$marker.pid -ne $PID -and (Test-MaterializerProcessAlive -ProcessId $marker.pid)) {
+    if ([int]$marker.pid -ne $PID -and $markerProcessIdentity.Alive -and
+        ($null -eq $markerProcessIdentity.StartTicks -or
+            [string]::IsNullOrWhiteSpace($markerProcessStartTicks) -or
+            [string]::Equals($markerProcessStartTicks, [string]$markerProcessIdentity.StartTicks, [StringComparison]::Ordinal))) {
         Throw-MaterializerError -Message "Another payload materializer PID $($marker.pid) is active." -ExitCode 4
+    }
+    if ([int]$marker.pid -ne $PID -and $markerProcessIdentity.Alive -and
+        -not [string]::IsNullOrWhiteSpace($markerProcessStartTicks) -and
+        $null -ne $markerProcessIdentity.StartTicks -and
+        -not [string]::Equals($markerProcessStartTicks, [string]$markerProcessIdentity.StartTicks, [StringComparison]::Ordinal)) {
+        Write-Host "[RECOVERED] Ignored a stale materializer marker whose PID was reused."
     }
 }
 
 function Publish-MaterializerActiveMarker {
     param(
         [Parameter(Mandatory = $true)]$Lock,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()][string]$MarkerAction
     )
 
+    $publishedAction = if ([string]::IsNullOrWhiteSpace($MarkerAction)) {
+        $Action.ToLowerInvariant()
+    } else {
+        $MarkerAction.ToLowerInvariant()
+    }
+    if ($publishedAction -notin @("upgrade", "sync", "remove")) {
+        Throw-MaterializerError -Message "Unsupported materializer active marker action: $publishedAction" -ExitCode 2
+    }
+    $selfIdentity = Get-MaterializerProcessIdentity -ProcessId $PID
     $document = [ordered]@{
         schema_version = 1
         host_use_gate_version = $script:HostUseGateVersion
         managed_by = $script:ManagedBy
         pid = $PID
+        process_start_ticks = $selfIdentity.StartTicks
         project_root = [System.IO.Path]::GetFullPath($ProjectRoot)
-        action = $Action.ToLowerInvariant()
+        action = $publishedAction
         created_at_utc = [DateTime]::UtcNow.ToString("o")
     }
     $stagePath = Join-Path $Lock.Root ("active-$([guid]::NewGuid().ToString('N')).tmp")
@@ -1263,6 +1724,59 @@ function Publish-MaterializerActiveMarker {
         $Lock.ActiveMarkerPublished = $true
     } finally {
         Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Publish-MaterializerUpgradeState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][ValidateSet("INSTALLING", "SWITCHING", "ROLLBACK", "CURRENT", "CHECK_FAILED")][string]$State,
+        [AllowNull()][string]$Message
+    )
+
+    $statePath = Join-Path $Lock.Root $script:UpgradeStateName
+    Assert-NoReparsePoint -Path $statePath -Root $ProjectRoot -Label "materializer upgrade state"
+    $boundedMessage = if ([string]::IsNullOrWhiteSpace($Message)) {
+        $null
+    } elseif ($Message.Length -le 512) {
+        $Message
+    } else {
+        $Message.Substring(0, 512)
+    }
+    $document = [ordered]@{
+        schema_version = 1
+        managed_by = $script:ManagedBy
+        project_root = [System.IO.Path]::GetFullPath($ProjectRoot)
+        state = $State
+        generation_id = $script:GenerationId
+        updated_at_utc = [DateTime]::UtcNow.ToString("o")
+        message = $boundedMessage
+    }
+    $stagePath = Join-Path $Lock.Root ("upgrade-state-$([guid]::NewGuid().ToString('N')).tmp")
+    try {
+        Write-DurableUtf8File -Path $stagePath -Content (($document | ConvertTo-Json -Depth 6) + "`n")
+        Publish-TransactionFile -StagePath $stagePath -TargetPath $statePath
+    } finally {
+        Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-MaterializerUpgradeStateArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    Assert-NoReparsePoint -Path $Path -Root $ProjectRoot -Label "materializer upgrade state"
+    $stateJson = Read-BoundedJsonDocument -Path $Path -Label "materializer upgrade state" -MaximumBytes (64 * 1024)
+    $state = $stateJson.Document
+    if ([int](Get-RequiredProperty -Object $state -Name "schema_version" -Label "materializer upgrade state") -ne 1 -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $state -Name "managed_by" -Label "materializer upgrade state"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath([string](Get-RequiredProperty -Object $state -Name "project_root" -Label "materializer upgrade state")), [System.IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        [string](Get-RequiredProperty -Object $state -Name "state" -Label "materializer upgrade state") -notin @("INSTALLING", "SWITCHING", "ROLLBACK", "CURRENT", "CHECK_FAILED") -or
+        [string](Get-RequiredProperty -Object $state -Name "generation_id" -Label "materializer upgrade state") -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+        throw "Materializer upgrade state identity is invalid."
     }
 }
 
@@ -1308,6 +1822,7 @@ function Assert-NoLiveHostUseLeases {
 
     $leaseRoot = Join-Path $Lock.Root $script:HostUseLeaseDirectoryName
     $report = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
     if ($report.Invalid.Count -gt 0) {
         Throw-MaterializerError -Message "Host-use lease is invalid and requires manual review: $($report.Invalid[0])" -ExitCode 7
     }
@@ -1315,9 +1830,19 @@ function Assert-NoLiveHostUseLeases {
         Remove-Item -LiteralPath $lease.Path -Force
         Write-Host "[RECOVERED] Removed stale $($lease.Owner) host-use lease for PID $($lease.ProcessId)."
     }
+    if ($generationReport.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Generation lease is invalid and requires manual review: $($generationReport.Invalid[0])" -ExitCode 7
+    }
+    foreach ($lease in $generationReport.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Write-Host "[RECOVERED] Removed stale generation $($lease.GenerationId) $($lease.Owner) lease for PID $($lease.ProcessId)."
+    }
 
-    if ($report.Live.Count -gt 0) {
+    if ($report.Live.Count -gt 0 -or $generationReport.Live.Count -gt 0) {
         foreach ($lease in $report.Live) {
+            Write-Host "[ACTIVE] $lease"
+        }
+        foreach ($lease in $generationReport.Live) {
             Write-Host "[ACTIVE] $lease"
         }
         Throw-MaterializerError -Message "Host payload mutation is blocked while CodeDB host tooling is active." -ExitCode 4
@@ -1407,15 +1932,13 @@ function Assert-LegacyMcpBoundary {
     Write-Host "[CONFIRMED] Legacy MCP sessions were explicitly confirmed stopped."
 }
 
-function Initialize-MaterializerHostUseGate {
+function Complete-MaterializerHostUseGate {
     param(
         [Parameter(Mandatory = $true)]$Lock,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$MarkerPath
     )
 
-    Assert-ExistingMaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
-    Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
     $Lock.ProviderRuntimeRoots = @(Get-MaterializerProviderRuntimeRoots -ProjectRoot $ProjectRoot)
     Enter-MaterializerWatchManagementLocks -Lock $Lock -ProjectRoot $ProjectRoot
     Assert-NoLiveHostUseLeases -Lock $Lock -ProjectRoot $ProjectRoot
@@ -1423,11 +1946,23 @@ function Initialize-MaterializerHostUseGate {
     Assert-LegacyMcpBoundary -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
 }
 
+function Initialize-MaterializerUpgradeGate {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    Assert-ExistingMaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
+    Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
+}
+
 function Assert-TransactionTargetRelativePath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $normalized = ConvertTo-SafeRelativePath -Path $Path -Label "transaction target"
-    if ([string]::Equals($normalized, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
+    if ([string]::Equals($normalized, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($normalized, $script:LastKnownGoodPointerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($normalized, $script:UpgradeStateRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
         return $normalized
     }
     return Assert-TargetRelativePath -Path $normalized
@@ -1545,7 +2080,10 @@ function Write-TransactionJournal {
     param(
         [Parameter(Mandatory = $true)][ValidateSet("Sync", "Remove")][string]$Operation,
         [Parameter(Mandatory = $true)][string]$TransactionRoot,
-        [Parameter(Mandatory = $true)]$Entries
+        [Parameter(Mandatory = $true)]$Entries,
+        [switch]$AutomaticUpgrade,
+        [AllowNull()][string]$PreviousWatcherManagerPath,
+        [AllowNull()][string]$ProjectRoot
     )
 
     $transactionId = Split-Path -Leaf $TransactionRoot
@@ -1559,12 +2097,37 @@ function Write-TransactionJournal {
             backup_sha256 = $_.BackupSha256
         }
     })
+    $previousWatcherManager = $null
+    $previousWatcherManagerSha256 = $null
+    if ($AutomaticUpgrade) {
+        if ([string]::IsNullOrWhiteSpace($ProjectRoot) -or [string]::IsNullOrWhiteSpace($PreviousWatcherManagerPath)) {
+            throw "Automatic-upgrade journal requires the previous watcher manager identity."
+        }
+        $fullProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        $fullPreviousManager = [System.IO.Path]::GetFullPath($PreviousWatcherManagerPath)
+        Assert-PathInside -Path $fullPreviousManager -Root $fullProjectRoot -Label "previous watcher manager"
+        $previousWatcherManager = $fullPreviousManager.Substring($fullProjectRoot.Length + 1).Replace('\', '/')
+        $previousWatcherManager = ConvertTo-SafeRelativePath -Path $previousWatcherManager -Label "previous watcher manager"
+        $isLegacyManager = [string]::Equals($previousWatcherManager, "AIWork/codedb/scripts/manage-codedb-project-watch.ps1", [StringComparison]::OrdinalIgnoreCase)
+        $isGenerationManager = $previousWatcherManager -match '^AIWork/\.runtime/codedb/host/generations/[A-Za-z0-9._-]{1,64}/scripts/manage-codedb-project-watch\.ps1$'
+        if (-not $isLegacyManager -and -not $isGenerationManager) {
+            throw "Previous watcher manager is outside the supported legacy or immutable-generation layout."
+        }
+        Assert-NoReparsePoint -Path $fullPreviousManager -Root $fullProjectRoot -Label "previous watcher manager"
+        if (-not (Test-Path -LiteralPath $fullPreviousManager -PathType Leaf)) {
+            throw "Previous watcher manager does not exist."
+        }
+        $previousWatcherManagerSha256 = Get-FileSha256 -Path $fullPreviousManager
+    }
     $document = [ordered]@{
         schema_version = 1
         managed_by = $script:ManagedBy
         transaction_id = $transactionId
         state = "prepared"
         operation = $Operation.ToLowerInvariant()
+        automatic_upgrade = [bool]$AutomaticUpgrade
+        previous_watcher_manager = $previousWatcherManager
+        previous_watcher_manager_sha256 = $previousWatcherManagerSha256
         entries = $journalEntries
     }
     $journalPath = Join-Path $TransactionRoot $script:TransactionJournalName
@@ -1593,6 +2156,37 @@ function Read-TransactionJournal {
         $operation -notin @("sync", "remove") -or
         $journalEntries.Count -eq 0) {
         throw "Transaction journal identity, state, operation, or entries are invalid."
+    }
+
+    $automaticUpgrade = $false
+    $automaticUpgradeProperty = $document.PSObject.Properties["automatic_upgrade"]
+    if ($null -ne $automaticUpgradeProperty) {
+        if ($automaticUpgradeProperty.Value -isnot [bool]) {
+            throw "Transaction journal automatic_upgrade must be a boolean."
+        }
+        $automaticUpgrade = [bool]$automaticUpgradeProperty.Value
+    }
+    $previousWatcherManagerPath = $null
+    $previousWatcherManagerSha256 = $null
+    $previousWatcherProperty = $document.PSObject.Properties["previous_watcher_manager"]
+    $previousWatcherHashProperty = $document.PSObject.Properties["previous_watcher_manager_sha256"]
+    if ($automaticUpgrade) {
+        if ($null -eq $previousWatcherProperty -or [string]::IsNullOrWhiteSpace([string]$previousWatcherProperty.Value) -or
+            $null -eq $previousWatcherHashProperty -or [string]$previousWatcherHashProperty.Value -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "Automatic-upgrade journal is missing the previous watcher manager identity."
+        }
+        $previousWatcherRelativePath = ConvertTo-SafeRelativePath -Path ([string]$previousWatcherProperty.Value) -Label "previous watcher manager"
+        $isLegacyManager = [string]::Equals($previousWatcherRelativePath, "AIWork/codedb/scripts/manage-codedb-project-watch.ps1", [StringComparison]::OrdinalIgnoreCase)
+        $isGenerationManager = $previousWatcherRelativePath -match '^AIWork/\.runtime/codedb/host/generations/[A-Za-z0-9._-]{1,64}/scripts/manage-codedb-project-watch\.ps1$'
+        if (-not $isLegacyManager -and -not $isGenerationManager) {
+            throw "Automatic-upgrade journal has an unsupported previous watcher manager."
+        }
+        $previousWatcherManagerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $previousWatcherRelativePath -Label "previous watcher manager"
+        Assert-NoReparsePoint -Path $previousWatcherManagerPath -Root $ProjectRoot -Label "previous watcher manager"
+        $previousWatcherManagerSha256 = ([string]$previousWatcherHashProperty.Value).ToLowerInvariant()
+    } elseif (($null -ne $previousWatcherProperty -and $null -ne $previousWatcherProperty.Value) -or
+        ($null -ne $previousWatcherHashProperty -and $null -ne $previousWatcherHashProperty.Value)) {
+        throw "Non-upgrade transaction journal cannot select a previous watcher manager."
     }
 
     $seenTargets = @{}
@@ -1658,6 +2252,9 @@ function Read-TransactionJournal {
 
     return [pscustomobject]@{
         Operation = $operation
+        AutomaticUpgrade = $automaticUpgrade
+        PreviousWatcherManagerPath = $previousWatcherManagerPath
+        PreviousWatcherManagerSha256 = $previousWatcherManagerSha256
         Entries = $entries.ToArray()
     }
 }
@@ -1685,6 +2282,158 @@ function Assert-TransactionRecoveryState {
     }
 }
 
+function Assert-PendingAutomaticUpgradeMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+        throw "Pending automatic-upgrade recovery is missing its active marker."
+    }
+    Assert-NoReparsePoint -Path $MarkerPath -Root $ProjectRoot -Label "pending automatic-upgrade marker"
+    $markerJson = Read-BoundedJsonDocument -Path $MarkerPath -Label "pending automatic-upgrade marker" -MaximumBytes (64 * 1024)
+    $marker = $markerJson.Document
+    $processStartTicks = [string](Get-RequiredProperty -Object $marker -Name "process_start_ticks" -Label "pending automatic-upgrade marker")
+    $createdAt = [DateTime]::MinValue
+    if ([int](Get-RequiredProperty -Object $marker -Name "schema_version" -Label "pending automatic-upgrade marker") -ne 1 -or
+        [int](Get-RequiredProperty -Object $marker -Name "host_use_gate_version" -Label "pending automatic-upgrade marker") -ne $script:HostUseGateVersion -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $marker -Name "managed_by" -Label "pending automatic-upgrade marker"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        [int](Get-RequiredProperty -Object $marker -Name "pid" -Label "pending automatic-upgrade marker") -le 0 -or
+        $processStartTicks -notmatch '^[0-9]{1,20}$' -or
+        -not [string]::Equals(
+            [System.IO.Path]::GetFullPath([string](Get-RequiredProperty -Object $marker -Name "project_root" -Label "pending automatic-upgrade marker")),
+            [System.IO.Path]::GetFullPath($ProjectRoot),
+            [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $marker -Name "action" -Label "pending automatic-upgrade marker"), "upgrade", [StringComparison]::Ordinal) -or
+        -not [DateTime]::TryParse([string](Get-RequiredProperty -Object $marker -Name "created_at_utc" -Label "pending automatic-upgrade marker"), [ref]$createdAt)) {
+        throw "Pending automatic-upgrade marker identity or schema is invalid."
+    }
+}
+
+function Assert-PendingAutomaticUpgradeJournalIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Journal,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if (-not $Journal.AutomaticUpgrade -or
+        -not [string]::Equals([string]$Journal.Operation, "sync", [StringComparison]::Ordinal)) {
+        throw "Pending automatic-upgrade journal has the wrong operation identity."
+    }
+    $pointerTarget = [string]$Manifest.CurrentPointerTarget
+    if (-not $Manifest.TargetMap.ContainsKey($pointerTarget)) {
+        throw "Payload manifest has no current-pointer identity for pending recovery."
+    }
+    $pointerEntry = @($Journal.Entries | Where-Object {
+        [string]::Equals([string]$_.Target, $pointerTarget, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $markerEntry = @($Journal.Entries | Where-Object {
+        [string]::Equals([string]$_.Target, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($pointerEntry.Count -ne 1 -or $markerEntry.Count -ne 1 -or
+        -not [string]::Equals([string]$pointerEntry[0].Mutation, "Write", [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$markerEntry[0].Mutation, "Write", [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$pointerEntry[0].DesiredSha256, [string]$Manifest.TargetMap[$pointerTarget].Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Pending automatic-upgrade journal does not select the package generation pointer and marker."
+    }
+    $pointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $pointerTarget -Label "pending current generation pointer"
+    $installedMarkerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "pending installed payload marker"
+    if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $installedMarkerPath -PathType Leaf) -or
+        -not [string]::Equals((Get-FileSha256 -Path $pointerPath), [string]$pointerEntry[0].DesiredSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-FileSha256 -Path $installedMarkerPath), [string]$markerEntry[0].DesiredSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Pending automatic-upgrade journal no longer matches the selected package generation."
+    }
+
+    $previousManagerPath = [System.IO.Path]::GetFullPath([string]$Journal.PreviousWatcherManagerPath)
+    Assert-PathInside -Path $previousManagerPath -Root $ProjectRoot -Label "pending previous watcher manager"
+    $projectPrefix = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $previousManagerTarget = $previousManagerPath.Substring($projectPrefix.Length).Replace('\', '/')
+    $managerBackupEntry = @($Journal.Entries | Where-Object {
+        [string]::Equals([string]$_.Target, $previousManagerTarget, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $currentManagerMatches = (Test-Path -LiteralPath $previousManagerPath -PathType Leaf) -and
+        [string]::Equals((Get-FileSha256 -Path $previousManagerPath), [string]$Journal.PreviousWatcherManagerSha256, [StringComparison]::OrdinalIgnoreCase)
+    $backupManagerMatches = $managerBackupEntry.Count -eq 1 -and
+        $managerBackupEntry[0].ExistedBefore -and
+        [string]::Equals([string]$managerBackupEntry[0].BackupSha256, [string]$Journal.PreviousWatcherManagerSha256, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $currentManagerMatches -and -not $backupManagerMatches) {
+        throw "Pending automatic-upgrade journal no longer proves its previous watcher manager identity."
+    }
+}
+
+function Get-PendingAutomaticUpgradeRecovery {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $notPending = [pscustomobject]@{ Pending = $false; TransactionId = $null }
+    $runtimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label "materializer runtime"
+    if (-not (Test-Path -LiteralPath $runtimeRoot)) {
+        return $notPending
+    }
+    if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+        throw "Materializer recovery runtime is not a directory: $runtimeRoot"
+    }
+    Assert-NoReparsePoint -Path $runtimeRoot -Root $ProjectRoot -Label "materializer recovery runtime"
+
+    $automaticTransactions = New-Object System.Collections.Generic.List[object]
+    $hasNonAutomaticOrUnclassifiedTransaction = $false
+    foreach ($transactionDirectory in @(Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory | Sort-Object Name)) {
+        if ([string]::Equals($transactionDirectory.Name, $script:HostUseLeaseDirectoryName, [StringComparison]::Ordinal) -or
+            [string]::Equals($transactionDirectory.Name, $script:TrackedHostAuthorizationDirectoryName, [StringComparison]::Ordinal)) {
+            continue
+        }
+        if ($transactionDirectory.Name -notmatch '^txn-v1-[0-9a-f]{12}$') {
+            throw "Unknown materializer recovery artifact requires manual review: $($transactionDirectory.FullName)"
+        }
+        Assert-NoReparsePoint -Path $transactionDirectory.FullName -Root $runtimeRoot -Label "pending materializer transaction"
+        $journalPath = Join-Path $transactionDirectory.FullName $script:TransactionJournalName
+        if (-not (Test-Path -LiteralPath $journalPath)) {
+            $hasNonAutomaticOrUnclassifiedTransaction = $true
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) {
+            throw "Pending transaction journal is not a file: $journalPath"
+        }
+        Assert-NoReparsePoint -Path $journalPath -Root $transactionDirectory.FullName -Label "pending transaction journal"
+        $journalInfo = Get-Item -LiteralPath $journalPath -Force
+        if ($journalInfo.Length -le 0 -or $journalInfo.Length -gt (1024 * 1024)) {
+            throw "Pending transaction journal has an invalid size: $journalPath"
+        }
+        $journal = Read-TransactionJournal -TransactionRoot $transactionDirectory.FullName -ProjectRoot $ProjectRoot
+        Assert-TransactionRecoveryState -Entries $journal.Entries
+        if (-not $journal.AutomaticUpgrade) {
+            $hasNonAutomaticOrUnclassifiedTransaction = $true
+            continue
+        }
+        $automaticTransactions.Add([pscustomobject]@{
+            Id = $transactionDirectory.Name
+            Journal = $journal
+        })
+    }
+
+    if ($hasNonAutomaticOrUnclassifiedTransaction -or $automaticTransactions.Count -eq 0) {
+        return $notPending
+    }
+    if ($automaticTransactions.Count -ne 1) {
+        throw "Multiple pending automatic-upgrade transactions require manual review."
+    }
+    $activeMarkerPath = Join-Path $runtimeRoot $script:ActiveMarkerName
+    Assert-PendingAutomaticUpgradeMarker -MarkerPath $activeMarkerPath -ProjectRoot $ProjectRoot
+    Assert-PendingAutomaticUpgradeJournalIdentity `
+        -Journal $automaticTransactions[0].Journal `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot
+    return [pscustomobject]@{
+        Pending = $true
+        TransactionId = $automaticTransactions[0].Id
+    }
+}
+
 function Assert-TransactionEntryBeforeMutation {
     param([Parameter(Mandatory = $true)]$Entry)
 
@@ -1702,7 +2451,8 @@ function Restore-Transaction {
     param(
         [Parameter(Mandatory = $true)]$Entries,
         [Parameter(Mandatory = $true)][string]$TransactionRoot,
-        [Parameter(Mandatory = $true)][string]$TargetRoot
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
     )
 
     $errors = New-Object System.Collections.Generic.List[string]
@@ -1747,6 +2497,8 @@ function Restore-Transaction {
         $createdPaths = @($Entries | Where-Object { -not $_.ExistedBefore } | ForEach-Object { $_.TargetPath })
         if ($createdPaths.Count -gt 0) {
             Remove-EmptyManagedParents -Paths $createdPaths -TargetRoot $TargetRoot
+            $hostRuntimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/.runtime/codedb/host" -Label "host generation runtime"
+            Remove-EmptyManagedParents -Paths $createdPaths -TargetRoot $hostRuntimeRoot
         }
     }
     return $errors.ToArray()
@@ -1756,9 +2508,15 @@ function Invoke-PendingTransactionRecovery {
     param(
         [Parameter(Mandatory = $true)]$Lock,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$TargetRoot
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [switch]$AutomaticOnly,
+        [switch]$SkipAutomaticUpgrade
     )
 
+    if ($AutomaticOnly -and $SkipAutomaticUpgrade) {
+        throw "Pending transaction recovery filters are mutually exclusive."
+    }
+    $recoveredAutomaticUpgrade = $false
     foreach ($transactionDirectory in @(Get-ChildItem -LiteralPath $Lock.Root -Force -Directory | Sort-Object Name)) {
         if ([string]::Equals($transactionDirectory.Name, $script:HostUseLeaseDirectoryName, [StringComparison]::Ordinal) -or
             [string]::Equals($transactionDirectory.Name, $script:TrackedHostAuthorizationDirectoryName, [StringComparison]::Ordinal)) {
@@ -1783,6 +2541,13 @@ function Invoke-PendingTransactionRecovery {
             }
             Assert-NoReparsePoint -Path $journalPath -Root $transactionRoot -Label "transaction journal"
             $journal = Read-TransactionJournal -TransactionRoot $transactionRoot -ProjectRoot $ProjectRoot
+            if (($AutomaticOnly -and -not $journal.AutomaticUpgrade) -or
+                ($SkipAutomaticUpgrade -and $journal.AutomaticUpgrade)) {
+                continue
+            }
+            if ($journal.AutomaticUpgrade) {
+                Publish-MaterializerUpgradeState -Lock $Lock -ProjectRoot $ProjectRoot -State "ROLLBACK" -Message "Recovering an interrupted automatic host upgrade."
+            }
             $stagedTargets = @(Get-GitStagedTargetChanges `
                 -ProjectRoot $ProjectRoot `
                 -RelativePaths @($journal.Entries | ForEach-Object { $_.Target }))
@@ -1793,9 +2558,21 @@ function Invoke-PendingTransactionRecovery {
                 $stagedRecoveryConflict = $true
                 Throw-MaterializerError -Message "Interrupted payload transaction recovery was rejected because package-managed targets have staged Git changes." -ExitCode 3
             }
-            $rollbackErrors = @(Restore-Transaction -Entries $journal.Entries -TransactionRoot $transactionRoot -TargetRoot $TargetRoot)
+            $rollbackErrors = @(Restore-Transaction -Entries $journal.Entries -TransactionRoot $transactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
             if ($rollbackErrors.Count -gt 0) {
                 throw $rollbackErrors -join '; '
+            }
+            if ($journal.AutomaticUpgrade) {
+                $rollbackWatcherManager = Resolve-RollbackWatcherManager `
+                    -ProjectRoot $ProjectRoot `
+                    -RecordedWatchManagerPath $journal.PreviousWatcherManagerPath `
+                    -RecordedWatchManagerSha256 $journal.PreviousWatcherManagerSha256
+                Invoke-UpgradeWatcherRestore -WatchManagerPath $rollbackWatcherManager -Lock $Lock -ProjectRoot $ProjectRoot
+                if (-not $Lock.ActiveMarkerPublished) {
+                    Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
+                }
+                Publish-MaterializerUpgradeState -Lock $Lock -ProjectRoot $ProjectRoot -State "CHECK_FAILED" -Message "Interrupted upgrade was rolled back to the last known-good selection."
+                $recoveredAutomaticUpgrade = $true
             }
             Remove-Item -LiteralPath $transactionRoot -Recurse -Force
             Write-Host "[RECOVERED] Rolled back interrupted $($journal.Operation) transaction."
@@ -1806,6 +2583,7 @@ function Invoke-PendingTransactionRecovery {
             Throw-MaterializerError -Message "Interrupted payload transaction could not be recovered. $($_.Exception.Message) Transaction: $transactionRoot" -ExitCode 7
         }
     }
+    return $recoveredAutomaticUpgrade
 }
 
 function Remove-EmptyManagedParents {
@@ -1832,22 +2610,387 @@ function Remove-EmptyManagedParents {
     }
 }
 
+function Assert-GenerationDirectoryMatchesManifest {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$GenerationRoot,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$SkipSyntaxValidation
+    )
+
+    if (-not (Test-Path -LiteralPath $GenerationRoot -PathType Container)) {
+        throw "Immutable generation directory does not exist: $GenerationRoot"
+    }
+    Assert-NoReparsePoint -Path $GenerationRoot -Root $ProjectRoot -Label "immutable generation"
+    $expected = @{}
+    foreach ($file in @($Manifest.Files | Where-Object {
+        $_.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)
+    })) {
+        $relativePath = $file.Target.Substring($script:GenerationTargetPrefix.Length)
+        $relativePath = ConvertTo-SafeRelativePath -Path $relativePath -Label "immutable generation file"
+        $expected[$relativePath] = $file
+        $candidatePath = ConvertTo-AbsoluteChildPath -Root $GenerationRoot -RelativePath $relativePath -Label "immutable generation file"
+        if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            throw "Immutable generation file is missing: $relativePath"
+        }
+        Assert-NoReparsePoint -Path $candidatePath -Root $GenerationRoot -Label "immutable generation file"
+        if (-not [string]::Equals((Get-FileSha256 -Path $candidatePath), $file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Immutable generation file hash mismatch: $relativePath"
+        }
+    }
+
+    $actualFiles = @()
+    foreach ($item in @(Get-ChildItem -LiteralPath $GenerationRoot -Force -Recurse)) {
+        Assert-NoReparsePoint -Path $item.FullName -Root $GenerationRoot -Label "immutable generation content"
+        if ($item.PSIsContainer) {
+            continue
+        }
+        $relativePath = $item.FullName.Substring($GenerationRoot.TrimEnd('\', '/').Length + 1).Replace('\', '/')
+        $actualFiles += $relativePath
+        if (-not $expected.ContainsKey($relativePath)) {
+            throw "Immutable generation contains an unmanifested file: $relativePath"
+        }
+    }
+    if ($actualFiles.Count -ne $expected.Count) {
+        throw "Immutable generation file closure is incomplete."
+    }
+
+    if (-not $SkipSyntaxValidation) {
+        $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+        if ($null -eq $nodeCommand) {
+            throw "Node.js is required to validate the CodeDB generation coordinator."
+        }
+        $coordinatorPath = Join-Path $GenerationRoot "coordinator\codedb-watch-coordinator.mjs"
+        $global:LASTEXITCODE = 0
+        $nodeOutput = @(& $nodeCommand.Source --check $coordinatorPath 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Generation coordinator syntax validation failed: $($nodeOutput -join ' ')"
+        }
+        foreach ($scriptPath in @(Get-ChildItem -LiteralPath (Join-Path $GenerationRoot "scripts") -File -Filter "*.ps1" -ErrorAction Stop)) {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath.FullName, [ref]$tokens, [ref]$parseErrors)
+            if (@($parseErrors).Count -gt 0) {
+                throw "Generation PowerShell syntax validation failed for $($scriptPath.Name): $($parseErrors[0].Message)"
+            }
+        }
+    }
+}
+
+function Publish-ImmutableGeneration {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$TransactionRoot
+    )
+
+    $generationRoot = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:GenerationTargetPrefix.TrimEnd('/') `
+        -Label "immutable generation"
+    if (Test-Path -LiteralPath $generationRoot) {
+        Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $generationRoot -ProjectRoot $ProjectRoot
+        Write-Host "[INSTALLING] Reusing the complete immutable generation $($Manifest.GenerationId)."
+        return $generationRoot
+    }
+
+    $stagedGenerationRoot = Join-Path $TransactionRoot "generation-stage\$($Manifest.GenerationId)"
+    New-Item -ItemType Directory -Force -Path $stagedGenerationRoot | Out-Null
+    foreach ($file in @($Manifest.Files | Where-Object {
+        $_.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)
+    })) {
+        $relativePath = $file.Target.Substring($script:GenerationTargetPrefix.Length)
+        $stagePath = ConvertTo-AbsoluteChildPath -Root $stagedGenerationRoot -RelativePath $relativePath -Label "staged generation file"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stagePath) | Out-Null
+        Copy-Item -LiteralPath $file.SourcePath -Destination $stagePath
+    }
+    Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $stagedGenerationRoot -ProjectRoot $TransactionRoot
+
+    $generationParent = Split-Path -Parent $generationRoot
+    Assert-NoReparsePoint -Path $generationParent -Root $ProjectRoot -Label "generation publication root"
+    New-Item -ItemType Directory -Force -Path $generationParent | Out-Null
+    Assert-NoReparsePoint -Path $generationParent -Root $ProjectRoot -Label "generation publication root"
+    [System.IO.Directory]::Move($stagedGenerationRoot, $generationRoot)
+    Invoke-TestFaultAfterMutation
+    Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $generationRoot -ProjectRoot $ProjectRoot
+    Write-Host "[INSTALLING] Published immutable generation $($Manifest.GenerationId)."
+    return $generationRoot
+}
+
+function Get-ValidatedInstalledGenerationPointer {
+    param(
+        [Parameter(Mandatory = $true)][string]$PointerPath,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $PointerPath -PathType Leaf)) {
+        return $null
+    }
+    Assert-NoReparsePoint -Path $PointerPath -Root $ProjectRoot -Label "installed generation pointer"
+    $pointerJson = Read-BoundedJsonDocument -Path $PointerPath -Label "installed generation pointer" -MaximumBytes (64 * 1024)
+    $pointer = $pointerJson.Document
+    $generationId = [string](Get-RequiredProperty -Object $pointer -Name "generation_id" -Label "installed generation pointer")
+    $generationRelativePath = ConvertTo-SafeRelativePath `
+        -Path ([string](Get-RequiredProperty -Object $pointer -Name "generation_relative_path" -Label "installed generation pointer")) `
+        -Label "installed generation path"
+    $manifestSha256 = ([string](Get-RequiredProperty -Object $pointer -Name "generation_manifest_sha256" -Label "installed generation pointer")).ToLowerInvariant()
+    $pointerBootstrapProtocol = [int](Get-RequiredProperty -Object $pointer -Name "bootstrap_protocol" -Label "installed generation pointer")
+    $expectedRelativePath = "AIWork/.runtime/codedb/host/generations/$generationId"
+    if ([int](Get-RequiredProperty -Object $pointer -Name "schema_version" -Label "installed generation pointer") -ne 1 -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $pointer -Name "managed_by" -Label "installed generation pointer"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        $generationId -notmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        -not [string]::Equals($generationRelativePath, $expectedRelativePath, [StringComparison]::Ordinal) -or
+        $manifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $pointerBootstrapProtocol -lt 1 -or
+        $pointerBootstrapProtocol -gt $script:BootstrapProtocol) {
+        throw "Installed generation pointer identity is invalid."
+    }
+
+    $generationRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $generationRelativePath -Label "installed generation"
+    Assert-NoReparsePoint -Path $generationRoot -Root $ProjectRoot -Label "installed generation"
+    $generationManifestPath = Join-Path $generationRoot "generation-manifest.json"
+    $generationJson = Read-BoundedJsonDocument -Path $generationManifestPath -Label "installed generation manifest" -MaximumBytes (1024 * 1024)
+    if (-not [string]::Equals((Get-FileSha256 -Path $generationManifestPath), $manifestSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Installed generation manifest hash does not match its pointer."
+    }
+    $generation = $generationJson.Document
+    $generationFiles = @(Get-RequiredProperty -Object $generation -Name "files" -Label "installed generation manifest")
+    if ([int](Get-RequiredProperty -Object $generation -Name "schema_version" -Label "installed generation manifest") -ne 1 -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "managed_by" -Label "installed generation manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "generation_id" -Label "installed generation manifest"), $generationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "package_version" -Label "installed generation manifest"), [string](Get-RequiredProperty -Object $pointer -Name "package_version" -Label "installed generation pointer"), [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-RequiredProperty -Object $generation -Name "payload_version" -Label "installed generation manifest"), [string](Get-RequiredProperty -Object $pointer -Name "payload_version" -Label "installed generation pointer"), [StringComparison]::Ordinal) -or
+        [int](Get-RequiredProperty -Object $generation -Name "payload_sequence" -Label "installed generation manifest") -ne [int](Get-RequiredProperty -Object $pointer -Name "payload_sequence" -Label "installed generation pointer") -or
+        [int](Get-RequiredProperty -Object $generation -Name "bootstrap_protocol" -Label "installed generation manifest") -ne $pointerBootstrapProtocol -or
+        $generationFiles.Count -eq 0) {
+        throw "Installed generation manifest identity does not match its pointer."
+    }
+
+    $seen = @{}
+    $managedFiles = New-Object System.Collections.Generic.List[object]
+    $managedFiles.Add([pscustomobject]@{ Path = $generationManifestPath; Sha256 = $manifestSha256 })
+    foreach ($entry in $generationFiles) {
+        $relativePath = ConvertTo-SafeRelativePath -Path ([string](Get-RequiredProperty -Object $entry -Name "path" -Label "installed generation file")) -Label "installed generation file"
+        $sha256 = ([string](Get-RequiredProperty -Object $entry -Name "sha256" -Label "installed generation file")).ToLowerInvariant()
+        if ($sha256 -notmatch '^[0-9a-f]{64}$' -or $seen.ContainsKey($relativePath)) {
+            throw "Installed generation manifest contains an invalid or duplicate file: $relativePath"
+        }
+        $seen[$relativePath] = $true
+        $filePath = ConvertTo-AbsoluteChildPath -Root $generationRoot -RelativePath $relativePath -Label "installed generation file"
+        Assert-NoReparsePoint -Path $filePath -Root $generationRoot -Label "installed generation file"
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $filePath), $sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Installed generation file is missing or has drifted: $relativePath"
+        }
+        $managedFiles.Add([pscustomobject]@{ Path = $filePath; Sha256 = $sha256 })
+    }
+    $actualFiles = @(Get-ChildItem -LiteralPath $generationRoot -Force -Recurse -File)
+    foreach ($actualFile in $actualFiles) {
+        Assert-NoReparsePoint -Path $actualFile.FullName -Root $generationRoot -Label "installed generation content"
+        $relativePath = $actualFile.FullName.Substring($generationRoot.TrimEnd('\', '/').Length + 1).Replace('\', '/')
+        if (-not [string]::Equals($relativePath, "generation-manifest.json", [StringComparison]::OrdinalIgnoreCase) -and
+            -not $seen.ContainsKey($relativePath)) {
+            throw "Installed generation contains an unmanifested file: $relativePath"
+        }
+    }
+    if ($actualFiles.Count -ne $managedFiles.Count) {
+        throw "Installed generation file closure is incomplete."
+    }
+
+    return [pscustomobject]@{
+        Text = $pointerJson.Text
+        Document = $pointer
+        GenerationId = $generationId
+        BootstrapProtocol = $pointerBootstrapProtocol
+        GenerationRoot = $generationRoot
+        WatchManagerPath = Join-Path $generationRoot "scripts\manage-codedb-project-watch.ps1"
+        ManagedFiles = $managedFiles.ToArray()
+    }
+}
+
+function Save-LastKnownGoodPointer {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$TransactionRoot
+    )
+
+    $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "current generation pointer"
+    $current = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $current) {
+        return $null
+    }
+    $lastKnownGoodPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:LastKnownGoodPointerRelativePath -Label "last-known-good generation pointer"
+    Assert-NoReparsePoint -Path $lastKnownGoodPath -Root $ProjectRoot -Label "last-known-good generation pointer"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $lastKnownGoodPath) | Out-Null
+    $stagePath = Join-Path $TransactionRoot "last-known-good.pointer"
+    Write-DurableUtf8File -Path $stagePath -Content $current.Text
+    Publish-TransactionFile -StagePath $stagePath -TargetPath $lastKnownGoodPath
+    if (-not [string]::Equals((Get-FileSha256 -Path $lastKnownGoodPath), (Get-FileSha256 -Path $currentPointerPath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Last-known-good generation pointer publication failed verification."
+    }
+    Write-Host "[INSTALLING] Retained generation $($current.GenerationId) as last known good."
+    return $current
+}
+
+function Resolve-RollbackWatcherManager {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$RecordedWatchManagerPath,
+        [Parameter(Mandatory = $true)][string]$RecordedWatchManagerSha256
+    )
+
+    $recordedPath = [System.IO.Path]::GetFullPath($RecordedWatchManagerPath)
+    Assert-PathInside -Path $recordedPath -Root $ProjectRoot -Label "rollback watcher manager"
+    Assert-NoReparsePoint -Path $recordedPath -Root $ProjectRoot -Label "rollback watcher manager"
+    if ($RecordedWatchManagerSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not (Test-Path -LiteralPath $recordedPath -PathType Leaf) -or
+        -not [string]::Equals((Get-FileSha256 -Path $recordedPath), $RecordedWatchManagerSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Rollback watcher manager no longer matches its transaction identity."
+    }
+    $normalizedPath = $recordedPath.Replace('\', '/')
+    $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "rollback current pointer"
+    $isGenerationManager = $normalizedPath.IndexOf('/AIWork/.runtime/codedb/host/generations/', [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $isGenerationManager) {
+        $expectedLegacyPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/codedb/scripts/manage-codedb-project-watch.ps1" -Label "legacy rollback watcher manager"
+        if (-not [string]::Equals($recordedPath, $expectedLegacyPath, [StringComparison]::OrdinalIgnoreCase) -or
+            (Test-Path -LiteralPath $currentPointerPath)) {
+            throw "Legacy rollback selection does not match the restored flat host layout."
+        }
+        $markerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "restored payload marker"
+        $marker = Read-InstalledMarker -MarkerPath $markerPath -ProjectRoot $ProjectRoot
+        $managerTarget = "AIWork/codedb/scripts/manage-codedb-project-watch.ps1"
+        if ($null -eq $marker -or -not $marker.Map.ContainsKey($managerTarget) -or
+            -not [string]::Equals($marker.Map[$managerTarget].InstalledSha256, $RecordedWatchManagerSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Restored legacy marker does not own the recorded rollback watcher manager."
+        }
+        return $expectedLegacyPath
+    }
+
+    $current = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $current -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath($current.WatchManagerPath), $recordedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Restored current.json does not select the recorded rollback watcher generation."
+    }
+    $lastKnownGoodPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:LastKnownGoodPointerRelativePath -Label "last-known-good generation pointer"
+    $lastKnownGood = Get-ValidatedInstalledGenerationPointer -PointerPath $lastKnownGoodPath -ProjectRoot $ProjectRoot
+    if ($null -eq $lastKnownGood -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath($lastKnownGood.WatchManagerPath), $recordedPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-FileSha256 -Path $lastKnownGoodPath), (Get-FileSha256 -Path $currentPointerPath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Last-known-good pointer does not match the restored current generation."
+    }
+    return $recordedPath
+}
+
+function Get-LegacyWatchManagerPath {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/codedb/scripts/manage-codedb-project-watch.ps1" -Label "legacy watch manager"
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label "legacy watch manager"
+        return $path
+    }
+    return $null
+}
+
+function Invoke-UpgradeWatcherEnsure {
+    param(
+        [AllowNull()][string]$WatchManagerPath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($PocFixture) {
+        if ($TestFailWatcherHandoff) {
+            throw "Injected POC watcher readiness failure."
+        }
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($WatchManagerPath)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $WatchManagerPath -PathType Leaf)) {
+        throw "$Label watch manager is missing: $WatchManagerPath"
+    }
+    Write-Host "[SWITCHING] Reconciling $Label watcher ownership."
+    & $WatchManagerPath -Action Ensure -MaterializerHandoff
+}
+
+function Invoke-UpgradeWatcherRestore {
+    param(
+        [AllowNull()][string]$WatchManagerPath,
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if ($PocFixture -or [string]::IsNullOrWhiteSpace($WatchManagerPath)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $WatchManagerPath -PathType Leaf)) {
+        throw "Last-known-good watch manager is missing: $WatchManagerPath"
+    }
+    $normalizedPath = [System.IO.Path]::GetFullPath($WatchManagerPath).Replace('\', '/')
+    if ($normalizedPath.IndexOf('/AIWork/.runtime/codedb/host/generations/', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        # Ensure detects a generation mismatch and performs the handoff without
+        # creating the session-level manual-start override used by Restart.
+        Write-Host "[ROLLBACK] Reconciling the last-known-good generation watcher."
+        $callerAction = $Action.ToLowerInvariant()
+        if (-not [string]::Equals($callerAction, "upgrade", [StringComparison]::Ordinal)) {
+            # Recovery of an interrupted automatic upgrade is itself an upgrade
+            # handoff, even when a later mutation discovered the journal.
+            Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot -MarkerAction "upgrade"
+        }
+        try {
+            & $WatchManagerPath -Action Ensure -MaterializerHandoff
+        } finally {
+            if (-not [string]::Equals($callerAction, "upgrade", [StringComparison]::Ordinal) -and
+                (Test-Path -LiteralPath $Lock.ActiveMarkerPath -PathType Leaf)) {
+                Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot -MarkerAction $callerAction
+            }
+        }
+        return
+    }
+
+    # poc.21 has no Restart action. An explicit Stop is required because its
+    # Ensure command can otherwise attach to a ready compatibility coordinator.
+    Write-Host "[ROLLBACK] Stopping the selected coordinator before restoring the legacy watcher."
+    & $WatchManagerPath -Action Stop
+    if ($Lock.ActiveMarkerPublished -and (Test-Path -LiteralPath $Lock.ActiveMarkerPath -PathType Leaf)) {
+        # The legacy gate blocks every active marker. File rollback is already
+        # complete here, and the project materializer lock still excludes a
+        # competing mutation while the old watcher reacquires its lease.
+        Remove-Item -LiteralPath $Lock.ActiveMarkerPath -Force
+        $Lock.ActiveMarkerPublished = $false
+    }
+    & $WatchManagerPath -Action Ensure
+}
+
 function Invoke-Sync {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
-        [Parameter(Mandatory = $true)][string]$MarkerPath
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [switch]$AutomaticUpgrade
     )
 
     $lock = $null
     $transactionRoot = $null
     $keepTransaction = $false
     $entries = $null
+    $previousWatcherManager = $null
+    $previousWatcherManagerSha256 = $null
+    $watcherHandoffAttempted = $false
+    $upgradeMutationStarted = $false
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
-        Initialize-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
-        Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot
+        if ($AutomaticUpgrade) {
+            Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
+            $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot
+        } else {
+            Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
+            $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -AutomaticOnly
+            Complete-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
+            $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -SkipAutomaticUpgrade
+        }
         $plan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
         Write-MaterializationPlan -Plan $plan
         if ($plan.HasConflict) {
@@ -1857,6 +3000,22 @@ function Invoke-Sync {
             Write-Host "[OK] Host payload is already current; no files were written."
             return
         }
+        if ($AutomaticUpgrade) {
+            $eligibility = Get-AutomaticUpgradeEligibility -Manifest $Manifest -Plan $plan
+            if (-not $eligibility.Eligible) {
+                Throw-MaterializerError -Message "Automatic host upgrade was rejected: $($eligibility.Reason)." -ExitCode 4
+            }
+            Write-Host "[INSTALLING] Installing immutable generation $($Manifest.GenerationId)."
+            Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "INSTALLING" -Message "Validating and publishing immutable generation $($Manifest.GenerationId)."
+            $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "current generation pointer"
+            $previousGeneration = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+            $previousWatcherManager = if ($null -ne $previousGeneration) {
+                $previousGeneration.WatchManagerPath
+            } else {
+                Get-LegacyWatchManagerPath -ProjectRoot $ProjectRoot
+            }
+            $previousWatcherManagerSha256 = Get-FileSha256 -Path $previousWatcherManager
+        }
 
         $transactionRoot = Join-Path $lock.Root ($script:TransactionPrefix + [guid]::NewGuid().ToString("N").Substring(0, 12))
         $stageRoot = Join-Path $transactionRoot "stage"
@@ -1864,7 +3023,25 @@ function Invoke-Sync {
         New-Item -ItemType Directory -Force -Path $stageRoot, $backupRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
 
-        foreach ($item in $plan.Files) {
+        if ($AutomaticUpgrade) {
+            $upgradeMutationStarted = $true
+            $null = Publish-ImmutableGeneration -Manifest $Manifest -ProjectRoot $ProjectRoot -TransactionRoot $transactionRoot
+            $null = Save-LastKnownGoodPointer -ProjectRoot $ProjectRoot -TransactionRoot $transactionRoot
+            Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "SWITCHING" -Message "Publishing current.json and reconciling watcher ownership."
+        }
+
+        $orderedFiles = @($plan.Files | Sort-Object `
+            @{ Expression = {
+                if ($AutomaticUpgrade -and [string]::Equals($_.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)) { 0 }
+                elseif ($AutomaticUpgrade -and [string]::Equals($_.Target, "AIWork/codedb/wrapper/codedb-project-wrapper.mjs", [StringComparison]::OrdinalIgnoreCase)) { 1 }
+                elseif ([string]::Equals($_.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)) { 3 }
+                else { 2 }
+            } }, `
+            Target)
+        foreach ($item in $orderedFiles) {
+            if ($AutomaticUpgrade -and $item.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
             $needsFileWrite = $item.Status -eq "Missing" -or
                 ($item.Status -eq "Upgradeable" -and
                     -not [string]::Equals([string]$item.TargetSha256, $item.SourceSha256, [StringComparison]::OrdinalIgnoreCase))
@@ -1894,6 +3071,10 @@ function Invoke-Sync {
         }
 
         foreach ($item in $plan.Retired) {
+            if ($AutomaticUpgrade -and $item.Target -match '^AIWork/\.runtime/codedb/host/generations/[A-Za-z0-9._-]{1,64}/') {
+                Write-Host "[DRAINING] Retaining retired immutable generation content until lease and rollback retention permit cleanup: $($item.Target)"
+                continue
+            }
             if (-not [string]::Equals((Get-FileSha256 -Path $item.TargetPath), $item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Retired payload target changed during sync: $($item.Target)"
             }
@@ -1918,7 +3099,13 @@ function Invoke-Sync {
             -Index $entries.Count)) | Out-Null
 
         # The durable journal is the recovery commit point; target mutations start after it.
-        Write-TransactionJournal -Operation "Sync" -TransactionRoot $transactionRoot -Entries $entries.ToArray()
+        Write-TransactionJournal `
+            -Operation "Sync" `
+            -TransactionRoot $transactionRoot `
+            -Entries $entries.ToArray() `
+            -AutomaticUpgrade:$AutomaticUpgrade `
+            -PreviousWatcherManagerPath $previousWatcherManager `
+            -ProjectRoot $ProjectRoot
         foreach ($entry in $entries) {
             Assert-TransactionEntryBeforeMutation -Entry $entry
             if ($entry.Mutation -eq "Write") {
@@ -1940,17 +3127,70 @@ function Invoke-Sync {
         if (-not $postPlan.IsCurrent) {
             throw "Post-sync verification did not reach the current state."
         }
-        if ($plan.Retired.Count -gt 0) {
-            Remove-EmptyManagedParents -Paths @($plan.Retired | ForEach-Object { $_.TargetPath }) -TargetRoot $TargetRoot
+        if ($AutomaticUpgrade -and $TestCrashBeforeWatcherHandoff) {
+            Write-Host "Injected POC process crash after post-plan current and before watcher handoff."
+            [Environment]::Exit(86)
         }
-        Write-Host "[OK] Host payload synchronized to version $($Manifest.PayloadVersion)."
+        $removedRetiredPaths = @($plan.Retired | Where-Object {
+            -not ($AutomaticUpgrade -and $_.Target -match '^AIWork/\.runtime/codedb/host/generations/[A-Za-z0-9._-]{1,64}/')
+        } | ForEach-Object { $_.TargetPath })
+        if ($removedRetiredPaths.Count -gt 0) {
+            Remove-EmptyManagedParents -Paths $removedRetiredPaths -TargetRoot $TargetRoot
+        }
+        if ($AutomaticUpgrade) {
+            Write-Host "[SWITCHING] Published current generation pointer for $($Manifest.GenerationId)."
+            $newWatcherManager = Join-Path `
+                (ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:GenerationTargetPrefix.TrimEnd('/') -Label "selected generation") `
+                "scripts\manage-codedb-project-watch.ps1"
+            $watcherHandoffAttempted = $true
+            Invoke-UpgradeWatcherEnsure -WatchManagerPath $newWatcherManager -Label "selected generation"
+            Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "CURRENT" -Message "Generation $($Manifest.GenerationId) is selected and watcher reconciliation succeeded."
+            Write-Host "[OK] Host payload automatically upgraded to version $($Manifest.PayloadVersion)."
+        } else {
+            Write-Host "[OK] Host payload synchronized to version $($Manifest.PayloadVersion)."
+        }
     } catch {
         $originalError = $_.Exception
+        if ($AutomaticUpgrade -and $null -ne $lock -and $upgradeMutationStarted) {
+            try {
+                Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "ROLLBACK" -Message $originalError.Message
+                Write-Host "[ROLLBACK] Restoring the last known-good host selection."
+            } catch {
+                Write-Warning "Could not publish CodeDB rollback state: $($_.Exception.Message)"
+            }
+        }
+        $rollbackErrors = @()
         if ($null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
-            $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot)
-            if ($rollbackErrors.Count -gt 0) {
-                $keepTransaction = $true
-                Throw-MaterializerError -Message "Payload sync failed and rollback was incomplete. $($rollbackErrors -join '; ') Transaction: $transactionRoot" -ExitCode 7
+            $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
+        }
+        if ($AutomaticUpgrade -and $watcherHandoffAttempted -and $rollbackErrors.Count -eq 0) {
+            try {
+                Write-Host "[ROLLBACK] Restoring the previous watcher selection."
+                $rollbackWatcherManager = Resolve-RollbackWatcherManager `
+                    -ProjectRoot $ProjectRoot `
+                    -RecordedWatchManagerPath $previousWatcherManager `
+                    -RecordedWatchManagerSha256 $previousWatcherManagerSha256
+                Invoke-UpgradeWatcherRestore -WatchManagerPath $rollbackWatcherManager -Lock $lock -ProjectRoot $ProjectRoot
+            } catch {
+                $rollbackErrors += "restore watcher: $($_.Exception.Message)"
+            }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            if ($AutomaticUpgrade -and $null -ne $lock) {
+                try {
+                    Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "CHECK_FAILED" -Message ($rollbackErrors -join '; ')
+                } catch {
+                    Write-Warning "Could not publish CodeDB failed upgrade state: $($_.Exception.Message)"
+                }
+            }
+            $keepTransaction = $true
+            Throw-MaterializerError -Message "Payload sync failed and rollback was incomplete. $($rollbackErrors -join '; ') Transaction: $transactionRoot" -ExitCode 7
+        }
+        if ($AutomaticUpgrade -and $null -ne $lock) {
+            try {
+                Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "CHECK_FAILED" -Message $originalError.Message
+            } catch {
+                Write-Warning "Could not publish CodeDB failed upgrade state: $($_.Exception.Message)"
             }
         }
         if ($script:RequestedExitCode -ne 0) {
@@ -1979,8 +3219,10 @@ function Invoke-Remove {
     $entries = $null
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
-        Initialize-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
-        Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot
+        Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
+        $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -AutomaticOnly
+        Complete-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
+        $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -SkipAutomaticUpgrade
         $marker = Read-InstalledMarker -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
         if ($null -eq $marker) {
             Write-Host "[OK] No managed host payload is installed."
@@ -2026,11 +3268,66 @@ function Invoke-Remove {
             Throw-MaterializerError -Message "Payload removal was rejected because managed files drifted." -ExitCode 3
         }
 
+        $extraRemovalTargets = New-Object System.Collections.Generic.List[object]
+        $removalTargetMap = @{}
+        foreach ($item in $marker.Files) {
+            $removalTargetMap[$item.Target] = $true
+        }
+        $candidateGenerationRoot = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath $script:GenerationTargetPrefix.TrimEnd('/') `
+            -Label "package generation candidate"
+        if (Test-Path -LiteralPath $candidateGenerationRoot) {
+            # A failed automatic handoff can leave a complete but unselected
+            # package generation beside the restored legacy installation.
+            Assert-GenerationDirectoryMatchesManifest `
+                -Manifest $Manifest `
+                -GenerationRoot $candidateGenerationRoot `
+                -ProjectRoot $ProjectRoot `
+                -SkipSyntaxValidation
+            foreach ($managedFile in @($Manifest.Files | Where-Object {
+                $_.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)
+            })) {
+                if (-not $removalTargetMap.ContainsKey($managedFile.Target)) {
+                    $extraRemovalTargets.Add([pscustomobject]@{ Target = $managedFile.Target; TargetPath = $managedFile.TargetPath })
+                    $removalTargetMap[$managedFile.Target] = $true
+                }
+            }
+        }
+        $lastKnownGoodPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:LastKnownGoodPointerRelativePath -Label "last-known-good generation pointer"
+        if (Test-Path -LiteralPath $lastKnownGoodPath) {
+            $lastKnownGood = Get-ValidatedInstalledGenerationPointer -PointerPath $lastKnownGoodPath -ProjectRoot $ProjectRoot
+            foreach ($managedFile in $lastKnownGood.ManagedFiles) {
+                $relativePath = $managedFile.Path.Substring([System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Length + 1).Replace('\', '/')
+                $relativePath = Assert-TargetRelativePath -Path $relativePath
+                if (-not $removalTargetMap.ContainsKey($relativePath)) {
+                    $extraRemovalTargets.Add([pscustomobject]@{ Target = $relativePath; TargetPath = $managedFile.Path })
+                    $removalTargetMap[$relativePath] = $true
+                }
+            }
+            $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:LastKnownGoodPointerRelativePath; TargetPath = $lastKnownGoodPath })
+            $removalTargetMap[$script:LastKnownGoodPointerRelativePath] = $true
+        }
+        $upgradeStatePath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:UpgradeStateRelativePath -Label "materializer upgrade state"
+        if (Test-Path -LiteralPath $upgradeStatePath) {
+            Assert-MaterializerUpgradeStateArtifact -Path $upgradeStatePath -ProjectRoot $ProjectRoot
+            $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:UpgradeStateRelativePath; TargetPath = $upgradeStatePath })
+            $removalTargetMap[$script:UpgradeStateRelativePath] = $true
+        }
+
         $transactionRoot = Join-Path $lock.Root ($script:TransactionPrefix + [guid]::NewGuid().ToString("N").Substring(0, 12))
         $backupRoot = Join-Path $transactionRoot "backup"
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
         foreach ($item in $marker.Files) {
+            $entries.Add((New-TransactionEntry `
+                -Target $item.Target `
+                -TargetPath $item.TargetPath `
+                -Mutation "Delete" `
+                -BackupRoot $backupRoot `
+                -Index $entries.Count)) | Out-Null
+        }
+        foreach ($item in @($extraRemovalTargets | Sort-Object Target)) {
             $entries.Add((New-TransactionEntry `
                 -Target $item.Target `
                 -TargetPath $item.TargetPath `
@@ -2055,14 +3352,41 @@ function Invoke-Remove {
             }
             Invoke-TestFaultAfterMutation
         }
-        if ($marker.Files.Count -gt 0) {
-            Remove-EmptyManagedParents -Paths @($marker.Files | ForEach-Object { $_.TargetPath }) -TargetRoot $TargetRoot
+        $flatRemovedPaths = @($marker.Files | Where-Object {
+            $_.Target.StartsWith("AIWork/codedb/", [StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object { $_.TargetPath })
+        if ($flatRemovedPaths.Count -gt 0) {
+            Remove-EmptyManagedParents -Paths $flatRemovedPaths -TargetRoot $TargetRoot
+        }
+        $hostRuntimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/.runtime/codedb/host" -Label "host generation runtime"
+        $runtimeRemovedPaths = @($marker.Files | Where-Object {
+            $_.Target.StartsWith("AIWork/.runtime/codedb/host/", [StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object { $_.TargetPath }) + @($extraRemovalTargets | Where-Object {
+            $_.Target.StartsWith("AIWork/.runtime/codedb/host/", [StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object { $_.TargetPath })
+        if ($runtimeRemovedPaths.Count -gt 0) {
+            Remove-EmptyManagedParents -Paths $runtimeRemovedPaths -TargetRoot $hostRuntimeRoot
+        }
+        $generationLeaseRoot = Join-Path $hostRuntimeRoot "leases"
+        if (Test-Path -LiteralPath $generationLeaseRoot -PathType Container) {
+            foreach ($generationLeaseDirectory in @(Get-ChildItem -LiteralPath $generationLeaseRoot -Force -Directory)) {
+                if (@(Get-ChildItem -LiteralPath $generationLeaseDirectory.FullName -Force).Count -eq 0) {
+                    Remove-Item -LiteralPath $generationLeaseDirectory.FullName -Force
+                }
+            }
+            if (@(Get-ChildItem -LiteralPath $generationLeaseRoot -Force).Count -eq 0) {
+                Remove-Item -LiteralPath $generationLeaseRoot -Force
+            }
+        }
+        if ((Test-Path -LiteralPath $hostRuntimeRoot -PathType Container) -and
+            @(Get-ChildItem -LiteralPath $hostRuntimeRoot -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $hostRuntimeRoot -Force
         }
         Write-Host "[OK] Managed host payload was removed; unrelated host files were preserved."
     } catch {
         $originalError = $_.Exception
         if ($null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
-            $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot)
+            $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
             if ($rollbackErrors.Count -gt 0) {
                 $keepTransaction = $true
                 Throw-MaterializerError -Message "Payload removal failed and rollback was incomplete. $($rollbackErrors -join '; ') Transaction: $transactionRoot" -ExitCode 7
@@ -2088,12 +3412,23 @@ try {
     if ($Action -notin @("Sync", "Remove") -and $hasTrackedHostAuthorization) {
         Throw-MaterializerError -Message "Tracked-host authorization is valid only for Sync or Remove." -ExitCode 4
     }
-    if ($TestFailAfterMutation -gt 0 -and $TestCrashAfterMutation -gt 0) {
+    $requestedTestFaultCount = 0
+    if ($TestFailAfterMutation -gt 0) { $requestedTestFaultCount += 1 }
+    if ($TestCrashAfterMutation -gt 0) { $requestedTestFaultCount += 1 }
+    if ($TestFailWatcherHandoff) { $requestedTestFaultCount += 1 }
+    if ($TestCrashBeforeWatcherHandoff) { $requestedTestFaultCount += 1 }
+    if ($requestedTestFaultCount -gt 1) {
         Throw-MaterializerError -Message "Only one materializer test fault may be requested at a time." -ExitCode 2
     }
+    if ($TestFailWatcherHandoff -and (-not $PocFixture -or $Action -ne "Upgrade")) {
+        Throw-MaterializerError -Message "Watcher handoff fault injection requires a fixture-only Upgrade action." -ExitCode 4
+    }
+    if ($TestCrashBeforeWatcherHandoff -and (-not $PocFixture -or $Action -ne "Upgrade")) {
+        Throw-MaterializerError -Message "Pre-handoff crash injection requires a fixture-only Upgrade action." -ExitCode 4
+    }
     if (($TestFailAfterMutation -gt 0 -or $TestCrashAfterMutation -gt 0) -and
-        (-not $PocFixture -or $Action -notin @("Sync", "Remove"))) {
-        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Sync or Remove action." -ExitCode 4
+        (-not $PocFixture -or $Action -notin @("Upgrade", "Sync", "Remove"))) {
+        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Sync, or Remove action." -ExitCode 4
     }
 
     $projectRootPath = [System.IO.Path]::GetFullPath($ProjectRoot)
@@ -2118,9 +3453,27 @@ try {
         "DryRun" {
             $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
             Write-MaterializationPlan -Plan $plan
+            $upgradeEligibility = Get-AutomaticUpgradeEligibility -Manifest $payload -Plan $plan
+            $pendingAutomaticRecovery = if ($plan.IsCurrent) {
+                Get-PendingAutomaticUpgradeRecovery -Manifest $payload -ProjectRoot $projectRootPath
+            } else {
+                [pscustomobject]@{ Pending = $false; TransactionId = $null }
+            }
             Write-HostUseLeaseGuidance -ProjectRoot $projectRootPath
-            if ($plan.IsCurrent) {
+            if ($pendingAutomaticRecovery.Pending) {
+                Write-Host "[UPGRADE_READY] Interrupted automatic host upgrade $($pendingAutomaticRecovery.TransactionId) requires recovery before watcher handoff."
+                Write-Host "[STALE] Host payload files are current but automatic upgrade recovery is pending."
+            } elseif ($plan.IsCurrent) {
                 Write-Host "[OK] Host payload is current."
+            } elseif ($upgradeEligibility.Eligible) {
+                $installedGeneration = [string]$plan.Marker.GenerationId
+                $installedIdentity = if ($installedGeneration -match '^[A-Za-z0-9._-]{1,64}$') {
+                    "generation $installedGeneration"
+                } else {
+                    "payload $([string]$plan.Marker.PayloadVersion)"
+                }
+                Write-Host "[UPGRADE_READY] Owned $installedIdentity can migrate to generation $($payload.GenerationId) while existing leases drain naturally."
+                Write-Host "[STALE] Host payload has a safe automatic generation upgrade."
             } elseif ($plan.HasConflict) {
                 Write-Host "[STALE] Host payload has conflicts; Sync would be rejected."
             } else {
@@ -2134,6 +3487,9 @@ try {
                 Throw-MaterializerError -Message "Host payload is not current." -ExitCode 3
             }
             Write-Host "[OK] Host payload marker and managed files are current."
+        }
+        "Upgrade" {
+            Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath -AutomaticUpgrade
         }
         "Sync" {
             Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath

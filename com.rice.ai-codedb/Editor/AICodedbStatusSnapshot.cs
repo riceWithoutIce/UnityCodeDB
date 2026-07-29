@@ -14,6 +14,13 @@ namespace Rice.AI.Codedb.Editor
         internal string OverallDescription { get; }
         internal AICodedbHostPayloadStatus HostPayloadStatus { get; }
         internal AICodedbStatusItem HostPayload { get; }
+        internal AICodedbStatusItem HostGeneration { get; }
+        internal AICodedbStatusItem HostLastKnownGood { get; }
+        internal AICodedbStatusItem HostUpgrade { get; }
+        internal AICodedbStatusItem HostUpdatePolicy { get; }
+        internal AICodedbHostGenerationSelection HostGenerationSelection { get; }
+        internal AICodedbHostUpgradeStatus HostUpgradeStatus { get; }
+        internal AICodedbHostUpdatePolicy HostUpdatePolicyValue { get; }
         internal AICodedbStatusItem ProviderExecutable { get; }
         internal AICodedbStatusItem ProviderConfig { get; }
         internal AICodedbStatusItem RuntimeConfigTemplate { get; }
@@ -31,13 +38,27 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         private AICodedbStatusSnapshot()
         {
+            var hostPayloadMarkerExists = File.Exists(AICodedbPaths.HostPayloadMarkerPath);
+            HostGenerationSelection = AICodedbPaths.HostGeneration;
             HostPayloadStatus = AICodedbHostPayloadStatusBuilder.Build(
-                File.Exists(AICodedbPaths.HostPayloadMarkerPath),
-                AICodedbHostPayloadMaterializer.ReadStatus());
+                hostPayloadMarkerExists,
+                AICodedbHostPayloadMaterializer.ReadStatus(),
+                HostGenerationSelection.State == AICodedbHostGenerationState.Current
+                    ? HostGenerationSelection.GenerationId
+                    : string.Empty);
             HostPayload = HostPayloadStatus.ToStatusItem();
+            HostUpdatePolicyValue = AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot);
+            HostGeneration = CreateHostGenerationStatus(HostGenerationSelection);
+            HostLastKnownGood = CreateOptionalFileStatus(
+                "Last known good",
+                AICodedbPaths.HostLastKnownGoodPointerPath,
+                hostPayloadMarkerExists);
+            HostUpgradeStatus = AICodedbHostUpgradeStatusStore.Read(AICodedbPaths.ProjectRoot);
+            HostUpgrade = HostUpgradeStatus.ToStatusItem(hostPayloadMarkerExists);
+            HostUpdatePolicy = CreateHostUpdatePolicyStatus(HostUpdatePolicyValue);
             ProviderExecutable = CreateFileStatus("Provider executable", AICodedbProjectSettings.ProviderExecutableRelativePath);
             ProviderConfig = CreateProviderConfigStatus();
-            RuntimeConfigTemplate = CreateFileStatus("Runtime config template", AICodedbProjectSettings.RuntimeConfigTemplateRelativePath);
+            RuntimeConfigTemplate = CreateAbsoluteFileStatus("Runtime config template", AICodedbPaths.RuntimeConfigTemplatePath);
             RuntimeDirectory = CreateDirectoryStatus("Runtime directory", AICodedbProjectSettings.RuntimeRelativePath);
             IndexDirectory = CreateDirectoryStatus("Index directory", AICodedbProjectSettings.IndexRelativePath);
             IndexManifest = CreateFileStatus("Index manifest", AICodedbProjectSettings.IndexManifestRelativePath);
@@ -155,6 +176,17 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbStatusState.Ok;
         }
 
+        internal static AICodedbStatusState GetHostManagementState(
+            AICodedbStatusState payload,
+            AICodedbStatusState generation,
+            AICodedbStatusState upgrade,
+            AICodedbStatusState updatePolicy)
+        {
+            var state = CombineStates(payload, generation);
+            state = CombineStates(state, upgrade);
+            return CombineStates(state, updatePolicy);
+        }
+
         /// <summary>
         /// Creates a compact display label for a status state.
         /// </summary>
@@ -181,7 +213,12 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         private AICodedbStatusState ResolveOverallState()
         {
-            var state = CombineStates(HostPayload.State, ProviderExecutable.State);
+            var state = GetHostManagementState(
+                HostPayload.State,
+                HostGeneration.State,
+                HostUpgrade.State,
+                HostUpdatePolicy.State);
+            state = CombineStates(state, ProviderExecutable.State);
             state = CombineStates(state, ProviderConfig.State);
             state = CombineStates(state, RuntimeConfigTemplate.State);
             state = CombineStates(state, RuntimeDirectory.State);
@@ -244,6 +281,65 @@ namespace Rice.AI.Codedb.Editor
                 return AICodedbStatusItem.Ok(label, "Found", relativePath);
 
             return AICodedbStatusItem.Warning(label, "Missing", relativePath);
+        }
+
+        private static AICodedbStatusItem CreateAbsoluteFileStatus(string label, string absolutePath)
+        {
+            var detail = AICodedbPaths.ToProjectRelativeDisplayPath(absolutePath);
+            if (File.Exists(absolutePath))
+                return AICodedbStatusItem.Ok(label, "Found", detail);
+            return AICodedbStatusItem.Warning(label, "Missing", detail);
+        }
+
+        private static AICodedbStatusItem CreateOptionalFileStatus(
+            string label,
+            string absolutePath,
+            bool hostPayloadMarkerExists)
+        {
+            var detail = AICodedbPaths.ToProjectRelativeDisplayPath(absolutePath);
+            if (File.Exists(absolutePath) && !hostPayloadMarkerExists)
+            {
+                return AICodedbStatusItem.Inactive(
+                    label,
+                    "Historical",
+                    "No installed host payload marker exists. " + detail);
+            }
+            return File.Exists(absolutePath)
+                ? AICodedbStatusItem.Ok(label, "Retained", detail)
+                : AICodedbStatusItem.Inactive(
+                    label,
+                    "Not retained",
+                    detail + " is created when an existing current generation is upgraded.");
+        }
+
+        private static AICodedbStatusItem CreateHostGenerationStatus(AICodedbHostGenerationSelection selection)
+        {
+            switch (selection.State)
+            {
+                case AICodedbHostGenerationState.Current:
+                    return AICodedbStatusItem.Ok(
+                        "Host generation",
+                        selection.GenerationId,
+                        $"Package {selection.PackageVersion}, sequence {selection.PayloadSequence}, bootstrap {selection.BootstrapProtocol}");
+                case AICodedbHostGenerationState.Legacy:
+                    return AICodedbStatusItem.Warning(
+                        "Host generation",
+                        "Legacy " + selection.GenerationId,
+                        "The recognized poc.21 flat payload is awaiting generation migration.");
+                case AICodedbHostGenerationState.Unavailable:
+                    return AICodedbStatusItem.Warning("Host generation", "Not selected", selection.Detail);
+                default:
+                    return AICodedbStatusItem.Error("Host generation", "Invalid", selection.Detail);
+            }
+        }
+
+        private static AICodedbStatusItem CreateHostUpdatePolicyStatus(AICodedbHostUpdatePolicy policy)
+        {
+            if (!policy.IsValid)
+                return AICodedbStatusItem.Error("Automatic host updates", "Invalid", policy.Detail);
+            if (policy.IsEnabled)
+                return AICodedbStatusItem.Ok("Automatic host updates", policy.IsDefault ? "On (default)" : "On", policy.Detail);
+            return AICodedbStatusItem.Inactive("Automatic host updates", "Off", policy.Detail);
         }
 
         private static AICodedbStatusItem CreateProviderConfigStatus()
@@ -516,6 +612,11 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusItem Error(string label, string summary, string detail)
         {
             return new AICodedbStatusItem(label, AICodedbStatusState.Error, summary, detail);
+        }
+
+        internal static AICodedbStatusItem Inactive(string label, string summary, string detail)
+        {
+            return new AICodedbStatusItem(label, AICodedbStatusState.Inactive, summary, detail);
         }
     }
 

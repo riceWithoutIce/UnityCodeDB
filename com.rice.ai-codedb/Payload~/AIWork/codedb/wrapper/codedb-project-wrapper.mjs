@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import {
-  acquireCodedbHostUseLease,
-  assertCodedbUnityProjectRoot
-} from "../shared/codedb-host-use-gate.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,35 +34,40 @@ const COORDINATOR_CONNECT_RETRY_DELAYS_MS = [0, 50, 150];
 const COORDINATOR_RETRYABLE_TRANSPORT_CODES = new Set(["EBUSY", "ECONNREFUSED", "ECONNRESET", "ENOENT", "EPIPE"]);
 const MAX_COORDINATOR_RESPONSE_BYTES = 1024 * 1024;
 const EDITOR_LEASE_STALE_AFTER_MS = 90000;
-const EDITOR_LEASE_MONITOR_INTERVAL_MS = 2000;
+const EDITOR_LEASE_PROCESS_IDENTITY_RECHECK_AFTER_MS = 15000;
 const ADAPTER_OPERATIONAL_STATES = new Set(["watching", "pending", "building"]);
+const MANAGED_BY = "com.rice.ai-codedb";
+const BOOTSTRAP_PROTOCOL = 1;
+const GENERATION_LEASE_VERSION = 2;
+const GENERATION_HEARTBEAT_INTERVAL_MS = 5000;
+const GENERATION_PIN_ATTEMPTS = 4;
+const PROCESS_SNAPSHOT_TIMEOUT_MS = 5000;
+const PROCESS_SNAPSHOT_MAX_BYTES = 1024 * 1024;
 
-const context = createContext(process.argv.slice(2));
+let generationCache = null;
+
+const baseContext = createContext(process.argv.slice(2));
+const requestGenerationStorage = new AsyncLocalStorage();
+const context = new Proxy(baseContext, {
+  get(target, property) {
+    const generation = requestGenerationStorage.getStore();
+    return generation && Object.prototype.hasOwnProperty.call(generation, property)
+      ? generation[property]
+      : target[property];
+  }
+});
 if (context.printContext) {
+  const generation = tryResolveCurrentGeneration();
   process.stdout.write(`${JSON.stringify({
     unity_root: context.unityRoot,
     project_slug: context.projectSlug,
     provider_name: context.providerName,
-    runtime_root: path.join("AIWork", ".runtime", "codedb", context.providerName).replace(/\\/g, "/")
+    runtime_root: path.join("AIWork", ".runtime", "codedb", context.providerName).replace(/\\/g, "/"),
+    generation_id: generation?.generationId ?? null,
+    bootstrap_protocol: BOOTSTRAP_PROTOCOL
   })}\n`);
   process.exit(0);
 }
-
-const hostUseLease = acquireCodedbHostUseLease(context.unityRoot, "mcp");
-let editorLeaseObserved = hasActiveEditorLease();
-const editorLeaseMonitor = setInterval(() => {
-  const editorOnline = hasActiveEditorLease();
-  if (editorOnline) {
-    editorLeaseObserved = true;
-  } else if (editorLeaseObserved) {
-    process.exit(0);
-  }
-}, EDITOR_LEASE_MONITOR_INTERVAL_MS);
-editorLeaseMonitor.unref();
-process.once("exit", () => {
-  clearInterval(editorLeaseMonitor);
-  hostUseLease.release();
-});
 
 const tools = [
   {
@@ -163,6 +166,7 @@ function createContext(args) {
   const projectSlug = createProjectSlug(path.basename(unityRoot));
   const providerName = `codedb-${projectSlug}`;
   const runtimeRoot = path.join(unityRoot, "AIWork", ".runtime", "codedb", providerName);
+  const hostRuntimeRoot = path.join(unityRoot, "AIWork", ".runtime", "codedb", "host");
 
   return {
     unityRoot,
@@ -170,21 +174,276 @@ function createContext(args) {
     projectSlug,
     providerName,
     printContext: options.printContext === true,
+    hostRuntimeRoot,
+    currentGenerationPointerPath: path.join(hostRuntimeRoot, "current.json"),
     providerExecutablePath: path.join(runtimeRoot, "bin", "codebase-mcp.exe"),
     providerConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.toml"),
     watchConfigPath: path.join(runtimeRoot, "config", "codedb-mcp.watch.toml"),
     desiredStatePath: path.join(runtimeRoot, "watch", "lifecycle", "desired-state.json"),
+    manualRuntimePath: path.join(runtimeRoot, "watch", "lifecycle", "manual-runtime.json"),
     editorLeaseRoot: path.join(runtimeRoot, "watch", "lifecycle", "editor-leases"),
     watchCoordinatorRuntimePath: path.join(runtimeRoot, "watch", "coordinator"),
     watchCoordinatorStatePath: path.join(runtimeRoot, "watch", "coordinator", "coordinator-state.json"),
-    adapterBuilderPath: path.join(__dirname, "..", "scripts", "build-codedb-project-text-adapter.ps1"),
-    adapterWorkerPath: path.join(__dirname, "..", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
+    adapterBuilderPath: null,
+    adapterWorkerPath: null,
+    legacyAdapterBuilderPath: path.join(unityRoot, "AIWork", "codedb", "scripts", "build-codedb-project-text-adapter.ps1"),
+    legacyAdapterWorkerPath: path.join(unityRoot, "AIWork", "codedb", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
     providerIndexRoot: path.join(runtimeRoot, "index"),
     textAdapterRoot: path.join(runtimeRoot, "adapter", "text-index"),
     textAdapterManifestPath: path.join(runtimeRoot, "adapter", "text-index", "manifest.json"),
     textAdapterFilesPath: path.join(runtimeRoot, "adapter", "text-index", "files.jsonl"),
     textAdapterIndexPath: path.join(runtimeRoot, "adapter", "text-index", "index.jsonl")
   };
+}
+
+function tryResolveCurrentGeneration() {
+  try {
+    return resolveCurrentGeneration();
+  } catch {
+    return null;
+  }
+}
+
+function resolveCurrentGeneration() {
+  const pointerPath = baseContext.currentGenerationPointerPath;
+  const pointerText = readBoundedUtf8File(pointerPath, 64 * 1024, "CodeDB generation pointer");
+  const pointerIdentity = crypto.createHash("sha256").update(pointerText, "utf8").digest("hex");
+  if (generationCache?.pointerIdentity === pointerIdentity) {
+    return generationCache;
+  }
+
+  let pointer;
+  try {
+    pointer = JSON.parse(pointerText);
+  } catch (error) {
+    throw new Error(`[CHECK_FAILED] CodeDB generation pointer is invalid JSON: ${error.message}`);
+  }
+  const generationId = String(pointer?.generation_id ?? "");
+  const generationRelativePath = normalizeRelativePath(pointer?.generation_relative_path);
+  const expectedRelativePath = `AIWork/.runtime/codedb/host/generations/${generationId}`;
+  const valid = pointer?.schema_version === 1
+    && pointer?.managed_by === MANAGED_BY
+    && Number.isInteger(pointer?.payload_sequence)
+    && pointer.payload_sequence > 0
+    && typeof pointer?.package_version === "string"
+    && typeof pointer?.payload_version === "string"
+    && /^[A-Za-z0-9._-]{1,64}$/.test(generationId)
+    && pointer?.bootstrap_protocol === BOOTSTRAP_PROTOCOL
+    && generationRelativePath === expectedRelativePath
+    && /^[0-9a-f]{64}$/.test(String(pointer?.generation_manifest_sha256 ?? ""));
+  if (!valid) {
+    throw new Error("[CHECK_FAILED] CodeDB generation pointer identity or bootstrap protocol is invalid.");
+  }
+
+  const generationRoot = path.resolve(baseContext.unityRoot, generationRelativePath.replace(/\//g, path.sep));
+  const generationsRoot = path.join(baseContext.hostRuntimeRoot, "generations");
+  assertPathInside(generationRoot, generationsRoot, "CodeDB generation");
+  if (!fs.existsSync(generationRoot) || !fs.statSync(generationRoot).isDirectory()) {
+    throw new Error(`[CHECK_FAILED] Selected CodeDB generation is missing: ${generationRelativePath}`);
+  }
+  const realGenerationRoot = fs.realpathSync(generationRoot);
+  assertPathInside(realGenerationRoot, fs.realpathSync(generationsRoot), "CodeDB resolved generation");
+
+  const manifestPath = path.join(realGenerationRoot, "generation-manifest.json");
+  const manifestText = readBoundedUtf8File(manifestPath, 1024 * 1024, "CodeDB generation manifest");
+  const manifestSha256 = crypto.createHash("sha256").update(manifestText, "utf8").digest("hex");
+  if (manifestSha256 !== pointer.generation_manifest_sha256) {
+    throw new Error("[CHECK_FAILED] Selected CodeDB generation manifest hash does not match current.json.");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch (error) {
+    throw new Error(`[CHECK_FAILED] CodeDB generation manifest is invalid JSON: ${error.message}`);
+  }
+  const manifestValid = manifest?.schema_version === 1
+    && manifest?.managed_by === MANAGED_BY
+    && manifest?.generation_id === generationId
+    && manifest?.package_version === pointer.package_version
+    && manifest?.payload_version === pointer.payload_version
+    && manifest?.payload_sequence === pointer.payload_sequence
+    && manifest?.bootstrap_protocol === BOOTSTRAP_PROTOCOL
+    && Array.isArray(manifest?.files)
+    && manifest.files.length > 0;
+  if (!manifestValid) {
+    throw new Error("[CHECK_FAILED] CodeDB generation manifest identity does not match current.json.");
+  }
+  verifyGenerationFiles(realGenerationRoot, manifest.files);
+
+  generationCache = {
+    pointerIdentity,
+    generationId,
+    generationRoot: realGenerationRoot,
+    packageVersion: pointer.package_version,
+    payloadVersion: pointer.payload_version,
+    payloadSequence: pointer.payload_sequence,
+    bootstrapProtocol: pointer.bootstrap_protocol,
+    generationManifestSha256: manifestSha256,
+    adapterBuilderPath: path.join(realGenerationRoot, "scripts", "build-codedb-project-text-adapter.ps1"),
+    adapterWorkerPath: path.join(realGenerationRoot, "scripts", "run-codedb-project-text-adapter-worker.ps1")
+  };
+  return generationCache;
+}
+
+function verifyGenerationFiles(generationRoot, files) {
+  const seen = new Set();
+  for (const entry of files) {
+    const relativePath = normalizeRelativePath(entry?.path);
+    const expectedHash = String(entry?.sha256 ?? "");
+    if (!relativePath || relativePath === "." || seen.has(relativePath) || !/^[0-9a-f]{64}$/.test(expectedHash)) {
+      throw new Error("[CHECK_FAILED] CodeDB generation manifest contains an invalid or duplicate file entry.");
+    }
+    seen.add(relativePath);
+    const filePath = path.resolve(generationRoot, relativePath.replace(/\//g, path.sep));
+    assertPathInside(filePath, generationRoot, "CodeDB generation file");
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      throw new Error(`[CHECK_FAILED] CodeDB generation file is missing: ${relativePath}`);
+    }
+    const realPath = fs.realpathSync(filePath);
+    assertPathInside(realPath, generationRoot, "CodeDB resolved generation file");
+    const actualHash = crypto.createHash("sha256").update(fs.readFileSync(realPath)).digest("hex");
+    if (actualHash !== expectedHash) {
+      throw new Error(`[CHECK_FAILED] CodeDB generation file hash mismatch: ${relativePath}`);
+    }
+  }
+}
+
+function readBoundedUtf8File(filePath, maximumBytes, label) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error(`[HOST_NOT_READY] ${label} is missing: ${toUnityRelativePath(filePath)}`);
+  }
+  const stat = fs.statSync(filePath);
+  if (stat.size <= 0 || stat.size > maximumBytes) {
+    throw new Error(`[CHECK_FAILED] ${label} size is invalid.`);
+  }
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function acquireGenerationRequestLease(generationId) {
+  const materializerMarker = path.join(baseContext.unityRoot, "AIWork", ".runtime", "codedb", "payload-materializer", "materialize-active.json");
+  assertDestructiveMaterializerInactive(materializerMarker);
+  const leasesRoot = path.join(baseContext.hostRuntimeRoot, "leases");
+  const leaseRoot = path.join(leasesRoot, generationId);
+  assertPathInside(leaseRoot, baseContext.hostRuntimeRoot, "CodeDB request lease");
+  fs.mkdirSync(leaseRoot, { recursive: true });
+
+  const leaseId = `mcp-${process.pid}-${crypto.randomUUID().replace(/-/g, "")}`;
+  const leasePath = path.join(leaseRoot, `${leaseId}.json`);
+  const createdAt = new Date().toISOString();
+  const lease = {
+    schema_version: 2,
+    generation_lease_version: GENERATION_LEASE_VERSION,
+    managed_by: MANAGED_BY,
+    generation_id: generationId,
+    lease_id: leaseId,
+    owner: "mcp",
+    pid: process.pid,
+    process_start_identity: String(Math.max(0, Math.round(Date.now() - process.uptime() * 1000))),
+    project_root: baseContext.unityRoot,
+    created_at_utc: createdAt,
+    heartbeat_at_utc: createdAt
+  };
+  publishGenerationLease(leasePath, lease, true);
+  try {
+    assertDestructiveMaterializerInactive(materializerMarker);
+  } catch (error) {
+    fs.rmSync(leasePath, { force: true });
+    removeEmptyDirectory(leaseRoot);
+    removeEmptyDirectory(leasesRoot);
+    throw error;
+  }
+
+  let released = false;
+  const heartbeat = setInterval(() => {
+    if (released) {
+      return;
+    }
+    lease.heartbeat_at_utc = new Date().toISOString();
+    try {
+      publishGenerationLease(leasePath, lease, false);
+    } catch {
+      // Strict host mutation treats an unreadable live lease as a blocker.
+    }
+  }, GENERATION_HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref();
+  return {
+    release() {
+      if (released) {
+        return;
+      }
+      released = true;
+      clearInterval(heartbeat);
+      fs.rmSync(leasePath, { force: true });
+      removeEmptyDirectory(leaseRoot);
+      removeEmptyDirectory(leasesRoot);
+    }
+  };
+}
+
+function acquirePinnedGenerationRequest() {
+  for (let attempt = 0; attempt < GENERATION_PIN_ATTEMPTS; attempt += 1) {
+    const generation = resolveCurrentGeneration();
+    const lease = acquireGenerationRequestLease(generation.generationId);
+    let selected;
+    try {
+      selected = resolveCurrentGeneration();
+    } catch (error) {
+      lease.release();
+      throw error;
+    }
+    if (selected.pointerIdentity === generation.pointerIdentity) {
+      return { generation, lease };
+    }
+    lease.release();
+  }
+  throw new Error("[HOST_UPDATING] CodeDB selected generation changed repeatedly while publishing a request lease.");
+}
+
+function publishGenerationLease(leasePath, lease, createNew) {
+  const temporaryPath = path.join(
+    path.dirname(leasePath),
+    `.${path.basename(leasePath)}.${process.pid}.${crypto.randomUUID()}.tmp`
+  );
+  let fd;
+  try {
+    if (createNew && fs.existsSync(leasePath)) {
+      throw new Error(`CodeDB generation lease already exists: ${leasePath}`);
+    }
+    fd = fs.openSync(temporaryPath, "wx");
+    fs.writeFileSync(fd, `${JSON.stringify(lease, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporaryPath, leasePath);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+    fs.rmSync(temporaryPath, { force: true });
+  }
+}
+
+function assertDestructiveMaterializerInactive(activeMarkerPath) {
+  if (!fs.existsSync(activeMarkerPath)) {
+    return;
+  }
+  try {
+    const marker = JSON.parse(fs.readFileSync(activeMarkerPath, "utf8"));
+    if (marker?.managed_by === MANAGED_BY && marker?.action === "upgrade") {
+      return;
+    }
+  } catch {
+    // Invalid materializer state remains a fail-closed blocker.
+  }
+  throw new Error(`[HOST_UPDATING] CodeDB host payload mutation is active: ${activeMarkerPath}`);
+}
+
+function removeEmptyDirectory(directoryPath) {
+  try {
+    fs.rmdirSync(directoryPath);
+  } catch {
+    // Another request or watcher still owns this directory.
+  }
 }
 
 function resolveWrapperUnityRoot(rootAssertion) {
@@ -199,6 +458,30 @@ function resolveWrapperUnityRoot(rootAssertion) {
   }
 
   return wrapperUnityRoot;
+}
+
+function assertCodedbUnityProjectRoot(unityRoot) {
+  const candidate = String(unityRoot ?? "").trim();
+  if (!candidate) {
+    throw new Error("CodeDB requires a Unity project root.");
+  }
+  const resolvedRoot = path.resolve(candidate);
+  let root;
+  try {
+    root = fs.realpathSync(resolvedRoot);
+  } catch (error) {
+    throw new Error(`Invalid Unity project root ${resolvedRoot}: ${error.message}`);
+  }
+  if (!fs.statSync(root).isDirectory()) {
+    throw new Error(`Invalid Unity project root ${root}: expected a directory.`);
+  }
+  for (const marker of ["Assets", "Packages", "ProjectSettings"]) {
+    const markerPath = path.join(root, marker);
+    if (!fs.existsSync(markerPath) || !fs.statSync(markerPath).isDirectory()) {
+      throw new Error(`Invalid Unity project root ${root}: missing ${marker} directory.`);
+    }
+  }
+  return root;
 }
 
 function createProjectSlug(value) {
@@ -296,7 +579,7 @@ async function handleRequest(message) {
         },
         serverInfo: {
           name: "codedb-project-wrapper",
-          version: "0.2.2"
+          version: "0.2.3"
         }
       };
     case "tools/list":
@@ -316,26 +599,33 @@ async function callTool(params) {
   const timing = createToolTiming(name);
 
   try {
-    let text;
-    switch (name) {
-      case "codedb_status":
-        text = await getStatusText();
-        break;
-      case "codedb_search":
-      case "codedb_text_search":
-      case "codedb_find":
-        text = await routeSearchTool(name, args, timing);
-        break;
-      case "codedb_read":
-        text = routeReadTool(args, timing);
-        break;
-      case "codedb_context":
-        text = await routeContextTool(args, timing);
-        break;
-      default:
-        throw new Error(`Unsupported tool: ${name}`);
-    }
-    return toToolResult(text, false, timing);
+    const pinned = acquirePinnedGenerationRequest();
+    return await requestGenerationStorage.run(pinned.generation, async () => {
+      try {
+        let text;
+        switch (name) {
+          case "codedb_status":
+            text = await getStatusText();
+            break;
+          case "codedb_search":
+          case "codedb_text_search":
+          case "codedb_find":
+            text = await routeSearchTool(name, args, timing);
+            break;
+          case "codedb_read":
+            text = routeReadTool(args, timing);
+            break;
+          case "codedb_context":
+            text = await routeContextTool(args, timing);
+            break;
+          default:
+            throw new Error(`Unsupported tool: ${name}`);
+        }
+        return toToolResult(text, false, timing);
+      } finally {
+        pinned.lease.release();
+      }
+    });
   } catch (error) {
     throw new Error(formatTimedOutput(error.message || String(error), timing));
   }
@@ -907,9 +1197,10 @@ function formatSearchLocation(entry) {
 }
 
 async function invokeProviderTool(name, args, timing) {
-  const readyState = getReadyWatchCoordinatorState();
+  const lifecycle = await readEffectiveLifecycle();
+  const readyState = getReadyWatchCoordinatorState(lifecycle);
   if (!readyState) {
-    throw createLifecycleUnavailableError();
+    throw createLifecycleUnavailableError(lifecycle);
   }
 
   const response = await requestCoordinatorQuery(readyState, name, args);
@@ -1084,13 +1375,16 @@ function sanitizeDiagnosticToken(value) {
   return String(value ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "unknown";
 }
 
-function getReadyWatchCoordinatorState() {
-  const desired = readDesiredState();
-  const state = readWatchCoordinatorState();
-  if (desired?.desired_state !== "enabled" || !state) {
+function getReadyWatchCoordinatorState(lifecycle) {
+  if (lifecycle.desiredState !== "enabled" || !lifecycle.editorOnline) {
     return null;
   }
-  const ready = state.provider_state === "ready"
+  const state = readWatchCoordinatorState();
+  if (!state) {
+    return null;
+  }
+  const commonReady = state.schema_version === 2
+    && state.provider_state === "ready"
     && state.desired_state === "enabled"
     && state.editor_demand === "online"
     && Number(state.editor_session_count) > 0
@@ -1099,14 +1393,35 @@ function getReadyWatchCoordinatorState() {
     && normalizeAbsolutePath(state.root) === normalizeAbsolutePath(context.unityRoot)
     && normalizeAbsolutePath(state.provider_executable) === normalizeAbsolutePath(context.providerExecutablePath)
     && normalizeAbsolutePath(state.provider_config) === normalizeAbsolutePath(context.watchConfigPath)
-    && normalizeAbsolutePath(state.adapter_builder) === normalizeAbsolutePath(context.adapterBuilderPath)
-    && normalizeAbsolutePath(state.adapter_worker) === normalizeAbsolutePath(context.adapterWorkerPath)
+    && normalizeAbsolutePath(state.runtime) === normalizeAbsolutePath(context.watchCoordinatorRuntimePath)
     && normalizeAbsolutePath(state.adapter_manifest) === normalizeAbsolutePath(context.textAdapterManifestPath)
+    && Number(state.adapter_debounce_ms) > 0
     && state.adapter_worker_state === "ready"
     && processMayBeAlive(state.coordinator_pid)
     && processMayBeAlive(state.provider_pid)
     && processMayBeAlive(state.adapter_worker_pid);
-  return ready ? state : null;
+  if (!commonReady) {
+    return null;
+  }
+
+  const aliasesMatch = normalizeAbsolutePath(state.adapter_builder) === normalizeAbsolutePath(context.legacyAdapterBuilderPath)
+    && normalizeAbsolutePath(state.adapter_worker) === normalizeAbsolutePath(context.legacyAdapterWorkerPath);
+  const currentGeneration = state.generation_id === context.generationId
+    && aliasesMatch
+    && normalizeAbsolutePath(state.generation_adapter_builder) === normalizeAbsolutePath(context.adapterBuilderPath)
+    && normalizeAbsolutePath(state.generation_adapter_worker) === normalizeAbsolutePath(context.adapterWorkerPath);
+  if (currentGeneration) {
+    return { ...state, watcher_generation: context.generationId, watcher_generation_mode: "current" };
+  }
+
+  const legacyGeneration = (state.generation_id === undefined || state.generation_id === null)
+    && aliasesMatch
+    && (state.generation_adapter_builder === undefined || state.generation_adapter_builder === null)
+    && (state.generation_adapter_worker === undefined || state.generation_adapter_worker === null)
+    && countLegacyMcpSessions() > 0;
+  return legacyGeneration
+    ? { ...state, watcher_generation: "poc.21", watcher_generation_mode: "legacy-draining" }
+    : null;
 }
 
 function readWatchCoordinatorState() {
@@ -1134,15 +1449,51 @@ function readDesiredState() {
   }
 }
 
-function hasActiveEditorLease() {
+async function readEffectiveLifecycle() {
+  const policyState = readDesiredState()?.desired_state ?? "unknown";
+  const activeSessionIds = await readActiveEditorSessionIds();
+  const manualMode = readManualRuntimeMode(activeSessionIds);
+  const desiredState = manualMode === "started"
+    ? "enabled"
+    : (manualMode === "stopped" ? "disabled" : policyState);
+  return {
+    policyState,
+    manualMode,
+    desiredState,
+    editorOnline: activeSessionIds.size > 0
+  };
+}
+
+function readManualRuntimeMode(activeSessionIds) {
+  try {
+    const document = JSON.parse(fs.readFileSync(context.manualRuntimePath, "utf8"));
+    const sessionIds = Array.isArray(document?.editor_session_ids) ? document.editor_session_ids : [];
+    const valid = document?.schema_version === 1
+      && document?.managed_by === MANAGED_BY
+      && (document?.mode === "started" || document?.mode === "stopped")
+      && normalizeAbsolutePath(document?.project_root) === normalizeAbsolutePath(context.unityRoot)
+      && document?.project_identity === context.projectIdentity
+      && sessionIds.length > 0
+      && sessionIds.every((value) => typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value));
+    if (!valid || !sessionIds.some((sessionId) => activeSessionIds.has(sessionId))) {
+      return "none";
+    }
+    return document.mode;
+  } catch {
+    return "none";
+  }
+}
+
+async function readActiveEditorSessionIds() {
   let names;
   try {
     names = fs.readdirSync(context.editorLeaseRoot);
   } catch {
-    return false;
+    return new Set();
   }
 
   const now = Date.now();
+  const candidates = [];
   for (const name of names) {
     if (!name.toLowerCase().endsWith(".json")) {
       continue;
@@ -1150,35 +1501,129 @@ function hasActiveEditorLease() {
     try {
       const lease = JSON.parse(fs.readFileSync(path.join(context.editorLeaseRoot, name), "utf8"));
       const heartbeatMs = Date.parse(lease?.heartbeat_at_utc ?? "");
+      const createdMs = Date.parse(lease?.created_at_utc ?? "");
+      const pid = Number(lease?.editor_pid);
       const valid = lease?.schema_version === 1
         && lease?.managed_by === "com.rice.ai-codedb"
+        && typeof lease?.session_id === "string"
+        && /^[A-Za-z0-9._-]{1,128}$/.test(lease.session_id)
         && `${lease?.session_id}.json` === name
+        && Number.isInteger(pid)
+        && pid > 0
+        && typeof lease?.process_start_ticks === "string"
+        && /^[0-9]+$/.test(lease.process_start_ticks)
         && normalizeAbsolutePath(lease?.project_root) === normalizeAbsolutePath(context.unityRoot)
         && lease?.project_identity === context.projectIdentity
+        && Number.isFinite(createdMs)
         && Number.isFinite(heartbeatMs)
+        && createdMs <= heartbeatMs
         && heartbeatMs <= now + 30000
-        && now - heartbeatMs <= EDITOR_LEASE_STALE_AFTER_MS
-        && processMayBeAlive(lease?.editor_pid);
+        && now - heartbeatMs <= EDITOR_LEASE_STALE_AFTER_MS;
       if (valid) {
-        return true;
+        candidates.push({ lease, pid, heartbeatMs });
       }
     } catch {
       // The coordinator owns malformed/stale lease reclamation.
     }
   }
-  return false;
+
+  const processSnapshot = await getProcessStartTicks(candidates
+    .filter((candidate) => now - candidate.heartbeatMs > EDITOR_LEASE_PROCESS_IDENTITY_RECHECK_AFTER_MS)
+    .map((candidate) => candidate.pid));
+  const sessionIds = new Set();
+  for (const candidate of candidates) {
+    if (processSnapshot.available && processSnapshot.starts.has(candidate.pid)) {
+      if (processSnapshot.starts.get(candidate.pid) !== candidate.lease.process_start_ticks) {
+        continue;
+      }
+    } else if (!processMayBeAlive(candidate.pid)) {
+      continue;
+    }
+    sessionIds.add(candidate.lease.session_id);
+  }
+  return sessionIds;
+}
+
+async function getProcessStartTicks(processIds) {
+  const ids = [...new Set(processIds
+    .map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0))];
+  const starts = new Map();
+  if (ids.length === 0) {
+    return { available: true, starts };
+  }
+  if (process.platform !== "win32") {
+    return { available: false, starts };
+  }
+
+  const script = `$rows = foreach ($id in @(${ids.join(",")})) { try { $p = Get-Process -Id $id -ErrorAction Stop; [pscustomobject]@{ pid = [int]$p.Id; start_ticks = $p.StartTime.ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture) } } catch {} }; ConvertTo-Json -Compress -InputObject @($rows)`;
+  const command = await new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-NoLogo", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: PROCESS_SNAPSHOT_TIMEOUT_MS,
+      maxBuffer: PROCESS_SNAPSHOT_MAX_BYTES
+    }, (error, stdout) => resolve({ error, stdout: stdout ?? "" }));
+  });
+  if (command.error || !command.stdout.trim()) {
+    return { available: false, starts };
+  }
+
+  try {
+    const rows = JSON.parse(command.stdout.trim());
+    for (const row of Array.isArray(rows) ? rows : [rows]) {
+      const pid = Number(row?.pid);
+      if (Number.isInteger(pid)
+          && pid > 0
+          && typeof row?.start_ticks === "string"
+          && /^[0-9]+$/.test(row.start_ticks)) {
+        starts.set(pid, row.start_ticks);
+      }
+    }
+  } catch {
+    return { available: false, starts: new Map() };
+  }
+  return { available: true, starts };
+}
+
+function countLegacyMcpSessions() {
+  const leaseRoot = path.join(
+    baseContext.unityRoot,
+    "AIWork",
+    ".runtime",
+    "codedb",
+    "payload-materializer",
+    "host-use-leases"
+  );
+  let names;
+  try {
+    names = fs.readdirSync(leaseRoot);
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const name of names) {
+    const match = /^mcp-([0-9]+)-[0-9a-f]{32}\.json$/i.exec(name);
+    if (match && processMayBeAlive(Number(match[1]))) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function lifecycleError(code, message) {
   return new Error(`[${code}] ${message}`);
 }
 
-function createLifecycleUnavailableError() {
-  const desired = readDesiredState();
-  if (desired?.desired_state === "disabled") {
-    return lifecycleError("SERVICE_DISABLED", "CodeDB is disabled for this Unity project.");
+function createLifecycleUnavailableError(lifecycle) {
+  if (lifecycle.desiredState === "disabled") {
+    const message = lifecycle.manualMode === "stopped"
+      ? "CodeDB is stopped for the current Unity Editor session."
+      : "CodeDB is disabled for this Unity project.";
+    const code = lifecycle.manualMode === "stopped" ? "MANUAL_STOPPED" : "SERVICE_DISABLED";
+    return lifecycleError(code, message);
   }
-  if (!hasActiveEditorLease()) {
+  if (!lifecycle.editorOnline) {
     return lifecycleError("EDITOR_OFFLINE", "No interactive Unity Editor session is online for this project.");
   }
   return lifecycleError("STARTING", "CodeDB is enabled and the Unity Editor is online, but the backend is not ready yet.");
@@ -1207,30 +1652,59 @@ function normalizeAbsolutePath(value) {
 
 async function getStatusText() {
   const watchState = readWatchCoordinatorState();
-  const desiredState = readDesiredState()?.desired_state ?? "unknown";
-  const editorOnline = hasActiveEditorLease();
-  const readyState = getReadyWatchCoordinatorState();
+  const lifecycle = await readEffectiveLifecycle();
+  const desiredState = lifecycle.desiredState;
+  const editorOnline = lifecycle.editorOnline;
+  const readyState = getReadyWatchCoordinatorState(lifecycle);
   const coordinatorResponse = readyState ? await requestCoordinatorStatus(readyState) : null;
   const coordinatorReady = coordinatorResponse?.ok === true
     && coordinatorResponse?.status?.lifecycle_id === readyState?.lifecycle_id;
   const coordinatorUnreachable = readyState !== null && !coordinatorReady;
-  const automaticRefreshState = desiredState === "disabled"
-    ? "disabled"
-    : (!editorOnline ? "editor_offline" : (coordinatorReady ? "active" : (coordinatorUnreachable ? "unreachable" : "starting")));
-  const reasonCode = desiredState === "disabled"
-    ? "SERVICE_DISABLED"
-    : (!editorOnline ? "EDITOR_OFFLINE" : (coordinatorReady ? "READY" : (coordinatorUnreachable ? "COORDINATOR_UNREACHABLE" : "STARTING")));
+  let automaticRefreshState;
+  let reasonCode;
+  if (lifecycle.manualMode === "stopped") {
+    automaticRefreshState = "manual_stopped";
+    reasonCode = "MANUAL_STOPPED";
+  } else if (desiredState === "disabled") {
+    automaticRefreshState = "disabled";
+    reasonCode = "SERVICE_DISABLED";
+  } else if (!editorOnline) {
+    automaticRefreshState = "editor_offline";
+    reasonCode = "EDITOR_OFFLINE";
+  } else if (coordinatorReady) {
+    automaticRefreshState = "active";
+    reasonCode = "READY";
+  } else if (coordinatorUnreachable) {
+    automaticRefreshState = "unreachable";
+    reasonCode = "COORDINATOR_UNREACHABLE";
+  } else {
+    automaticRefreshState = "starting";
+    reasonCode = "STARTING";
+  }
+  const watcherGeneration = readyState?.watcher_generation
+    ?? (watchState?.generation_id || (watchState ? "poc.21" : "none"));
+  const watcherGenerationMode = readyState?.watcher_generation_mode
+    ?? (watchState ? (watchState.generation_id ? "not-ready" : "legacy-not-ready") : "stopped");
   const lines = [
     `[OK] ${context.providerName} wrapper ready.`,
+    `Package version: ${context.packageVersion}`,
+    `Selected generation: ${context.generationId}`,
+    `Payload sequence: ${context.payloadSequence}`,
+    `Bootstrap protocol: ${context.bootstrapProtocol}`,
+    `Generation manifest: ${context.generationManifestSha256}`,
+    `Legacy sessions: ${countLegacyMcpSessions()}`,
     `Unity root: ${toUnityRelativePath(context.unityRoot)}`,
     `Provider executable: ${fileState(context.providerExecutablePath)}`,
     `Provider config: ${fileState(context.providerConfigPath)}`,
+    `Policy state: ${lifecycle.policyState}`,
+    `Manual runtime: ${lifecycle.manualMode}`,
     `Desired state: ${desiredState}`,
     `Editor demand: ${editorOnline ? "online" : "offline"}`,
     `Automatic refresh: ${automaticRefreshState}`,
     `Lifecycle reason: ${reasonCode}`,
     `Watch config: ${fileState(context.watchConfigPath)}`,
     `Watch coordinator: ${coordinatorReady ? "ready" : (coordinatorUnreachable ? "unreachable" : "stopped")}`,
+    `Watcher generation: ${watcherGeneration} (${watcherGenerationMode})`,
     `Shader watcher: ${watchState?.adapter_state ?? "stopped"}`,
     `Active provider config: ${coordinatorReady ? toUnityRelativePath(context.watchConfigPath) : "none"}`,
     `Provider index: ${fileState(context.providerIndexRoot)}`,

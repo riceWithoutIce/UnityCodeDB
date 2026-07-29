@@ -40,7 +40,6 @@ namespace Rice.AI.Codedb.Editor
         private const float McpSnippetHeight = 76f;
         private const float ContentHorizontalPadding = 8f;
         private const float BodyVerticalSpacing = 4f;
-        private const float WatchToggleWidth = 42f;
         private const float HeaderProfileWidth = 106f;
         private const float HeaderBrandIconWidth = 36f;
         private const float HeaderBrandIconSize = 32f;
@@ -373,6 +372,10 @@ namespace Rice.AI.Codedb.Editor
             DrawDetailsPanel(() =>
             {
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostPayload);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostGeneration);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostLastKnownGood);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpgrade);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpdatePolicy);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderExecutable);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderConfig);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeConfigTemplate);
@@ -447,18 +450,42 @@ namespace Rice.AI.Codedb.Editor
             DrawHostPayloadAuthorizationControls();
             EditorGUILayout.Space(6f);
             var hasAuthorization = !string.IsNullOrWhiteSpace(_trackedHostAuthorizationPath);
+            var updateAction = _statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically
+                ? (Action)(() => RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade))
+                : null;
             DrawActionGrid(2,
                 AICodedbActionButton.Create("Inspect host files", () => RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun)),
                 AICodedbActionButton.Create("Verify host files", () => RunAction("Host Payload Verify", AICodedbActions.RunHostPayloadVerify)),
+                AICodedbActionButton.Create("Update now", updateAction),
                 AICodedbActionButton.Create("Sync host files", hasAuthorization ? (Action)RunHostPayloadSyncWithConfirmation : null),
                 AICodedbActionButton.Create("Remove host files", hasAuthorization ? (Action)RunHostPayloadRemoveWithConfirmation : null));
             EditorGUILayout.Space(6f);
             DrawDetailsPanel(() =>
             {
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostPayload);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostGeneration);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostLastKnownGood);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpgrade);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpdatePolicy);
                 AICodedbDetailRowView.DrawValue("Materializer", "Package tool", AICodedbPaths.HostPayloadMaterializerScriptPath);
                 AICodedbDetailRowView.DrawValue("Ownership marker", "Project path", AICodedbProjectSettings.HostPayloadMarkerRelativePath);
+                AICodedbDetailRowView.DrawValue("Current pointer", "Ignored runtime", AICodedbProjectSettings.HostCurrentPointerRelativePath);
+                AICodedbDetailRowView.DrawValue("Rollback pointer", "Ignored runtime", AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath);
                 AICodedbDetailRowView.DrawValue("Authorization", "Ignored runtime", AICodedbProjectSettings.TrackedHostAuthorizationRelativePath);
+                if (_statusSnapshot.HostPayloadStatus.LegacyMcpSessionCount > 0)
+                {
+                    AICodedbDetailRowView.DrawValue(
+                        "Legacy MCP sessions",
+                        "Draining host-use leases",
+                        _statusSnapshot.HostPayloadStatus.LegacyMcpSessionCount.ToString());
+                }
+                for (var index = 0; index < _statusSnapshot.HostPayloadStatus.ActiveOwners.Length; index++)
+                {
+                    AICodedbDetailRowView.DrawValue(
+                        "Active owner " + (index + 1),
+                        "Active lease owner",
+                        _statusSnapshot.HostPayloadStatus.ActiveOwners[index]);
+                }
             });
         }
 
@@ -527,26 +554,18 @@ namespace Rice.AI.Codedb.Editor
                         AICodedbManagerStyles.GetStateValueStyle(GetWatcherDisplayState()),
                         GUILayout.Width(112f),
                         GUILayout.Height(52f));
-
-                    var previousMixedValue = EditorGUI.showMixedValue;
-                    EditorGUI.showMixedValue = !_watcherStatusLoaded || !_watcherStatus.HasKnownOptIn;
-                    using (new EditorGUI.DisabledScope(!_watcherStatusLoaded || !_watcherStatus.HasKnownOptIn))
-                    {
-                        EditorGUI.BeginChangeCheck();
-                        var requestedEnabled = EditorGUILayout.Toggle(
-                            _watcherStatus.IsOptInEnabled,
-                            GUILayout.Width(WatchToggleWidth),
-                            GUILayout.Height(52f));
-                        if (EditorGUI.EndChangeCheck())
-                        {
-                            if (requestedEnabled)
-                                RunStartWatcherWithConfirmation();
-                            else
-                                RunAction("Pause Watcher", AICodedbActions.RunPauseWatcher);
-                        }
-                    }
-                    EditorGUI.showMixedValue = previousMixedValue;
                 }
+
+                AICodedbSectionView.DrawDivider();
+                DrawLifecyclePolicyToggles();
+                EditorGUILayout.Space(4f);
+                var hasCurrentGeneration = CanUseLifecycleControls(_statusSnapshot.HostGenerationSelection.State);
+                DrawActionGrid(3,
+                    AICodedbActionButton.Create("Start now", hasCurrentGeneration ? (Action)(() => RunAction("Start Now", AICodedbActions.RunStartWatcher)) : null),
+                    AICodedbActionButton.Create("Stop now", hasCurrentGeneration ? (Action)(() => RunAction("Stop Now", AICodedbActions.RunStopWatcher)) : null),
+                    AICodedbActionButton.Create("Restart", hasCurrentGeneration ? (Action)(() => RunAction("Restart", AICodedbActions.RunRestartWatcher)) : null));
+                if (!hasCurrentGeneration)
+                    EditorGUILayout.HelpBox("Lifecycle controls require the current host generation. Use Update now first.", MessageType.Info);
 
                 var repairLabel = GetWatcherRepairLabel();
                 if (!string.IsNullOrWhiteSpace(repairLabel))
@@ -561,6 +580,46 @@ namespace Rice.AI.Codedb.Editor
             }
 
             EditorGUILayout.Space(AICodedbManagerStyles.SectionGap);
+        }
+
+        private void DrawLifecyclePolicyToggles()
+        {
+            var previousMixedValue = EditorGUI.showMixedValue;
+            EditorGUI.showMixedValue = !_watcherStatusLoaded || !_watcherStatus.HasKnownOptIn;
+            var hasCurrentGeneration = CanUseLifecycleControls(_statusSnapshot.HostGenerationSelection.State);
+            using (new EditorGUI.DisabledScope(!hasCurrentGeneration || !_watcherStatusLoaded || !_watcherStatus.HasKnownOptIn))
+            {
+                EditorGUI.BeginChangeCheck();
+                var requestedStartWithEditor = EditorGUILayout.ToggleLeft(
+                    "Start with Unity Editor",
+                    _watcherStatus.IsOptInEnabled,
+                    GUILayout.Height(InlineControlHeight));
+                if (EditorGUI.EndChangeCheck())
+                {
+                    if (requestedStartWithEditor)
+                        RunEnableWatcherWithConfirmation();
+                    else
+                        RunAction("Disable Start with Unity Editor", AICodedbActions.RunDisableWatcher);
+                }
+            }
+            EditorGUI.showMixedValue = previousMixedValue;
+
+            var updatePolicy = _statusSnapshot.HostUpdatePolicyValue;
+            EditorGUI.showMixedValue = !updatePolicy.IsValid;
+            EditorGUI.BeginChangeCheck();
+            var requestedAutomaticUpdates = EditorGUILayout.ToggleLeft(
+                "Automatic host updates",
+                updatePolicy.IsEnabled,
+                GUILayout.Height(InlineControlHeight));
+            if (EditorGUI.EndChangeCheck())
+            {
+                RunAction(
+                    "Automatic Host Updates",
+                    () => AICodedbActions.SetAutomaticHostUpdates(requestedAutomaticUpdates));
+                if (requestedAutomaticUpdates)
+                    AICodedbEditorLifecycle.RequestReconcile();
+            }
+            EditorGUI.showMixedValue = previousMixedValue;
         }
 
         private void DrawIndexDiagnostics()
@@ -904,6 +963,8 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetPrimaryActionLabel()
         {
+            if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
+                return "Update now";
             if (!_statusSnapshot.IsHostPayloadCurrent())
                 return "Inspect host files";
             if (_statusSnapshot.IsReady())
@@ -913,7 +974,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunPrimaryAction()
         {
-            if (!_statusSnapshot.IsHostPayloadCurrent())
+            if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
+                RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade);
+            else if (!_statusSnapshot.IsHostPayloadCurrent())
                 RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun);
             else if (_statusSnapshot.IsReady())
                 RunAction("Refresh If Stale", AICodedbActions.RunRefreshIfStale);
@@ -954,7 +1017,7 @@ namespace Rice.AI.Codedb.Editor
             RunAction("Rebuild Index", AICodedbActions.RunRebuildIndex);
         }
 
-        private void RunStartWatcherWithConfirmation()
+        private void RunEnableWatcherWithConfirmation()
         {
             if (!EditorUtility.DisplayDialog(
                     "Enable automatic refresh",
@@ -965,7 +1028,7 @@ namespace Rice.AI.Codedb.Editor
                 return;
             }
 
-            RunAction("Start Watcher", AICodedbActions.RunStartWatcher);
+            RunAction("Enable Start with Unity Editor", AICodedbActions.RunEnableWatcher);
         }
 
         private void RunHostPayloadSyncWithConfirmation()
@@ -1129,7 +1192,11 @@ namespace Rice.AI.Codedb.Editor
 
             if (_statusSnapshot.GetProviderState() != AICodedbStatusState.Ok)
                 _showProviderGuidance = true;
-            if (_statusSnapshot.GetHostPayloadState() != AICodedbStatusState.Ok)
+            if (AICodedbStatusSnapshot.GetHostManagementState(
+                    _statusSnapshot.HostPayload.State,
+                    _statusSnapshot.HostGeneration.State,
+                    _statusSnapshot.HostUpgrade.State,
+                    _statusSnapshot.HostUpdatePolicy.State) != AICodedbStatusState.Ok)
                 _showAdvancedHostFiles = true;
             if (_statusSnapshot.GetIndexState() != AICodedbStatusState.Ok
                 || _statusSnapshot.GetTextAdapterState() != AICodedbStatusState.Ok)
@@ -1172,7 +1239,23 @@ namespace Rice.AI.Codedb.Editor
         {
             if (!_watcherStatusLoaded)
                 return string.Empty;
-            switch (_watcherStatus.State)
+            return ResolveWatcherRepairLabel(
+                _statusSnapshot.HostGenerationSelection.State,
+                _watcherStatus.State);
+        }
+
+        internal static bool CanUseLifecycleControls(AICodedbHostGenerationState generationState)
+        {
+            return generationState == AICodedbHostGenerationState.Current;
+        }
+
+        internal static string ResolveWatcherRepairLabel(
+            AICodedbHostGenerationState generationState,
+            AICodedbWatcherState watcherState)
+        {
+            if (!CanUseLifecycleControls(generationState))
+                return string.Empty;
+            switch (watcherState)
             {
                 case AICodedbWatcherState.Stale:
                     return "Repair watcher";
@@ -1188,12 +1271,14 @@ namespace Rice.AI.Codedb.Editor
 
         private Action GetWatcherRepairAction()
         {
+            if (!CanUseLifecycleControls(_statusSnapshot.HostGenerationSelection.State))
+                return null;
             switch (_watcherStatus.State)
             {
                 case AICodedbWatcherState.Stale:
-                    return RunStartWatcherWithConfirmation;
+                    return () => RunAction("Restart", AICodedbActions.RunRestartWatcher);
                 case AICodedbWatcherState.DisabledRunning:
-                    return () => RunAction("Pause Watcher", AICodedbActions.RunPauseWatcher);
+                    return () => RunAction("Disable Start with Unity Editor", AICodedbActions.RunDisableWatcher);
                 default:
                     return () => RunAction("Watcher Status", AICodedbActions.RunWatcherStatus);
             }
@@ -1308,6 +1393,10 @@ namespace Rice.AI.Codedb.Editor
             {
                 case AICodedbHostPayloadState.SetupRequired:
                     return "SETUP_REQUIRED";
+                case AICodedbHostPayloadState.UpgradeReady:
+                    return "UPGRADE_READY";
+                case AICodedbHostPayloadState.Draining:
+                    return "DRAINING";
                 case AICodedbHostPayloadState.UpdateRequired:
                     return "UPDATE_REQUIRED";
                 case AICodedbHostPayloadState.Conflict:
@@ -1333,6 +1422,10 @@ namespace Rice.AI.Codedb.Editor
             {
                 case AICodedbHostPayloadState.SetupRequired:
                     return "Install the package-managed host files before relying on discovery.";
+                case AICodedbHostPayloadState.UpgradeReady:
+                    return "The owned poc.21 host payload can migrate without stopping active CodeDB sessions.";
+                case AICodedbHostPayloadState.Draining:
+                    return "The current host generation is ready; older CodeDB sessions will remain on their original generation until they disconnect.";
                 case AICodedbHostPayloadState.UpdateRequired:
                     return "Update the installed host files to match this package.";
                 case AICodedbHostPayloadState.Conflict:
@@ -1351,6 +1444,10 @@ namespace Rice.AI.Codedb.Editor
             {
                 case AICodedbHostPayloadState.Current:
                     return "Current";
+                case AICodedbHostPayloadState.Draining:
+                    return "DRAINING";
+                case AICodedbHostPayloadState.UpgradeReady:
+                    return "UPGRADE_READY";
                 case AICodedbHostPayloadState.SetupRequired:
                     return "SETUP_REQUIRED";
                 case AICodedbHostPayloadState.UpdateRequired:
@@ -1366,10 +1463,12 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetHostPayloadSummary()
         {
-            var protection = _statusSnapshot.HostPayloadStatus.State == AICodedbHostPayloadState.Current
+            var protection = _statusSnapshot.HostPayloadStatus.IsCurrent
                 ? " · protected"
                 : string.Empty;
-            return GetHostPayloadLabel() + protection;
+            var ownerCount = _statusSnapshot.HostPayloadStatus.ActiveOwners.Length;
+            var owners = ownerCount > 0 ? " · " + ownerCount + " active owner" + (ownerCount == 1 ? string.Empty : "s") : string.Empty;
+            return GetHostPayloadLabel() + protection + owners;
         }
 
         private static string GetStateLabel(AICodedbStatusState state, string okLabel)

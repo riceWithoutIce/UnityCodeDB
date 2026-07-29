@@ -15,7 +15,9 @@ and correctness release is recorded in the
 [v0.2.1 roadmap](v0.2.1-roadmap.md). The Windows query, upgrade, and Manager UI
 patch is tracked in the [v0.2.2 roadmap](v0.2.2-roadmap.md). Automatic host
 generation upgrades, same-client Unity restart recovery, and explicit manual
-controls are planned in the [v0.2.3 roadmap](v0.2.3-roadmap.md). Approved
+controls are implemented in the `0.2.3` prerelease, remain under third-party
+validation before stable promotion, and are tracked in the
+[v0.2.3 roadmap](v0.2.3-roadmap.md). Approved
 future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
@@ -37,7 +39,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.2"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.3"
   }
 }
 ```
@@ -64,6 +66,7 @@ Unity project owns:
 AIWork/
   codedb/                         Tracked operational files
   .runtime/codedb/<provider>/     Ignored generated runtime
+  .runtime/codedb/host/           Ignored generations, pointers, and leases
 .codex/config.toml                Optional project-level MCP registration
 ```
 
@@ -75,9 +78,15 @@ does not generate, persist, infer, or delete that authorization.
 ## Safety Boundaries
 
 - After Setup completes, interactive Editor sessions own project demand and
-  start the backend asynchronously. Pause is explicit and persistent until
-  Resume; closing the final Editor stops the backend without changing that
-  preference. BatchMode does not auto-start CodeDB.
+  start the backend asynchronously. `Start with Unity Editor` is persistent;
+  Start, Stop, and Restart are immediate commands associated with the Editor
+  cohort present when they are issued. Closing the final Editor stops the
+  backend without changing persistent policy. BatchMode does not auto-start
+  CodeDB.
+- Owned, byte-exact lower generations can be installed and selected
+  automatically while generation-scoped leases protect active requests.
+  First adoption, explicit Sync/Remove, downgrade, drift, and staged managed
+  files retain their review gates.
 - Opening or refreshing the Manager is read-only. MCP wrappers attach only to
   an Editor-owned ready coordinator and never start a one-shot Provider.
 - The tracked provider config remains `watch=false`; the coordinator owns a
@@ -86,8 +95,10 @@ does not generate, persist, infer, or delete that authorization.
 - Generated indexes, provider binaries, logs, and watcher state remain ignored.
 - MCP guidance is project-level first; global client configuration is never
   silently modified.
-- Host mutations fail closed on drift, staged managed files, active watchers or
-  MCP wrappers, interrupted transactions, downgrade, and payload collisions.
+- Strict Sync and Remove fail closed on drift, staged managed files, active
+  watchers or MCP requests, interrupted transactions, downgrade, and payload
+  collisions. Automatic generation upgrades use a separate owned-upgrade path
+  with durable rollback and never kill Unity, Codex, or MCP processes.
 
 ## Discover Read Bounds
 

@@ -20,6 +20,9 @@ namespace Rice.AI.Codedb.Editor
                     Array.Empty<string>());
             }
 
+            if (IsHostUpgradeActivity(actionTitle, result.StandardOutput))
+                return BuildHostUpgradeSummary(actionTitle, result);
+
             if (AICodedbWatcherStatusBuilder.IsWatcherActivity(actionTitle, result.StandardOutput))
             {
                 var watcherStatus = AICodedbWatcherStatusBuilder.Build(result);
@@ -43,6 +46,94 @@ namespace Rice.AI.Codedb.Editor
                 result.GetElapsedText(),
                 itemsTitle,
                 items);
+        }
+
+        private static bool IsHostUpgradeActivity(string actionTitle, string output)
+        {
+            return (!string.IsNullOrWhiteSpace(actionTitle)
+                    && actionTitle.IndexOf("Host Payload Upgrade", StringComparison.OrdinalIgnoreCase) >= 0)
+                   || ContainsUpgradeMarker(output, "[INSTALLING]")
+                   || ContainsUpgradeMarker(output, "[SWITCHING]")
+                   || ContainsUpgradeMarker(output, "[ROLLBACK]");
+        }
+
+        private static AICodedbActivitySummary BuildHostUpgradeSummary(
+            string actionTitle,
+            AICodedbCommandResult result)
+        {
+            var stages = ExtractUpgradeStages(result.StandardOutput);
+            var rollback = LastLineWithMarker(stages, "[ROLLBACK]");
+            var switching = LastLineWithMarker(stages, "[SWITCHING]");
+            var installing = LastLineWithMarker(stages, "[INSTALLING]");
+            var stage = FirstNonEmptyLine(rollback, switching, installing);
+            var state = result.TimedOut || !result.Succeeded || !string.IsNullOrWhiteSpace(rollback)
+                ? AICodedbStatusState.Error
+                : AICodedbStatusState.Ok;
+            string label;
+            if (result.TimedOut)
+                label = "Timed Out";
+            else if (!string.IsNullOrWhiteSpace(rollback))
+                label = "Rolled Back";
+            else if (!result.Succeeded)
+                label = "Failed";
+            else if (!string.IsNullOrWhiteSpace(switching))
+                label = "Switched";
+            else if (!string.IsNullOrWhiteSpace(installing))
+                label = "Installed";
+            else
+                label = "Completed";
+
+            var detail = !result.Succeeded && string.IsNullOrWhiteSpace(rollback)
+                ? GetDetail(result, string.Empty, 0)
+                : !string.IsNullOrWhiteSpace(stage)
+                    ? Regex.Replace(stage, @"^\[(?:INSTALLING|SWITCHING|ROLLBACK)\]\s*", string.Empty, RegexOptions.IgnoreCase)
+                    : GetDetail(result, string.Empty, 0);
+            return new AICodedbActivitySummary(
+                state,
+                label,
+                actionTitle,
+                detail,
+                result.GetElapsedText(),
+                "Upgrade stages",
+                stages);
+        }
+
+        private static string[] ExtractUpgradeStages(string output)
+        {
+            var stages = new List<string>();
+            if (string.IsNullOrWhiteSpace(output))
+                return stages.ToArray();
+            foreach (var line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                var trimmed = line.Trim();
+                if (ContainsMarker(trimmed, "[INSTALLING]")
+                    || ContainsMarker(trimmed, "[SWITCHING]")
+                    || ContainsMarker(trimmed, "[ROLLBACK]"))
+                    stages.Add(trimmed);
+            }
+            return stages.ToArray();
+        }
+
+        private static string LastLineWithMarker(string[] lines, string marker)
+        {
+            for (var index = lines.Length - 1; index >= 0; index--)
+            {
+                if (ContainsMarker(lines[index], marker))
+                    return lines[index];
+            }
+            return string.Empty;
+        }
+
+        private static bool ContainsUpgradeMarker(string output, string marker)
+        {
+            if (string.IsNullOrWhiteSpace(output))
+                return false;
+            foreach (var line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (ContainsMarker(line.Trim(), marker))
+                    return true;
+            }
+            return false;
         }
 
         private static string FindResultMarkerLine(string output)
@@ -208,6 +299,16 @@ namespace Rice.AI.Codedb.Editor
                     return trimmed;
             }
 
+            return string.Empty;
+        }
+
+        private static string FirstNonEmptyLine(params string[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
             return string.Empty;
         }
 

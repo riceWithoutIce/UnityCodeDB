@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "managed_by": "com.rice.ai-codedb",
+  "package_version": "0.2.3",
+  "payload_version": "poc.22",
+  "payload_sequence": 22,
+  "generation_id": "poc.22",
+  "generation_relative_path": "AIWork/.runtime/codedb/host/generations/poc.22",
+  "generation_manifest_sha256": "16d2b363def955e70d638edf882199844b3d3b59a7abfdda21c1b5471fe27af9",
+  "bootstrap_protocol": 1
+}

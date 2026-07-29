@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -59,6 +60,11 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunHostPayloadVerify()
         {
             return AICodedbHostPayloadMaterializer.RunVerify();
+        }
+
+        internal static AICodedbCommandResult RunHostPayloadUpgrade()
+        {
+            return AICodedbHostPayloadMaterializer.RunUpgrade();
         }
 
         /// <summary>
@@ -174,11 +180,27 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
-        /// Explicitly enables the project-local watch opt-in and starts or attaches to its coordinator.
+        /// Enables the persistent Start with Unity Editor policy.
+        /// </summary>
+        internal static AICodedbCommandResult RunEnableWatcher()
+        {
+            return RunScript("Codedb Enable Watcher", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Enable"));
+        }
+
+        /// <summary>
+        /// Disables the persistent Start with Unity Editor policy and stops the coordinator.
+        /// </summary>
+        internal static AICodedbCommandResult RunDisableWatcher()
+        {
+            return RunScript("Codedb Disable Watcher", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Disable"));
+        }
+
+        /// <summary>
+        /// Starts CodeDB for the current Editor session without changing persistent policy.
         /// </summary>
         internal static AICodedbCommandResult RunStartWatcher()
         {
-            return RunScript("Codedb Start Watcher", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, "-Action", "Start");
+            return RunScript("Codedb Start Now", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Start"));
         }
 
         /// <summary>
@@ -190,8 +212,7 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbProcessRunner.RunPowerShellScriptAsync(
                 scriptPath,
                 RefreshIndexTimeoutMilliseconds,
-                "-Action",
-                "Ensure");
+                BuildWatcherScriptArguments("Ensure"));
         }
 
         /// <summary>
@@ -199,15 +220,40 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunWatcherStatus()
         {
-            return RunScript("Codedb Watcher Status", AICodedbPaths.WatchManageScriptPath, 0, "-Action", "Status");
+            return RunScript("Codedb Watcher Status", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Status"));
         }
 
         /// <summary>
-        /// Disables wrapper auto-attach and gracefully stops the project-local coordinator.
+        /// Stops CodeDB for the current Editor session without changing persistent policy.
         /// </summary>
         internal static AICodedbCommandResult RunStopWatcher()
         {
-            return RunScript("Codedb Stop Watcher", AICodedbPaths.WatchManageScriptPath, 0, "-Action", "Stop");
+            return RunScript("Codedb Stop Now", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Stop"));
+        }
+
+        /// <summary>
+        /// Gracefully restarts CodeDB for the current Editor session.
+        /// </summary>
+        internal static AICodedbCommandResult RunRestartWatcher()
+        {
+            return RunScript("Codedb Restart", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Restart"));
+        }
+
+        internal static string[] BuildWatcherScriptArguments(string action)
+        {
+            switch (action)
+            {
+                case "Enable":
+                case "Disable":
+                case "Start":
+                case "Ensure":
+                case "Status":
+                case "Stop":
+                case "Restart":
+                    return new[] { "-Action", action };
+                default:
+                    throw new ArgumentException("Unsupported CodeDB watcher action.", nameof(action));
+            }
         }
 
         /// <summary>
@@ -215,7 +261,24 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunPauseWatcher()
         {
-            return RunScript("Codedb Pause Watcher", AICodedbPaths.WatchManageScriptPath, 0, "-Action", "Pause");
+            return RunDisableWatcher();
+        }
+
+        internal static AICodedbCommandResult SetAutomaticHostUpdates(bool enabled)
+        {
+            try
+            {
+                AICodedbHostUpdatePolicyStore.SetEnabled(AICodedbPaths.ProjectRoot, enabled);
+                return new AICodedbCommandResult(
+                    0,
+                    "[OK] Automatic host updates: " + (enabled ? "ENABLED" : "DISABLED"),
+                    string.Empty,
+                    false);
+            }
+            catch (System.Exception exception)
+            {
+                return new AICodedbCommandResult(-1, string.Empty, exception.Message, false);
+            }
         }
 
         /// <summary>
