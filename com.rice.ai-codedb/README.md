@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The `0.2.3` prerelease targets Unity
-`2022.3` on Windows.
+and bounded MCP discovery surface. The `0.2.4-preview.1` prerelease targets
+Unity `2022.3` on Windows.
 
 Install the latest prerelease from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.3`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4-preview.1`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The `0.2.3` package keeps a tracked stable wrapper and byte-exact
+The `0.2.4-preview.1` package keeps a tracked stable wrapper and byte-exact
 v0.2.2 compatibility files under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
 `AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
@@ -75,9 +75,9 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.2.3",
-  "payload_version": "poc.22",
-  "payload_sequence": 22,
+  "package_version": "0.2.4-preview.1",
+  "payload_version": "poc.23",
+  "payload_sequence": 23,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 43,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -158,5 +158,7 @@ are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
 also passed with exact host restoration. v0.2.2 completed real Unity import,
 74/74 package EditMode tests, and wide/minimum/docked visual acceptance.
-v0.2.3 Unity runtime and visual acceptance remain release gates until the
-current validation cycle is complete.
+The `0.2.4-preview.1` coverage adds the exact poc.21 coordinator-state schema
+without `generation_id` and suppresses repeated automatic retries after the
+same generation records `CHECK_FAILED`. Unity runtime and visual acceptance
+remain prerelease gates until the current validation cycle is complete.

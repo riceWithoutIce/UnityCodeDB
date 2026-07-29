@@ -719,25 +719,37 @@ try {
 
         $existingStatus = Invoke-CoordinatorCli -Command status
         $adapterOperational = [string]$existingStatus.adapter_state -in @("watching", "pending", "building")
-        $sameGeneration = [string]::Equals([string]$existingStatus.generation_id, $context.GenerationId, [StringComparison]::Ordinal)
+        $existingGenerationProperty = $existingStatus.PSObject.Properties["generation_id"]
+        $existingGenerationId = if ($null -eq $existingGenerationProperty) {
+            ""
+        } else {
+            [string]$existingGenerationProperty.Value
+        }
+        $existingGenerationLabel = if ([string]::IsNullOrWhiteSpace($existingGenerationId)) {
+            "legacy"
+        } else {
+            $existingGenerationId
+        }
+        $sameGeneration = -not [string]::IsNullOrWhiteSpace($existingGenerationId) -and
+            [string]::Equals($existingGenerationId, $context.GenerationId, [StringComparison]::Ordinal)
         $generationMismatch = $existingStatus.action -in @("running", "stale") -and -not $sameGeneration
         if ($generationMismatch -and $isAutomaticEnsure -and -not $MaterializerHandoff -and
             (Test-Path -LiteralPath $materializerActiveMarkerPath)) {
-            Write-Host "[SKIP] Payload materialization owns the generation handoff; generation $([string]$existingStatus.generation_id) remains active."
+            Write-Host "[SKIP] Payload materialization owns the generation handoff; generation $existingGenerationLabel remains active."
             Write-Host "[OK] Automatic refresh: HANDOFF_PENDING"
             Write-Output ($existingStatus | ConvertTo-Json -Depth 8 -Compress)
             break
         }
         $mustRestart = $Action -eq "Restart" -or $generationMismatch
         if ($mustRestart -and $existingStatus.action -in @("running", "stale")) {
-            if ($generationMismatch) {
+            if ($generationMismatch -and -not [string]::IsNullOrWhiteSpace($existingGenerationId)) {
                 Wait-ForGenerationMcpLeaseDrain `
-                    -GenerationId ([string]$existingStatus.generation_id) `
+                    -GenerationId $existingGenerationId `
                     -ProjectRoot $context.UnityRoot `
                     -LeasesRoot $generationLeasesRoot `
                     -TimeoutMilliseconds $generationDrainTimeoutMilliseconds
             }
-            Write-Host "[SWITCHING] Stopping generation $([string]$existingStatus.generation_id) before starting $($context.GenerationId)."
+            Write-Host "[SWITCHING] Stopping generation $existingGenerationLabel before starting $($context.GenerationId)."
             $null = Invoke-CoordinatorCli -Command stop
             $existingStatus = Invoke-CoordinatorCli -Command status
             $adapterOperational = $false

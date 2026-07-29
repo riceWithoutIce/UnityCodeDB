@@ -619,6 +619,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.Phase, Is.EqualTo(expectedPhase));
             Assert.That(status.DisplayState, Is.EqualTo(expectedState));
+            Assert.That(status.GenerationId, Is.EqualTo("poc.22"));
             Assert.That(status.Summary, Is.EqualTo(phase + " / poc.22"));
             Assert.That(status.Detail, Is.EqualTo("upgrade detail"));
         }

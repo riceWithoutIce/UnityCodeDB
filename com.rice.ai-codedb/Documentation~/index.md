@@ -15,9 +15,10 @@ and correctness release is recorded in the
 [v0.2.1 roadmap](v0.2.1-roadmap.md). The Windows query, upgrade, and Manager UI
 patch is tracked in the [v0.2.2 roadmap](v0.2.2-roadmap.md). Automatic host
 generation upgrades, same-client Unity restart recovery, and explicit manual
-controls are implemented in the `0.2.3` prerelease, remain under third-party
-validation before stable promotion, and are tracked in the
-[v0.2.3 roadmap](v0.2.3-roadmap.md). Approved
+controls were introduced in the `0.2.3` prerelease. The
+`0.2.4-preview.1` compatibility patch fixes real poc.21 watcher handoff and
+remains under third-party validation before stable promotion. The underlying
+design is tracked in the [v0.2.3 roadmap](v0.2.3-roadmap.md). Approved
 future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
@@ -39,7 +40,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.3"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4-preview.1"
   }
 }
 ```

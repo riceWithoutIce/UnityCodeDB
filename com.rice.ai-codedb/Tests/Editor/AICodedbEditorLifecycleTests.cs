@@ -389,6 +389,39 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostGenerationState.Invalid), Is.False);
         }
 
+        [Test]
+        public void IsAutomaticHostUpgradeSuppressed_OnlyBlocksTheFailedCurrentGeneration()
+        {
+            var failedCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.CheckFailed,
+                AICodedbStatusState.Error,
+                "poc.23",
+                "CHECK_FAILED / poc.23",
+                "fixture failure");
+            var failedPrevious = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.CheckFailed,
+                AICodedbStatusState.Error,
+                "poc.22",
+                "CHECK_FAILED / poc.22",
+                "fixture failure");
+            var switchingCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Switching,
+                AICodedbStatusState.Warning,
+                "poc.23",
+                "SWITCHING / poc.23",
+                string.Empty);
+
+            Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
+                failedCurrent,
+                "poc.23"), Is.True);
+            Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
+                failedPrevious,
+                "poc.23"), Is.False);
+            Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
+                switchingCurrent,
+                "poc.23"), Is.False);
+        }
+
         private AICodedbEditorLifecycle.ManualRuntimeDocument CreateManualRuntime(string mode, params string[] sessionIds)
         {
             return new AICodedbEditorLifecycle.ManualRuntimeDocument

@@ -421,17 +421,20 @@ namespace Rice.AI.Codedb.Editor
     {
         internal AICodedbHostUpgradePhase Phase { get; }
         internal AICodedbStatusState DisplayState { get; }
+        internal string GenerationId { get; }
         internal string Summary { get; }
         internal string Detail { get; }
 
         internal AICodedbHostUpgradeStatus(
             AICodedbHostUpgradePhase phase,
             AICodedbStatusState displayState,
+            string generationId,
             string summary,
             string detail)
         {
             Phase = phase;
             DisplayState = displayState;
+            GenerationId = generationId ?? string.Empty;
             Summary = summary ?? string.Empty;
             Detail = detail ?? string.Empty;
         }
@@ -479,6 +482,7 @@ namespace Rice.AI.Codedb.Editor
                     return new AICodedbHostUpgradeStatus(
                         AICodedbHostUpgradePhase.Unavailable,
                         AICodedbStatusState.Inactive,
+                        string.Empty,
                         "No recorded upgrade",
                         AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
                 }
@@ -550,6 +554,7 @@ namespace Rice.AI.Codedb.Editor
             return new AICodedbHostUpgradeStatus(
                 phase,
                 displayState,
+                document.generation_id,
                 document.state + " / " + document.generation_id,
                 detail);
         }
@@ -559,6 +564,7 @@ namespace Rice.AI.Codedb.Editor
             return new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Invalid,
                 AICodedbStatusState.Error,
+                string.Empty,
                 "CHECK_FAILED",
                 detail);
         }

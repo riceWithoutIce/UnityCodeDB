@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4-preview.1 - 2026-07-29
+
+- Fixed automatic watcher handoff from the real v0.2.2/poc.21 coordinator
+  state, whose legacy schema has no `generation_id`. The selected generation
+  now classifies that state as legacy, skips nonexistent generation leases,
+  and switches under the materializer handoff lock.
+- Suppressed repeated automatic retries after a deterministic `CHECK_FAILED`
+  for the current generation. Manual `Update now` remains available, and a
+  newer package generation automatically clears the suppression boundary.
+- Added exact legacy-schema handoff coverage and advanced the immutable host
+  generation to `poc.23` without changing the stable v0.2.3 bootstrap wrapper.
+
 ## 0.2.3 - 2026-07-29
 
 - Added immutable project-local host generations and atomic `current.json`

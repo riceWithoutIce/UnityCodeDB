@@ -33,7 +33,7 @@ $ErrorActionPreference = "Stop"
 $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:TargetPrefix = "AIWork/codedb/"
-$script:GenerationId = "poc.22"
+$script:GenerationId = "poc.23"
 $script:BootstrapProtocol = 1
 $script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
 $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
@@ -1180,7 +1180,8 @@ function Get-AutomaticUpgradeEligibility {
         [string]::Equals($marker.PackageVersion, "0.2.2", [StringComparison]::Ordinal) -and
         [string]::Equals($marker.PayloadVersion, "poc.21", [StringComparison]::Ordinal) -and
         $marker.HostUseGateVersion -eq 1 -and
-        $Manifest.PayloadSequence -eq 22 -and
+        $Manifest.PayloadSequence -ge 22 -and
+        $Manifest.BootstrapProtocol -eq 1 -and
         [string]::Equals($Manifest.GenerationId, $script:GenerationId, [StringComparison]::Ordinal)
     $knownGenerationUpgrade = $marker.PayloadSequence -ge 22 -and
         $marker.PayloadSequence -lt $Manifest.PayloadSequence -and

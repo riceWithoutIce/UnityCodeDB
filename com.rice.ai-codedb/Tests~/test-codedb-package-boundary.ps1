@@ -87,7 +87,7 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.3" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected "0.2.4-preview.1" -Label "Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
@@ -170,17 +170,17 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.22" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 22 -Label "Payload sequence"
-Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.22" -Label "Payload generation"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.23" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 23 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.23" -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 43 -Label "Payload target count"
 Assert-Equal -Actual @($payloadManifest.retired_targets).Count -Expected 0 -Label "Retired target count"
 
 $flatTargetPrefix = "AIWork/codedb/"
-$generationSourcePrefix = "Generations/poc.22/"
-$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.22"
+$generationSourcePrefix = "Generations/poc.23/"
+$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.23"
 $generationTargetPrefix = $generationTargetRoot + "/"
 $currentPointerSource = "host-current.json"
 $currentPointerTarget = "AIWork/.runtime/codedb/host/current.json"
@@ -234,7 +234,7 @@ $actualFlatSources = @(Get-ChildItem -LiteralPath $flatSourceRoot -Recurse -File
 } | Sort-Object)
 Assert-Equal -Actual ($actualFlatSources -join "|") -Expected (($flatSources | Sort-Object) -join "|") -Label "Flat payload source closure"
 
-$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.22"
+$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.23"
 $actualGenerationSources = @(Get-ChildItem -LiteralPath $generationSourceRoot -Recurse -File | ForEach-Object {
     Get-RelativePath -Root $payloadRoot -Path $_.FullName
 } | Sort-Object)

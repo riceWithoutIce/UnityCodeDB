@@ -142,7 +142,9 @@ namespace Rice.AI.Codedb.Editor
                     {
                         Debug.LogWarning("CodeDB automatic host update policy is invalid: " + updatePolicy.Detail);
                     }
-                    else if (updatePolicy.IsEnabled)
+                    else if (updatePolicy.IsEnabled && !IsAutomaticHostUpgradeSuppressed(
+                                 AICodedbHostUpgradeStatusStore.Read(_projectRoot),
+                                 AICodedbProjectSettings.CurrentGenerationId))
                     {
                         var upgradeResult = await AICodedbHostPayloadMaterializer.RunUpgradeAsync();
                         if (_quitting)
@@ -207,7 +209,11 @@ namespace Rice.AI.Codedb.Editor
             if (generation.State == AICodedbHostGenerationState.Legacy)
             {
                 var updatePolicy = AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot);
-                if (updatePolicy.IsValid && updatePolicy.IsEnabled)
+                if (updatePolicy.IsValid
+                    && updatePolicy.IsEnabled
+                    && !IsAutomaticHostUpgradeSuppressed(
+                        AICodedbHostUpgradeStatusStore.Read(_projectRoot),
+                        AICodedbProjectSettings.CurrentGenerationId))
                     return true;
             }
 
@@ -246,6 +252,18 @@ namespace Rice.AI.Codedb.Editor
             AICodedbHostGenerationState generationState)
         {
             return hostStatus.IsCurrent || generationState == AICodedbHostGenerationState.Legacy;
+        }
+
+        internal static bool IsAutomaticHostUpgradeSuppressed(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            return upgradeStatus.Phase == AICodedbHostUpgradePhase.CheckFailed
+                   && !string.IsNullOrWhiteSpace(currentGenerationId)
+                   && string.Equals(
+                       upgradeStatus.GenerationId,
+                       currentGenerationId,
+                       StringComparison.Ordinal);
         }
 
         private static bool IsProcessAlive(int processId)
