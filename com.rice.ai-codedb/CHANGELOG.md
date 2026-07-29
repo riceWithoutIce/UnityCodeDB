@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.4-preview.3 - 2026-07-29
+
+- Restored no-click generation-to-generation upgrades by declaring the exact
+  package-owned `poc.22`, `poc.23`, and `poc.24` immutable target closure in
+  the payload retirement allowlist.
+- Kept prior generation files and live leases intact during automatic pointer
+  handoff, while preserving strict reviewed cleanup through Remove after lease
+  drain.
+- Added direct and skipped-upgrade regression coverage for `poc.22`, `poc.23`,
+  and `poc.24` to `poc.25`, including a live `poc.23` generation lease.
+
 ## 0.2.4-preview.2 - 2026-07-29
 
 - Reconciled owned host generations automatically after package compilation

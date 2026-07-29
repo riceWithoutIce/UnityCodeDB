@@ -33,7 +33,7 @@ $ErrorActionPreference = "Stop"
 $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:TargetPrefix = "AIWork/codedb/"
-$script:GenerationId = "poc.24"
+$script:GenerationId = "poc.25"
 $script:BootstrapProtocol = 1
 $script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
 $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
@@ -2594,7 +2594,7 @@ function Remove-EmptyManagedParents {
     )
 
     $fullTargetRoot = [System.IO.Path]::GetFullPath($TargetRoot).TrimEnd('\', '/')
-    $parents = @($Paths | ForEach-Object { Split-Path -Parent $_ } | Sort-Object Length -Descending -Unique)
+    $parents = @($Paths | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique | Sort-Object Length -Descending)
     foreach ($parent in $parents) {
         $current = $parent
         while (-not [string]::IsNullOrWhiteSpace($current) -and

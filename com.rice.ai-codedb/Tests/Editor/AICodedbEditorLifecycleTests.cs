@@ -417,21 +417,21 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostGenerationState.Legacy,
                 enabled,
                 unavailable,
-                "poc.24"), Is.True);
+                "poc.25"), Is.True);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 unavailable,
-                "poc.24"), Is.True);
+                "poc.25"), Is.True);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Current,
                 enabled,
                 unavailable,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
         }
 
         [Test]
@@ -442,14 +442,14 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.24",
-                "CHECK_FAILED / poc.24",
+                "poc.25",
+                "CHECK_FAILED / poc.25",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.23",
-                "CHECK_FAILED / poc.23",
+                "poc.24",
+                "CHECK_FAILED / poc.24",
                 "fixture failure");
 
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
@@ -458,28 +458,28 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedPrevious,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 disabled,
                 failedPrevious,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedCurrent,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedPrevious,
-                "poc.24"), Is.True);
+                "poc.25"), Is.True);
         }
 
         [Test]
@@ -488,31 +488,31 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.24",
-                "CHECK_FAILED / poc.24",
+                "poc.25",
+                "CHECK_FAILED / poc.25",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.23",
-                "CHECK_FAILED / poc.23",
+                "poc.24",
+                "CHECK_FAILED / poc.24",
                 "fixture failure");
             var switchingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Switching,
                 AICodedbStatusState.Warning,
-                "poc.24",
-                "SWITCHING / poc.24",
+                "poc.25",
+                "SWITCHING / poc.25",
                 string.Empty);
 
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 failedCurrent,
-                "poc.24"), Is.True);
+                "poc.25"), Is.True);
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 failedPrevious,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 switchingCurrent,
-                "poc.24"), Is.False);
+                "poc.25"), Is.False);
         }
 
         private AICodedbEditorLifecycle.ManualRuntimeDocument CreateManualRuntime(string mode, params string[] sessionIds)

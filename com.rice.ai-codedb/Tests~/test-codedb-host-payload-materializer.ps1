@@ -31,7 +31,7 @@ $powershellPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.24"
+$generationId = "poc.25"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -1910,6 +1910,121 @@ function Copy-CanonicalFilesToHost {
     }
 }
 
+function Install-PriorGenerationFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$PriorGenerationId,
+        [Parameter(Mandatory = $true)][int]$PriorPayloadSequence,
+        [Parameter(Mandatory = $true)][string]$PriorPackageVersion
+    )
+
+    Clear-ManagedTestState
+    $hostGenerationRuntimeRoot = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/host"
+    if (Test-Path -LiteralPath $hostGenerationRuntimeRoot) {
+        Remove-Item -LiteralPath $hostGenerationRuntimeRoot -Recurse -Force
+    }
+
+    foreach ($relativePath in $legacyManagedTargets) {
+        $source = Get-CanonicalPayloadSourcePath -TargetRelativePath $relativePath
+        $target = Get-PathFromRelative -Root $hostRoot -RelativePath $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+
+    $canonicalGenerationRoot = Join-Path $canonicalPayloadRoot "Generations\$generationId"
+    $canonicalGenerationManifest = Get-Content -LiteralPath (Join-Path $canonicalGenerationRoot "generation-manifest.json") -Raw | ConvertFrom-Json
+    $priorGenerationRelativeRoot = "AIWork/.runtime/codedb/host/generations/$PriorGenerationId"
+    $priorGenerationRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $priorGenerationRelativeRoot
+    $priorGenerationFiles = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($canonicalGenerationManifest.files)) {
+        $relativePath = [string]$entry.path
+        $sourcePath = Get-PathFromRelative -Root $canonicalGenerationRoot -RelativePath $relativePath
+        $targetPath = Get-PathFromRelative -Root $priorGenerationRoot -RelativePath $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+
+        if ([string]::Equals($relativePath, "coordinator/codedb-watch-coordinator.mjs", [StringComparison]::Ordinal)) {
+            $content = [System.IO.File]::ReadAllText($targetPath).Replace(
+                [string]$canonicalPayloadManifest.package_version,
+                $PriorPackageVersion)
+            Write-Utf8File -Path $targetPath -Content $content
+        } elseif ([string]::Equals($relativePath, "shared/codedb-host-use-gate.mjs", [StringComparison]::Ordinal)) {
+            $content = [System.IO.File]::ReadAllText($targetPath).Replace($generationId, $PriorGenerationId)
+            Write-Utf8File -Path $targetPath -Content $content
+        }
+
+        $priorGenerationFiles.Add([ordered]@{
+            path = $relativePath
+            sha256 = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }) | Out-Null
+    }
+
+    $priorGenerationManifest = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        generation_id = $PriorGenerationId
+        package_version = $PriorPackageVersion
+        payload_version = $PriorGenerationId
+        payload_sequence = $PriorPayloadSequence
+        bootstrap_protocol = 1
+        files = $priorGenerationFiles.ToArray()
+    }
+    $priorGenerationManifestPath = Join-Path $priorGenerationRoot "generation-manifest.json"
+    Write-Utf8File -Path $priorGenerationManifestPath -Content (($priorGenerationManifest | ConvertTo-Json -Depth 8) + "`n")
+
+    $pointer = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        package_version = $PriorPackageVersion
+        payload_version = $PriorGenerationId
+        payload_sequence = $PriorPayloadSequence
+        generation_id = $PriorGenerationId
+        generation_relative_path = $priorGenerationRelativeRoot
+        generation_manifest_sha256 = (Get-FileHash -LiteralPath $priorGenerationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        bootstrap_protocol = 1
+    }
+    $pointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
+    Write-Utf8File -Path $pointerPath -Content (($pointer | ConvertTo-Json -Depth 8) + "`n")
+
+    $ownedTargets = New-Object System.Collections.Generic.List[string]
+    foreach ($relativePath in $legacyManagedTargets) {
+        $ownedTargets.Add($relativePath) | Out-Null
+    }
+    foreach ($entry in $priorGenerationFiles) {
+        $ownedTargets.Add("$priorGenerationRelativeRoot/$($entry.path)") | Out-Null
+    }
+    $ownedTargets.Add("$priorGenerationRelativeRoot/generation-manifest.json") | Out-Null
+    $ownedTargets.Add($currentPointerRelativePath) | Out-Null
+    $markerFiles = @($ownedTargets | Sort-Object | ForEach-Object {
+        $targetPath = Get-PathFromRelative -Root $hostRoot -RelativePath $_
+        [ordered]@{
+            path = $_
+            installed_sha256 = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
+    $marker = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        package_version = $PriorPackageVersion
+        payload_version = $PriorGenerationId
+        payload_sequence = $PriorPayloadSequence
+        host_use_gate_version = 1
+        generation_lease_version = 2
+        generation_id = $PriorGenerationId
+        bootstrap_protocol = 1
+        current_pointer = $currentPointerRelativePath
+        files = $markerFiles
+    }
+    $markerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath
+    Write-Utf8File -Path $markerPath -Content (($marker | ConvertTo-Json -Depth 8) + "`n")
+
+    return [pscustomobject]@{
+        GenerationRoot = $priorGenerationRoot
+        GenerationTargets = @($ownedTargets | Where-Object { $_.StartsWith("$priorGenerationRelativeRoot/", [StringComparison]::Ordinal) })
+        MarkerPath = $markerPath
+        PointerPath = $pointerPath
+    }
+}
+
 function Install-LegacyPoc21Fixture {
     Clear-ManagedTestState
     foreach ($relativePath in $legacyManagedTargets) {
@@ -2058,9 +2173,9 @@ $sentinelSnapshot = $null
 try {
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.4-preview.2" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.4-preview.3" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 24 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 25 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 21 -Message "Legacy target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 21 -Message "Generation target count mismatch."
@@ -2254,6 +2369,61 @@ try {
     Assert-NoMaterializerResidue
     Write-Host "[OK] Current generation pointer failure and crash both rolled generation publication back to the exact old state."
 
+    $priorGenerationCases = @(
+        [pscustomobject]@{ GenerationId = "poc.22"; Sequence = 22; PackageVersion = "0.2.3"; LiveLease = $false },
+        [pscustomobject]@{ GenerationId = "poc.23"; Sequence = 23; PackageVersion = "0.2.4-preview.1"; LiveLease = $true },
+        [pscustomobject]@{ GenerationId = "poc.24"; Sequence = 24; PackageVersion = "0.2.4-preview.2"; LiveLease = $false }
+    )
+    foreach ($priorGenerationCase in $priorGenerationCases) {
+        $priorFixture = Install-PriorGenerationFixture `
+            -PriorGenerationId $priorGenerationCase.GenerationId `
+            -PriorPayloadSequence $priorGenerationCase.Sequence `
+            -PriorPackageVersion $priorGenerationCase.PackageVersion
+        $priorLeasePath = $null
+        if ($priorGenerationCase.LiveLease) {
+            $priorLeasePath = New-TestGenerationLease -Owner "mcp" -LeaseGenerationId $priorGenerationCase.GenerationId
+        }
+
+        $priorUpgradeDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $priorUpgradeDryRun -ExitCode 0 -Label "$($priorGenerationCase.GenerationId) to $generationId DryRun"
+        Assert-True `
+            -Condition (-not $priorUpgradeDryRun.Text.Contains("UntrustedOwnedPath")) `
+            -Message "$($priorGenerationCase.GenerationId) DryRun rejected package-owned generation targets as untrusted."
+        Assert-True `
+            -Condition ($priorUpgradeDryRun.Text.Contains("[UPGRADE_READY] Owned generation $($priorGenerationCase.GenerationId) can migrate to generation $generationId while existing leases drain naturally.")) `
+            -Message "$($priorGenerationCase.GenerationId) DryRun did not advertise the supported generation upgrade."
+
+        $priorUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $priorUpgrade -ExitCode 0 -Label "$($priorGenerationCase.GenerationId) to $generationId Upgrade"
+        Assert-True -Condition (-not $priorUpgrade.Text.Contains("UntrustedOwnedPath")) -Message "$($priorGenerationCase.GenerationId) Upgrade reported an untrusted owned target."
+        Assert-CanonicalFilesInstalled
+        foreach ($relativePath in $priorFixture.GenerationTargets) {
+            Assert-True `
+                -Condition (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $relativePath) -PathType Leaf) `
+                -Message "Automatic Upgrade removed retained $($priorGenerationCase.GenerationId) file: $relativePath"
+        }
+        $selectedPointer = Get-Content -LiteralPath $priorFixture.PointerPath -Raw | ConvertFrom-Json
+        Assert-Equal -Actual $selectedPointer.generation_id -Expected $generationId -Message "$($priorGenerationCase.GenerationId) Upgrade did not select $generationId."
+
+        if ($priorGenerationCase.LiveLease) {
+            Assert-True -Condition (Test-Path -LiteralPath $priorLeasePath -PathType Leaf) -Message "Automatic Upgrade removed the live $($priorGenerationCase.GenerationId) lease."
+            $leasedRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
+            Assert-Result -Result $leasedRemove -ExitCode 4 -Label "$($priorGenerationCase.GenerationId) live-lease Remove gate"
+            Assert-True `
+                -Condition ($leasedRemove.Text.Contains("[ACTIVE] generation $($priorGenerationCase.GenerationId) mcp PID $PID")) `
+                -Message "Remove did not report the live $($priorGenerationCase.GenerationId) generation lease."
+            Assert-True -Condition (Test-Path -LiteralPath $priorFixture.GenerationRoot -PathType Container) -Message "Leased prior generation was removed before drain."
+            Remove-Item -LiteralPath $priorLeasePath -Force
+        }
+
+        $priorCleanup = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $priorCleanup -ExitCode 0 -Label "$($priorGenerationCase.GenerationId) post-upgrade cleanup Remove"
+        Assert-CanonicalFilesRemoved
+        Assert-True -Condition (-not (Test-Path -LiteralPath $priorFixture.GenerationRoot)) -Message "Remove retained drained $($priorGenerationCase.GenerationId) generation content."
+        Assert-NoMaterializerResidue
+    }
+    Write-Host "[OK] poc.22, poc.23, and poc.24 upgraded to poc.25 without untrusted-path conflicts; live poc.23 content remained protected until lease drain."
+
     Install-LegacyPoc21Fixture
     $markerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath
     $rollbackSelectionPaths = @($legacyManagedTargets + @($markerRelativePath, $currentPointerRelativePath))
@@ -2278,7 +2448,7 @@ try {
     Assert-Equal -Actual $failedUpgradeState.state -Expected "CHECK_FAILED" -Message "Watcher-handoff rollback did not persist CHECK_FAILED diagnostics."
     Assert-Equal -Actual $failedUpgradeState.generation_id -Expected $generationId -Message "Watcher-handoff rollback diagnostic generation mismatch."
     Assert-NoMaterializerResidue
-    Write-Host "[OK] Failed watcher handoff restored poc.21 selection and retained a complete, unselected poc.24 generation for safe retry."
+    Write-Host "[OK] Failed watcher handoff restored poc.21 selection and retained a complete, unselected poc.25 generation for safe retry."
 
     $failedCandidateCleanup = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $failedCandidateCleanup -ExitCode 0 -Label "Failed-upgrade candidate cleanup Remove"
@@ -2487,7 +2657,7 @@ try {
         }
     }
     Assert-NoMaterializerResidue
-    Write-Host "[OK] poc.21 upgraded with live legacy owners, published poc.24 atomically, and let both legacy leases drain naturally."
+    Write-Host "[OK] poc.21 upgraded with live legacy owners, published poc.25 atomically, and let both legacy leases drain naturally."
 
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     $lastKnownGoodPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $lastKnownGoodPointerRelativePath
@@ -2512,9 +2682,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.4-preview.2" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.4-preview.3" -Message "Marker package version mismatch."
     Assert-Equal -Actual $marker.payload_version -Expected $generationId -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 24 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 25 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual $marker.generation_lease_version -Expected 2 -Message "Marker generation-lease version mismatch."
     Assert-Equal -Actual $marker.generation_id -Expected $generationId -Message "Marker generation id mismatch."
@@ -2523,7 +2693,7 @@ try {
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     Assert-LfOnlyFile -Path $currentPointerPath -Label "Current generation pointer"
     $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.4-preview.2" -Message "Current pointer package version mismatch."
+    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.4-preview.3" -Message "Current pointer package version mismatch."
     Assert-Equal -Actual $currentPointer.generation_id -Expected $generationId -Message "Current pointer generation id mismatch."
     Assert-Equal -Actual $currentPointer.generation_relative_path -Expected $generationTargetPrefix.TrimEnd([char]'/') -Message "Current pointer generation path mismatch."
     $installedGenerationManifest = Get-PathFromRelative -Root $hostRoot -RelativePath ($generationTargetPrefix + "generation-manifest.json")
@@ -2944,13 +3114,13 @@ try {
         $handoffManifest = Get-Content -LiteralPath $handoffManifestPath -Raw | ConvertFrom-Json
         $handoffManifest.generation_id = $handoffGenerationId
         $handoffManifest.payload_version = $handoffGenerationId
-        $handoffManifest.payload_sequence = 24
+        $handoffManifest.payload_sequence = 25
         Write-Utf8File -Path $handoffManifestPath -Content (($handoffManifest | ConvertTo-Json -Depth 8) + "`n")
 
         $handoffPointer = $originalCurrentPointerText | ConvertFrom-Json
         $handoffPointer.generation_id = $handoffGenerationId
         $handoffPointer.payload_version = $handoffGenerationId
-        $handoffPointer.payload_sequence = 24
+        $handoffPointer.payload_sequence = 25
         $handoffPointer.generation_relative_path = "AIWork/.runtime/codedb/host/generations/$handoffGenerationId"
         $handoffPointer.generation_manifest_sha256 = (Get-FileHash -LiteralPath $handoffManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-Utf8File -Path $handoffPointerPath -Content (($handoffPointer | ConvertTo-Json -Depth 8) + "`n")
@@ -4501,8 +4671,8 @@ startup_timeout_sec = 120
     $canonicalV2Entries["AIWork/codedb/scripts/codedb-project-common.ps1"] = "package upgrade that must not partially apply`n"
     $conflictingUpgradeRoot = New-SyntheticPayload `
         -Root (Join-Path $syntheticRoot "conflicting-upgrade") `
-        -PayloadVersion "poc.24-test-upgrade" `
-        -PayloadSequence 25 `
+        -PayloadVersion "poc.25-test-upgrade" `
+        -PayloadSequence 26 `
         -PackageVersion "0.2.4-test" `
         -Entries $canonicalV2Entries
     $beforeManagedConflict = Get-FileSnapshot -Root $hostRoot
