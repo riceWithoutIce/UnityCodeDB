@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
-  "generation_id": "poc.23",
-  "package_version": "0.2.4-preview.1",
-  "payload_version": "poc.23",
-  "payload_sequence": 23,
+  "generation_id": "poc.24",
+  "package_version": "0.2.4-preview.2",
+  "payload_version": "poc.24",
+  "payload_sequence": 24,
   "bootstrap_protocol": 1,
   "files": [
     {
@@ -17,7 +17,7 @@
     },
     {
       "path": "coordinator/codedb-watch-coordinator.mjs",
-      "sha256": "feaf8e37fe55ef73ab1563c36481c8deeb81017b40b5ae2e53c202375e321f90"
+      "sha256": "9f8d372c517267eadcbe9153cbe2bbd35e10b100d28741697505082b33997d2b"
     },
     {
       "path": "scripts/build-codedb-project-text-adapter.ps1",
@@ -85,7 +85,7 @@
     },
     {
       "path": "shared/codedb-host-use-gate.mjs",
-      "sha256": "98f36742e929345299440fb97f22c00c7aae162d13496175151286bc1b59aa1b"
+      "sha256": "18f89e45204f0f1ec535c9ad7e875d0f48af5e1a30da434f8339f814172a67b2"
     }
   ]
 }

@@ -253,10 +253,10 @@ namespace Rice.AI.Codedb.Editor
                 var draining = HasDrainingOwners(activeOwners, currentGenerationId);
                 return new AICodedbHostPayloadStatus(
                     draining ? AICodedbHostPayloadState.Draining : AICodedbHostPayloadState.Current,
-                    draining ? AICodedbStatusState.Warning : AICodedbStatusState.Ok,
+                    AICodedbStatusState.Ok,
                     draining ? "CURRENT / DRAINING" : "CURRENT",
                     draining
-                        ? "The current generation is active while legacy or previous-generation sessions finish."
+                        ? "The current generation is ready while legacy or previous-generation sessions finish naturally; no action is required."
                         : AICodedbProjectSettings.HostPayloadMarkerRelativePath,
                     activeOwners,
                     legacyMcpSessionCount);

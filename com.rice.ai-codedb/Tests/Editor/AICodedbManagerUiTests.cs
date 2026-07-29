@@ -445,7 +445,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "poc.22");
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Draining));
-            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Ok));
+            Assert.That(status.Summary, Is.EqualTo("CURRENT / DRAINING"));
+            Assert.That(status.Detail, Does.Contain("no action is required"));
             Assert.That(status.IsCurrent, Is.True);
             Assert.That(status.ActiveOwners, Is.EqualTo(new[]
             {
@@ -455,6 +457,25 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "[ACTIVE] generation poc.22 watcher PID 404"
             }));
             Assert.That(status.LegacyMcpSessionCount, Is.EqualTo(1));
+        }
+
+        [TestCase(AICodedbHostPayloadState.Draining, AICodedbHostUpgradePhase.Current, false, true, ExpectedResult = true)]
+        [TestCase(AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Unavailable, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Unavailable, false, false, ExpectedResult = false)]
+        [TestCase(AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.CheckFailed, true, true, ExpectedResult = false)]
+        [TestCase(AICodedbHostPayloadState.Blocked, AICodedbHostUpgradePhase.Switching, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbHostPayloadState.Current, AICodedbHostUpgradePhase.Current, true, false, ExpectedResult = false)]
+        public bool ShouldAutoObserveHostStatus_TracksOnlyAutomaticOrTransientStates(
+            AICodedbHostPayloadState payloadState,
+            AICodedbHostUpgradePhase upgradePhase,
+            bool automaticUpdatesEnabled,
+            bool automaticUpgradeSuppressed)
+        {
+            return AICodedbManagerWindow.ShouldAutoObserveHostStatus(
+                payloadState,
+                upgradePhase,
+                automaticUpdatesEnabled,
+                automaticUpgradeSuppressed);
         }
 
         [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]

@@ -1473,7 +1473,7 @@ async function runOwnedDaemon(context) {
     const initialize = await providerRpc.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "codedb-watch-coordinator", version: "0.2.4-preview.1" }
+      clientInfo: { name: "codedb-watch-coordinator", version: "0.2.4-preview.2" }
     }, PROVIDER_REQUEST_TIMEOUT_MS);
     if (!initialize?.serverInfo?.name) {
       throw new Error("Provider initialize did not return server information.");

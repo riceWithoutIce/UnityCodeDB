@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4-preview.2 - 2026-07-29
+
+- Reconciled owned host generations automatically after package compilation
+  and script reload, independently from manual watcher Start/Stop policy.
+- Deferred reconciliation while Unity is compiling or updating packages, then
+  retried through the normal single-writer lifecycle path.
+- Kept `DRAINING` fully usable and non-blocking, with no requirement to close
+  legacy MCP sessions. The Manager now observes automatic upgrades and lease
+  drain asynchronously without requiring `Update now` or manual refresh.
+- Advanced the immutable host generation to `poc.24` for a real no-click
+  `preview.1` to `preview.2` third-party upgrade test.
+
 ## 0.2.4-preview.1 - 2026-07-29
 
 - Fixed automatic watcher handoff from the real v0.2.2/poc.21 coordinator

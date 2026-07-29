@@ -21,7 +21,7 @@ project's ignored runtime instead of sharing state across projects.
 ## Package
 
 - Package name: `com.rice.ai-codedb`
-- Latest prerelease: `v0.2.4-preview.1`
+- Latest prerelease: `v0.2.4-preview.2`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -32,7 +32,7 @@ Add the package to the Unity project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4-preview.1"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4-preview.2"
   }
 }
 ```

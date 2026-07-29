@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const GENERATION_LEASE_VERSION = 2;
-export const GENERATION_ID = "poc.23";
+export const GENERATION_ID = "poc.24";
 
 const MATERIALIZER_RUNTIME = path.join("AIWork", ".runtime", "codedb", "payload-materializer");
 const HOST_RUNTIME = path.join("AIWork", ".runtime", "codedb", "host");

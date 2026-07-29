@@ -36,13 +36,13 @@ namespace Rice.AI.Codedb.Editor
         /// <summary>
         /// Captures the current read-only codedb setup status.
         /// </summary>
-        private AICodedbStatusSnapshot()
+        private AICodedbStatusSnapshot(AICodedbCommandResult hostPayloadResult)
         {
             var hostPayloadMarkerExists = File.Exists(AICodedbPaths.HostPayloadMarkerPath);
             HostGenerationSelection = AICodedbPaths.HostGeneration;
             HostPayloadStatus = AICodedbHostPayloadStatusBuilder.Build(
                 hostPayloadMarkerExists,
-                AICodedbHostPayloadMaterializer.ReadStatus(),
+                hostPayloadResult ?? AICodedbHostPayloadMaterializer.ReadStatus(),
                 HostGenerationSelection.State == AICodedbHostGenerationState.Current
                     ? HostGenerationSelection.GenerationId
                     : string.Empty);
@@ -77,7 +77,14 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbStatusSnapshot Refresh()
         {
-            return new AICodedbStatusSnapshot();
+            return new AICodedbStatusSnapshot(null);
+        }
+
+        internal static AICodedbStatusSnapshot Refresh(AICodedbCommandResult hostPayloadResult)
+        {
+            if (hostPayloadResult == null)
+                throw new ArgumentNullException(nameof(hostPayloadResult));
+            return new AICodedbStatusSnapshot(hostPayloadResult);
         }
 
         /// <summary>

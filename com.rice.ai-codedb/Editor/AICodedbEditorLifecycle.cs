@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.Callbacks;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
@@ -81,6 +82,12 @@ namespace Rice.AI.Codedb.Editor
             BeginReconcile();
         }
 
+        [DidReloadScripts]
+        private static void OnScriptsReloaded()
+        {
+            EditorApplication.delayCall += RequestReconcile;
+        }
+
         private static void OnEditorUpdate()
         {
             if (!_initialized || _quitting || EditorApplication.timeSinceStartup < _nextHeartbeatAt)
@@ -124,7 +131,14 @@ namespace Rice.AI.Codedb.Editor
 
         private static async void BeginReconcile()
         {
-            if (_quitting || Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
+            if (_quitting)
+                return;
+            if (ShouldDeferReconcile(EditorApplication.isCompiling, EditorApplication.isUpdating))
+            {
+                _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
+                return;
+            }
+            if (Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
                 return;
 
             _nextReconcileAt = EditorApplication.timeSinceStartup + ReconcileRetrySeconds;
@@ -190,6 +204,18 @@ namespace Rice.AI.Codedb.Editor
 
         private static bool BackendNeedsReconcile()
         {
+            var generation = AICodedbPaths.HostGeneration;
+            if (ShouldReconcileAutomaticHostUpgrade(
+                    File.Exists(AICodedbPaths.HostPayloadMarkerPath),
+                    File.Exists(AICodedbPaths.HostCurrentPointerPath),
+                    generation.State,
+                    AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot),
+                    AICodedbHostUpgradeStatusStore.Read(_projectRoot),
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                return true;
+            }
+
             var manual = ReadJson<ManualRuntimeDocument>(AICodedbPaths.WatchManualRuntimePath);
             var manualMode = GetApplicableManualMode(
                 manual,
@@ -204,18 +230,6 @@ namespace Rice.AI.Codedb.Editor
                 && string.Equals(desired.desired_state, "disabled", StringComparison.Ordinal)
                 && !string.Equals(manualMode, "started", StringComparison.Ordinal))
                 return false;
-
-            var generation = AICodedbPaths.HostGeneration;
-            if (generation.State == AICodedbHostGenerationState.Legacy)
-            {
-                var updatePolicy = AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot);
-                if (updatePolicy.IsValid
-                    && updatePolicy.IsEnabled
-                    && !IsAutomaticHostUpgradeSuppressed(
-                        AICodedbHostUpgradeStatusStore.Read(_projectRoot),
-                        AICodedbProjectSettings.CurrentGenerationId))
-                    return true;
-            }
 
             var state = ReadJson<CoordinatorStateDocument>(AICodedbPaths.WatchCoordinatorStatePath);
             return ShouldReconcileCoordinator(
@@ -252,6 +266,28 @@ namespace Rice.AI.Codedb.Editor
             AICodedbHostGenerationState generationState)
         {
             return hostStatus.IsCurrent || generationState == AICodedbHostGenerationState.Legacy;
+        }
+
+        internal static bool ShouldDeferReconcile(bool isCompiling, bool isUpdating)
+        {
+            return isCompiling || isUpdating;
+        }
+
+        internal static bool ShouldReconcileAutomaticHostUpgrade(
+            bool markerExists,
+            bool currentPointerExists,
+            AICodedbHostGenerationState generationState,
+            AICodedbHostUpdatePolicy updatePolicy,
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            if (!markerExists || !updatePolicy.IsValid || !updatePolicy.IsEnabled)
+                return false;
+            if (IsAutomaticHostUpgradeSuppressed(upgradeStatus, currentGenerationId))
+                return false;
+            if (generationState == AICodedbHostGenerationState.Legacy)
+                return true;
+            return currentPointerExists && generationState != AICodedbHostGenerationState.Current;
         }
 
         internal static bool IsAutomaticHostUpgradeSuppressed(

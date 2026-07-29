@@ -44,6 +44,7 @@ namespace Rice.AI.Codedb.Editor
         private const float HeaderBrandIconWidth = 36f;
         private const float HeaderBrandIconSize = 32f;
         private const float HeaderContentHeight = 40f;
+        private const double TransientStatusRefreshSeconds = 5d;
         private const float CustomProbeSingleRowMinWidth =
             CustomProbeLanguageLabelWidth
             + CustomProbeLanguageWidth
@@ -67,6 +68,8 @@ namespace Rice.AI.Codedb.Editor
         private AICodedbWatcherStatus _watcherStatus;
         private bool _watcherStatusLoaded;
         private bool _watcherRefreshScheduled;
+        private bool _hostStatusRefreshInFlight;
+        private double _nextHostStatusRefreshAt;
         private int _selectedTab;
         private bool _showOverviewDetails;
         private bool _showProviderGuidance;
@@ -108,12 +111,16 @@ namespace Rice.AI.Codedb.Editor
             _activityPanel = new AICodedbActivityPanel();
             _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
             _watcherStatusLoaded = false;
+            EditorApplication.update -= ObserveTransientHostStatus;
+            EditorApplication.update += ObserveTransientHostStatus;
             RefreshStatus();
+            _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + 1d;
             ScheduleWatcherStatusRefresh();
         }
 
         private void OnDisable()
         {
+            EditorApplication.update -= ObserveTransientHostStatus;
             if (_watcherRefreshScheduled)
                 EditorApplication.delayCall -= RefreshWatcherStatusDelayed;
             _watcherRefreshScheduled = false;
@@ -164,6 +171,81 @@ namespace Rice.AI.Codedb.Editor
             var initializeDisclosures = _statusSnapshot == null;
             _statusSnapshot = AICodedbStatusSnapshot.Refresh();
             ApplyDisclosurePolicy(initializeDisclosures);
+        }
+
+        private void RefreshStatus(AICodedbCommandResult hostPayloadResult)
+        {
+            var initializeDisclosures = _statusSnapshot == null;
+            _statusSnapshot = AICodedbStatusSnapshot.Refresh(hostPayloadResult);
+            ApplyDisclosurePolicy(initializeDisclosures);
+        }
+
+        private void ObserveTransientHostStatus()
+        {
+            if (_statusSnapshot == null || _hostStatusRefreshInFlight)
+                return;
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                return;
+
+            var suppressed = AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
+                _statusSnapshot.HostUpgradeStatus,
+                AICodedbProjectSettings.CurrentGenerationId);
+            if (!ShouldAutoObserveHostStatus(
+                    _statusSnapshot.HostPayloadStatus.State,
+                    _statusSnapshot.HostUpgradeStatus.Phase,
+                    _statusSnapshot.HostUpdatePolicyValue.IsEnabled,
+                    suppressed))
+            {
+                return;
+            }
+            if (EditorApplication.timeSinceStartup < _nextHostStatusRefreshAt)
+                return;
+
+            _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRefreshSeconds;
+            RefreshTransientHostStatusAsync();
+        }
+
+        private async void RefreshTransientHostStatusAsync()
+        {
+            if (_hostStatusRefreshInFlight)
+                return;
+            _hostStatusRefreshInFlight = true;
+            try
+            {
+                var result = await AICodedbHostPayloadMaterializer.ReadStatusAsync();
+                if (this == null)
+                    return;
+                RefreshStatus(result);
+                Repaint();
+            }
+            catch (Exception exception)
+            {
+                if (this != null)
+                    Debug.LogWarning("CodeDB Manager automatic status refresh failed: " + exception.Message);
+            }
+            finally
+            {
+                _hostStatusRefreshInFlight = false;
+            }
+        }
+
+        internal static bool ShouldAutoObserveHostStatus(
+            AICodedbHostPayloadState payloadState,
+            AICodedbHostUpgradePhase upgradePhase,
+            bool automaticUpdatesEnabled,
+            bool automaticUpgradeSuppressed)
+        {
+            if (payloadState == AICodedbHostPayloadState.Draining)
+                return true;
+            if (upgradePhase == AICodedbHostUpgradePhase.Installing
+                || upgradePhase == AICodedbHostUpgradePhase.Switching
+                || upgradePhase == AICodedbHostUpgradePhase.Rollback)
+            {
+                return true;
+            }
+            return payloadState == AICodedbHostPayloadState.UpgradeReady
+                   && automaticUpdatesEnabled
+                   && !automaticUpgradeSuppressed;
         }
 
         private void RefreshAllStatus()
@@ -1396,7 +1478,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "UPGRADE_READY";
                 case AICodedbHostPayloadState.Draining:
-                    return "DRAINING";
+                    return "READY / DRAINING";
                 case AICodedbHostPayloadState.UpdateRequired:
                     return "UPDATE_REQUIRED";
                 case AICodedbHostPayloadState.Conflict:
@@ -1425,7 +1507,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "The owned poc.21 host payload can migrate without stopping active CodeDB sessions.";
                 case AICodedbHostPayloadState.Draining:
-                    return "The current host generation is ready; older CodeDB sessions will remain on their original generation until they disconnect.";
+                    return "CodeDB is ready. Older sessions remain compatible on their original generation and finish naturally; no action is required.";
                 case AICodedbHostPayloadState.UpdateRequired:
                     return "Update the installed host files to match this package.";
                 case AICodedbHostPayloadState.Conflict:
@@ -1445,7 +1527,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbHostPayloadState.Current:
                     return "Current";
                 case AICodedbHostPayloadState.Draining:
-                    return "DRAINING";
+                    return "Ready / Draining";
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "UPGRADE_READY";
                 case AICodedbHostPayloadState.SetupRequired:
