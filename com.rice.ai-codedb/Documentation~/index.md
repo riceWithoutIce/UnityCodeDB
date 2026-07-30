@@ -15,17 +15,19 @@ and correctness release is recorded in the
 [v0.2.1 roadmap](v0.2.1-roadmap.md). The Windows query, upgrade, and Manager UI
 patch is tracked in the [v0.2.2 roadmap](v0.2.2-roadmap.md). Automatic host
 generation upgrades, same-client Unity restart recovery, and explicit manual
-controls were introduced in the `0.2.3` prerelease. The
-`0.2.4-preview.4` acceptance candidate makes package-reload upgrades and
+controls were introduced in the `0.2.3` release. Stable `0.2.4` makes
+package-reload upgrades and
 transient Manager status observation automatic while keeping legacy sessions
 usable, restores trusted migration from the published `poc.22` through
-`poc.25` generations, and safely recovers canonical stale coordinator state
+`poc.26` generations, and safely recovers canonical stale coordinator state
 from a prior generation. The Manager keeps its native tab title compact,
 shows the full Package version in the header, and presents a failed automatic
 upgrade as `CHECK_FAILED` with a `Retry update` action.
-It remains under third-party validation before stable promotion. The
-underlying design is tracked in the [v0.2.3 roadmap](v0.2.3-roadmap.md). Approved
-future work continues in the
+The underlying design and stable acceptance decision are tracked in the
+[v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
+Unity with a NotElevated MCP client were explicitly deferred without being
+marked passed; they remain in the
+[v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
 
 ## Supported Environment
@@ -46,7 +48,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4-preview.4"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4"
   }
 }
 ```

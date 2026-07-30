@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4 - 2026-07-30
+
+- Promoted the automatic package-reconciliation, same-transport Editor restart,
+  explicit manual lifecycle controls, truthful upgrade status, and complete
+  Package-version header validated throughout the v0.2.4 preview line.
+- Advanced the immutable Host generation to `poc.27` so stable package identity
+  does not rewrite published `poc.26` bytes, and extended supported direct and
+  skipped generation upgrades through `poc.26`.
+- Recorded the live two-project concurrency matrix and Elevated Unity with a
+  NotElevated MCP client as explicit `v0.2.5` deferred validation risks. Stable
+  `0.2.4` does not claim those two environment-dependent checks passed.
+
 ## 0.2.4-preview.4 - 2026-07-30
 
 - Recovered automatic Editor startup from a dead prior-generation coordinator

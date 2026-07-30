@@ -31,7 +31,7 @@ $powershellPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.26"
+$generationId = "poc.27"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -2173,9 +2173,9 @@ $sentinelSnapshot = $null
 try {
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.4-preview.4" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.4" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 26 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 27 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 21 -Message "Legacy target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 21 -Message "Generation target count mismatch."
@@ -2373,7 +2373,8 @@ try {
         [pscustomobject]@{ GenerationId = "poc.22"; Sequence = 22; PackageVersion = "0.2.3"; LiveLease = $false },
         [pscustomobject]@{ GenerationId = "poc.23"; Sequence = 23; PackageVersion = "0.2.4-preview.1"; LiveLease = $true },
         [pscustomobject]@{ GenerationId = "poc.24"; Sequence = 24; PackageVersion = "0.2.4-preview.2"; LiveLease = $false },
-        [pscustomobject]@{ GenerationId = "poc.25"; Sequence = 25; PackageVersion = "0.2.4-preview.3"; LiveLease = $false }
+        [pscustomobject]@{ GenerationId = "poc.25"; Sequence = 25; PackageVersion = "0.2.4-preview.3"; LiveLease = $false },
+        [pscustomobject]@{ GenerationId = "poc.26"; Sequence = 26; PackageVersion = "0.2.4-preview.4"; LiveLease = $false }
     )
     foreach ($priorGenerationCase in $priorGenerationCases) {
         $priorFixture = Install-PriorGenerationFixture `
@@ -2423,7 +2424,7 @@ try {
         Assert-True -Condition (-not (Test-Path -LiteralPath $priorFixture.GenerationRoot)) -Message "Remove retained drained $($priorGenerationCase.GenerationId) generation content."
         Assert-NoMaterializerResidue
     }
-    Write-Host "[OK] poc.22 through poc.25 upgraded to poc.26 without untrusted-path conflicts; live poc.23 content remained protected until lease drain."
+    Write-Host "[OK] poc.22 through poc.26 upgraded to poc.27 without untrusted-path conflicts; live poc.23 content remained protected until lease drain."
 
     Install-LegacyPoc21Fixture
     $markerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath
@@ -2449,7 +2450,7 @@ try {
     Assert-Equal -Actual $failedUpgradeState.state -Expected "CHECK_FAILED" -Message "Watcher-handoff rollback did not persist CHECK_FAILED diagnostics."
     Assert-Equal -Actual $failedUpgradeState.generation_id -Expected $generationId -Message "Watcher-handoff rollback diagnostic generation mismatch."
     Assert-NoMaterializerResidue
-    Write-Host "[OK] Failed watcher handoff restored poc.21 selection and retained a complete, unselected poc.26 generation for safe retry."
+    Write-Host "[OK] Failed watcher handoff restored poc.21 selection and retained a complete, unselected poc.27 generation for safe retry."
 
     $failedCandidateCleanup = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $failedCandidateCleanup -ExitCode 0 -Label "Failed-upgrade candidate cleanup Remove"
@@ -2658,7 +2659,7 @@ try {
         }
     }
     Assert-NoMaterializerResidue
-    Write-Host "[OK] poc.21 upgraded with live legacy owners, published poc.26 atomically, and let both legacy leases drain naturally."
+    Write-Host "[OK] poc.21 upgraded with live legacy owners, published poc.27 atomically, and let both legacy leases drain naturally."
 
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     $lastKnownGoodPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $lastKnownGoodPointerRelativePath
@@ -2683,9 +2684,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.4-preview.4" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.4" -Message "Marker package version mismatch."
     Assert-Equal -Actual $marker.payload_version -Expected $generationId -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 26 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 27 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual $marker.generation_lease_version -Expected 2 -Message "Marker generation-lease version mismatch."
     Assert-Equal -Actual $marker.generation_id -Expected $generationId -Message "Marker generation id mismatch."
@@ -2694,7 +2695,7 @@ try {
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     Assert-LfOnlyFile -Path $currentPointerPath -Label "Current generation pointer"
     $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.4-preview.4" -Message "Current pointer package version mismatch."
+    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.4" -Message "Current pointer package version mismatch."
     Assert-Equal -Actual $currentPointer.generation_id -Expected $generationId -Message "Current pointer generation id mismatch."
     Assert-Equal -Actual $currentPointer.generation_relative_path -Expected $generationTargetPrefix.TrimEnd([char]'/') -Message "Current pointer generation path mismatch."
     $installedGenerationManifest = Get-PathFromRelative -Root $hostRoot -RelativePath ($generationTargetPrefix + "generation-manifest.json")
@@ -3115,13 +3116,13 @@ try {
         $handoffManifest = Get-Content -LiteralPath $handoffManifestPath -Raw | ConvertFrom-Json
         $handoffManifest.generation_id = $handoffGenerationId
         $handoffManifest.payload_version = $handoffGenerationId
-        $handoffManifest.payload_sequence = 26
+        $handoffManifest.payload_sequence = 27
         Write-Utf8File -Path $handoffManifestPath -Content (($handoffManifest | ConvertTo-Json -Depth 8) + "`n")
 
         $handoffPointer = $originalCurrentPointerText | ConvertFrom-Json
         $handoffPointer.generation_id = $handoffGenerationId
         $handoffPointer.payload_version = $handoffGenerationId
-        $handoffPointer.payload_sequence = 26
+        $handoffPointer.payload_sequence = 27
         $handoffPointer.generation_relative_path = "AIWork/.runtime/codedb/host/generations/$handoffGenerationId"
         $handoffPointer.generation_manifest_sha256 = (Get-FileHash -LiteralPath $handoffManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-Utf8File -Path $handoffPointerPath -Content (($handoffPointer | ConvertTo-Json -Depth 8) + "`n")
@@ -4716,9 +4717,9 @@ startup_timeout_sec = 120
     $canonicalV2Entries["AIWork/codedb/scripts/codedb-project-common.ps1"] = "package upgrade that must not partially apply`n"
     $conflictingUpgradeRoot = New-SyntheticPayload `
         -Root (Join-Path $syntheticRoot "conflicting-upgrade") `
-        -PayloadVersion "poc.26-test-upgrade" `
-        -PayloadSequence 27 `
-        -PackageVersion "0.2.4-test" `
+        -PayloadVersion "poc.27-test-upgrade" `
+        -PayloadSequence 28 `
+        -PackageVersion "0.2.5-test" `
         -Entries $canonicalV2Entries
     $beforeManagedConflict = Get-FileSnapshot -Root $hostRoot
     $managedConflict = Invoke-Materializer -Action "Sync" -PayloadRoot $conflictingUpgradeRoot
