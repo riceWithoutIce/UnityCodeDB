@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Verify", "Upgrade", "Sync", "Remove")]
+    [ValidateSet("DryRun", "Verify", "Upgrade", "Redeploy", "Sync", "Remove")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -1245,6 +1245,68 @@ function Get-AutomaticUpgradeEligibility {
     return [pscustomobject]@{ Eligible = $true; Reason = $reason }
 }
 
+function Get-OwnedLegacyRedeployEligibility {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    $marker = $Plan.Marker
+    if ($null -eq $marker) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "first adoption requires explicit Sync authorization" }
+    }
+    if ($Plan.IsCurrent) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "host payload is already current" }
+    }
+    if ($Plan.HasConflict -or $Plan.StagedTargets.Count -gt 0) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "conflict or staged target requires explicit review" }
+    }
+    if ($marker.PayloadSequence -ge $Manifest.PayloadSequence -or
+        -not [string]::IsNullOrWhiteSpace([string]$marker.GenerationId) -or
+        $marker.HostUseGateVersion -lt 1 -or
+        $Manifest.BootstrapProtocol -ne 1 -or
+        -not [string]::Equals($Manifest.GenerationId, $script:GenerationId, [StringComparison]::Ordinal)) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "installed payload is not a supported flat legacy redeploy source" }
+    }
+
+    $supportedIdentity = @(
+        [pscustomobject]@{ PackageVersion = "0.1.0"; PayloadVersion = "poc.9"; PayloadSequence = 9 },
+        [pscustomobject]@{ PackageVersion = "0.2.0"; PayloadVersion = "poc.16"; PayloadSequence = 16 },
+        [pscustomobject]@{ PackageVersion = "0.2.1"; PayloadVersion = "poc.20"; PayloadSequence = 20 }
+    ) | Where-Object {
+        [string]::Equals($_.PackageVersion, $marker.PackageVersion, [StringComparison]::Ordinal) -and
+        [string]::Equals($_.PayloadVersion, $marker.PayloadVersion, [StringComparison]::Ordinal) -and
+        $_.PayloadSequence -eq $marker.PayloadSequence
+    }
+    if (@($supportedIdentity).Count -ne 1) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "installed payload identity is not in the reviewed legacy redeploy allowlist" }
+    }
+
+    foreach ($item in $Plan.Files) {
+        if ($item.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($item.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($item.Status -ne "Missing") {
+                return [pscustomobject]@{ Eligible = $false; Reason = "new generation target already exists and requires explicit review" }
+            }
+            continue
+        }
+        if (-not $item.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $item.Status -notin @("Current", "Upgradeable") -or
+            [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -or
+            -not [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Eligible = $false; Reason = "legacy flat payload is not fully owned and byte-exact" }
+        }
+    }
+    if ($Plan.Retired.Count -gt 0) {
+        return [pscustomobject]@{ Eligible = $false; Reason = "legacy marker contains targets outside the current flat payload closure" }
+    }
+
+    return [pscustomobject]@{
+        Eligible = $true
+        Reason = "owned $($marker.PayloadVersion) flat payload can be stopped and redeployed to generation $($Manifest.GenerationId)"
+    }
+}
+
 function New-MarkerJson {
     param([Parameter(Mandatory = $true)]$Manifest)
 
@@ -1950,11 +2012,12 @@ function Complete-MaterializerHostUseGate {
 function Initialize-MaterializerUpgradeGate {
     param(
         [Parameter(Mandatory = $true)]$Lock,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()][string]$MarkerAction
     )
 
     Assert-ExistingMaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
-    Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot
+    Publish-MaterializerActiveMarker -Lock $Lock -ProjectRoot $ProjectRoot -MarkerAction $MarkerAction
 }
 
 function Assert-TransactionTargetRelativePath {
@@ -2970,8 +3033,13 @@ function Invoke-Sync {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
         [Parameter(Mandatory = $true)][string]$MarkerPath,
-        [switch]$AutomaticUpgrade
+        [switch]$AutomaticUpgrade,
+        [switch]$OwnedLegacyRedeploy
     )
+
+    if ($AutomaticUpgrade -and $OwnedLegacyRedeploy) {
+        throw "AutomaticUpgrade and OwnedLegacyRedeploy are mutually exclusive."
+    }
 
     $lock = $null
     $transactionRoot = $null
@@ -2987,7 +3055,8 @@ function Invoke-Sync {
             Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
             $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot
         } else {
-            Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
+            $markerAction = if ($OwnedLegacyRedeploy) { "sync" } else { $null }
+            Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerAction $markerAction
             $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -AutomaticOnly
             Complete-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
             $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -SkipAutomaticUpgrade
@@ -3000,6 +3069,13 @@ function Invoke-Sync {
         if ($plan.IsCurrent) {
             Write-Host "[OK] Host payload is already current; no files were written."
             return
+        }
+        if ($OwnedLegacyRedeploy) {
+            $redeployEligibility = Get-OwnedLegacyRedeployEligibility -Manifest $Manifest -Plan $plan
+            if (-not $redeployEligibility.Eligible) {
+                Throw-MaterializerError -Message "Owned legacy host redeploy was rejected: $($redeployEligibility.Reason)." -ExitCode 4
+            }
+            Write-Host "[REDEPLOYING] Replacing byte-exact $($plan.Marker.PayloadVersion) host files and publishing generation $($Manifest.GenerationId)."
         }
         if ($AutomaticUpgrade) {
             $eligibility = Get-AutomaticUpgradeEligibility -Manifest $Manifest -Plan $plan
@@ -3147,6 +3223,8 @@ function Invoke-Sync {
             Invoke-UpgradeWatcherEnsure -WatchManagerPath $newWatcherManager -Label "selected generation"
             Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "CURRENT" -Message "Generation $($Manifest.GenerationId) is selected and watcher reconciliation succeeded."
             Write-Host "[OK] Host payload automatically upgraded to version $($Manifest.PayloadVersion)."
+        } elseif ($OwnedLegacyRedeploy) {
+            Write-Host "[OK] Host payload redeployed to version $($Manifest.PayloadVersion)."
         } else {
             Write-Host "[OK] Host payload synchronized to version $($Manifest.PayloadVersion)."
         }
@@ -3428,8 +3506,8 @@ try {
         Throw-MaterializerError -Message "Pre-handoff crash injection requires a fixture-only Upgrade action." -ExitCode 4
     }
     if (($TestFailAfterMutation -gt 0 -or $TestCrashAfterMutation -gt 0) -and
-        (-not $PocFixture -or $Action -notin @("Upgrade", "Sync", "Remove"))) {
-        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Sync, or Remove action." -ExitCode 4
+        (-not $PocFixture -or $Action -notin @("Upgrade", "Redeploy", "Sync", "Remove"))) {
+        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Redeploy, Sync, or Remove action." -ExitCode 4
     }
 
     $projectRootPath = [System.IO.Path]::GetFullPath($ProjectRoot)
@@ -3455,6 +3533,7 @@ try {
             $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
             Write-MaterializationPlan -Plan $plan
             $upgradeEligibility = Get-AutomaticUpgradeEligibility -Manifest $payload -Plan $plan
+            $redeployEligibility = Get-OwnedLegacyRedeployEligibility -Manifest $payload -Plan $plan
             $pendingAutomaticRecovery = if ($plan.IsCurrent) {
                 Get-PendingAutomaticUpgradeRecovery -Manifest $payload -ProjectRoot $projectRootPath
             } else {
@@ -3475,6 +3554,9 @@ try {
                 }
                 Write-Host "[UPGRADE_READY] Owned $installedIdentity can migrate to generation $($payload.GenerationId) while existing leases drain naturally."
                 Write-Host "[STALE] Host payload has a safe automatic generation upgrade."
+            } elseif ($redeployEligibility.Eligible) {
+                Write-Host "[REDEPLOY_READY] Owned payload $([string]$plan.Marker.PayloadVersion) can redeploy to generation $($payload.GenerationId) after MCP and watcher owners stop."
+                Write-Host "[STALE] Host payload requires a controlled legacy redeploy."
             } elseif ($plan.HasConflict) {
                 Write-Host "[STALE] Host payload has conflicts; Sync would be rejected."
             } else {
@@ -3491,6 +3573,9 @@ try {
         }
         "Upgrade" {
             Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath -AutomaticUpgrade
+        }
+        "Redeploy" {
+            Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath -OwnedLegacyRedeploy
         }
         "Sync" {
             Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath

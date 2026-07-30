@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added a controlled `Redeploy host` action for byte-exact package-owned flat
+  payloads from published `poc.9`, `poc.16`, and `poc.20` releases that cannot
+  use the live generation-upgrade path. Redeploy requires all MCP and watcher
+  owners to stop, rejects drift and staged ownership paths, publishes the
+  current generation transactionally, and regenerates only the ignored runtime
+  config while preserving Provider binaries, indexes, adapters, registration,
+  and unrelated project files.
+
 ## 0.2.4 - 2026-07-30
 
 - Promoted the automatic package-reconciliation, same-transport Editor restart,

@@ -68,6 +68,19 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Replaces a recognized byte-exact legacy host payload and regenerates its ignored runtime config.
+        /// </summary>
+        internal static AICodedbCommandResult RunHostPayloadRedeploy()
+        {
+            var redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy();
+            if (!redeployResult.Succeeded)
+                return redeployResult;
+
+            var configResult = RunRegenerateRuntimeConfig();
+            return CombineResults(redeployResult, configResult);
+        }
+
+        /// <summary>
         /// Synchronizes the audited host payload under explicit tracked-host authorization.
         /// </summary>
         internal static AICodedbCommandResult RunHostPayloadSync(string authorizationPath, bool confirmLegacyMcpStopped)
@@ -347,6 +360,27 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunRegistrationValidation()
         {
             return RunScript("Codedb Registration Validation", AICodedbPaths.RegistrationValidateScriptPath);
+        }
+
+        private static AICodedbCommandResult CombineResults(
+            AICodedbCommandResult first,
+            AICodedbCommandResult second)
+        {
+            return new AICodedbCommandResult(
+                second.ExitCode,
+                JoinOutput(first.StandardOutput, second.StandardOutput),
+                JoinOutput(first.StandardError, second.StandardError),
+                first.TimedOut || second.TimedOut,
+                first.ElapsedMilliseconds + second.ElapsedMilliseconds);
+        }
+
+        private static string JoinOutput(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first))
+                return second ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(second))
+                return first ?? string.Empty;
+            return first.TrimEnd() + Environment.NewLine + second.TrimStart();
         }
 
         /// <summary>

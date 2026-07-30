@@ -60,6 +60,14 @@ separate generation path: it verifies byte ownership, publishes an immutable
 generation, switches the pointer at a request boundary, and rolls back the
 selection and watcher if readiness fails. Legacy or unowned wrappers still
 require explicit `-ConfirmLegacyMcpStopped` for first adoption or strict Sync.
+Published flat payloads that predate the live generation transition can instead
+report `REDEPLOY_REQUIRED`. After all MCP and watcher owners stop, the Manager's
+`Redeploy host` action accepts only the reviewed `poc.9`, `poc.16`, and `poc.20`
+identities, re-verifies every owned byte and staged ownership path, then uses the
+same durable Sync transaction to publish the current flat payload, immutable
+generation, pointer, and marker. It regenerates the ignored runtime config but
+preserves Provider binaries, indexes, adapters, MCP registration, unowned host
+files, and unrelated project content.
 
 A tracked-host authorization must be a direct child of
 `AIWork/.runtime/codedb/payload-materializer/authorizations/`, must remain Git
@@ -92,10 +100,11 @@ Sync authorization cannot authorize Remove, and the separate legacy MCP-stop,
 active-process, staged-index, conflict, and transaction gates still apply.
 
 The package materializer is wired into the Manager Setup tab for read-only
-status/DryRun, strict Verify, and explicitly authorized Sync/Remove. Manager
+status/DryRun, strict Verify, controlled legacy Redeploy, and explicitly
+authorized Sync/Remove. Manager
 status distinguishes `INSTALLING`, `SWITCHING`, `CURRENT`, `DRAINING`,
-`ROLLBACK`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, conflict, active host-use
-blockers, and check-failed outcomes. It shows selected/watcher generations,
+`ROLLBACK`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, `REDEPLOY_REQUIRED`, conflict,
+active host-use blockers, and check-failed outcomes. It shows selected/watcher generations,
 bootstrap protocol, legacy session count, and all active owners. The Index view
 separates the persistent `Start with Unity Editor` policy from Start, Stop, and
 Restart commands associated with the Editor cohort present when they are

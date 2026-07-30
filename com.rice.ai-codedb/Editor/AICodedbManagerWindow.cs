@@ -617,6 +617,9 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbProjectSettings.CurrentGenerationId)
                 ? (Action)(() => RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade))
                 : null;
+            var redeployAction = _statusSnapshot.HostPayloadStatus.CanRedeploy
+                ? (Action)RunHostPayloadRedeployWithConfirmation
+                : null;
             var updateLabel = IsCurrentHostUpgradeInProgress(
                 _statusSnapshot.HostUpgradeStatus,
                 AICodedbProjectSettings.CurrentGenerationId)
@@ -628,6 +631,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbActionButton.Create("Inspect host files", () => RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun)),
                 AICodedbActionButton.Create("Verify host files", () => RunAction("Host Payload Verify", AICodedbActions.RunHostPayloadVerify)),
                 AICodedbActionButton.Create(updateLabel, updateAction),
+                AICodedbActionButton.Create("Redeploy host", redeployAction),
                 AICodedbActionButton.Create("Sync host files", hasAuthorization ? (Action)RunHostPayloadSyncWithConfirmation : null),
                 AICodedbActionButton.Create("Remove host files", hasAuthorization ? (Action)RunHostPayloadRemoveWithConfirmation : null));
             EditorGUILayout.Space(6f);
@@ -1147,6 +1151,8 @@ namespace Rice.AI.Codedb.Editor
                     _statusSnapshot.HostUpgradeStatus,
                     AICodedbProjectSettings.CurrentGenerationId);
             }
+            if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
+                return "Redeploy host";
             if (!_statusSnapshot.IsHostPayloadCurrent())
                 return "Inspect host files";
             if (_statusSnapshot.IsReady())
@@ -1165,6 +1171,8 @@ namespace Rice.AI.Codedb.Editor
 
             if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
                 RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade);
+            else if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
+                RunHostPayloadRedeployWithConfirmation();
             else if (!_statusSnapshot.IsHostPayloadCurrent())
                 RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun);
             else if (_statusSnapshot.IsReady())
@@ -1249,6 +1257,37 @@ namespace Rice.AI.Codedb.Editor
             {
                 ClearTrackedHostAuthorization();
             }
+        }
+
+        private void RunHostPayloadRedeployWithConfirmation()
+        {
+            var hostPayload = _statusSnapshot.HostPayloadStatus;
+            if (hostPayload.ActiveOwners.Length > 0)
+            {
+                var mcpGuidance = hostPayload.LegacyMcpSessionCount > 0
+                    ? "Disconnect " + hostPayload.LegacyMcpSessionCount + " project MCP session"
+                      + (hostPayload.LegacyMcpSessionCount == 1 ? string.Empty : "s") + ", then "
+                    : string.Empty;
+                EditorUtility.DisplayDialog(
+                    "Redeploy host is blocked",
+                    mcpGuidance
+                    + "stop CodeDB and refresh status before redeploying. Active host owners are never terminated automatically.",
+                    "OK");
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog(
+                    "Redeploy legacy CodeDB host",
+                    "Replace only byte-exact package-owned legacy Host files with the current generation and regenerate the ignored runtime config? "
+                    + "The Provider executable, indexes, Shader adapter, MCP registration, business Assets, unowned files, and Git staging are preserved. "
+                    + "Any drift, staged ownership path, unexpected generation state, or new active owner will stop the operation.",
+                    "Redeploy Host",
+                    "Cancel"))
+            {
+                return;
+            }
+
+            RunAction("Host Payload Redeploy", AICodedbActions.RunHostPayloadRedeploy);
         }
 
         private void RunHostPayloadRemoveWithConfirmation()
@@ -1600,6 +1639,8 @@ namespace Rice.AI.Codedb.Editor
                     return "SETUP_REQUIRED";
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "UPGRADE_READY";
+                case AICodedbHostPayloadState.RedeployRequired:
+                    return "REDEPLOY_REQUIRED";
                 case AICodedbHostPayloadState.Draining:
                     return "READY / DRAINING";
                 case AICodedbHostPayloadState.UpdateRequired:
@@ -1642,6 +1683,8 @@ namespace Rice.AI.Codedb.Editor
                     return "Install the package-managed host files before relying on discovery.";
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "The installed owned host generation can update without stopping active CodeDB sessions.";
+                case AICodedbHostPayloadState.RedeployRequired:
+                    return "Stop CodeDB and disconnect project MCP sessions, then redeploy the byte-exact legacy Host to this package generation.";
                 case AICodedbHostPayloadState.Draining:
                     return "CodeDB is ready. Older sessions remain compatible on their original generation and finish naturally; no action is required.";
                 case AICodedbHostPayloadState.UpdateRequired:
@@ -1649,6 +1692,8 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbHostPayloadState.Conflict:
                     return "Review the reported host-file conflict before attempting Sync.";
                 case AICodedbHostPayloadState.Blocked:
+                    if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
+                        return "Disconnect project MCP sessions and stop CodeDB before redeploying the legacy Host.";
                     return _statusSnapshot.HostPayloadStatus.Detail;
             }
             if (_statusSnapshot.IsReady())
@@ -1666,6 +1711,8 @@ namespace Rice.AI.Codedb.Editor
                     return "Ready / Draining";
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "UPGRADE_READY";
+                case AICodedbHostPayloadState.RedeployRequired:
+                    return "REDEPLOY_REQUIRED";
                 case AICodedbHostPayloadState.SetupRequired:
                     return "SETUP_REQUIRED";
                 case AICodedbHostPayloadState.UpdateRequired:

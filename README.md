@@ -57,12 +57,17 @@ vendor its source or redistribute its binary.
    flow described in the package README.
 4. Prepare the project-local runtime and provide the external provider.
 5. Generate and review project-level MCP registration guidance.
-6. After Setup completes, each interactive Unity Editor session publishes
+6. If Setup reports `REDEPLOY_REQUIRED`, stop CodeDB, disconnect project MCP
+   sessions, and use `Redeploy host`. The action replaces only byte-exact
+   package-owned legacy Host files, regenerates the ignored runtime config, and
+   preserves Provider binaries, indexes, adapters, MCP registration, and
+   unrelated project files.
+7. After Setup completes, each interactive Unity Editor session publishes
    project demand and starts CodeDB asynchronously. `Start with Unity Editor`
    controls the persistent policy; Start, Stop, and Restart control the Editor
    session cohort present when the command is issued without silently changing
    that policy.
-7. Closing the final Editor session stops that project's backend without
+8. Closing the final Editor session stops that project's backend without
    changing its preference. BatchMode sessions do not auto-start CodeDB.
 
 ## Ownership Boundaries

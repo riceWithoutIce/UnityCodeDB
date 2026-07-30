@@ -597,6 +597,39 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void Build_MapsOwnedLegacyPayloadToRedeployRequired()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.27 after MCP and watcher owners stop.\n" +
+                    "[STALE] Host payload requires a controlled legacy redeploy."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.RedeployRequired));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(status.Summary, Is.EqualTo("REDEPLOY_REQUIRED"));
+            Assert.That(status.CanRedeploy, Is.True);
+        }
+
+        [Test]
+        public void Build_RetainsRedeployActionWhileLegacyOwnersBlockMutation()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[ACTIVE] mcp PID 101\n" +
+                    "[ACTIVE] watcher PID 202\n" +
+                    "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.27 after MCP and watcher owners stop.\n" +
+                    "[STALE] Host payload requires a controlled legacy redeploy."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
+            Assert.That(status.CanRedeploy, Is.True);
+            Assert.That(status.LegacyMcpSessionCount, Is.EqualTo(1));
+            Assert.That(status.ActiveOwners.Length, Is.EqualTo(2));
+        }
+
+        [Test]
         public void Build_MapsFailedDryRunToUnknownError()
         {
             var status = AICodedbHostPayloadStatusBuilder.Build(
@@ -620,7 +653,8 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostPayloadAction.DryRun)]
         [TestCase(AICodedbHostPayloadAction.Verify)]
         [TestCase(AICodedbHostPayloadAction.Upgrade)]
-        public void BuildScriptArguments_ReadOnlyActionsHaveNoAuthorization(
+        [TestCase(AICodedbHostPayloadAction.Redeploy)]
+        public void BuildScriptArguments_PackageManagedActionsHaveNoAuthorization(
             AICodedbHostPayloadAction action)
         {
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(action, string.Empty, false);
@@ -690,6 +724,23 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 "-Action",
                 "Upgrade",
+                "-ProjectRoot",
+                AICodedbPaths.ProjectRoot
+            }));
+        }
+
+        [Test]
+        public void BuildScriptArguments_RedeployUsesExactActionAndProjectRoot()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.Redeploy,
+                string.Empty,
+                false);
+
+            Assert.That(arguments, Is.EqualTo(new[]
+            {
+                "-Action",
+                "Redeploy",
                 "-ProjectRoot",
                 AICodedbPaths.ProjectRoot
             }));

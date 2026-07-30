@@ -2057,6 +2057,44 @@ function Install-LegacyPoc21Fixture {
         -Content (($legacyMarker | ConvertTo-Json -Depth 8) + "`n")
 }
 
+function Install-OwnedLegacyRedeployFixture {
+    param(
+        [string]$PackageVersion = "0.2.0",
+        [string]$PayloadVersion = "poc.16",
+        [int]$PayloadSequence = 16
+    )
+
+    Clear-ManagedTestState
+    foreach ($relativePath in $legacyManagedTargets) {
+        $source = Get-CanonicalPayloadSourcePath -TargetRelativePath $relativePath
+        $target = Get-PathFromRelative -Root $hostRoot -RelativePath $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+
+    $legacyWrapperPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+    Write-Utf8File -Path $legacyWrapperPath -Content "// byte-exact owned $PayloadVersion wrapper fixture`n"
+    $legacyFiles = @($legacyManagedTargets | Sort-Object | ForEach-Object {
+        $target = Get-PathFromRelative -Root $hostRoot -RelativePath $_
+        [ordered]@{
+            path = $_
+            installed_sha256 = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
+    $legacyMarker = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        package_version = $PackageVersion
+        payload_version = $PayloadVersion
+        payload_sequence = $PayloadSequence
+        host_use_gate_version = 1
+        files = $legacyFiles
+    }
+    Write-Utf8File `
+        -Path (Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath) `
+        -Content (($legacyMarker | ConvertTo-Json -Depth 8) + "`n")
+}
+
 function Assert-CanonicalFilesInstalled {
     param([string]$Root = $hostRoot)
 
@@ -2605,6 +2643,78 @@ try {
 
     $preHandoffRecoveryCleanup = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $preHandoffRecoveryCleanup -ExitCode 0 -Label "Pre-handoff recovery cleanup Remove"
+    Assert-CanonicalFilesRemoved
+    Assert-NoMaterializerResidue
+
+    Install-OwnedLegacyRedeployFixture -PayloadVersion "poc.15" -PayloadSequence 15
+    $unknownLegacyDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $unknownLegacyDryRun -ExitCode 0 -Label "Unknown legacy Redeploy DryRun"
+    Assert-True -Condition (-not $unknownLegacyDryRun.Text.Contains("[REDEPLOY_READY]")) -Message "Unknown legacy payload incorrectly advertised Redeploy."
+    $unknownLegacyBefore = Get-ManagedPayloadSnapshot -Root $hostRoot
+    $unknownLegacyRedeploy = Invoke-Materializer -Action "Redeploy" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $unknownLegacyRedeploy -ExitCode 4 -Label "Unknown legacy Redeploy refusal"
+    Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot) -Expected $unknownLegacyBefore -Message "Rejected unknown legacy Redeploy changed managed state."
+
+    $reviewedLegacyRedeployIdentities = @(
+        [pscustomobject]@{ PackageVersion = "0.1.0"; PayloadVersion = "poc.9"; PayloadSequence = 9 },
+        [pscustomobject]@{ PackageVersion = "0.2.0"; PayloadVersion = "poc.16"; PayloadSequence = 16 },
+        [pscustomobject]@{ PackageVersion = "0.2.1"; PayloadVersion = "poc.20"; PayloadSequence = 20 }
+    )
+    foreach ($identity in $reviewedLegacyRedeployIdentities) {
+        Install-OwnedLegacyRedeployFixture `
+            -PackageVersion $identity.PackageVersion `
+            -PayloadVersion $identity.PayloadVersion `
+            -PayloadSequence $identity.PayloadSequence
+        $reviewedLegacyDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $reviewedLegacyDryRun -ExitCode 0 -Label "$($identity.PayloadVersion) Redeploy DryRun"
+        Assert-True `
+            -Condition ($reviewedLegacyDryRun.Text.Contains("[REDEPLOY_READY] Owned payload $($identity.PayloadVersion) can redeploy to generation $generationId after MCP and watcher owners stop.")) `
+            -Message "Reviewed $($identity.PayloadVersion) identity did not advertise the controlled Redeploy action."
+        Assert-True -Condition (-not $reviewedLegacyDryRun.Text.Contains("[UPGRADE_READY]")) -Message "Reviewed $($identity.PayloadVersion) identity incorrectly advertised a live automatic upgrade."
+    }
+    Write-Host "[OK] Published poc.9, poc.16, and poc.20 identities advertise controlled Redeploy."
+
+    Install-OwnedLegacyRedeployFixture
+    $legacyRedeployDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $legacyRedeployDryRun -ExitCode 0 -Label "poc.16 Redeploy DryRun"
+    Assert-True `
+        -Condition ($legacyRedeployDryRun.Text.Contains("[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation $generationId after MCP and watcher owners stop.")) `
+        -Message "Owned poc.16 DryRun did not advertise the controlled redeploy action."
+    Assert-True -Condition (-not $legacyRedeployDryRun.Text.Contains("[UPGRADE_READY]")) -Message "Owned poc.16 incorrectly advertised a live automatic upgrade."
+
+    $legacyRedeployBeforeBlock = Get-ManagedPayloadSnapshot -Root $hostRoot
+    $unsupportedAutomaticUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $unsupportedAutomaticUpgrade -ExitCode 4 -Label "poc.16 automatic Upgrade refusal"
+    Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot) -Expected $legacyRedeployBeforeBlock -Message "Rejected poc.16 automatic Upgrade changed managed state."
+
+    $legacyRedeployGate = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/shared/codedb-host-use-gate.mjs"
+    $legacyRedeployMcpProcess = $null
+    try {
+        $legacyRedeployMcpProcess = Start-LegacyHostUseLeaseProcess -GatePath $legacyRedeployGate -Owner "mcp"
+        $blockedRedeploy = Invoke-Materializer -Action "Redeploy" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $blockedRedeploy -ExitCode 4 -Label "Active-owner poc.16 Redeploy refusal"
+        Assert-True -Condition ($blockedRedeploy.Text.Contains("[ACTIVE] mcp PID $($legacyRedeployMcpProcess.Id)")) -Message "Blocked Redeploy omitted its active MCP owner."
+        Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot) -Expected $legacyRedeployBeforeBlock -Message "Blocked poc.16 Redeploy changed managed state."
+    } finally {
+        if ($null -ne $legacyRedeployMcpProcess) {
+            Stop-LegacyHostUseLeaseProcess -Process $legacyRedeployMcpProcess -Owner "mcp"
+        }
+    }
+
+    $legacyRedeploy = Invoke-Materializer -Action "Redeploy" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $legacyRedeploy -ExitCode 0 -Label "Owned poc.16 Redeploy"
+    Assert-True -Condition ($legacyRedeploy.Text.Contains("[REDEPLOYING] Replacing byte-exact poc.16 host files and publishing generation $generationId.")) -Message "Redeploy omitted its source and target identities."
+    Assert-True -Condition ($legacyRedeploy.Text.Contains("[OK] Host payload redeployed to version $generationId.")) -Message "Redeploy omitted its completion state."
+    Assert-CanonicalFilesInstalled
+    $redeployedPointer = Get-Content -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath) -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $redeployedPointer.generation_id -Expected $generationId -Message "Redeploy did not select the current generation."
+    $redeployedMarker = Get-Content -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath) -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $redeployedMarker.payload_version -Expected $generationId -Message "Redeploy did not publish the current ownership marker."
+    Assert-NoMaterializerResidue
+    Write-Host "[OK] Byte-exact poc.16 required stopped owners, redeployed transactionally, and selected $generationId."
+
+    $legacyRedeployCleanup = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $legacyRedeployCleanup -ExitCode 0 -Label "Redeploy cleanup Remove"
     Assert-CanonicalFilesRemoved
     Assert-NoMaterializerResidue
 

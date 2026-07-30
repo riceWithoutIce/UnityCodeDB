@@ -12,6 +12,7 @@ namespace Rice.AI.Codedb.Editor
         DryRun,
         Verify,
         Upgrade,
+        Redeploy,
         Sync,
         Remove
     }
@@ -55,6 +56,11 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbProcessRunner.RunPowerShellScriptAsync(scriptPath, MutationTimeoutMilliseconds, arguments);
         }
 
+        internal static AICodedbCommandResult RunRedeploy()
+        {
+            return Run(AICodedbHostPayloadAction.Redeploy, string.Empty, false, true);
+        }
+
         internal static AICodedbCommandResult RunSync(string authorizationPath, bool confirmLegacyMcpStopped)
         {
             return Run(AICodedbHostPayloadAction.Sync, authorizationPath, confirmLegacyMcpStopped, true);
@@ -78,7 +84,7 @@ namespace Rice.AI.Codedb.Editor
                 throw new ArgumentException("Tracked-host authorization path must be absolute.", nameof(authorizationPath));
 
             if (!requiresAuthorization && !string.IsNullOrWhiteSpace(authorizationPath))
-                throw new ArgumentException("DryRun, Verify, and Upgrade do not accept tracked-host authorization.", nameof(authorizationPath));
+                throw new ArgumentException("DryRun, Verify, Upgrade, and Redeploy do not accept tracked-host authorization.", nameof(authorizationPath));
 
             if (!requiresAuthorization && confirmLegacyMcpStopped)
                 throw new ArgumentException("Legacy MCP confirmation is valid only for Sync or Remove.", nameof(confirmLegacyMcpStopped));
@@ -109,7 +115,9 @@ namespace Rice.AI.Codedb.Editor
 
         private static bool IsMutation(AICodedbHostPayloadAction action)
         {
-            return action == AICodedbHostPayloadAction.Upgrade || RequiresAuthorization(action);
+            return action == AICodedbHostPayloadAction.Upgrade
+                   || action == AICodedbHostPayloadAction.Redeploy
+                   || RequiresAuthorization(action);
         }
 
         private static AICodedbCommandResult Run(
@@ -159,6 +167,7 @@ namespace Rice.AI.Codedb.Editor
         Current,
         Draining,
         UpgradeReady,
+        RedeployRequired,
         UpdateRequired,
         Conflict,
         Blocked
@@ -175,6 +184,7 @@ namespace Rice.AI.Codedb.Editor
         internal bool IsCurrent => State == AICodedbHostPayloadState.Current || State == AICodedbHostPayloadState.Draining;
         internal bool IsDraining => State == AICodedbHostPayloadState.Draining;
         internal bool CanUpgradeAutomatically => State == AICodedbHostPayloadState.UpgradeReady;
+        internal bool CanRedeploy { get; }
 
         internal AICodedbHostPayloadStatus(
             AICodedbHostPayloadState state,
@@ -182,7 +192,8 @@ namespace Rice.AI.Codedb.Editor
             string summary,
             string detail,
             string[] activeOwners = null,
-            int legacyMcpSessionCount = 0)
+            int legacyMcpSessionCount = 0,
+            bool canRedeploy = false)
         {
             State = state;
             DisplayState = displayState;
@@ -190,6 +201,7 @@ namespace Rice.AI.Codedb.Editor
             Detail = detail ?? string.Empty;
             ActiveOwners = activeOwners ?? Array.Empty<string>();
             LegacyMcpSessionCount = Math.Max(0, legacyMcpSessionCount);
+            CanRedeploy = canRedeploy;
         }
 
         internal AICodedbStatusItem ToStatusItem()
@@ -228,6 +240,7 @@ namespace Rice.AI.Codedb.Editor
             var combined = output + "\n" + error;
             var activeOwners = MatchingLines(combined, "[ACTIVE]");
             var legacyMcpSessionCount = CountLegacyMcpSessions(activeOwners);
+            var canRedeploy = Contains(output, "[REDEPLOY_READY]");
 
             if (Contains(combined, "[CONFLICT]") || Contains(combined, "Host payload has conflicts"))
             {
@@ -283,7 +296,20 @@ namespace Rice.AI.Codedb.Editor
                         ? string.Join("\n", activeOwners)
                         : FirstMatchingLine(output, "[BLOCKED]"),
                     activeOwners,
-                    legacyMcpSessionCount);
+                    legacyMcpSessionCount,
+                    canRedeploy);
+            }
+
+            if (canRedeploy)
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.RedeployRequired,
+                    AICodedbStatusState.Warning,
+                    "REDEPLOY_REQUIRED",
+                    FirstMatchingLine(output, "[REDEPLOY_READY]"),
+                    activeOwners,
+                    legacyMcpSessionCount,
+                    true);
             }
 
             if (Contains(output, "[STALE] Host payload can be synchronized"))

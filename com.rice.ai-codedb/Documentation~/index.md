@@ -80,9 +80,15 @@ AIWork/
 ```
 
 The Manager can inspect package-owned host files without mutating the project.
-Sync and Remove require a separately reviewed authorization document tied to
-the exact project root, Git HEAD, action, and payload identity. The package
-does not generate, persist, infer, or delete that authorization.
+When a byte-exact published flat payload is too old for live generation
+migration, Setup reports `REDEPLOY_REQUIRED`. `Redeploy host` requires all MCP
+and watcher owners to stop, then transactionally replaces only the recognized
+`poc.9`, `poc.16`, or `poc.20` Host closure, publishes the current generation,
+and regenerates the ignored runtime config. Provider binaries, indexes,
+adapters, MCP registration, unowned files, and unrelated project content remain
+outside that action. Sync and Remove require a separately reviewed authorization
+document tied to the exact project root, Git HEAD, action, and payload identity.
+The package does not generate, persist, infer, or delete that authorization.
 
 ## Safety Boundaries
 
@@ -108,6 +114,9 @@ does not generate, persist, infer, or delete that authorization.
   watchers or MCP requests, interrupted transactions, downgrade, and payload
   collisions. Automatic generation upgrades use a separate owned-upgrade path
   with durable rollback and never kill Unity, Codex, or MCP processes.
+- Controlled legacy Redeploy also rejects drift, staged ownership paths, and
+  active owners. It never terminates processes and cannot be used for first
+  adoption, unknown payload identities, or current/foreign generations.
 
 ## Discover Read Bounds
 
