@@ -1,0 +1,99 @@
+# Project-neutral provider runtime config template.
+# The runtime preparation script replaces __CODEDB_PROVIDER_SLUG__ before use.
+# Paths are relative to the host Unity project root.
+
+[scan]
+extensions = [
+  "cs",
+  "shader",
+  "hlsl",
+  "compute",
+  "cginc",
+  "lua",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "ts",
+  "tsx",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "cxx",
+  "hpp",
+  "hh",
+  "hxx",
+]
+max_file_bytes = 50000000
+respect_gitignore = true
+root_paths = [
+  "Assets",
+  "Packages",
+  "ProjectSettings",
+]
+include_paths = []
+exclude_paths = [
+  "Library/**",
+  "Library/PackageCache/**",
+  "Temp/**",
+  "Logs/**",
+  "UserSettings/**",
+  "obj/**",
+  "bin/**",
+  "Build/**",
+  "Builds/**",
+  ".codedb/**",
+  ".codedb-mcp/**",
+  ".serena/**",
+  ".codex_tmp/**",
+  "AIWork/.runtime/**",
+]
+skip_dirs = [
+  ".git",
+  ".hg",
+  ".svn",
+  ".vs",
+  ".idea",
+  ".gradle",
+  "node_modules",
+  "target",
+  "dist",
+  ".next",
+  ".svelte-kit",
+  "coverage",
+  "out",
+  ".codedb",
+  ".codedb-mcp",
+  ".serena",
+  ".codex_tmp",
+  "Library",
+  "Temp",
+  "Logs",
+  "UserSettings",
+  "obj",
+  "bin",
+  "Build",
+  "Builds",
+]
+
+[embedding]
+model = "AIWork/.runtime/codedb/__CODEDB_PROVIDER_SLUG__/models/potion-code-16M"
+
+[diagnostics]
+timing = true
+slow_file_ms = 0
+
+[logging]
+enabled = false
+file = "AIWork/.runtime/codedb/__CODEDB_PROVIDER_SLUG__/logs/codedb-mcp.log"
+queue_capacity = 8192
+flush_interval_ms = 500
+
+[watch]
+enabled = false
+poll_interval_seconds = 5
+
+[storage]
+enabled = true
+dir = "AIWork/.runtime/codedb/__CODEDB_PROVIDER_SLUG__/index"

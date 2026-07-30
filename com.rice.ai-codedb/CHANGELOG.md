@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.4-preview.4 - 2026-07-30
+
+- Recovered automatic Editor startup from a dead prior-generation coordinator
+  whose recorded generation adapter paths still point to its immutable
+  generation. Canonical project-local paths are accepted; mismatched roots,
+  runtime identity, adapter configuration, and out-of-generation paths remain
+  fail-closed.
+- Advanced the immutable host generation to `poc.26` and extended direct and
+  skipped automatic-upgrade coverage through the published `poc.25`
+  generation without stopping Unity, Codex, MCP, or active generation leases.
+- Kept the native Unity tab title at `CodeDB Manager`, moved the complete
+  Package version to a right-aligned header row, and made current persisted
+  `INSTALLING`, `SWITCHING`, `ROLLBACK`, and `CHECK_FAILED` phases take
+  precedence over generic `UPGRADE_READY` guidance. Failed updates expose an
+  explicit `Retry update` action while in-progress phases suppress duplicate
+  update commands.
+
 ## 0.2.4-preview.3 - 2026-07-29
 
 - Restored no-click generation-to-generation upgrades by declaring the exact

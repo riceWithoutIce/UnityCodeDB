@@ -1,6 +1,6 @@
 {
   "name": "com.rice.ai-codedb",
-  "version": "0.2.4-preview.3",
+  "version": "0.2.4-preview.4",
   "displayName": "Rice AI CodeDB",
   "description": "Editor tooling for project-local CodeDB automatic refresh, shared queries, and bounded Discover Read workflows.",
   "unity": "2022.3",

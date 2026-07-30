@@ -41,13 +41,23 @@ namespace Rice.AI.Codedb.Editor
         internal static GUIContent CreateWindowTitleContent(string packageVersion)
         {
             var version = (packageVersion ?? string.Empty).Trim();
-            var title = string.IsNullOrWhiteSpace(version)
-                ? "Codedb Manager"
-                : "Codedb Manager v" + version;
             var tooltip = string.IsNullOrWhiteSpace(version)
                 ? "Rice AI CodeDB"
                 : "Rice AI CodeDB v" + version;
-            return new GUIContent(title, TabIcon, tooltip);
+            return new GUIContent("CodeDB Manager", TabIcon, tooltip);
+        }
+
+        internal static GUIContent CreatePackageVersionContent()
+        {
+            return CreatePackageVersionContent(ResolvePackageVersion());
+        }
+
+        internal static GUIContent CreatePackageVersionContent(string packageVersion)
+        {
+            var version = (packageVersion ?? string.Empty).Trim();
+            return string.IsNullOrWhiteSpace(version)
+                ? new GUIContent("Package version unavailable", "Unity Package Manager version is unavailable during package refresh.")
+                : new GUIContent("Package v" + version, "Installed Unity Package Manager version");
         }
 
         private static string ResolvePackageVersion()
@@ -64,7 +74,7 @@ namespace Rice.AI.Codedb.Editor
                 // Unity can briefly withhold package metadata during package refresh.
             }
 
-            return string.Empty;
+            return AICodedbProjectSettings.CurrentPackageVersion;
         }
     }
 }

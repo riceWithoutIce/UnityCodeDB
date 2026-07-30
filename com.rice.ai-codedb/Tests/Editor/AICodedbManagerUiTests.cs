@@ -105,11 +105,11 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void WindowTitleContent_UsesPackageVersionAndTabIcon()
+        public void WindowTitleContent_KeepsStableTitleAndVersionTooltip()
         {
             var content = AICodedbBrandAssets.CreateWindowTitleContent("0.2.2");
 
-            Assert.That(content.text, Is.EqualTo("Codedb Manager v0.2.2"));
+            Assert.That(content.text, Is.EqualTo("CodeDB Manager"));
             Assert.That(content.tooltip, Is.EqualTo("Rice AI CodeDB v0.2.2"));
             Assert.That(content.image, Is.SameAs(AICodedbBrandAssets.TabIcon));
         }
@@ -119,8 +119,17 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var content = AICodedbBrandAssets.CreateWindowTitleContent(string.Empty);
 
-            Assert.That(content.text, Is.EqualTo("Codedb Manager"));
+            Assert.That(content.text, Is.EqualTo("CodeDB Manager"));
             Assert.That(content.tooltip, Is.EqualTo("Rice AI CodeDB"));
+        }
+
+        [Test]
+        public void PackageVersionContent_LabelsPackageIdentitySeparately()
+        {
+            var content = AICodedbBrandAssets.CreatePackageVersionContent("0.2.4-preview.4");
+
+            Assert.That(content.text, Is.EqualTo("Package v0.2.4-preview.4"));
+            Assert.That(content.tooltip, Is.EqualTo("Installed Unity Package Manager version"));
         }
     }
 
@@ -476,6 +485,73 @@ namespace Rice.AI.Codedb.Editor.Tests
                 upgradePhase,
                 automaticUpdatesEnabled,
                 automaticUpgradeSuppressed);
+        }
+
+        [Test]
+        public void ManagerPresentation_PrioritizesFailedCurrentGenerationAndOffersRetry()
+        {
+            var failedCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.CheckFailed,
+                AICodedbStatusState.Error,
+                "poc.26",
+                "CHECK_FAILED / poc.26",
+                "fixture failure");
+            var failedPrevious = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.CheckFailed,
+                AICodedbStatusState.Error,
+                "poc.25",
+                "CHECK_FAILED / poc.25",
+                "historical failure");
+            var invalid = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Invalid,
+                AICodedbStatusState.Error,
+                string.Empty,
+                "CHECK_FAILED",
+                "invalid state");
+
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedCurrent, "poc.26"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedCurrent, "poc.26"), Is.EqualTo("Retry update"));
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedPrevious, "poc.26"), Is.False);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedPrevious, "poc.26"), Is.EqualTo("Update now"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(invalid, "poc.26"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(invalid, "poc.26"), Is.EqualTo("Retry update"));
+        }
+
+        [Test]
+        public void ManagerPresentation_PrioritizesOnlyCurrentTransientUpgradePhases()
+        {
+            var installingCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Installing,
+                AICodedbStatusState.Warning,
+                "poc.26",
+                "INSTALLING / poc.26",
+                "installing");
+            var switchingCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Switching,
+                AICodedbStatusState.Warning,
+                "poc.26",
+                "SWITCHING / poc.26",
+                "switching");
+            var rollbackCurrent = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Rollback,
+                AICodedbStatusState.Error,
+                "poc.26",
+                "ROLLBACK / poc.26",
+                "rollback");
+            var installingPrevious = new AICodedbHostUpgradeStatus(
+                AICodedbHostUpgradePhase.Installing,
+                AICodedbStatusState.Warning,
+                "poc.25",
+                "INSTALLING / poc.25",
+                "historical install");
+
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingCurrent, "poc.26"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(installingCurrent.Phase), Is.EqualTo("INSTALLING"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(switchingCurrent, "poc.26"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(switchingCurrent.Phase), Is.EqualTo("SWITCHING"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(rollbackCurrent, "poc.26"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(rollbackCurrent.Phase), Is.EqualTo("ROLLBACK"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingPrevious, "poc.26"), Is.False);
         }
 
         [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]

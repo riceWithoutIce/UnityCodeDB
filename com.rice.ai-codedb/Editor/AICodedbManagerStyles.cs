@@ -16,6 +16,7 @@ namespace Rice.AI.Codedb.Editor
         private static bool s_proSkin;
         private static GUIStyle s_headerTitle;
         private static GUIStyle s_headerSubtitle;
+        private static GUIStyle s_headerPackageVersion;
         private static GUIStyle s_pageTitle;
         private static GUIStyle s_pageSubtitle;
         private static GUIStyle s_sectionTitle;
@@ -41,6 +42,15 @@ namespace Rice.AI.Codedb.Editor
             {
                 EnsureInitialized();
                 return s_headerSubtitle;
+            }
+        }
+
+        internal static GUIStyle HeaderPackageVersion
+        {
+            get
+            {
+                EnsureInitialized();
+                return s_headerPackageVersion;
             }
         }
 
@@ -167,6 +177,10 @@ namespace Rice.AI.Codedb.Editor
             s_headerSubtitle = new GUIStyle(EditorStyles.miniLabel)
             {
                 alignment = TextAnchor.MiddleLeft
+            };
+            s_headerPackageVersion = new GUIStyle(EditorStyles.miniLabel)
+            {
+                alignment = TextAnchor.MiddleRight
             };
             s_pageTitle = new GUIStyle(EditorStyles.boldLabel)
             {

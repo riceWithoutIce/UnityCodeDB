@@ -44,6 +44,8 @@ namespace Rice.AI.Codedb.Editor
         private const float HeaderBrandIconWidth = 36f;
         private const float HeaderBrandIconSize = 32f;
         private const float HeaderContentHeight = 40f;
+        private const float HeaderControlsMinWidth = 174f;
+        private const float HeaderPackageVersionHeight = 16f;
         private const double TransientStatusRefreshSeconds = 5d;
         private const float CustomProbeSingleRowMinWidth =
             CustomProbeLanguageLabelWidth
@@ -92,7 +94,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static void Open(AICodedbManagerTab tab)
         {
-            var window = GetWindow<AICodedbManagerWindow>(false, "Codedb Manager");
+            var window = GetWindow<AICodedbManagerWindow>(false, "CodeDB Manager");
             window.ApplyWindowTitle();
             window.minSize = new Vector2(900f, 460f);
             window._selectedTab = (int)tab;
@@ -248,6 +250,66 @@ namespace Rice.AI.Codedb.Editor
                    && !automaticUpgradeSuppressed;
         }
 
+        internal static bool IsCurrentHostUpgradeFailure(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            return upgradeStatus.Phase == AICodedbHostUpgradePhase.Invalid
+                   || AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
+                       upgradeStatus,
+                       currentGenerationId);
+        }
+
+        internal static bool IsCurrentHostUpgradeInProgress(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            if (string.IsNullOrWhiteSpace(currentGenerationId)
+                || !string.Equals(upgradeStatus.GenerationId, currentGenerationId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return upgradeStatus.Phase == AICodedbHostUpgradePhase.Installing
+                   || upgradeStatus.Phase == AICodedbHostUpgradePhase.Switching
+                   || upgradeStatus.Phase == AICodedbHostUpgradePhase.Rollback;
+        }
+
+        internal static bool ShouldPrioritizeHostUpgradeStatus(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            return IsCurrentHostUpgradeFailure(upgradeStatus, currentGenerationId)
+                   || IsCurrentHostUpgradeInProgress(upgradeStatus, currentGenerationId);
+        }
+
+        internal static string GetHostUpgradeStatusLabel(AICodedbHostUpgradePhase phase)
+        {
+            switch (phase)
+            {
+                case AICodedbHostUpgradePhase.Installing:
+                    return "INSTALLING";
+                case AICodedbHostUpgradePhase.Switching:
+                    return "SWITCHING";
+                case AICodedbHostUpgradePhase.Rollback:
+                    return "ROLLBACK";
+                case AICodedbHostUpgradePhase.CheckFailed:
+                case AICodedbHostUpgradePhase.Invalid:
+                    return "CHECK_FAILED";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        internal static string GetHostUpgradeActionLabel(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            return IsCurrentHostUpgradeFailure(upgradeStatus, currentGenerationId)
+                ? "Retry update"
+                : "Update now";
+        }
+
         private void RefreshAllStatus()
         {
             RefreshStatus();
@@ -273,17 +335,34 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button(
-                        AICodedbProjectSettings.DefaultToolProfile,
-                        EditorStyles.miniButton,
-                        GUILayout.Width(HeaderProfileWidth),
-                        GUILayout.Height(24f)))
+                var packageVersionContent = AICodedbBrandAssets.CreatePackageVersionContent();
+                var controlsWidth = Mathf.Max(
+                    HeaderControlsMinWidth,
+                    AICodedbManagerStyles.HeaderPackageVersion.CalcSize(packageVersionContent).x);
+                using (new EditorGUILayout.VerticalScope(GUILayout.Width(controlsWidth)))
                 {
-                    SelectTab(AICodedbManagerTab.Policy);
-                }
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.FlexibleSpace();
+                        if (GUILayout.Button(
+                                AICodedbProjectSettings.DefaultToolProfile,
+                                EditorStyles.miniButton,
+                                GUILayout.Width(HeaderProfileWidth),
+                                GUILayout.Height(24f)))
+                        {
+                            SelectTab(AICodedbManagerTab.Policy);
+                        }
 
-                DrawHeaderIconButton("Refresh", "Refresh status", RefreshAllStatus);
-                DrawHeaderIconButton("pane options", "More actions", ShowHeaderMenu);
+                        DrawHeaderIconButton("Refresh", "Refresh status", RefreshAllStatus);
+                        DrawHeaderIconButton("pane options", "More actions", ShowHeaderMenu);
+                    }
+
+                    EditorGUILayout.LabelField(
+                        packageVersionContent,
+                        AICodedbManagerStyles.HeaderPackageVersion,
+                        GUILayout.Width(controlsWidth),
+                        GUILayout.Height(HeaderPackageVersionHeight));
+                }
             }
         }
 
@@ -533,12 +612,22 @@ namespace Rice.AI.Codedb.Editor
             EditorGUILayout.Space(6f);
             var hasAuthorization = !string.IsNullOrWhiteSpace(_trackedHostAuthorizationPath);
             var updateAction = _statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically
+                && !IsCurrentHostUpgradeInProgress(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId)
                 ? (Action)(() => RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade))
                 : null;
+            var updateLabel = IsCurrentHostUpgradeInProgress(
+                _statusSnapshot.HostUpgradeStatus,
+                AICodedbProjectSettings.CurrentGenerationId)
+                    ? "Update in progress"
+                    : GetHostUpgradeActionLabel(
+                        _statusSnapshot.HostUpgradeStatus,
+                        AICodedbProjectSettings.CurrentGenerationId);
             DrawActionGrid(2,
                 AICodedbActionButton.Create("Inspect host files", () => RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun)),
                 AICodedbActionButton.Create("Verify host files", () => RunAction("Host Payload Verify", AICodedbActions.RunHostPayloadVerify)),
-                AICodedbActionButton.Create("Update now", updateAction),
+                AICodedbActionButton.Create(updateLabel, updateAction),
                 AICodedbActionButton.Create("Sync host files", hasAuthorization ? (Action)RunHostPayloadSyncWithConfirmation : null),
                 AICodedbActionButton.Create("Remove host files", hasAuthorization ? (Action)RunHostPayloadRemoveWithConfirmation : null));
             EditorGUILayout.Space(6f);
@@ -1045,8 +1134,19 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetPrimaryActionLabel()
         {
+            if (IsCurrentHostUpgradeInProgress(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                return string.Empty;
+            }
+
             if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
-                return "Update now";
+            {
+                return GetHostUpgradeActionLabel(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId);
+            }
             if (!_statusSnapshot.IsHostPayloadCurrent())
                 return "Inspect host files";
             if (_statusSnapshot.IsReady())
@@ -1056,6 +1156,13 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunPrimaryAction()
         {
+            if (IsCurrentHostUpgradeInProgress(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                return;
+            }
+
             if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
                 RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade);
             else if (!_statusSnapshot.IsHostPayloadCurrent())
@@ -1444,6 +1551,15 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetHeaderTitle()
         {
+            if (ShouldPrioritizeHostUpgradeStatus(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                return AICodedbProjectSettings.ProjectDisplayName
+                       + " / "
+                       + GetHostUpgradeStatusLabel(_statusSnapshot.HostUpgradeStatus.Phase);
+            }
+
             if (!_statusSnapshot.IsHostPayloadCurrent())
                 return AICodedbProjectSettings.ProjectDisplayName + " · " + GetHostPayloadLabel();
 
@@ -1471,6 +1587,13 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetOverviewStatusTitle()
         {
+            if (ShouldPrioritizeHostUpgradeStatus(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                return GetHostUpgradeStatusLabel(_statusSnapshot.HostUpgradeStatus.Phase);
+            }
+
             switch (_statusSnapshot.HostPayloadStatus.State)
             {
                 case AICodedbHostPayloadState.SetupRequired:
@@ -1500,12 +1623,25 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetOverviewStatusDescription()
         {
+            if (ShouldPrioritizeHostUpgradeStatus(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                if (!string.IsNullOrWhiteSpace(_statusSnapshot.HostUpgradeStatus.Detail))
+                    return _statusSnapshot.HostUpgradeStatus.Detail;
+                return IsCurrentHostUpgradeFailure(
+                    _statusSnapshot.HostUpgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId)
+                        ? "The automatic host update failed. Review the activity output, then retry the update."
+                        : "The automatic host update is in progress. No action is required.";
+            }
+
             switch (_statusSnapshot.HostPayloadStatus.State)
             {
                 case AICodedbHostPayloadState.SetupRequired:
                     return "Install the package-managed host files before relying on discovery.";
                 case AICodedbHostPayloadState.UpgradeReady:
-                    return "The owned poc.21 host payload can migrate without stopping active CodeDB sessions.";
+                    return "The installed owned host generation can update without stopping active CodeDB sessions.";
                 case AICodedbHostPayloadState.Draining:
                     return "CodeDB is ready. Older sessions remain compatible on their original generation and finish naturally; no action is required.";
                 case AICodedbHostPayloadState.UpdateRequired:
