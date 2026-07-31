@@ -23,6 +23,9 @@ usable, restores trusted migration from the published `poc.22` through
 from a prior generation. The Manager keeps its native tab title compact,
 shows the full Package version in the header, and presents a failed automatic
 upgrade as `CHECK_FAILED` with a `Retry update` action.
+The `0.2.5-preview.1` validation release adds controlled redeployment for
+byte-exact `poc.9`, `poc.16`, and `poc.20` flat Hosts and advances the immutable
+generation to `poc.28` without changing the accepted deferred validation risks.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -48,13 +51,14 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.1"
   }
 }
 ```
 
-Production projects should pin a release tag. The `#main` revision is reserved
-for intentional validation of unreleased development changes.
+Production projects should stay on stable `v0.2.4` until this validation
+prerelease is accepted. The `#main` revision is reserved for intentional
+validation of unpublished development changes.
 
 ## Manager
 

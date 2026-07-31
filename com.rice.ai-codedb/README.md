@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The stable `0.2.4` release targets Unity
-`2022.3` on Windows.
+and bounded MCP discovery surface. The `0.2.5-preview.1` validation prerelease
+targets Unity `2022.3` on Windows; stable remains `0.2.4`.
 
-Install the latest stable release from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.4`.
+Install the validation prerelease from the repository subfolder with
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.1`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The `0.2.4` package keeps a tracked stable wrapper and byte-exact
+The `0.2.5-preview.1` package keeps a tracked stable wrapper and byte-exact
 v0.2.2 compatibility files under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
 `AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
@@ -83,9 +83,9 @@ name. Its closed schema is:
   "project_root": "<absolute Unity project root>",
   "git_head": "<current repository HEAD>",
   "action": "Sync",
-  "package_version": "0.2.4",
-  "payload_version": "poc.27",
-  "payload_sequence": 27,
+  "package_version": "0.2.5-preview.1",
+  "payload_version": "poc.28",
+  "payload_sequence": 28,
   "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
   "target_count": 43,
   "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
@@ -167,13 +167,15 @@ are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
 also passed with exact host restoration. v0.2.2 completed real Unity import,
 74/74 package EditMode tests, and wide/minimum/docked visual acceptance.
-The `0.2.4` coverage retains the exact poc.21 coordinator-state
+The `0.2.5-preview.1` coverage retains the exact poc.21 coordinator-state
 handoff, makes package-reload reconciliation independent from watcher policy,
 treats legacy-session drain as ready and non-blocking, and validates direct or
-skipped upgrades from the published `poc.22` through `poc.26` generations. It
+skipped upgrades from the published `poc.22` through `poc.27` generations. It
 also accepts canonical stale prior-generation coordinator paths during Editor
 startup while rejecting paths outside that generation, and keeps failed
-automatic-upgrade status and retry guidance visible in the Manager. A
+automatic-upgrade status and retry guidance visible in the Manager. It adds the
+stopped-owner legacy Redeploy path for published `poc.9`, `poc.16`, and
+`poc.20` flat payloads while preserving Provider and index state. A
 representative third-party project passed no-click upgrade, same-transport Editor restart,
 manual lifecycle controls, Domain Reload, Play Mode, normal-permission queries,
 and BatchMode isolation. Live two-project concurrency and Elevated Unity with
