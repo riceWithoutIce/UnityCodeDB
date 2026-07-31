@@ -31,7 +31,7 @@ $powershellPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.28"
+$generationId = "poc.29"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -2211,9 +2211,9 @@ $sentinelSnapshot = $null
 try {
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.5-preview.1" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.5-preview.2" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 28 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 29 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 21 -Message "Legacy target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 21 -Message "Generation target count mismatch."
@@ -2413,7 +2413,8 @@ try {
         [pscustomobject]@{ GenerationId = "poc.24"; Sequence = 24; PackageVersion = "0.2.4-preview.2"; LiveLease = $false },
         [pscustomobject]@{ GenerationId = "poc.25"; Sequence = 25; PackageVersion = "0.2.4-preview.3"; LiveLease = $false },
         [pscustomobject]@{ GenerationId = "poc.26"; Sequence = 26; PackageVersion = "0.2.4-preview.4"; LiveLease = $false },
-        [pscustomobject]@{ GenerationId = "poc.27"; Sequence = 27; PackageVersion = "0.2.4"; LiveLease = $false }
+        [pscustomobject]@{ GenerationId = "poc.27"; Sequence = 27; PackageVersion = "0.2.4"; LiveLease = $false },
+        [pscustomobject]@{ GenerationId = "poc.28"; Sequence = 28; PackageVersion = "0.2.5-preview.1"; LiveLease = $false }
     )
     foreach ($priorGenerationCase in $priorGenerationCases) {
         $priorFixture = Install-PriorGenerationFixture `
@@ -2463,7 +2464,7 @@ try {
         Assert-True -Condition (-not (Test-Path -LiteralPath $priorFixture.GenerationRoot)) -Message "Remove retained drained $($priorGenerationCase.GenerationId) generation content."
         Assert-NoMaterializerResidue
     }
-    Write-Host "[OK] poc.22 through poc.27 upgraded to $generationId without untrusted-path conflicts; live poc.23 content remained protected until lease drain."
+    Write-Host "[OK] poc.22 through poc.28 upgraded to $generationId without untrusted-path conflicts; live poc.23 content remained protected until lease drain."
 
     Install-LegacyPoc21Fixture
     $markerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $markerRelativePath
@@ -2795,9 +2796,9 @@ try {
 
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.5-preview.1" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.2.5-preview.2" -Message "Marker package version mismatch."
     Assert-Equal -Actual $marker.payload_version -Expected $generationId -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 28 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 29 -Message "Marker payload sequence mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual $marker.generation_lease_version -Expected 2 -Message "Marker generation-lease version mismatch."
     Assert-Equal -Actual $marker.generation_id -Expected $generationId -Message "Marker generation id mismatch."
@@ -2806,7 +2807,7 @@ try {
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     Assert-LfOnlyFile -Path $currentPointerPath -Label "Current generation pointer"
     $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.5-preview.1" -Message "Current pointer package version mismatch."
+    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.5-preview.2" -Message "Current pointer package version mismatch."
     Assert-Equal -Actual $currentPointer.generation_id -Expected $generationId -Message "Current pointer generation id mismatch."
     Assert-Equal -Actual $currentPointer.generation_relative_path -Expected $generationTargetPrefix.TrimEnd([char]'/') -Message "Current pointer generation path mismatch."
     $installedGenerationManifest = Get-PathFromRelative -Root $hostRoot -RelativePath ($generationTargetPrefix + "generation-manifest.json")
@@ -4828,8 +4829,8 @@ startup_timeout_sec = 120
     $canonicalV2Entries["AIWork/codedb/scripts/codedb-project-common.ps1"] = "package upgrade that must not partially apply`n"
     $conflictingUpgradeRoot = New-SyntheticPayload `
         -Root (Join-Path $syntheticRoot "conflicting-upgrade") `
-        -PayloadVersion "poc.28-test-upgrade" `
-        -PayloadSequence 29 `
+        -PayloadVersion "poc.29-test-upgrade" `
+        -PayloadSequence 30 `
         -PackageVersion "0.2.6-test" `
         -Entries $canonicalV2Entries
     $beforeManagedConflict = Get-FileSnapshot -Root $hostRoot

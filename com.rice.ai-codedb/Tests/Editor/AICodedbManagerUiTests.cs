@@ -493,14 +493,14 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.28",
-                "CHECK_FAILED / poc.28",
+                "poc.29",
+                "CHECK_FAILED / poc.29",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.27",
-                "CHECK_FAILED / poc.27",
+                "poc.28",
+                "CHECK_FAILED / poc.28",
                 "historical failure");
             var invalid = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Invalid,
@@ -509,12 +509,12 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "CHECK_FAILED",
                 "invalid state");
 
-            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedCurrent, "poc.28"), Is.True);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedCurrent, "poc.28"), Is.EqualTo("Retry update"));
-            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedPrevious, "poc.28"), Is.False);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedPrevious, "poc.28"), Is.EqualTo("Update now"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(invalid, "poc.28"), Is.True);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(invalid, "poc.28"), Is.EqualTo("Retry update"));
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedCurrent, "poc.29"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedCurrent, "poc.29"), Is.EqualTo("Retry update"));
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedPrevious, "poc.29"), Is.False);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedPrevious, "poc.29"), Is.EqualTo("Update now"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(invalid, "poc.29"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(invalid, "poc.29"), Is.EqualTo("Retry update"));
         }
 
         [Test]
@@ -523,35 +523,35 @@ namespace Rice.AI.Codedb.Editor.Tests
             var installingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Installing,
                 AICodedbStatusState.Warning,
-                "poc.28",
-                "INSTALLING / poc.28",
+                "poc.29",
+                "INSTALLING / poc.29",
                 "installing");
             var switchingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Switching,
                 AICodedbStatusState.Warning,
-                "poc.28",
-                "SWITCHING / poc.28",
+                "poc.29",
+                "SWITCHING / poc.29",
                 "switching");
             var rollbackCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Rollback,
                 AICodedbStatusState.Error,
-                "poc.28",
-                "ROLLBACK / poc.28",
+                "poc.29",
+                "ROLLBACK / poc.29",
                 "rollback");
             var installingPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Installing,
                 AICodedbStatusState.Warning,
-                "poc.27",
-                "INSTALLING / poc.27",
+                "poc.28",
+                "INSTALLING / poc.28",
                 "historical install");
 
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingCurrent, "poc.28"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingCurrent, "poc.29"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(installingCurrent.Phase), Is.EqualTo("INSTALLING"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(switchingCurrent, "poc.28"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(switchingCurrent, "poc.29"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(switchingCurrent.Phase), Is.EqualTo("SWITCHING"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(rollbackCurrent, "poc.28"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(rollbackCurrent, "poc.29"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(rollbackCurrent.Phase), Is.EqualTo("ROLLBACK"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingPrevious, "poc.28"), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingPrevious, "poc.29"), Is.False);
         }
 
         [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]
@@ -602,7 +602,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var status = AICodedbHostPayloadStatusBuilder.Build(
                 true,
                 Result(
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.RedeployRequired));
@@ -620,7 +620,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     "[ACTIVE] mcp PID 101\n" +
                     "[ACTIVE] watcher PID 202\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
@@ -640,7 +640,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Result(
                     "[ACTIVE] watcher PID 202\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
@@ -656,9 +656,9 @@ namespace Rice.AI.Codedb.Editor.Tests
             var status = AICodedbHostPayloadStatusBuilder.Build(
                 true,
                 Result(
-                    "[ACTIVE] generation poc.27 mcp PID 303\n" +
+                    "[ACTIVE] generation poc.28 mcp PID 303\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop."));
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop."));
 
             Assert.That(status.CanRedeploy, Is.True);
             Assert.That(status.ActiveMcpSessionCount, Is.EqualTo(1));

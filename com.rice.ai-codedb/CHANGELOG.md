@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.5-preview.2 - 2026-07-31
+
+- Made `Redeploy host` a complete Manager workflow for supported flat legacy
+  Hosts. Each click refreshes owner status, gracefully stops a recognized legacy
+  watcher, revalidates ownership immediately before mutation, and completes the
+  generation/config transition without asking the user to run project scripts.
+- Kept external MCP clients fail-closed and user-owned: connected MCP sessions
+  receive focused disconnect guidance and are never terminated by the Manager.
+- Advanced the immutable Host generation to `poc.29`, retained the published
+  `poc.28` closure, and extended direct/skipped upgrade coverage through
+  `v0.2.5-preview.1`.
+
 ## 0.2.5-preview.1 - 2026-07-31
 
 - Added a controlled `Redeploy host` action for byte-exact package-owned flat
