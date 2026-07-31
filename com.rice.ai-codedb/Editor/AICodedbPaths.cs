@@ -44,6 +44,7 @@ namespace Rice.AI.Codedb.Editor
         internal static string FreshnessScriptPath => GetHostPath("scripts/check-codedb-project-freshness.ps1", AICodedbProjectSettings.FreshnessScriptRelativePath);
         internal static string RefreshIfStaleScriptPath => GetHostPath("scripts/refresh-codedb-project-if-stale.ps1", AICodedbProjectSettings.RefreshIfStaleScriptRelativePath);
         internal static string WatchManageScriptPath => GetHostPath("scripts/manage-codedb-project-watch.ps1", AICodedbProjectSettings.WatchManageScriptRelativePath);
+        internal static string LegacyWatchManageScriptPath => GetProjectPath(AICodedbProjectSettings.WatchManageScriptRelativePath);
         internal static string TextAdapterBuildScriptPath => GetHostPath("scripts/build-codedb-project-text-adapter.ps1", AICodedbProjectSettings.TextAdapterBuildScriptRelativePath);
         internal static string TextAdapterProbeScriptPath => GetHostPath("scripts/probe-codedb-project-text-adapter.ps1", AICodedbProjectSettings.TextAdapterProbeScriptRelativePath);
         internal static string RegistrationDraftScriptPath => GetHostPath("scripts/emit-codedb-mcp-registration-draft.ps1", AICodedbProjectSettings.RegistrationDraftScriptRelativePath);

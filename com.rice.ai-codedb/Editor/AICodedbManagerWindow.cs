@@ -1261,27 +1261,53 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunHostPayloadRedeployWithConfirmation()
         {
-            var hostPayload = _statusSnapshot.HostPayloadStatus;
-            if (hostPayload.ActiveOwners.Length > 0)
+            var preflightResult = AICodedbActions.RunHostPayloadDryRun();
+            RefreshStatus(preflightResult);
+            if (!preflightResult.Succeeded)
             {
-                var mcpGuidance = hostPayload.LegacyMcpSessionCount > 0
-                    ? "Disconnect " + hostPayload.LegacyMcpSessionCount + " project MCP session"
-                      + (hostPayload.LegacyMcpSessionCount == 1 ? string.Empty : "s") + ", then "
-                    : string.Empty;
+                _lastResultTitle = "Host Payload Redeploy Preflight";
+                _lastResult = preflightResult;
+                GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
+                Repaint();
+                return;
+            }
+
+            var hostPayload = _statusSnapshot.HostPayloadStatus;
+            if (!hostPayload.CanRedeploy)
+            {
+                EditorUtility.DisplayDialog(
+                    "Redeploy status changed",
+                    "The Manager refreshed CodeDB status and Redeploy is no longer available. Review the updated Host status before continuing.",
+                    "OK");
+                Repaint();
+                return;
+            }
+
+            if (hostPayload.ActiveOwners.Length > 0 && !hostPayload.HasOnlyLegacyWatcherOwners)
+            {
+                var mcpGuidance = hostPayload.ActiveMcpSessionCount > 0
+                    ? "CodeDB is still connected to " + hostPayload.ActiveMcpSessionCount + " MCP client"
+                      + (hostPayload.ActiveMcpSessionCount == 1 ? string.Empty : "s")
+                      + ". Disconnect this project from those clients, then click Redeploy host again."
+                    : "CodeDB is still in use by an owner that cannot be stopped safely from the Manager. Close the connected CodeDB client, refresh status, then click Redeploy host again.";
                 EditorUtility.DisplayDialog(
                     "Redeploy host is blocked",
-                    mcpGuidance
-                    + "stop CodeDB and refresh status before redeploying. Active host owners are never terminated automatically.",
+                    mcpGuidance + " The Manager never terminates external client processes.",
                     "OK");
                 return;
             }
 
+            var stopLegacyWatcher = hostPayload.LegacyWatcherCount > 0;
+            var watcherGuidance = stopLegacyWatcher
+                ? "CodeDB is currently running. The Manager will stop the legacy watcher gracefully, replace the recognized package-owned Host files, and configure the current Host generation. "
+                : "If the legacy watcher starts before Redeploy runs, the Manager will stop it gracefully. ";
             if (!EditorUtility.DisplayDialog(
                     "Redeploy legacy CodeDB host",
-                    "Replace only byte-exact package-owned legacy Host files with the current generation and regenerate the ignored runtime config? "
+                    watcherGuidance
+                    + "Replace only byte-exact package-owned legacy Host files with the current generation and regenerate the ignored runtime config? "
                     + "The Provider executable, indexes, Shader adapter, MCP registration, business Assets, unowned files, and Git staging are preserved. "
                     + "Any drift, staged ownership path, unexpected generation state, or new active owner will stop the operation.",
-                    "Redeploy Host",
+                    stopLegacyWatcher ? "Stop and Redeploy" : "Redeploy Host",
                     "Cancel"))
             {
                 return;
@@ -1684,7 +1710,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbHostPayloadState.UpgradeReady:
                     return "The installed owned host generation can update without stopping active CodeDB sessions.";
                 case AICodedbHostPayloadState.RedeployRequired:
-                    return "Stop CodeDB and disconnect project MCP sessions, then redeploy the byte-exact legacy Host to this package generation.";
+                    return "Redeploy the recognized legacy Host. The Manager will stop its watcher safely and configure the current generation.";
                 case AICodedbHostPayloadState.Draining:
                     return "CodeDB is ready. Older sessions remain compatible on their original generation and finish naturally; no action is required.";
                 case AICodedbHostPayloadState.UpdateRequired:
@@ -1693,7 +1719,13 @@ namespace Rice.AI.Codedb.Editor
                     return "Review the reported host-file conflict before attempting Sync.";
                 case AICodedbHostPayloadState.Blocked:
                     if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
-                        return "Disconnect project MCP sessions and stop CodeDB before redeploying the legacy Host.";
+                    {
+                        if (_statusSnapshot.HostPayloadStatus.ActiveMcpSessionCount > 0)
+                            return "Disconnect this project from its MCP clients, then click Redeploy host again. The Manager will stop the legacy watcher.";
+                        if (_statusSnapshot.HostPayloadStatus.HasOnlyLegacyWatcherOwners)
+                            return "Click Redeploy host. The Manager will stop the legacy watcher and configure the current generation.";
+                        return "Close the connected CodeDB client, then click Redeploy host again.";
+                    }
                     return _statusSnapshot.HostPayloadStatus.Detail;
             }
             if (_statusSnapshot.IsReady())

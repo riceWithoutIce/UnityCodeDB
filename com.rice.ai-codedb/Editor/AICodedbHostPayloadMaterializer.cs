@@ -181,6 +181,9 @@ namespace Rice.AI.Codedb.Editor
         internal string Detail { get; }
         internal string[] ActiveOwners { get; }
         internal int LegacyMcpSessionCount { get; }
+        internal int ActiveMcpSessionCount => AICodedbHostPayloadStatusBuilder.CountActiveMcpSessions(ActiveOwners);
+        internal int LegacyWatcherCount => AICodedbHostPayloadStatusBuilder.CountLegacyWatchers(ActiveOwners);
+        internal bool HasOnlyLegacyWatcherOwners => ActiveOwners.Length > 0 && LegacyWatcherCount == ActiveOwners.Length;
         internal bool IsCurrent => State == AICodedbHostPayloadState.Current || State == AICodedbHostPayloadState.Draining;
         internal bool IsDraining => State == AICodedbHostPayloadState.Draining;
         internal bool CanUpgradeAutomatically => State == AICodedbHostPayloadState.UpgradeReady;
@@ -382,12 +385,38 @@ namespace Rice.AI.Codedb.Editor
 
         private static int CountLegacyMcpSessions(string[] activeOwners)
         {
+            return CountOwners(activeOwners, "mcp", true);
+        }
+
+        internal static int CountActiveMcpSessions(string[] activeOwners)
+        {
+            return CountOwners(activeOwners, "mcp", false);
+        }
+
+        internal static int CountLegacyWatchers(string[] activeOwners)
+        {
+            return CountOwners(activeOwners, "watcher", true);
+        }
+
+        private static int CountOwners(string[] activeOwners, string expectedKind, bool legacyOnly)
+        {
             var count = 0;
-            foreach (var owner in activeOwners)
+            foreach (var owner in activeOwners ?? Array.Empty<string>())
             {
-                var match = LegacyOwnerPattern.Match(owner);
-                if (match.Success
-                    && string.Equals(match.Groups[1].Value, "mcp", StringComparison.OrdinalIgnoreCase))
+                var legacyMatch = LegacyOwnerPattern.Match(owner ?? string.Empty);
+                if (legacyMatch.Success)
+                {
+                    if (string.Equals(legacyMatch.Groups[1].Value, expectedKind, StringComparison.OrdinalIgnoreCase))
+                        count++;
+                    continue;
+                }
+
+                if (legacyOnly)
+                    continue;
+
+                var generationMatch = GenerationOwnerPattern.Match(owner ?? string.Empty);
+                if (generationMatch.Success
+                    && string.Equals(generationMatch.Groups[2].Value, expectedKind, StringComparison.OrdinalIgnoreCase))
                     count++;
             }
             return count;

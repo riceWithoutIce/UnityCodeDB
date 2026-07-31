@@ -72,12 +72,56 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunHostPayloadRedeploy()
         {
+            AICodedbCommandResult stopResult = null;
+            var preflightResult = AICodedbHostPayloadMaterializer.RunDryRun();
+            if (!preflightResult.Succeeded)
+                return preflightResult;
+
+            var preflight = AICodedbHostPayloadStatusBuilder.Build(
+                File.Exists(AICodedbPaths.HostPayloadMarkerPath),
+                preflightResult,
+                AICodedbProjectSettings.CurrentGenerationId);
+            if (!preflight.CanRedeploy)
+            {
+                return new AICodedbCommandResult(
+                    4,
+                    preflightResult.StandardOutput,
+                    "Redeploy preflight changed. Refresh the Manager and try again.",
+                    false,
+                    preflightResult.ElapsedMilliseconds);
+            }
+
+            if (preflight.ActiveOwners.Length > 0 && !preflight.HasOnlyLegacyWatcherOwners)
+            {
+                var ownerDescription = preflight.ActiveMcpSessionCount > 0
+                    ? "Disconnect this project from its MCP clients, then try Redeploy host again."
+                    : "Close the connected CodeDB client, then try Redeploy host again.";
+                return new AICodedbCommandResult(
+                    4,
+                    preflightResult.StandardOutput,
+                    ownerDescription + " External client processes are never terminated by the Manager.",
+                    false,
+                    preflightResult.ElapsedMilliseconds);
+            }
+
+            if (preflight.LegacyWatcherCount > 0)
+            {
+                stopResult = RunScript(
+                    "Codedb Stop Legacy Watcher",
+                    AICodedbPaths.LegacyWatchManageScriptPath,
+                    0,
+                    BuildWatcherScriptArguments("Stop"));
+                if (!stopResult.Succeeded)
+                    return stopResult;
+            }
+
             var redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy();
             if (!redeployResult.Succeeded)
-                return redeployResult;
+                return stopResult == null ? redeployResult : CombineResults(stopResult, redeployResult);
 
             var configResult = RunRegenerateRuntimeConfig();
-            return CombineResults(redeployResult, configResult);
+            var result = CombineResults(redeployResult, configResult);
+            return stopResult == null ? result : CombineResults(stopResult, result);
         }
 
         /// <summary>

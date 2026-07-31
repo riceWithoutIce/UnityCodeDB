@@ -626,7 +626,44 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
             Assert.That(status.CanRedeploy, Is.True);
             Assert.That(status.LegacyMcpSessionCount, Is.EqualTo(1));
+            Assert.That(status.ActiveMcpSessionCount, Is.EqualTo(1));
+            Assert.That(status.LegacyWatcherCount, Is.EqualTo(1));
+            Assert.That(status.HasOnlyLegacyWatcherOwners, Is.False);
             Assert.That(status.ActiveOwners.Length, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void Build_AllowsRedeployFlowToStopRecognizedLegacyWatcherOwner()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[ACTIVE] watcher PID 202\n" +
+                    "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop.\n" +
+                    "[STALE] Host payload requires a controlled legacy redeploy."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
+            Assert.That(status.CanRedeploy, Is.True);
+            Assert.That(status.ActiveMcpSessionCount, Is.Zero);
+            Assert.That(status.LegacyWatcherCount, Is.EqualTo(1));
+            Assert.That(status.HasOnlyLegacyWatcherOwners, Is.True);
+        }
+
+        [Test]
+        public void Build_GenerationMcpOwnerRemainsExternalRedeployBlocker()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[ACTIVE] generation poc.27 mcp PID 303\n" +
+                    "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.28 after MCP and watcher owners stop."));
+
+            Assert.That(status.CanRedeploy, Is.True);
+            Assert.That(status.ActiveMcpSessionCount, Is.EqualTo(1));
+            Assert.That(status.LegacyWatcherCount, Is.Zero);
+            Assert.That(status.HasOnlyLegacyWatcherOwners, Is.False);
         }
 
         [Test]
