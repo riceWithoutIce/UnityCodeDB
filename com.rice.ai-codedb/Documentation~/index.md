@@ -32,8 +32,9 @@ The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
 marked passed; they remain in the
-[v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues in the
-[v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
+[v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues
+in the [v0.3.0 bounded Discover Read and task-aware invocation
+expansion](v0.3.0-roadmap.md).
 
 ## Supported Environment
 
@@ -141,6 +142,30 @@ The package does not generate, persist, infer, or delete that authorization.
   merged by file/range, deduplicated, and then subject to one global limit.
 - `codedb_context` uses those same unified hits and wrapper-local bounded reads,
   so context cannot bypass scope, deduplication, read, or output limits.
+
+## Task-Aware Invocation Direction
+
+The current package keeps CodeDB fresh and queryable, but a Ready wrapper does
+not make an MCP client call it. Automatic refresh and task-level invocation are
+separate contracts.
+
+The approved v0.3 direction adds a managed-client decision gate before current
+project source is used as task evidence:
+
+- implementation, diagnosis, code review, architecture review, code-backed
+  documentation, dependency analysis, and Shader/HLSL work should preflight
+  CodeDB and collect targeted search, navigation, or bounded-read evidence;
+- release, Git, asset, scene, configuration, and planning work should invoke it
+  only when implementation evidence can affect the result;
+- pure rewriting, translation, and general conversation should skip it;
+- every project task should record a use or stable skip/fallback reason, and a
+  status-only call does not count as source evidence.
+
+Coding versus non-coding is not the decision boundary. Source dependency is.
+The managed client owns task classification and skip telemetry; the package
+continues to own read-only project policy, freshness, bounded queries, and
+explicit result semantics. See the
+[v0.3.0 roadmap](v0.3.0-roadmap.md) for the acceptance corpus and release gates.
 
 Host-only lifecycle acceptance code is not part of the package. The package
 assembly remains independent, with an optional friend-assembly declaration for
