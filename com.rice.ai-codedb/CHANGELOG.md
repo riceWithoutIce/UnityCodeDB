@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.5-preview.4 - 2026-08-13
+
+- Fixed `Repair CodeDB` MCP registration merge for standards-compliant target
+  descendant tables such as `[mcp_servers.<project>.tools.<tool>]`, including
+  parent-first, child-first, and child-only declarations.
+- Limited CodeDB ownership to the target server table's direct `command`,
+  `cwd`, `args`, and `startup_timeout_sec` keys. Custom direct keys and
+  descendant tables remain byte-preserved with comments, order, BOM, and line
+  endings, while real target or managed-key namespace conflicts still fail
+  closed without Host or MCP configuration writes.
+- Reused the published immutable `0.2.5-preview.3` / `poc.30` Host closure.
+  Preview.4 changes Package-owned materializer behavior and UPM metadata only;
+  it does not fabricate a new Host generation or rewrite published hashes.
+
 ## 0.2.5-preview.3 - 2026-08-13
 
 - Split tracked project adoption from ignored Host runtime ownership with a

@@ -33,6 +33,10 @@ adoption from ignored runtime ownership, reconstructs absent or valid previous
 runtime automatically, gates Host commands on a validated generation, and adds
 one confirmed `Repair CodeDB` action for Host plus project MCP recovery. Package
 behavior no longer depends on project version control or installation source.
+The `0.2.5-preview.4` validation candidate reuses that immutable `poc.30` Host
+closure and fixes Package-owned MCP merge compatibility: CodeDB rewrites only
+the target table's four managed direct keys while preserving custom direct keys
+and legal descendant tables such as `tools.*`.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -58,7 +62,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.4"
   }
 }
 ```
@@ -120,10 +124,13 @@ No authorization document or version-control state is required.
   generated watch-enabled config and the Shader/HLSL adapter lifecycle.
 - Provider watch and the Shader/HLSL adapter have separate ownership.
 - Generated indexes, provider binaries, logs, and watcher state remain ignored.
-- `Repair CodeDB` updates only the current project's MCP server table, preserving
-  unrelated TOML content and publishing a recoverable backup. It refuses
-  invalid, duplicate, or ambiguous configuration without writes and never
-  edits global client configuration.
+- `Repair CodeDB` updates only `command`, `cwd`, `args`, and
+  `startup_timeout_sec` directly in the current project's MCP server table.
+  Custom direct keys, legal descendant tables such as `tools.*`, and unrelated
+  TOML remain byte-preserved, with a recoverable pre-image backup. Invalid,
+  duplicate, incompatible, scalar, array-table, and managed-key namespace
+  conflicts are refused without writes; global client configuration is never
+  edited.
 - DryRun, automatic Upgrade, Repair, Verify, advanced Sync, and Remove neither
   inspect nor invoke a version-control system. Unity's resolved Package path is
   read-only input for cached, local, embedded, and registry-backed installs.

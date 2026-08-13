@@ -6,3 +6,4 @@ Payload~/**/codedbignore.example text eol=lf
 Tools~/**/*.ps1 text eol=lf
 Tools~/**/*.mjs text eol=lf
 Tests~/**/*.ps1 text eol=lf
+Tests~/**/*.toml text eol=lf

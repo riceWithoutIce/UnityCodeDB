@@ -60,6 +60,8 @@ $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
+$expectedUpmPackageVersion = "0.2.5-preview.4"
+$expectedHostCompatibilityPackageVersion = "0.2.5-preview.3"
 
 $expectedTopLevel = @(
     ".gitattributes",
@@ -87,10 +89,16 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.5-preview.3" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected $expectedUpmPackageVersion -Label "UPM Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
-Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
-Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
+Assert-Equal `
+    -Actual $packageManifest.documentationUrl `
+    -Expected "https://github.com/riceWithoutIce/UnityCodeDB/tree/v$expectedUpmPackageVersion/com.rice.ai-codedb#readme" `
+    -Label "Package documentation URL"
+Assert-Equal `
+    -Actual $packageManifest.changelogUrl `
+    -Expected "https://github.com/riceWithoutIce/UnityCodeDB/blob/v$expectedUpmPackageVersion/com.rice.ai-codedb/CHANGELOG.md" `
+    -Label "Package changelog URL"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.licensesUrl)) -Message "Package licensesUrl is missing."
 
 $forbiddenBinaryExtensions = @(".7z", ".dll", ".exe", ".gz", ".pdb", ".tar", ".zip")
@@ -111,12 +119,27 @@ foreach ($file in $textFiles) {
     }
 
     $content = [System.IO.File]::ReadAllText($file.FullName)
+    $relativeFilePath = Get-RelativePath -Root $packageRoot -Path $file.FullName
     if ($content -match '(?i)\bbalance\b|codedb-balance') {
-        throw "Package contains a host-specific identifier: $(Get-RelativePath -Root $packageRoot -Path $file.FullName)"
+        $isReviewedDefectEvidence = [string]::Equals(
+            $relativeFilePath,
+            "Documentation~/v0.2.5-roadmap.md",
+            [StringComparison]::Ordinal)
+        $evidenceMatches = [regex]::Matches($content, 'codedb-balance', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $remainingContent = [regex]::Replace(
+            $content,
+            'codedb-balance',
+            '',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if (-not $isReviewedDefectEvidence -or
+            $evidenceMatches.Count -ne 4 -or
+            $remainingContent -match '(?i)\bbalance\b') {
+            throw "Package contains a host-specific identifier: $relativeFilePath"
+        }
     }
 
     if ($content -match '(?im)(^|[^A-Za-z0-9+.-])[A-Z]:[\\/]') {
-        throw "Package contains a machine-local absolute path: $(Get-RelativePath -Root $packageRoot -Path $file.FullName)"
+        throw "Package contains a machine-local absolute path: $relativeFilePath"
     }
 }
 
@@ -209,7 +232,16 @@ Assert-True -Condition ($thirdPartyNotices.IndexOf("https://streamlinehq.com", [
 $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
-Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
+Assert-Equal `
+    -Actual $payloadManifest.package_version `
+    -Expected $expectedHostCompatibilityPackageVersion `
+    -Label "Payload Host compatibility package version"
+Assert-True `
+    -Condition (-not [string]::Equals(
+        [string]$packageManifest.version,
+        [string]$payloadManifest.package_version,
+        [StringComparison]::Ordinal)) `
+    -Message "Preview.4 must keep UPM metadata separate from the immutable preview.3/poc.30 Host identity."
 Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.30" -Label "Payload version"
 Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 30 -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.30" -Label "Payload generation"
@@ -383,10 +415,19 @@ foreach ($requiredRule in @(
     "Payload~/**/*.json text eol=lf",
     "Tools~/**/*.ps1 text eol=lf",
     "Tools~/**/*.mjs text eol=lf",
-    "Tests~/**/*.ps1 text eol=lf"
+    "Tests~/**/*.ps1 text eol=lf",
+    "Tests~/**/*.toml text eol=lf"
 )) {
     Assert-True -Condition ($packageAttributes.IndexOf($requiredRule, [StringComparison]::Ordinal) -ge 0) -Message "Missing package EOL rule: $requiredRule"
 }
+
+$projectSettingsSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbProjectSettings.cs"))
+Assert-Equal `
+    -Actual ([regex]::Matches(
+        $projectSettingsSource,
+        'internal const string CurrentPackageVersion = "0\.2\.5-preview\.3";').Count) `
+    -Expected 1 `
+    -Label "Editor Host compatibility identity"
 
 $legacyStopClientPath = Join-Path $packageRoot "Tools~\stop-codedb-legacy-watcher.mjs"
 Assert-True -Condition (Test-Path -LiteralPath $legacyStopClientPath -PathType Leaf) -Message "Package-owned legacy watcher Stop client is missing."

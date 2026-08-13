@@ -8,15 +8,17 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The `0.2.5-preview.3` / `poc.30` validation
-prerelease targets Unity `2022.3` on Windows; stable remains `0.2.4`.
+and bounded MCP discovery surface. The `0.2.5-preview.4` validation prerelease
+candidate targets Unity `2022.3` on Windows and reuses the immutable
+`0.2.5-preview.3` / `poc.30` Host closure; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.4`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The `0.2.5-preview.3` package keeps a tracked stable wrapper and byte-exact
-v0.2.2 compatibility files under `AIWork/codedb/`, then materializes immutable
+The `0.2.5-preview.4` Package keeps the published preview.3 Host compatibility
+identity, a tracked stable wrapper, and byte-exact v0.2.2 compatibility files
+under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
 `AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
 active generation. Generated provider binaries, configs, indexes, logs,
@@ -77,10 +79,13 @@ unrelated project content.
 `Repair CodeDB` is the end-user recovery path. One confirmation runs the
 Package-owned preflight, bounded Host reconstruction or quarantine, pointer and
 rollback repair, watcher handoff, policy preservation, project MCP registration
-merge, and verification. It changes only `[mcp_servers.<project-slug>]`, keeps
-unrelated TOML content and line endings, and creates a recoverable backup before
-rewriting an existing config. Invalid TOML, duplicate or ambiguous target
-tables, path escapes, unknown Host content, and managed drift fail closed.
+merge, and verification. It changes only the direct `command`, `cwd`, `args`,
+and `startup_timeout_sec` keys in `[mcp_servers.<project-slug>]`. Other direct
+keys and descendant tables such as `tools.*` remain byte-preserved together
+with unrelated TOML content and line endings, and Repair creates a recoverable
+backup before rewriting an existing config. Invalid TOML, duplicate or
+incompatible target declarations, target array tables, managed-key namespace
+conflicts, path escapes, unknown Host content, and managed drift fail closed.
 Results are `REPAIRED`, `PARTIALLY_REPAIRED`, or `BLOCKED`; a repaired
 registration applies to new client sessions and does not claim hot reload.
 Retaining a valid non-conflicting MCP generation is still `REPAIRED` and does
@@ -176,6 +181,11 @@ project MCP merge/refusal, identical action outcomes with no VCS metadata or
 Git/SVN metadata, zero VCS command invocation, and cached/local/embedded
 read-only Package layouts. Local Unity EditMode and Manager UI acceptance passed;
 third-party Package-only acceptance for preview.3 remains a separate release gate.
+The `0.2.5-preview.4` compatibility matrix adds parent-first, child-first, and
+child-only MCP target descendants, custom direct keys, a sanitized third-party
+tool-policy fixture, byte-exact backup and unrelated-content preservation,
+idempotency, and zero-write namespace-conflict refusals. Real local Unity
+Repair and resumed third-party Package-only acceptance remain separate gates.
 An earlier representative third-party project passed no-click upgrade,
 same-transport Editor restart,
 manual lifecycle controls, Domain Reload, Play Mode, normal-permission queries,

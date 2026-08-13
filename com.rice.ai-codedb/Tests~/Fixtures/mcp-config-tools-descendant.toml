@@ -1,0 +1,13 @@
+# Sanitized third-party configuration that exposed the preview.3 merge defect.
+[mcp_servers.__TARGET_SERVER__]
+command = "node"
+args = ["AIWork/codedb/wrapper/__TARGET_WRAPPER__", "--root", "."]
+startup_timeout_sec = 120
+custom_transport = "keep"
+
+# Tool policy remains client-owned.
+[mcp_servers.__TARGET_SERVER__.tools.codedb_text_search]
+approval_mode = "approve"
+
+[mcp_servers.unrelated]
+command = "unrelated.exe"

@@ -4,6 +4,8 @@
 param(
     [switch]$RepairOnly,
 
+    [switch]$McpConfigOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -12,8 +14,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpConfigOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpConfigOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -2716,17 +2718,21 @@ function Install-PriorGenerationFixture {
 }
 
 function Reset-RepairFixture {
-    if (Test-Path -LiteralPath $repairHostRoot) {
-        Remove-Item -LiteralPath $repairHostRoot -Recurse -Force
+    param([string]$Root = $repairHostRoot)
+
+    if (Test-Path -LiteralPath $Root) {
+        Remove-Item -LiteralPath $Root -Recurse -Force
     }
-    New-TestHost -Root $repairHostRoot
+    New-TestHost -Root $Root
 }
 
 function Install-CurrentTrackedAdoptionFixture {
-    Reset-RepairFixture
+    param([string]$Root = $repairHostRoot)
+
+    Reset-RepairFixture -Root $Root
     foreach ($relativePath in $legacyManagedTargets) {
         $source = Get-CanonicalPayloadSourcePath -TargetRelativePath $relativePath
-        $target = Get-PathFromRelative -Root $repairHostRoot -RelativePath $relativePath
+        $target = Get-PathFromRelative -Root $Root -RelativePath $relativePath
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
         Copy-Item -LiteralPath $source -Destination $target -Force
     }
@@ -2778,7 +2784,7 @@ function Install-CurrentTrackedAdoptionFixture {
         files = $markerFiles
     }
     $markerJson = ($marker | ConvertTo-Json -Depth 8).Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd([char]10) + "`n"
-    Write-Utf8File -Path (Get-PathFromRelative -Root $repairHostRoot -RelativePath $markerRelativePath) -Content $markerJson
+    Write-Utf8File -Path (Get-PathFromRelative -Root $Root -RelativePath $markerRelativePath) -Content $markerJson
 }
 
 function Get-ByteSnapshot {
@@ -2811,6 +2817,260 @@ function Assert-RepairBlockedWithoutWrites {
     Assert-True -Condition ($blocked.Text.Contains("[RESULT] BLOCKED")) -Message "$Label did not report BLOCKED."
     Assert-True -Condition ($blocked.Text.Contains($ExpectedText)) -Message "$Label did not report '$ExpectedText'.`n$($blocked.Text)"
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $before -Message "$Label changed the fixture."
+}
+
+function Invoke-McpConfigCompatibilityScenarios {
+    $configPath = Join-Path $repairHostRoot ".codex\config.toml"
+    $backupRoot = Join-Path $repairHostRoot "AIWork\.runtime\codedb\payload-materializer\mcp-config-backups"
+    $targetTable = "mcp_servers.codedb-repair-fixture"
+    $targetHeader = "[$targetTable]"
+
+    function Reset-McpConfigCase {
+        if (Test-Path -LiteralPath $configPath) {
+            Remove-Item -LiteralPath $configPath -Force
+        }
+        if (Test-Path -LiteralPath $backupRoot) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        }
+    }
+
+    function Assert-McpConfigRepair {
+        param(
+            [Parameter(Mandatory = $true)][byte[]]$OriginalBytes,
+            [Parameter(Mandatory = $true)][string]$Label,
+            [Parameter(Mandatory = $true)][string[]]$PreservedFragments,
+            [switch]$ExpectBom,
+            [switch]$ExpectCrLf
+        )
+
+        Reset-McpConfigCase
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath) | Out-Null
+        [System.IO.File]::WriteAllBytes($configPath, $OriginalBytes)
+        $originalHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+        $repair = Invoke-Materializer `
+            -Action "Repair" `
+            -PayloadRoot $canonicalPayloadRoot `
+            -TargetProjectRoot $repairHostRoot
+        Assert-Result -Result $repair -ExitCode 0 -Label $Label
+        Assert-True -Condition ($repair.Text.Contains("[RESULT] REPAIRED")) -Message "$Label did not report REPAIRED."
+
+        $repairedBytes = [System.IO.File]::ReadAllBytes($configPath)
+        $offset = if ($ExpectBom) { 3 } else { 0 }
+        if ($ExpectBom) {
+            Assert-True `
+                -Condition ($repairedBytes.Length -ge 3 -and $repairedBytes[0] -eq 0xEF -and $repairedBytes[1] -eq 0xBB -and $repairedBytes[2] -eq 0xBF) `
+                -Message "$Label did not preserve the UTF-8 BOM."
+        }
+        $repairedText = [System.Text.UTF8Encoding]::new($false, $true).GetString(
+            $repairedBytes,
+            $offset,
+            $repairedBytes.Length - $offset)
+        if ($ExpectCrLf) {
+            Assert-True -Condition ($repairedText.Contains("`r`n")) -Message "$Label did not preserve CRLF."
+            Assert-True -Condition (-not $repairedText.Replace("`r`n", "").Contains("`n")) -Message "$Label introduced mixed line endings."
+        }
+        foreach ($fragment in $PreservedFragments) {
+            Assert-True -Condition ($repairedText.Contains($fragment)) -Message "$Label did not byte-preserve '$fragment'."
+        }
+        foreach ($managedLine in @(
+            'command = "node"',
+            'cwd = "."',
+            'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
+            'startup_timeout_sec = 120'
+        )) {
+            Assert-True -Condition ($repairedText.Contains($managedLine)) -Message "$Label did not publish '$managedLine'."
+        }
+        Assert-Equal `
+            -Actual ([regex]::Matches($repairedText, '(?m)^\[mcp_servers\.codedb-repair-fixture\]\s*(?:#.*)?$').Count) `
+            -Expected 1 `
+            -Message "$Label did not leave exactly one target parent table."
+        $backups = @(Get-ChildItem -LiteralPath $backupRoot -Force -File)
+        Assert-Equal -Actual $backups.Count -Expected 1 -Message "$Label did not create exactly one replacement-time backup."
+        Assert-Equal `
+            -Actual (Get-FileHash -LiteralPath $backups[0].FullName -Algorithm SHA256).Hash `
+            -Expected $originalHash `
+            -Message "$Label backup is not the byte-exact pre-image."
+
+        $afterFirstRepair = Get-FileSnapshot -Root $repairHostRoot
+        $repeat = Invoke-Materializer `
+            -Action "Repair" `
+            -PayloadRoot $canonicalPayloadRoot `
+            -TargetProjectRoot $repairHostRoot
+        Assert-Result -Result $repeat -ExitCode 0 -Label "Repeated $Label"
+        Assert-True -Condition ($repeat.Text.Contains("[PHASE MCP_REGISTRATION] CURRENT")) -Message "Repeated $Label did not report CURRENT."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $afterFirstRepair -Message "Repeated $Label was not byte-exactly idempotent."
+    }
+
+    function Assert-McpConfigBlocked {
+        param(
+            [Parameter(Mandatory = $true)][string]$Content,
+            [Parameter(Mandatory = $true)][string]$ExpectedText,
+            [Parameter(Mandatory = $true)][string]$Label
+        )
+
+        Reset-McpConfigCase
+        Write-Utf8File -Path $configPath -Content $Content
+        $before = Get-FileSnapshot -Root $repairHostRoot
+        $blocked = Invoke-Materializer `
+            -Action "Repair" `
+            -PayloadRoot $canonicalPayloadRoot `
+            -TargetProjectRoot $repairHostRoot
+        Assert-True -Condition ($blocked.ExitCode -ne 0) -Message "$Label unexpectedly succeeded."
+        Assert-True -Condition ($blocked.Text.Contains("[RESULT] BLOCKED")) -Message "$Label did not report BLOCKED."
+        Assert-True -Condition ($blocked.Text.Contains($ExpectedText)) -Message "$Label did not report '$ExpectedText'.`n$($blocked.Text)"
+        Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $before -Message "$Label changed Host, config, backup, or control-state bytes."
+    }
+
+    Install-CurrentTrackedAdoptionFixture
+    $bootstrap = Invoke-Materializer `
+        -Action "Repair" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TargetProjectRoot $repairHostRoot
+    Assert-Result -Result $bootstrap -ExitCode 0 -Label "MCP compatibility fixture bootstrap"
+    Reset-McpConfigCase
+
+    $parentFirstBody = @(
+        "# parent-first prefix",
+        "$targetHeader # target parent",
+        'custom_transport = "keep-parent" # custom direct key',
+        'command = "old-node" # managed comment',
+        'startup_timeout_sec = 9',
+        "",
+        "# client-owned tool policy",
+        "[$targetTable.tools.codedb_text_search]",
+        'approval_mode = "approve" # keep tool comment',
+        "",
+        "[mcp_servers.unrelated]",
+        'command = "unrelated.exe"',
+        ""
+    ) -join "`r`n"
+    $parentFirstUtf8 = [System.Text.UTF8Encoding]::new($false).GetBytes($parentFirstBody)
+    $parentFirstBytes = New-Object byte[] (3 + $parentFirstUtf8.Length)
+    $parentFirstBytes[0] = 0xEF
+    $parentFirstBytes[1] = 0xBB
+    $parentFirstBytes[2] = 0xBF
+    [Array]::Copy($parentFirstUtf8, 0, $parentFirstBytes, 3, $parentFirstUtf8.Length)
+    Assert-McpConfigRepair `
+        -OriginalBytes $parentFirstBytes `
+        -Label "Parent-first target descendant Repair" `
+        -ExpectBom `
+        -ExpectCrLf `
+        -PreservedFragments @(
+            'custom_transport = "keep-parent" # custom direct key',
+            "# client-owned tool policy`r`n[$targetTable.tools.codedb_text_search]`r`napproval_mode = `"approve`" # keep tool comment",
+            "[mcp_servers.unrelated]`r`ncommand = `"unrelated.exe`""
+        )
+
+    $childFirst = @"
+# child-first prefix
+[$targetTable.tools.codedb_text_search]
+approval_mode = "approve-child-first"
+
+$targetHeader # parent follows child
+custom_direct = "keep-child-first"
+command = "stale-node"
+"@
+    Assert-McpConfigRepair `
+        -OriginalBytes ([System.Text.UTF8Encoding]::new($false).GetBytes($childFirst)) `
+        -Label "Child-first target descendant Repair" `
+        -PreservedFragments @(
+            "# child-first prefix`n[$targetTable.tools.codedb_text_search]`napproval_mode = `"approve-child-first`"",
+            'custom_direct = "keep-child-first"',
+            "$targetHeader # parent follows child"
+        )
+
+    $childOnly = @"
+# child-only prefix
+[$targetTable.tools.codedb_text_search]
+approval_mode = "approve-child-only"
+
+[mcp_servers.unrelated]
+command = "keep-unrelated"
+"@
+    Assert-McpConfigRepair `
+        -OriginalBytes ([System.Text.UTF8Encoding]::new($false).GetBytes($childOnly)) `
+        -Label "Child-only target descendant Repair" `
+        -PreservedFragments @(
+            "# child-only prefix`n[$targetTable.tools.codedb_text_search]`napproval_mode = `"approve-child-only`"",
+            "[mcp_servers.unrelated]`ncommand = `"keep-unrelated`""
+        )
+
+    Install-CurrentTrackedAdoptionFixture
+    $thirdPartyConfigPath = $configPath
+    $thirdPartyBackupRoot = $backupRoot
+    $thirdPartyServer = "codedb-repair-fixture"
+    $thirdPartyFixturePath = Join-Path $packageRoot "Tests~\Fixtures\mcp-config-tools-descendant.toml"
+    $thirdPartyContent = [System.IO.File]::ReadAllText($thirdPartyFixturePath).
+        Replace('__TARGET_SERVER__', $thirdPartyServer).
+        Replace('__TARGET_WRAPPER__', "$thirdPartyServer-wrapper.mjs")
+    Write-Utf8File -Path $thirdPartyConfigPath -Content $thirdPartyContent
+    $thirdPartyOriginalHash = (Get-FileHash -LiteralPath $thirdPartyConfigPath -Algorithm SHA256).Hash
+    $thirdPartyRepair = Invoke-Materializer `
+        -Action "Repair" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TargetProjectRoot $repairHostRoot
+    Assert-Result -Result $thirdPartyRepair -ExitCode 0 -Label "Sanitized third-party tool configuration Repair"
+    $thirdPartyAfter = [System.IO.File]::ReadAllText($thirdPartyConfigPath)
+    foreach ($fragment in @(
+        "[mcp_servers.$thirdPartyServer.tools.codedb_text_search]`napproval_mode = `"approve`"",
+        'custom_transport = "keep"',
+        "[mcp_servers.unrelated]`ncommand = `"unrelated.exe`""
+    )) {
+        Assert-True -Condition ($thirdPartyAfter.Contains($fragment)) -Message "Sanitized third-party Repair did not preserve '$fragment'."
+    }
+    foreach ($managedLine in @(
+        'command = "node"',
+        'cwd = "."',
+        'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
+        'startup_timeout_sec = 120'
+    )) {
+        Assert-True -Condition ($thirdPartyAfter.Contains($managedLine)) -Message "Sanitized third-party Repair did not publish '$managedLine'."
+    }
+    $thirdPartyBackups = @(Get-ChildItem -LiteralPath $thirdPartyBackupRoot -Force -File)
+    Assert-Equal -Actual $thirdPartyBackups.Count -Expected 1 -Message "Sanitized third-party Repair did not create one backup."
+    Assert-Equal `
+        -Actual (Get-FileHash -LiteralPath $thirdPartyBackups[0].FullName -Algorithm SHA256).Hash `
+        -Expected $thirdPartyOriginalHash `
+        -Message "Sanitized third-party backup is not byte-exact."
+    $thirdPartySnapshot = Get-FileSnapshot -Root $repairHostRoot
+    $thirdPartyRepeat = Invoke-Materializer -Action "Repair" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
+    Assert-Result -Result $thirdPartyRepeat -ExitCode 0 -Label "Repeated sanitized third-party tool configuration Repair"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $thirdPartySnapshot -Message "Repeated sanitized third-party Repair was not idempotent."
+
+    Assert-McpConfigBlocked `
+        -Content "[mcp_servers.alpha]`ncommand = unquoted-command`n" `
+        -ExpectedText "unsupported or invalid bare TOML value" `
+        -Label "Focused invalid TOML refusal"
+    Assert-McpConfigBlocked `
+        -Content "$targetHeader`ncommand = `"node`"`n`n$targetHeader`ncommand = `"node`"`n" `
+        -ExpectedText "duplicate table" `
+        -Label "Focused duplicate target refusal"
+    Assert-McpConfigBlocked `
+        -Content 'mcp_servers.codedb-repair-fixture = "occupied"' `
+        -ExpectedText "ambiguous dotted-key collision" `
+        -Label "Focused target scalar refusal"
+    Assert-McpConfigBlocked `
+        -Content "[mcp_servers]`ncodedb-repair-fixture = { command = `"node`" }`n" `
+        -ExpectedText "ambiguous dotted-key collision" `
+        -Label "Focused incompatible inline target refusal"
+    Assert-McpConfigBlocked `
+        -Content "[[$targetTable]]`ncommand = `"node`"`n" `
+        -ExpectedText "ambiguous target array table" `
+        -Label "Focused target array-table refusal"
+    Assert-McpConfigBlocked `
+        -Content "[$targetTable.command]`nformat = `"managed-key-table`"`n" `
+        -ExpectedText "table namespace collision with managed key $targetTable.command" `
+        -Label "Focused managed command table refusal"
+    Assert-McpConfigBlocked `
+        -Content "[[$targetTable.args]]`nvalue = `"managed-key-array`"`n" `
+        -ExpectedText "table namespace collision with managed key $targetTable.args" `
+        -Label "Focused managed args array-table refusal"
+    Assert-McpConfigBlocked `
+        -Content "$targetHeader`nstartup_timeout_sec.value = 120`n" `
+        -ExpectedText "ambiguous target key collision" `
+        -Label "Focused managed dotted-key refusal"
+
+    Write-Host "[OK] MCP config compatibility preserved legal parent-first, child-first, child-only, custom-key, and tool-table configuration while retaining fail-closed namespace checks."
 }
 
 function Invoke-RepairAcceptanceScenarios {
@@ -3894,9 +4154,9 @@ command = "keep.exe"
         -ExpectedText "ambiguous dotted-key collision" `
         -Label "Ambiguous dotted target Repair refusal"
     Assert-RepairBlockedWithoutWrites `
-        -ConfigContent "[mcp_servers.codedb-repair-fixture.child]`nenabled = true`n" `
-        -ExpectedText "ambiguous dotted-key collision" `
-        -Label "Ambiguous child target Repair refusal"
+        -ConfigContent "[mcp_servers.codedb-repair-fixture.command]`nformat = `"table`"`n" `
+        -ExpectedText "table namespace collision with managed key" `
+        -Label "Managed target key table Repair refusal"
     Assert-RepairBlockedWithoutWrites `
         -ConfigContent "[[$($targetHeader.Trim('[', ']'))]]`ncommand = `"node`"`n" `
         -ExpectedText "ambiguous target array table" `
@@ -4323,6 +4583,8 @@ x_binary_max = 0b111111111111111111111111111111111111111111111111111111111111111
     Assert-Result -Result $mcpRetry -ExitCode 0 -Label "Repair MCP partial retry"
     Assert-True -Condition ($mcpRetry.Text.Contains("[RESULT] REPAIRED")) -Message "MCP partial retry did not converge."
     Write-Host "[OK] Watcher and MCP phase faults reported one partial result and converged on one Repair retry."
+
+    Invoke-McpConfigCompatibilityScenarios
 }
 
 function Install-LegacyPoc21Fixture {
@@ -4799,6 +5061,14 @@ try {
     Remove-Item -LiteralPath (Join-Path $productionProjectRoot $fixtureMarkerName) -Force
     $packageSnapshotBefore = Get-FileSnapshot -Root $packageRoot
     $sentinelSnapshot = Get-SentinelSnapshot
+
+    if ($McpConfigOnly) {
+        Invoke-McpConfigCompatibilityScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused MCP config acceptance modified package source files."
+        Write-Host "[OK] Focused MCP config compatibility scenarios passed."
+        $fixturePassed = $true
+        return
+    }
 
     if (-not $TransactionOnly) {
         if (-not $PortabilityOnly) {

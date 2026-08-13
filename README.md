@@ -22,7 +22,7 @@ project's ignored runtime instead of sharing state across projects.
 
 - Package name: `com.rice.ai-codedb`
 - Latest stable release: `v0.2.4`
-- Latest validation prerelease: `v0.2.5-preview.3` / `poc.30`
+- Latest validation prerelease candidate: `v0.2.5-preview.4` / `poc.30`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -34,7 +34,7 @@ project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.4"
   }
 }
 ```
@@ -59,8 +59,10 @@ vendor its source or redistribute its binary.
 2. Open `Tools/Rice AI/Codedb/Manager` to inspect project status.
 3. If recovery is needed, click `Repair CodeDB` and confirm its exact
    project-local scope. That one action repairs the Host runtime and only the
-   current project's MCP server section; it does not require an authorization
-   file, copied registration snippet, or manual TOML edit.
+   four CodeDB-managed direct keys in the current project's MCP server table.
+   Custom direct keys and descendant tables such as `tools.*` are preserved;
+   the action does not require an authorization file, copied registration
+   snippet, or manual TOML edit.
 4. Provide the separately acquired external provider when the Setup view asks
    for it.
 5. If Setup reports `REDEPLOY_REQUIRED`, stop CodeDB, disconnect project MCP
@@ -124,6 +126,7 @@ development, select the materializer slice that matches the changed behavior:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -McpConfigOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -RepairOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -TransactionOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -PortabilityOnly

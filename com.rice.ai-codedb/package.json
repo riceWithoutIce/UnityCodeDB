@@ -1,11 +1,11 @@
 {
   "name": "com.rice.ai-codedb",
-  "version": "0.2.5-preview.3",
+  "version": "0.2.5-preview.4",
   "displayName": "Rice AI CodeDB",
   "description": "Editor tooling for project-local CodeDB automatic refresh, shared queries, and bounded Discover Read workflows.",
   "unity": "2022.3",
-  "documentationUrl": "https://github.com/riceWithoutIce/UnityCodeDB/tree/v0.2.5-preview.3/com.rice.ai-codedb#readme",
-  "changelogUrl": "https://github.com/riceWithoutIce/UnityCodeDB/blob/v0.2.5-preview.3/com.rice.ai-codedb/CHANGELOG.md",
+  "documentationUrl": "https://github.com/riceWithoutIce/UnityCodeDB/tree/v0.2.5-preview.4/com.rice.ai-codedb#readme",
+  "changelogUrl": "https://github.com/riceWithoutIce/UnityCodeDB/blob/v0.2.5-preview.4/com.rice.ai-codedb/CHANGELOG.md",
   "licensesUrl": "https://github.com/riceWithoutIce/UnityCodeDB/blob/main/LICENSE",
   "keywords": [
     "ai",

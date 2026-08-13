@@ -3304,13 +3304,16 @@ function Get-RepairMcpConfigPlan {
             -not $valuePaths.Add($namespaceKey)) {
             throw "Project MCP config contains a duplicate key or key/table namespace collision at $absoluteKey."
         }
-        if (-not [string]::Equals($currentTable, $targetTable, [StringComparison]::Ordinal) -and
+        $isTargetTableScope = [string]::Equals($currentTable, $targetTable, [StringComparison]::Ordinal)
+        $isTargetDescendantScope = $currentTable.StartsWith($targetTable + '.', [StringComparison]::Ordinal)
+        if (-not $isTargetTableScope -and
+            -not $isTargetDescendantScope -and
             ([string]::Equals($absoluteKey, $targetTable, [StringComparison]::Ordinal) -or
              $absoluteKey.StartsWith($targetTable + '.', [StringComparison]::Ordinal) -or
              $targetTable.StartsWith($absoluteKey + '.', [StringComparison]::Ordinal))) {
             throw "Project MCP config contains an ambiguous dotted-key collision for $targetTable."
         }
-        if ([string]::Equals($currentTable, $targetTable, [StringComparison]::Ordinal)) {
+        if ($isTargetTableScope) {
             foreach ($desiredKey in $desiredValues.Keys) {
                 if ([string]::Equals($key, $desiredKey, [StringComparison]::Ordinal)) {
                     $targetAssignments.Add($key, [pscustomobject]@{
@@ -3336,11 +3339,15 @@ function Get-RepairMcpConfigPlan {
         throw "Project MCP config contains an ambiguous target array table: [[$targetTable]]"
     }
     foreach ($table in $tables) {
-        if ($table.Name.StartsWith($targetTable + '.', [StringComparison]::Ordinal)) {
-            throw "Project MCP config has an ambiguous child-table collision with [$targetTable]."
-        }
         if ($table.IsArray -and $targetTable.StartsWith($table.Name + '.', [StringComparison]::Ordinal)) {
             throw "Project MCP config has an ambiguous array-table collision with [$targetTable]."
+        }
+        foreach ($desiredKey in $desiredValues.Keys) {
+            $managedPath = "$targetTable.$desiredKey"
+            if ([string]::Equals($table.Name, $managedPath, [StringComparison]::Ordinal) -or
+                $table.Name.StartsWith($managedPath + '.', [StringComparison]::Ordinal)) {
+                throw "Project MCP config contains a table namespace collision with managed key $managedPath."
+            }
         }
     }
 
