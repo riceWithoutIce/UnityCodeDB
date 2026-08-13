@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "managed_by": "com.rice.ai-codedb",
+  "generation_id": "poc.30",
+  "package_version": "0.2.5-preview.3",
+  "payload_version": "poc.30",
+  "payload_sequence": 30,
+  "bootstrap_protocol": 1,
+  "files": [
+    {
+      "path": "codedb-mcp.runtime.example.toml",
+      "sha256": "2e5a9a5a61a234dceb7b651d3d2d297fc68f418865b616cda35d8f99df5d183b"
+    },
+    {
+      "path": "codedbignore.example",
+      "sha256": "e5fcd177542bd42bea58549bc9726fff43975f8d950353e420663abf69770265"
+    },
+    {
+      "path": "coordinator/codedb-watch-coordinator.mjs",
+      "sha256": "d46b0047fe95f5ff3b48d0aae2fe422a0295ed2d4ade7eaef1c48a89fa01f73a"
+    },
+    {
+      "path": "scripts/build-codedb-project-text-adapter.ps1",
+      "sha256": "9baad71471cdef2999000fb8c487a9b253e6db85eaa5caba263acfda7c1afb15"
+    },
+    {
+      "path": "scripts/check-codedb-project-freshness.ps1",
+      "sha256": "9439f0dc19c7123a0eb77b046204f7007aa70dd0e739f176abe9166efb9f8319"
+    },
+    {
+      "path": "scripts/clear-codedb-project-index.ps1",
+      "sha256": "6a5e331001583e6d055e5c47d0ea84be4e504e95a7effd9472ef24eb0a15f54d"
+    },
+    {
+      "path": "scripts/codedb-project-common.ps1",
+      "sha256": "c6a2403eef48bb531389735a2a3c2be0feac9a27b26946b0b8da90e5f1c2b6d5"
+    },
+    {
+      "path": "scripts/emit-codedb-mcp-registration-draft.ps1",
+      "sha256": "892f72ec6692c8a8ec38b30fe64b2126020db710410f8ef8d462a1e3ee8d440d"
+    },
+    {
+      "path": "scripts/manage-codedb-project-watch.ps1",
+      "sha256": "2dd95cf67c0cf30a6c9e9333dcd739e49549ca3ba32e99a5ca95c0d8cc8c67eb"
+    },
+    {
+      "path": "scripts/prepare-codedb-project-runtime.ps1",
+      "sha256": "8d78f0a95bb02acfa17dce5a24b8115355e31d175749596712af0c3c5baecd4b"
+    },
+    {
+      "path": "scripts/prepare-codedb-project-watch-config.ps1",
+      "sha256": "9c8842604f8c6f08c7ba7472b89200c65a722577956d4b4f05735937812202bf"
+    },
+    {
+      "path": "scripts/probe-codedb-project-index.ps1",
+      "sha256": "fa11c21247a031cbbef0f0278663e218cf7c7aa4bdc00171279b880a1d8996ac"
+    },
+    {
+      "path": "scripts/probe-codedb-project-text-adapter.ps1",
+      "sha256": "122a09545c19596f7ae0597d80273d32545400f0f1bd4c43cc2e08a7fb502b6e"
+    },
+    {
+      "path": "scripts/refresh-codedb-project-if-stale.ps1",
+      "sha256": "59227ae1bb7bd0e9746941cf79ec410a04e9c70438394a718cbe38f963a2e466"
+    },
+    {
+      "path": "scripts/refresh-codedb-project.ps1",
+      "sha256": "767b54a3cfb3773b1b3fa5ed9d4c4b6a807c615fa063ec7312742b77114dbdee"
+    },
+    {
+      "path": "scripts/run-codedb-project-text-adapter-worker.ps1",
+      "sha256": "e47fba2fa4704d96f9fb9ea7a081d224cb1c5335906743de52fcb76bc1c6b170"
+    },
+    {
+      "path": "scripts/show-codedb-project-provider-guidance.ps1",
+      "sha256": "e806b3a0316c750bbd7b2ebcdbe087dad22633c660455a209ad66225fb60b7ca"
+    },
+    {
+      "path": "scripts/validate-codedb-mcp-project-config.ps1",
+      "sha256": "4aafd8f7730c95928152d4500f5d5e9a9df5a277118184f2b3cc508ccc480ff9"
+    },
+    {
+      "path": "scripts/verify-codedb-project.ps1",
+      "sha256": "65c721ff8ed04b7420c994b24404779dc55d5cb3a246fd03935664c2b33293b6"
+    },
+    {
+      "path": "shared/codedb-host-use-gate.mjs",
+      "sha256": "c563bdb1232bebe69f2db2bf4fcfac9cfa97197f7ddc890544badd3e6e1819c5"
+    }
+  ]
+}

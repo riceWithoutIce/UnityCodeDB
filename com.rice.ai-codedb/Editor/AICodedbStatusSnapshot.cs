@@ -1,9 +1,5 @@
 using System;
-using System.Diagnostics;
 using System.IO;
-using System.Text;
-using UnityEngine;
-using Debug = UnityEngine.Debug;
 
 namespace Rice.AI.Codedb.Editor
 {
@@ -30,7 +26,7 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbStatusItem TextAdapterDirectory { get; }
         internal AICodedbStatusItem TextAdapterManifest { get; }
         internal AICodedbStatusItem ProjectMcpConfig { get; }
-        internal AICodedbStatusItem RuntimeGitIgnored { get; }
+        internal AICodedbStatusItem RuntimeBoundary { get; }
         internal AICodedbStatusItem ToolProfile { get; }
 
         /// <summary>
@@ -49,11 +45,10 @@ namespace Rice.AI.Codedb.Editor
             HostPayload = HostPayloadStatus.ToStatusItem();
             HostUpdatePolicyValue = AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot);
             HostGeneration = CreateHostGenerationStatus(HostGenerationSelection);
-            HostLastKnownGood = CreateOptionalFileStatus(
-                "Last known good",
-                AICodedbPaths.HostLastKnownGoodPointerPath,
-                hostPayloadMarkerExists);
-            HostUpgradeStatus = AICodedbHostUpgradeStatusStore.Read(AICodedbPaths.ProjectRoot);
+            HostLastKnownGood = CreateLastKnownGoodStatus(hostPayloadMarkerExists);
+            HostUpgradeStatus = AICodedbHostUpgradeStatusStore.Read(
+                AICodedbPaths.ProjectRoot,
+                AICodedbProjectSettings.CurrentGenerationId);
             HostUpgrade = HostUpgradeStatus.ToStatusItem(hostPayloadMarkerExists);
             HostUpdatePolicy = CreateHostUpdatePolicyStatus(HostUpdatePolicyValue);
             ProviderExecutable = CreateFileStatus("Provider executable", AICodedbProjectSettings.ProviderExecutableRelativePath);
@@ -65,7 +60,7 @@ namespace Rice.AI.Codedb.Editor
             TextAdapterDirectory = CreateDirectoryStatus("Shader adapter directory", AICodedbProjectSettings.TextAdapterRelativePath);
             TextAdapterManifest = CreateFileStatus("Shader adapter manifest", AICodedbProjectSettings.TextAdapterManifestRelativePath);
             ProjectMcpConfig = CreateFileStatus("Project MCP config", AICodedbProjectSettings.ProjectMcpConfigRelativePath);
-            RuntimeGitIgnored = CreateGitIgnoredStatus(AICodedbProjectSettings.RuntimeRelativePath + "/");
+            RuntimeBoundary = CreateRuntimeBoundaryStatus(AICodedbProjectSettings.RuntimeRelativePath);
             ToolProfile = CreateToolProfileStatus();
             OverallState = ResolveOverallState();
             OverallTitle = CreateOverallTitle(OverallState);
@@ -132,7 +127,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal AICodedbStatusState GetRuntimeState()
         {
-            return CombineStates(RuntimeDirectory.State, RuntimeGitIgnored.State);
+            return CombineStates(RuntimeDirectory.State, RuntimeBoundary.State);
         }
 
         /// <summary>
@@ -232,7 +227,7 @@ namespace Rice.AI.Codedb.Editor
             state = CombineStates(state, IndexDirectory.State);
             state = CombineStates(state, IndexManifest.State);
             state = CombineStates(state, ProjectMcpConfig.State);
-            state = CombineStates(state, RuntimeGitIgnored.State);
+            state = CombineStates(state, RuntimeBoundary.State);
             state = CombineStates(state, ToolProfile.State);
             return state;
         }
@@ -266,7 +261,7 @@ namespace Rice.AI.Codedb.Editor
             switch (state)
             {
                 case AICodedbStatusState.Ok:
-                    return "Discover Read only. Runtime is project-local and ignored by Git.";
+                    return "Discover Read only. Runtime stays inside this Unity project.";
                 case AICodedbStatusState.Warning:
                     return "Complete the host payload or warning items before relying on codedb for discovery.";
                 case AICodedbStatusState.Error:
@@ -298,25 +293,35 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbStatusItem.Warning(label, "Missing", detail);
         }
 
-        private static AICodedbStatusItem CreateOptionalFileStatus(
-            string label,
-            string absolutePath,
-            bool hostPayloadMarkerExists)
+        private static AICodedbStatusItem CreateLastKnownGoodStatus(bool hostPayloadMarkerExists)
         {
+            const string label = "Last known good";
+            var absolutePath = AICodedbPaths.HostLastKnownGoodPointerPath;
             var detail = AICodedbPaths.ToProjectRelativeDisplayPath(absolutePath);
-            if (File.Exists(absolutePath) && !hostPayloadMarkerExists)
+            if (!File.Exists(absolutePath))
+            {
+                return AICodedbStatusItem.Inactive(
+                    label,
+                    "Not retained",
+                    detail + " is created when an existing current generation is upgraded.");
+            }
+
+            var selection = AICodedbHostGenerationStore.ResolvePointer(
+                AICodedbPaths.ProjectRoot,
+                absolutePath);
+            if (!hostPayloadMarkerExists)
             {
                 return AICodedbStatusItem.Inactive(
                     label,
                     "Historical",
-                    "No installed host payload marker exists. " + detail);
+                    "No installed host payload marker exists. " + selection.Detail);
             }
-            return File.Exists(absolutePath)
-                ? AICodedbStatusItem.Ok(label, "Retained", detail)
-                : AICodedbStatusItem.Inactive(
-                    label,
-                    "Not retained",
-                    detail + " is created when an existing current generation is upgraded.");
+            if (selection.State == AICodedbHostGenerationState.Invalid
+                || selection.State == AICodedbHostGenerationState.Unavailable)
+                return AICodedbStatusItem.Error(label, "Invalid", selection.Detail);
+            if (selection.State == AICodedbHostGenerationState.DowngradeReviewRequired)
+                return AICodedbStatusItem.Warning(label, "Newer " + selection.GenerationId, selection.Detail);
+            return AICodedbStatusItem.Ok(label, "Retained " + selection.GenerationId, detail);
         }
 
         private static AICodedbStatusItem CreateHostGenerationStatus(AICodedbHostGenerationSelection selection)
@@ -333,6 +338,16 @@ namespace Rice.AI.Codedb.Editor
                         "Host generation",
                         "Legacy " + selection.GenerationId,
                         "The recognized poc.21 flat payload is awaiting generation migration.");
+                case AICodedbHostGenerationState.Previous:
+                    return AICodedbStatusItem.Warning(
+                        "Host generation",
+                        "Previous " + selection.GenerationId,
+                        selection.Detail);
+                case AICodedbHostGenerationState.DowngradeReviewRequired:
+                    return AICodedbStatusItem.Warning(
+                        "Host generation",
+                        "Downgrade review required: " + selection.GenerationId,
+                        selection.Detail);
                 case AICodedbHostGenerationState.Unavailable:
                     return AICodedbStatusItem.Warning("Host generation", "Not selected", selection.Detail);
                 default:
@@ -432,20 +447,14 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
-        /// Checks whether a runtime path is ignored by Git without creating files.
+        /// Checks that the runtime path stays inside the canonical Unity project root.
         /// </summary>
-        /// <param name="relativePath">Unity-project-relative path to check.</param>
-        private static AICodedbStatusItem CreateGitIgnoredStatus(string relativePath)
+        private static AICodedbStatusItem CreateRuntimeBoundaryStatus(string relativePath)
         {
-            var result = RunGitCheckIgnore(relativePath);
-            if (result.ExitCode == 0)
-                return AICodedbStatusItem.Ok("Runtime Git ignore", "Ignored", relativePath);
-
-            if (result.ExitCode == 1)
-                return AICodedbStatusItem.Error("Runtime Git ignore", "Not ignored", relativePath);
-
-            var detail = string.IsNullOrWhiteSpace(result.Error) ? relativePath : result.Error.Trim();
-            return AICodedbStatusItem.Error("Runtime Git ignore", "Check failed", detail);
+            var path = AICodedbPaths.GetProjectPath(relativePath);
+            return AICodedbPaths.IsInsideProject(path)
+                ? AICodedbStatusItem.Ok("Runtime boundary", "Project-local", relativePath)
+                : AICodedbStatusItem.Error("Runtime boundary", "Outside project", path);
         }
 
         /// <summary>
@@ -460,110 +469,6 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbStatusItem.Error("Default profile", profile, "Expected Discover Read.");
         }
 
-        /// <summary>
-        /// Runs git check-ignore for a Unity-project-relative path.
-        /// </summary>
-        /// <param name="relativePath">Unity-project-relative path.</param>
-        private static GitCheckResult RunGitCheckIgnore(string relativePath)
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "git",
-                Arguments = "-C " + QuoteWindowsArgument(AICodedbPaths.ProjectRoot) + " check-ignore -q -- " + QuoteWindowsArgument(relativePath),
-                WorkingDirectory = AICodedbPaths.ProjectRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-
-            try
-            {
-                using (var process = Process.Start(startInfo))
-                {
-                    if (process == null)
-                        return new GitCheckResult(-1, "Failed to start git.");
-
-                    if (!process.WaitForExit(5000))
-                    {
-                        process.Kill();
-                        return new GitCheckResult(-1, "git check-ignore timed out.");
-                    }
-
-                    var error = process.StandardError.ReadToEnd();
-                    return new GitCheckResult(process.ExitCode, error);
-                }
-            }
-            catch (Exception exception)
-            {
-                Debug.LogException(exception);
-                return new GitCheckResult(-1, exception.Message);
-            }
-        }
-
-        /// <summary>
-        /// Quotes a Windows command-line argument for ProcessStartInfo.Arguments.
-        /// </summary>
-        /// <param name="argument">Argument to quote.</param>
-        private static string QuoteWindowsArgument(string argument)
-        {
-            if (string.IsNullOrEmpty(argument))
-                return "\"\"";
-
-            var builder = new StringBuilder();
-            builder.Append('"');
-
-            var backslashes = 0;
-            foreach (var character in argument)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-
-                if (character == '"')
-                {
-                    builder.Append('\\', backslashes * 2 + 1);
-                    builder.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-
-                if (backslashes > 0)
-                {
-                    builder.Append('\\', backslashes);
-                    backslashes = 0;
-                }
-
-                builder.Append(character);
-            }
-
-            if (backslashes > 0)
-                builder.Append('\\', backslashes * 2);
-
-            builder.Append('"');
-            return builder.ToString();
-        }
-
-        private readonly struct GitCheckResult
-        {
-            internal int ExitCode { get; }
-            internal string Error { get; }
-
-            /// <summary>
-            /// Creates a compact result for git check-ignore.
-            /// </summary>
-            /// <param name="exitCode">Process exit code.</param>
-            /// <param name="error">Captured stderr text.</param>
-            internal GitCheckResult(int exitCode, string error)
-            {
-                ExitCode = exitCode;
-                Error = error ?? string.Empty;
-            }
-        }
     }
 
     internal readonly struct AICodedbStatusItem

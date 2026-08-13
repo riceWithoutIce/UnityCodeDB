@@ -22,7 +22,7 @@ project's ignored runtime instead of sharing state across projects.
 
 - Package name: `com.rice.ai-codedb`
 - Latest stable release: `v0.2.4`
-- Latest validation prerelease: `v0.2.5-preview.2`
+- Latest validation prerelease: `v0.2.5-preview.3` / `poc.30`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -34,7 +34,7 @@ project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.2"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3"
   }
 }
 ```
@@ -53,29 +53,35 @@ vendor its source or redistribute its binary.
 
 ## First Setup
 
-1. Open `Tools/Rice AI/Codedb/Manager`.
-2. Use Setup to inspect the package-owned host payload before any mutation.
-3. Materialize the reviewed host files only through the explicit authorization
-   flow described in the package README.
-4. Prepare the project-local runtime and provide the external provider.
-5. Generate and review project-level MCP registration guidance.
-6. If Setup reports `REDEPLOY_REQUIRED`, stop CodeDB, disconnect project MCP
+1. After Unity resolves the Package, an empty safe CodeDB scope converges to the
+   current Host generation automatically. This behavior is independent of the
+   project's version-control system and the Package installation source.
+2. Open `Tools/Rice AI/Codedb/Manager` to inspect project status.
+3. If recovery is needed, click `Repair CodeDB` and confirm its exact
+   project-local scope. That one action repairs the Host runtime and only the
+   current project's MCP server section; it does not require an authorization
+   file, copied registration snippet, or manual TOML edit.
+4. Provide the separately acquired external provider when the Setup view asks
+   for it.
+5. If Setup reports `REDEPLOY_REQUIRED`, stop CodeDB, disconnect project MCP
    sessions, and use `Redeploy host`. The action replaces only byte-exact
    package-owned legacy Host files, regenerates the ignored runtime config, and
    preserves Provider binaries, indexes, adapters, MCP registration, and
    unrelated project files.
-7. After Setup completes, each interactive Unity Editor session publishes
+6. After Setup completes, each interactive Unity Editor session publishes
    project demand and starts CodeDB asynchronously. `Start with Unity Editor`
    controls the persistent policy; Start, Stop, and Restart control the Editor
    session cohort present when the command is issued without silently changing
    that policy.
-8. Closing the final Editor session stops that project's backend without
+7. Closing the final Editor session stops that project's backend without
    changing its preference. BatchMode sessions do not auto-start CodeDB.
 
 ## Ownership Boundaries
 
 - The package owns reusable Editor UI, validation, adapters, templates, and
   payload tooling under `com.rice.ai-codedb/`.
+- Unity's resolved Package location is read-only input. Cached, local, embedded,
+  and registry-backed installations use the same project state machine.
 - Each Unity project owns tracked operational files under `AIWork/codedb/`.
 - Generated runtime stays under ignored
   `AIWork/.runtime/codedb/<project-provider-slug>/`.
@@ -113,11 +119,20 @@ com.rice.ai-codedb/
 
 ## Validation
 
-Run the standalone package boundary and materializer fixtures from the
-repository root:
+Run the standalone package boundary fixture from the repository root. During
+development, select the materializer slice that matches the changed behavior:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -RepairOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -TransactionOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1 -PortabilityOnly
+```
+
+The materializer selectors are mutually exclusive. After the implementation
+tree is stable, run the complete fixture once as the release-candidate gate:
+
+```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\com.rice.ai-codedb\Tests~\test-codedb-host-payload-materializer.ps1
 ```
 

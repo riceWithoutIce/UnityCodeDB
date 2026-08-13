@@ -28,6 +28,11 @@ inside the Manager for byte-exact `poc.9`, `poc.16`, and `poc.20` flat Hosts.
 It refreshes owner status on click, stops a recognized legacy watcher safely,
 keeps external MCP clients user-owned, and advances the immutable generation to
 `poc.29` without changing the accepted deferred validation risks.
+The `0.2.5-preview.3` / `poc.30` validation prerelease separates tracked
+adoption from ignored runtime ownership, reconstructs absent or valid previous
+runtime automatically, gates Host commands on a validated generation, and adds
+one confirmed `Repair CodeDB` action for Host plus project MCP recovery. Package
+behavior no longer depends on project version control or installation source.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -53,7 +58,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.2"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3"
   }
 }
 ```
@@ -67,7 +72,7 @@ validation of unpublished development changes.
 Open `Tools/Rice AI/Codedb/Manager`. The Manager provides five focused views:
 
 - Overview: package, runtime, index, MCP, and watcher health.
-- Setup: host payload inspection and explicitly authorized materialization.
+- Setup: Host status, one-click recovery, and advanced payload diagnostics.
 - Index: provider and Shader/HLSL refresh, probes, and watcher lifecycle.
 - MCP: project registration guidance and validation.
 - Policy: the active read-only and project-ownership boundaries.
@@ -92,9 +97,9 @@ and watcher owners to stop, then transactionally replaces only the recognized
 `poc.9`, `poc.16`, or `poc.20` Host closure, publishes the current generation,
 and regenerates the ignored runtime config. Provider binaries, indexes,
 adapters, MCP registration, unowned files, and unrelated project content remain
-outside that action. Sync and Remove require a separately reviewed authorization
-document tied to the exact project root, Git HEAD, action, and payload identity.
-The package does not generate, persist, infer, or delete that authorization.
+outside that action. `Repair CodeDB`, advanced Sync, and Remove use a
+second-level Manager confirmation scoped to the manifest-closed CodeDB paths.
+No authorization document or version-control state is required.
 
 ## Safety Boundaries
 
@@ -106,23 +111,29 @@ The package does not generate, persist, infer, or delete that authorization.
   CodeDB.
 - Owned, byte-exact lower generations can be installed and selected
   automatically while generation-scoped leases protect active requests.
-  First adoption, explicit Sync/Remove, downgrade, drift, and staged managed
-  files retain their review gates.
+  An empty managed scope can be adopted automatically. Confirmed Repair handles
+  safe first adoption when needed; downgrade, drift, and unknown same-name
+  content retain their fail-closed review gates.
 - Opening or refreshing the Manager is read-only. MCP wrappers attach only to
   an Editor-owned ready coordinator and never start a one-shot Provider.
 - The tracked provider config remains `watch=false`; the coordinator owns a
   generated watch-enabled config and the Shader/HLSL adapter lifecycle.
 - Provider watch and the Shader/HLSL adapter have separate ownership.
 - Generated indexes, provider binaries, logs, and watcher state remain ignored.
-- MCP guidance is project-level first; global client configuration is never
-  silently modified.
-- Strict Sync and Remove fail closed on drift, staged managed files, active
-  watchers or MCP requests, interrupted transactions, downgrade, and payload
-  collisions. Automatic generation upgrades use a separate owned-upgrade path
-  with durable rollback and never kill Unity, Codex, or MCP processes.
-- Controlled legacy Redeploy also rejects drift, staged ownership paths, and
-  active owners. It never terminates processes and cannot be used for first
-  adoption, unknown payload identities, or current/foreign generations.
+- `Repair CodeDB` updates only the current project's MCP server table, preserving
+  unrelated TOML content and publishing a recoverable backup. It refuses
+  invalid, duplicate, or ambiguous configuration without writes and never
+  edits global client configuration.
+- DryRun, automatic Upgrade, Repair, Verify, advanced Sync, and Remove neither
+  inspect nor invoke a version-control system. Unity's resolved Package path is
+  read-only input for cached, local, embedded, and registry-backed installs.
+- Strict Sync and Remove fail closed on drift, active watchers or MCP requests,
+  interrupted transactions, downgrade, and payload collisions. Automatic
+  generation upgrades use a separate owned-upgrade path with durable rollback
+  and never kill Unity, Codex, or MCP processes.
+- Controlled legacy Redeploy also rejects drift and active owners. It never
+  terminates processes and cannot be used for first adoption, unknown payload
+  identities, or current/foreign generations.
 
 ## Discover Read Bounds
 

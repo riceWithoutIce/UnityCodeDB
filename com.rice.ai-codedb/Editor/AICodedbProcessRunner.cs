@@ -142,6 +142,12 @@ namespace Rice.AI.Codedb.Editor
         private const int DefaultTimeoutMilliseconds = 120000;
         private const int OutputDrainTimeoutMilliseconds = 1000;
 
+        private enum PowerShellScriptPathPolicy
+        {
+            ProjectLocal,
+            ResolvedPackageMaterializer
+        }
+
         /// <summary>
         /// Runs a project-local PowerShell script and captures its output.
         /// </summary>
@@ -159,34 +165,27 @@ namespace Rice.AI.Codedb.Editor
         /// <param name="scriptArguments">Optional arguments passed to the PowerShell script.</param>
         internal static AICodedbCommandResult RunPowerShellScript(string scriptPath, int timeoutMilliseconds, params string[] scriptArguments)
         {
-            if (Application.platform != RuntimePlatform.WindowsEditor)
-                return new AICodedbCommandResult(-1, string.Empty, "PowerShell codedb scripts are currently supported only in the Windows Editor.", false);
+            return RunPowerShellScript(
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                scriptArguments);
+        }
 
-            if (timeoutMilliseconds <= 0)
-                timeoutMilliseconds = DefaultTimeoutMilliseconds;
-
-            var normalizedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
-            if (!AICodedbPaths.IsInsideProject(normalizedScriptPath))
-                return new AICodedbCommandResult(-1, string.Empty, $"Refusing to run a script outside the Unity project: {normalizedScriptPath}", false);
-
-            if (!File.Exists(normalizedScriptPath))
-                return new AICodedbCommandResult(-1, string.Empty, $"Script not found: {AICodedbPaths.ToProjectRelativeDisplayPath(normalizedScriptPath)}", false);
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = BuildPowerShellArguments(normalizedScriptPath, scriptArguments),
-                WorkingDirectory = AICodedbPaths.ProjectRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-            startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = AICodedbPaths.ProjectRoot;
-
-            return RunProcess(startInfo, timeoutMilliseconds);
+        /// <summary>
+        /// Runs only the materializer script owned by the CodeDB Package resolved for this assembly.
+        /// </summary>
+        /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
+        /// <param name="scriptArguments">Optional arguments passed to the materializer.</param>
+        internal static AICodedbCommandResult RunResolvedPackageMaterializerPowerShellScript(
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
         }
 
         /// <summary>
@@ -200,37 +199,262 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             params string[] scriptArguments)
         {
+            return RunPowerShellScriptAsync(
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                scriptArguments);
+        }
+
+        /// <summary>
+        /// Runs the resolved Package-owned materializer on a worker thread.
+        /// </summary>
+        /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
+        /// <param name="scriptArguments">Optional arguments passed to the materializer.</param>
+        internal static Task<AICodedbCommandResult> RunResolvedPackageMaterializerPowerShellScriptAsync(
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsync(
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
+        }
+
+        private static AICodedbCommandResult RunPowerShellScript(
+            string scriptPath,
+            int timeoutMilliseconds,
+            PowerShellScriptPathPolicy pathPolicy,
+            string[] scriptArguments)
+        {
             if (Application.platform != RuntimePlatform.WindowsEditor)
-            {
-                return Task.FromResult(new AICodedbCommandResult(
-                    -1,
-                    string.Empty,
-                    "PowerShell codedb scripts are currently supported only in the Windows Editor.",
-                    false));
-            }
+                return UnsupportedPlatformResult();
 
             if (timeoutMilliseconds <= 0)
                 timeoutMilliseconds = DefaultTimeoutMilliseconds;
 
-            var normalizedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
-            if (!AICodedbPaths.IsInsideProject(normalizedScriptPath))
+            string normalizedScriptPath;
+            string authorizationError;
+            if (!TryAuthorizePowerShellScriptPath(
+                    pathPolicy,
+                    scriptPath,
+                    out normalizedScriptPath,
+                    out authorizationError))
+            {
+                return new AICodedbCommandResult(-1, string.Empty, authorizationError, false);
+            }
+
+            return RunProcess(
+                BuildPowerShellStartInfo(normalizedScriptPath, scriptArguments),
+                timeoutMilliseconds);
+        }
+
+        private static Task<AICodedbCommandResult> RunPowerShellScriptAsync(
+            string scriptPath,
+            int timeoutMilliseconds,
+            PowerShellScriptPathPolicy pathPolicy,
+            string[] scriptArguments)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                return Task.FromResult(UnsupportedPlatformResult());
+
+            if (timeoutMilliseconds <= 0)
+                timeoutMilliseconds = DefaultTimeoutMilliseconds;
+
+            string normalizedScriptPath;
+            string authorizationError;
+            if (!TryAuthorizePowerShellScriptPath(
+                    pathPolicy,
+                    scriptPath,
+                    out normalizedScriptPath,
+                    out authorizationError))
             {
                 return Task.FromResult(new AICodedbCommandResult(
                     -1,
                     string.Empty,
-                    $"Refusing to run a script outside the Unity project: {normalizedScriptPath}",
+                    authorizationError,
                     false));
             }
 
-            if (!File.Exists(normalizedScriptPath))
+            var startInfo = BuildPowerShellStartInfo(normalizedScriptPath, scriptArguments);
+            var effectiveTimeout = timeoutMilliseconds;
+            return Task.Run(() => RunProcess(startInfo, effectiveTimeout));
+        }
+
+        private static AICodedbCommandResult UnsupportedPlatformResult()
+        {
+            return new AICodedbCommandResult(
+                -1,
+                string.Empty,
+                "PowerShell codedb scripts are currently supported only in the Windows Editor.",
+                false);
+        }
+
+        private static bool TryAuthorizePowerShellScriptPath(
+            PowerShellScriptPathPolicy pathPolicy,
+            string scriptPath,
+            out string normalizedScriptPath,
+            out string error)
+        {
+            normalizedScriptPath = string.Empty;
+            error = string.Empty;
+
+            try
             {
-                return Task.FromResult(new AICodedbCommandResult(
-                    -1,
-                    string.Empty,
-                    $"Script not found: {AICodedbPaths.ToProjectRelativeDisplayPath(normalizedScriptPath)}",
-                    false));
+                if (pathPolicy == PowerShellScriptPathPolicy.ResolvedPackageMaterializer)
+                {
+                    var resolvedPackageRoot = AICodedbPaths.PackageRootPath;
+                    var materializerPath = AICodedbPaths.NormalizePath(Path.Combine(
+                        resolvedPackageRoot,
+                        AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
+                    return TryValidateResolvedPackageMaterializerScriptPath(
+                        resolvedPackageRoot,
+                        materializerPath,
+                        out normalizedScriptPath,
+                        out error);
+                }
+
+                normalizedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
+                if (!AICodedbPaths.IsInsideProject(normalizedScriptPath))
+                {
+                    error = $"Refusing to run a script outside the Unity project: {normalizedScriptPath}";
+                    normalizedScriptPath = string.Empty;
+                    return false;
+                }
+
+                if (!File.Exists(normalizedScriptPath))
+                {
+                    error = $"Script not found: {AICodedbPaths.ToProjectRelativeDisplayPath(normalizedScriptPath)}";
+                    normalizedScriptPath = string.Empty;
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                normalizedScriptPath = string.Empty;
+                error = "Refusing to run a PowerShell script because its path could not be validated: "
+                        + exception.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Validates the one Package-owned script that may execute outside the Unity project.
+        /// </summary>
+        internal static bool TryValidateResolvedPackageMaterializerScriptPath(
+            string resolvedPackageRoot,
+            string scriptPath,
+            out string normalizedScriptPath,
+            out string error)
+        {
+            normalizedScriptPath = string.Empty;
+            error = string.Empty;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(resolvedPackageRoot)
+                    || !Path.IsPathRooted(resolvedPackageRoot))
+                {
+                    error = "Resolved CodeDB Package root must be an absolute path.";
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(scriptPath) || !Path.IsPathRooted(scriptPath))
+                {
+                    error = "Resolved CodeDB Package materializer path must be absolute.";
+                    return false;
+                }
+
+                var normalizedPackageRoot = AICodedbPaths.NormalizePath(resolvedPackageRoot).TrimEnd('/', '\\');
+                var requestedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
+                var expectedScriptPath = AICodedbPaths.NormalizePath(Path.Combine(
+                    normalizedPackageRoot,
+                    AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
+                var packagePrefix = normalizedPackageRoot + "/";
+
+                if (!expectedScriptPath.StartsWith(packagePrefix, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(requestedScriptPath, expectedScriptPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "Refusing to run a script other than the resolved CodeDB Package materializer: "
+                            + requestedScriptPath;
+                    return false;
+                }
+
+                if (!Directory.Exists(normalizedPackageRoot))
+                {
+                    error = "Resolved CodeDB Package root was not found: " + normalizedPackageRoot;
+                    return false;
+                }
+
+                if (!TryValidatePackageMaterializerPathNodes(
+                        normalizedPackageRoot,
+                        out error))
+                    return false;
+
+                normalizedScriptPath = expectedScriptPath;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Refusing to run the resolved CodeDB Package materializer because its path could not be validated: "
+                        + exception.Message;
+                return false;
+            }
+        }
+
+        private static bool TryValidatePackageMaterializerPathNodes(
+            string normalizedPackageRoot,
+            out string error)
+        {
+            error = string.Empty;
+
+            var current = normalizedPackageRoot;
+            var relativeSegments = AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath
+                .Replace('\\', '/')
+                .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (!TryValidatePathNode(current, true, out error))
+                return false;
+
+            for (var index = 0; index < relativeSegments.Length; index++)
+            {
+                current = AICodedbPaths.NormalizePath(Path.Combine(current, relativeSegments[index]));
+                var expectDirectory = index < relativeSegments.Length - 1;
+                if (TryValidatePathNode(current, expectDirectory, out error))
+                    continue;
+
+                return false;
             }
 
+            return true;
+        }
+
+        private static bool TryValidatePathNode(string path, bool expectDirectory, out string error)
+        {
+            error = string.Empty;
+            if (expectDirectory ? !Directory.Exists(path) : !File.Exists(path))
+            {
+                error = expectDirectory
+                    ? "Resolved CodeDB Package directory was not found: " + path
+                    : "Resolved CodeDB Package materializer was not found: " + path;
+                return false;
+            }
+
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) == 0)
+                return true;
+
+            error = "Refusing to run the resolved CodeDB Package materializer through a reparse point: " + path;
+            return false;
+        }
+
+        private static ProcessStartInfo BuildPowerShellStartInfo(
+            string normalizedScriptPath,
+            string[] scriptArguments)
+        {
             var startInfo = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
@@ -244,8 +468,7 @@ namespace Rice.AI.Codedb.Editor
                 StandardErrorEncoding = Encoding.UTF8
             };
             startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = AICodedbPaths.ProjectRoot;
-            var effectiveTimeout = timeoutMilliseconds;
-            return Task.Run(() => RunProcess(startInfo, effectiveTimeout));
+            return startInfo;
         }
 
         /// <summary>

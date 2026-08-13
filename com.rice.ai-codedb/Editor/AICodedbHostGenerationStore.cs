@@ -12,7 +12,9 @@ namespace Rice.AI.Codedb.Editor
     {
         Unavailable,
         Legacy,
+        Previous,
         Current,
+        DowngradeReviewRequired,
         Invalid
     }
 
@@ -26,7 +28,7 @@ namespace Rice.AI.Codedb.Editor
         internal int BootstrapProtocol { get; }
         internal string RootPath { get; }
         internal string Detail { get; }
-        internal bool IsUsable => State == AICodedbHostGenerationState.Current || State == AICodedbHostGenerationState.Legacy;
+        internal bool IsUsable => State == AICodedbHostGenerationState.Current;
 
         internal AICodedbHostGenerationSelection(
             AICodedbHostGenerationState state,
@@ -74,7 +76,9 @@ namespace Rice.AI.Codedb.Editor
             string legacyProjectRelativePath)
         {
             var selection = Resolve(projectRoot);
-            if (selection.State == AICodedbHostGenerationState.Current)
+            if (selection.State == AICodedbHostGenerationState.Current
+                || selection.State == AICodedbHostGenerationState.Previous
+                || selection.State == AICodedbHostGenerationState.DowngradeReviewRequired)
                 return CombineInside(selection.RootPath, generationRelativePath, "generation path");
 
             if (selection.State == AICodedbHostGenerationState.Legacy)
@@ -86,16 +90,33 @@ namespace Rice.AI.Codedb.Editor
                 "unavailable host path");
         }
 
+        internal static AICodedbHostGenerationSelection ResolvePointer(string projectRoot, string pointerPath)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var normalizedPointerPath = AICodedbPaths.NormalizePath(pointerPath);
+            if (!File.Exists(normalizedPointerPath))
+            {
+                return new AICodedbHostGenerationSelection(
+                    AICodedbHostGenerationState.Unavailable,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    0,
+                    string.Empty,
+                    "Generation pointer is not installed.");
+            }
+            return ResolveCurrent(normalizedRoot, normalizedPointerPath);
+        }
+
         private static AICodedbHostGenerationSelection ResolveCurrent(string projectRoot, string currentPath)
         {
             try
             {
                 AssertNoReparsePoints(projectRoot, currentPath, "current generation pointer");
-                var pointer = JsonUtility.FromJson<CurrentPointerDocument>(ReadBoundedText(currentPath, PointerMaximumBytes, "current generation pointer"));
-                if (pointer == null)
-                    throw new InvalidOperationException("Current generation pointer is empty.");
+                var pointer = ReadCurrentPointer(currentPath, "current generation pointer");
 
-                ValidateCurrentPointer(pointer);
+                ValidatePointer(pointer);
                 var expectedGenerationRelativePath = AICodedbProjectSettings.HostGenerationsRelativePath + "/" + pointer.generation_id;
                 var actualGenerationRelativePath = NormalizeRelativePath(pointer.generation_relative_path, "generation root");
                 if (!string.Equals(actualGenerationRelativePath, expectedGenerationRelativePath, StringComparison.Ordinal))
@@ -112,17 +133,25 @@ namespace Rice.AI.Codedb.Editor
                 if (!string.Equals(manifestHash, pointer.generation_manifest_sha256, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Selected generation manifest hash does not match current.json.");
 
-                var manifest = JsonUtility.FromJson<GenerationManifestDocument>(ReadBoundedText(manifestPath, ManifestMaximumBytes, "generation manifest"));
+                var manifest = ReadGenerationManifest(manifestPath, "generation manifest");
                 ValidateGenerationManifest(pointer, manifest, generationRoot);
+                var state = ClassifyValidatedPointer(pointer);
+                if (state == AICodedbHostGenerationState.Current)
+                    ValidatePackageOwnedCurrentGeneration(pointer, manifestPath, generationRoot);
+                var detail = state == AICodedbHostGenerationState.Previous
+                    ? "Validated compatible previous generation selected by " + AICodedbPaths.ToProjectRelativeDisplayPath(currentPath) + ". Use Repair CodeDB or Update now before running Host commands."
+                    : state == AICodedbHostGenerationState.DowngradeReviewRequired
+                        ? "Validated generation " + pointer.generation_id + " is newer than the loaded Package and requires downgrade review. Host commands and automatic mutation are disabled."
+                        : AICodedbPaths.ToProjectRelativeDisplayPath(currentPath);
                 return new AICodedbHostGenerationSelection(
-                    AICodedbHostGenerationState.Current,
+                    state,
                     pointer.generation_id,
                     pointer.package_version,
                     pointer.payload_version,
                     pointer.payload_sequence,
                     pointer.bootstrap_protocol,
                     generationRoot,
-                    AICodedbPaths.ToProjectRelativeDisplayPath(currentPath));
+                    detail);
             }
             catch (Exception exception)
             {
@@ -157,18 +186,64 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 AssertNoReparsePoints(projectRoot, markerPath, "legacy marker");
-                var marker = JsonUtility.FromJson<LegacyMarkerDocument>(ReadBoundedText(markerPath, ManifestMaximumBytes, "legacy marker"));
-                if (marker == null
-                    || marker.schema_version != 1
+                var marker = ReadLegacyMarker(markerPath, "legacy marker");
+                if ((marker.schema_version != 1 && marker.schema_version != 2)
                     || !string.Equals(marker.managed_by, ManagedBy, StringComparison.Ordinal)
-                    || !string.Equals(marker.package_version, AICodedbProjectSettings.LegacyPackageVersion, StringComparison.Ordinal)
-                    || !string.Equals(marker.payload_version, AICodedbProjectSettings.LegacyPayloadVersion, StringComparison.Ordinal)
-                    || marker.payload_sequence != AICodedbProjectSettings.LegacyPayloadSequence
-                    || marker.host_use_gate_version < 1
+                    || string.IsNullOrWhiteSpace(marker.package_version)
+                    || string.IsNullOrWhiteSpace(marker.payload_version)
+                    || marker.payload_sequence < 1
                     || marker.files == null
                     || marker.files.Length == 0)
                 {
-                    throw new InvalidOperationException("Installed payload is not the recognized poc.21 legacy generation.");
+                    throw new InvalidOperationException("Installed payload marker identity or schema is invalid.");
+                }
+
+                if (marker.schema_version == 2
+                    && (!IsSha256(marker.payload_content_sha256)
+                        || marker.host_use_gate_version < 1
+                        || marker.generation_lease_version < 2
+                        || !IsGenerationId(marker.generation_id)
+                        || marker.bootstrap_protocol < 1
+                        || !string.Equals(
+                            marker.current_pointer,
+                            AICodedbProjectSettings.HostCurrentPointerRelativePath,
+                            StringComparison.Ordinal)))
+                {
+                    throw new InvalidOperationException("Installed payload marker generation metadata is invalid.");
+                }
+
+                var ownedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var entry in marker.files)
+                {
+                    if (entry == null || !IsSha256(entry.installed_sha256))
+                        throw new InvalidOperationException("Installed payload marker contains an invalid file entry.");
+                    var relativePath = NormalizeRelativePath(entry.path, "installed payload file");
+                    if (!ownedPaths.Add(relativePath)
+                        || (marker.schema_version == 2
+                            && !relativePath.StartsWith(
+                                AICodedbProjectSettings.LegacyHostRootRelativePath + "/",
+                                StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new InvalidOperationException("Installed payload marker contains an invalid or duplicate path.");
+                    }
+                }
+
+                var isRecognizedLegacy = marker.schema_version == 1
+                                         && string.Equals(marker.package_version, AICodedbProjectSettings.LegacyPackageVersion, StringComparison.Ordinal)
+                                         && string.Equals(marker.payload_version, AICodedbProjectSettings.LegacyPayloadVersion, StringComparison.Ordinal)
+                                         && marker.payload_sequence == AICodedbProjectSettings.LegacyPayloadSequence
+                                         && marker.host_use_gate_version >= 1;
+                if (!isRecognizedLegacy)
+                {
+                    return new AICodedbHostGenerationSelection(
+                        AICodedbHostGenerationState.Unavailable,
+                        string.Empty,
+                        marker.package_version,
+                        marker.payload_version,
+                        marker.payload_sequence,
+                        0,
+                        string.Empty,
+                        "The project is adopted but no runtime generation is selected on this machine.");
                 }
 
                 var legacyRoot = CombineInside(projectRoot, AICodedbProjectSettings.LegacyHostRootRelativePath, "legacy host root");
@@ -176,16 +251,12 @@ namespace Rice.AI.Codedb.Editor
                     throw new InvalidOperationException("Recognized legacy host root is missing.");
                 AssertNoReparsePoints(projectRoot, legacyRoot, "legacy host root");
 
-                var ownedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var entry in marker.files)
                 {
-                    if (entry == null || !IsSha256(entry.installed_sha256))
-                        throw new InvalidOperationException("Recognized legacy marker contains an invalid file entry.");
                     var relativePath = NormalizeRelativePath(entry.path, "legacy host file");
-                    if (!relativePath.StartsWith(AICodedbProjectSettings.LegacyHostRootRelativePath + "/", StringComparison.OrdinalIgnoreCase)
-                        || !ownedPaths.Add(relativePath))
+                    if (!relativePath.StartsWith(AICodedbProjectSettings.LegacyHostRootRelativePath + "/", StringComparison.OrdinalIgnoreCase))
                     {
-                        throw new InvalidOperationException("Recognized legacy marker contains an invalid or duplicate path.");
+                        throw new InvalidOperationException("Recognized legacy marker contains a path outside the flat Host root.");
                     }
 
                     var filePath = CombineInside(projectRoot, relativePath, "legacy host file");
@@ -205,7 +276,8 @@ namespace Rice.AI.Codedb.Editor
                     marker.payload_sequence,
                     0,
                     legacyRoot,
-                    AICodedbPaths.ToProjectRelativeDisplayPath(markerPath));
+                    "Validated legacy flat Host. Use Repair CodeDB or advanced Redeploy before running Host commands. Marker: "
+                    + AICodedbPaths.ToProjectRelativeDisplayPath(markerPath));
             }
             catch (Exception exception)
             {
@@ -221,19 +293,146 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static void ValidateCurrentPointer(CurrentPointerDocument pointer)
+        private static void ValidatePointer(CurrentPointerDocument pointer)
         {
             if (pointer.schema_version != 1
                 || !string.Equals(pointer.managed_by, ManagedBy, StringComparison.Ordinal)
-                || !string.Equals(pointer.package_version, AICodedbProjectSettings.CurrentPackageVersion, StringComparison.Ordinal)
-                || !string.Equals(pointer.payload_version, AICodedbProjectSettings.CurrentPayloadVersion, StringComparison.Ordinal)
-                || pointer.payload_sequence != AICodedbProjectSettings.CurrentPayloadSequence
-                || !string.Equals(pointer.generation_id, AICodedbProjectSettings.CurrentGenerationId, StringComparison.Ordinal)
-                || pointer.bootstrap_protocol != AICodedbProjectSettings.CurrentBootstrapProtocol
+                || string.IsNullOrWhiteSpace(pointer.package_version)
+                || string.IsNullOrWhiteSpace(pointer.payload_version)
+                || pointer.payload_sequence < 1
+                || !IsGenerationId(pointer.generation_id)
+                || pointer.bootstrap_protocol < 1
                 || !IsSha256(pointer.generation_manifest_sha256))
             {
-                throw new InvalidOperationException("Current generation pointer identity, version, or protocol is invalid.");
+                throw new InvalidOperationException("Generation pointer identity, version, or protocol is invalid.");
             }
+        }
+
+        private static AICodedbHostGenerationState ClassifyValidatedPointer(CurrentPointerDocument pointer)
+        {
+            if (pointer.bootstrap_protocol != AICodedbProjectSettings.CurrentBootstrapProtocol)
+                throw new InvalidOperationException("Selected generation uses an unsupported bootstrap protocol.");
+            if (pointer.payload_sequence > AICodedbProjectSettings.CurrentPayloadSequence)
+                return AICodedbHostGenerationState.DowngradeReviewRequired;
+            if (pointer.payload_sequence < AICodedbProjectSettings.CurrentPayloadSequence)
+                return AICodedbHostGenerationState.Previous;
+
+            if (!string.Equals(pointer.package_version, AICodedbProjectSettings.CurrentPackageVersion, StringComparison.Ordinal)
+                || !string.Equals(pointer.payload_version, AICodedbProjectSettings.CurrentPayloadVersion, StringComparison.Ordinal)
+                || !string.Equals(pointer.generation_id, AICodedbProjectSettings.CurrentGenerationId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Selected generation reuses the current payload sequence with a different identity.");
+            }
+            return AICodedbHostGenerationState.Current;
+        }
+
+        private static void ValidatePackageOwnedCurrentGeneration(
+            CurrentPointerDocument installedPointer,
+            string installedManifestPath,
+            string installedGenerationRoot)
+        {
+            var packageRoot = AICodedbPaths.PackageRootPath.TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(packageRoot) || !Directory.Exists(packageRoot))
+                throw new InvalidOperationException("Resolved Package root is unavailable for Current generation authentication.");
+            AssertNoReparsePoints(packageRoot, packageRoot, "resolved Package root");
+
+            var packagePointerPath = CombineInside(packageRoot, "Payload~/host-current.json", "Package Current pointer");
+            var packageGenerationRoot = CombineInside(
+                packageRoot,
+                "Payload~/Generations/" + AICodedbProjectSettings.CurrentGenerationId,
+                "Package Current generation");
+            var packageManifestPath = CombineInside(
+                packageGenerationRoot,
+                "generation-manifest.json",
+                "Package Current generation manifest");
+            if (!File.Exists(packagePointerPath)
+                || !Directory.Exists(packageGenerationRoot)
+                || !File.Exists(packageManifestPath))
+            {
+                throw new InvalidOperationException("Package-owned Current generation identity is incomplete.");
+            }
+            AssertNoReparsePoints(packageRoot, packagePointerPath, "Package Current pointer");
+            AssertNoReparsePoints(packageRoot, packageGenerationRoot, "Package Current generation");
+            AssertNoReparsePoints(packageGenerationRoot, packageManifestPath, "Package Current generation manifest");
+
+            var packagePointer = ReadCurrentPointer(packagePointerPath, "Package Current pointer");
+            ValidatePointer(packagePointer);
+            if (ClassifyValidatedPointer(packagePointer) != AICodedbHostGenerationState.Current
+                || !PointersHaveSameIdentity(installedPointer, packagePointer))
+            {
+                throw new InvalidOperationException(
+                    "Selected Current generation pointer does not match the Package-owned host-current identity.");
+            }
+
+            var packageManifestHash = GetFileSha256(packageManifestPath);
+            if (!string.Equals(packageManifestHash, packagePointer.generation_manifest_sha256, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(packageManifestHash, GetFileSha256(installedManifestPath), StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Selected Current generation manifest does not match the Package-owned manifest bytes.");
+            }
+
+            var packageManifest = ReadGenerationManifest(packageManifestPath, "Package Current generation manifest");
+            ValidateGenerationManifest(packagePointer, packageManifest, packageGenerationRoot);
+            if (!GenerationManifestsHaveSameIdentity(packageManifest, ReadGenerationManifest(
+                    installedManifestPath,
+                    "selected Current generation manifest")))
+            {
+                throw new InvalidOperationException(
+                    "Selected Current generation manifest identity does not match the Package-owned manifest.");
+            }
+
+            // Both closures are validated against the same byte-identical manifest.
+            AssertNoReparsePoints(installedGenerationRoot, installedGenerationRoot, "selected Current generation root");
+        }
+
+        private static bool PointersHaveSameIdentity(
+            CurrentPointerDocument left,
+            CurrentPointerDocument right)
+        {
+            return left.schema_version == right.schema_version
+                   && string.Equals(left.managed_by, right.managed_by, StringComparison.Ordinal)
+                   && string.Equals(left.package_version, right.package_version, StringComparison.Ordinal)
+                   && string.Equals(left.payload_version, right.payload_version, StringComparison.Ordinal)
+                   && left.payload_sequence == right.payload_sequence
+                   && string.Equals(left.generation_id, right.generation_id, StringComparison.Ordinal)
+                   && string.Equals(left.generation_relative_path, right.generation_relative_path, StringComparison.Ordinal)
+                   && string.Equals(
+                       left.generation_manifest_sha256,
+                       right.generation_manifest_sha256,
+                       StringComparison.OrdinalIgnoreCase)
+                   && left.bootstrap_protocol == right.bootstrap_protocol;
+        }
+
+        private static bool GenerationManifestsHaveSameIdentity(
+            GenerationManifestDocument left,
+            GenerationManifestDocument right)
+        {
+            if (left.schema_version != right.schema_version
+                || !string.Equals(left.managed_by, right.managed_by, StringComparison.Ordinal)
+                || !string.Equals(left.generation_id, right.generation_id, StringComparison.Ordinal)
+                || !string.Equals(left.package_version, right.package_version, StringComparison.Ordinal)
+                || !string.Equals(left.payload_version, right.payload_version, StringComparison.Ordinal)
+                || left.payload_sequence != right.payload_sequence
+                || left.bootstrap_protocol != right.bootstrap_protocol
+                || left.files == null
+                || right.files == null
+                || left.files.Length != right.files.Length)
+            {
+                return false;
+            }
+
+            var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in left.files)
+                expected.Add(entry.path, entry.sha256);
+            foreach (var entry in right.files)
+            {
+                string hash;
+                if (!expected.TryGetValue(entry.path, out hash)
+                    || !string.Equals(hash, entry.sha256, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
         }
 
         private static void ValidateGenerationManifest(
@@ -262,7 +461,8 @@ namespace Rice.AI.Codedb.Editor
                     throw new InvalidOperationException("Selected generation manifest contains an invalid file entry.");
 
                 var relativePath = NormalizeRelativePath(entry.path, "generation file");
-                if (!paths.Add(relativePath))
+                if (string.Equals(relativePath, "generation-manifest.json", StringComparison.OrdinalIgnoreCase)
+                    || !paths.Add(relativePath))
                     throw new InvalidOperationException("Selected generation manifest contains a duplicate file path.");
 
                 var filePath = CombineInside(generationRoot, relativePath, "generation file");
@@ -273,6 +473,60 @@ namespace Rice.AI.Codedb.Editor
                     throw new InvalidOperationException("Selected generation file is missing or has drifted: " + relativePath);
                 }
             }
+
+            ValidateGenerationClosure(generationRoot, paths);
+        }
+
+        private static void ValidateGenerationClosure(string generationRoot, HashSet<string> manifestPaths)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(generationRoot).TrimEnd('/');
+            var allowedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var manifestPath in manifestPaths)
+            {
+                var separatorIndex = manifestPath.IndexOf('/');
+                while (separatorIndex > 0)
+                {
+                    allowedDirectories.Add(manifestPath.Substring(0, separatorIndex));
+                    separatorIndex = manifestPath.IndexOf('/', separatorIndex + 1);
+                }
+            }
+
+            var pendingDirectories = new Stack<string>();
+            pendingDirectories.Push(normalizedRoot);
+            var actualFileCount = 0;
+            while (pendingDirectories.Count > 0)
+            {
+                var directory = pendingDirectories.Pop();
+                foreach (var path in Directory.GetFileSystemEntries(directory))
+                {
+                    AssertNoReparsePoints(normalizedRoot, path, "generation content");
+                    var attributes = File.GetAttributes(path);
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        var normalizedDirectory = AICodedbPaths.NormalizePath(path);
+                        var relativeDirectory = normalizedDirectory.Substring(normalizedRoot.Length + 1);
+                        if (!allowedDirectories.Contains(relativeDirectory))
+                        {
+                            throw new InvalidOperationException(
+                                "Selected generation contains an unmanifested directory: " + relativeDirectory);
+                        }
+                        pendingDirectories.Push(path);
+                        continue;
+                    }
+
+                    actualFileCount++;
+                    var normalizedPath = AICodedbPaths.NormalizePath(path);
+                    var relativePath = normalizedPath.Substring(normalizedRoot.Length + 1);
+                    if (!string.Equals(relativePath, "generation-manifest.json", StringComparison.OrdinalIgnoreCase)
+                        && !manifestPaths.Contains(relativePath))
+                    {
+                        throw new InvalidOperationException("Selected generation contains an unmanifested file: " + relativePath);
+                    }
+                }
+            }
+
+            if (actualFileCount != manifestPaths.Count + 1)
+                throw new InvalidOperationException("Selected generation file closure is incomplete.");
         }
 
         private static string CombineInside(string root, string relativePath, string label)
@@ -312,6 +566,23 @@ namespace Rice.AI.Codedb.Editor
             return true;
         }
 
+        private static bool IsGenerationId(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 64)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < 'A' || character > 'Z')
+                    && (character < 'a' || character > 'z')
+                    && (character < '0' || character > '9')
+                    && character != '.'
+                    && character != '_'
+                    && character != '-')
+                    return false;
+            }
+            return true;
+        }
+
         private static string GetFileSha256(string path)
         {
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -325,28 +596,108 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static string ReadBoundedText(string path, long maximumBytes, string label)
+        private static CurrentPointerDocument ReadCurrentPointer(string path, string label)
         {
-            var length = new FileInfo(path).Length;
-            if (length <= 0 || length > maximumBytes)
-                throw new InvalidOperationException(label + " has an invalid size.");
-            return File.ReadAllText(path);
+            var value = AICodedbStrictJson.ReadObject(path, PointerMaximumBytes, label);
+            return new CurrentPointerDocument
+            {
+                schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", label),
+                managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", label),
+                package_version = AICodedbStrictJson.GetRequiredString(value, "package_version", label),
+                payload_version = AICodedbStrictJson.GetRequiredString(value, "payload_version", label),
+                payload_sequence = AICodedbStrictJson.GetRequiredInt32(value, "payload_sequence", label),
+                generation_id = AICodedbStrictJson.GetRequiredString(value, "generation_id", label),
+                generation_relative_path = AICodedbStrictJson.GetRequiredString(value, "generation_relative_path", label),
+                generation_manifest_sha256 = AICodedbStrictJson.GetRequiredString(value, "generation_manifest_sha256", label),
+                bootstrap_protocol = AICodedbStrictJson.GetRequiredInt32(value, "bootstrap_protocol", label)
+            };
+        }
+
+        private static GenerationManifestDocument ReadGenerationManifest(string path, string label)
+        {
+            var value = AICodedbStrictJson.ReadObject(path, ManifestMaximumBytes, label);
+            var files = AICodedbStrictJson.GetRequiredArray(value, "files", label);
+            var entries = new GenerationFileDocument[files.Count];
+            for (var index = 0; index < files.Count; index++)
+            {
+                var entryLabel = label + " file entry";
+                var entry = AICodedbStrictJson.RequireObject(files[index], entryLabel);
+                entries[index] = new GenerationFileDocument
+                {
+                    path = AICodedbStrictJson.GetRequiredString(entry, "path", entryLabel),
+                    sha256 = AICodedbStrictJson.GetRequiredString(entry, "sha256", entryLabel)
+                };
+            }
+            return new GenerationManifestDocument
+            {
+                schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", label),
+                managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", label),
+                generation_id = AICodedbStrictJson.GetRequiredString(value, "generation_id", label),
+                package_version = AICodedbStrictJson.GetRequiredString(value, "package_version", label),
+                payload_version = AICodedbStrictJson.GetRequiredString(value, "payload_version", label),
+                payload_sequence = AICodedbStrictJson.GetRequiredInt32(value, "payload_sequence", label),
+                bootstrap_protocol = AICodedbStrictJson.GetRequiredInt32(value, "bootstrap_protocol", label),
+                files = entries
+            };
+        }
+
+        private static LegacyMarkerDocument ReadLegacyMarker(string path, string label)
+        {
+            var value = AICodedbStrictJson.ReadObject(path, ManifestMaximumBytes, label);
+            var schemaVersion = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", label);
+            var files = AICodedbStrictJson.GetRequiredArray(value, "files", label);
+            var entries = new LegacyFileDocument[files.Count];
+            for (var index = 0; index < files.Count; index++)
+            {
+                var entryLabel = label + " file entry";
+                var entry = AICodedbStrictJson.RequireObject(files[index], entryLabel);
+                entries[index] = new LegacyFileDocument
+                {
+                    path = AICodedbStrictJson.GetRequiredString(entry, "path", entryLabel),
+                    installed_sha256 = AICodedbStrictJson.GetRequiredString(entry, "installed_sha256", entryLabel)
+                };
+            }
+
+            var marker = new LegacyMarkerDocument
+            {
+                schema_version = schemaVersion,
+                managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", label),
+                package_version = AICodedbStrictJson.GetRequiredString(value, "package_version", label),
+                payload_version = AICodedbStrictJson.GetRequiredString(value, "payload_version", label),
+                payload_sequence = AICodedbStrictJson.GetRequiredInt32(value, "payload_sequence", label),
+                host_use_gate_version = AICodedbStrictJson.GetRequiredInt32(value, "host_use_gate_version", label),
+                files = entries
+            };
+            if (schemaVersion == 2)
+            {
+                marker.payload_content_sha256 = AICodedbStrictJson.GetRequiredString(value, "payload_content_sha256", label);
+                marker.generation_lease_version = AICodedbStrictJson.GetRequiredInt32(value, "generation_lease_version", label);
+                marker.generation_id = AICodedbStrictJson.GetRequiredString(value, "generation_id", label);
+                marker.bootstrap_protocol = AICodedbStrictJson.GetRequiredInt32(value, "bootstrap_protocol", label);
+                marker.current_pointer = AICodedbStrictJson.GetRequiredString(value, "current_pointer", label);
+            }
+            return marker;
         }
 
         private static void AssertNoReparsePoints(string root, string path, string label)
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(root).TrimEnd('/');
             var current = AICodedbPaths.NormalizePath(path);
-            while (!string.Equals(current, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            while (true)
             {
                 if (!current.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException(label + " escapes its root.");
+                {
+                    if (!string.Equals(current, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(label + " escapes its root.");
+                }
                 if (File.Exists(current) || Directory.Exists(current))
                 {
                     var attributes = File.GetAttributes(current);
                     if ((attributes & FileAttributes.ReparsePoint) != 0)
                         throw new InvalidOperationException(label + " contains a reparse point.");
                 }
+                if (string.Equals(current, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                    break;
                 var parent = Path.GetDirectoryName(current);
                 if (string.IsNullOrWhiteSpace(parent))
                     throw new InvalidOperationException(label + " has no valid parent.");
@@ -396,7 +747,12 @@ namespace Rice.AI.Codedb.Editor
             public string package_version;
             public string payload_version;
             public int payload_sequence;
+            public string payload_content_sha256;
             public int host_use_gate_version;
+            public int generation_lease_version;
+            public string generation_id;
+            public int bootstrap_protocol;
+            public string current_pointer;
             public LegacyFileDocument[] files;
         }
 
@@ -441,11 +797,32 @@ namespace Rice.AI.Codedb.Editor
                     return new AICodedbHostUpdatePolicy(true, true, true, "Enabled by default.");
 
                 var fileInfo = new FileInfo(path);
-                if (fileInfo.Length <= 0 || fileInfo.Length > 64 * 1024)
-                    throw new InvalidOperationException("Automatic host update policy has an invalid size.");
                 if ((fileInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidOperationException("Automatic host update policy cannot be a reparse point.");
-                var document = JsonUtility.FromJson<HostUpdatePolicyDocument>(File.ReadAllText(path));
+                var value = AICodedbStrictJson.ReadObject(path, 64 * 1024, "Automatic host update policy");
+                var document = new HostUpdatePolicyDocument
+                {
+                    schema_version = AICodedbStrictJson.GetRequiredInt32(
+                        value,
+                        "schema_version",
+                        "Automatic host update policy"),
+                    managed_by = AICodedbStrictJson.GetRequiredString(
+                        value,
+                        "managed_by",
+                        "Automatic host update policy"),
+                    project_root = AICodedbStrictJson.GetRequiredString(
+                        value,
+                        "project_root",
+                        "Automatic host update policy"),
+                    automatic_updates = AICodedbStrictJson.GetRequiredBoolean(
+                        value,
+                        "automatic_updates",
+                        "Automatic host update policy"),
+                    updated_at_utc = AICodedbStrictJson.GetRequiredString(
+                        value,
+                        "updated_at_utc",
+                        "Automatic host update policy")
+                };
                 DateTime updatedAt;
                 if (document == null
                     || document.schema_version != 1

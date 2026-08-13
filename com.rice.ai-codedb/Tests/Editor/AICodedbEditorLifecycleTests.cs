@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using NUnit.Framework;
 
@@ -57,6 +58,80 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void HostGenerationStore_RejectsSelfConsistentCurrentGenerationNotOwnedByPackage()
+        {
+            InstallGeneration(
+                AICodedbProjectSettings.CurrentPackageVersion,
+                AICodedbProjectSettings.CurrentPayloadVersion,
+                AICodedbProjectSettings.CurrentPayloadSequence,
+                AICodedbProjectSettings.CurrentGenerationId);
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.IsUsable, Is.False);
+            Assert.That(selection.Detail, Does.Contain("Package-owned"));
+        }
+
+        [Test]
+        public void HostGenerationStore_RejectsDuplicateCurrentPointerProperty()
+        {
+            InstallCurrentGeneration();
+            var pointerPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
+            var pointer = File.ReadAllText(pointerPath);
+            File.WriteAllText(
+                pointerPath,
+                pointer.Replace(
+                    "\"schema_version\": 1,",
+                    "\"schema_version\": 1,\n  \"schema_version\": 1,"));
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.IsUsable, Is.False);
+            Assert.That(selection.Detail, Does.Contain("duplicate"));
+        }
+
+        [Test]
+        public void HostGenerationStore_RejectsWrongTokenTypeInCurrentPointer()
+        {
+            InstallCurrentGeneration();
+            var pointerPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
+            var pointer = File.ReadAllText(pointerPath);
+            File.WriteAllText(
+                pointerPath,
+                pointer.Replace("\"schema_version\": 1", "\"schema_version\": true"));
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.IsUsable, Is.False);
+            Assert.That(selection.Detail, Does.Contain("signed 32-bit JSON integer"));
+        }
+
+        [Test]
+        public void HostGenerationStore_RejectsDuplicateGenerationManifestProperty()
+        {
+            var generationFile = InstallCurrentGeneration();
+            var manifestPath = Path.Combine(
+                Path.GetDirectoryName(Path.GetDirectoryName(generationFile)),
+                "generation-manifest.json");
+            var manifest = File.ReadAllText(manifestPath);
+            File.WriteAllText(
+                manifestPath,
+                manifest.Replace(
+                    "\"schema_version\": 1,",
+                    "\"schema_version\": 1,\n  \"SCHEMA_VERSION\": 1,"));
+            RewriteCurrentPointerManifestHash(manifestPath);
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.IsUsable, Is.False);
+            Assert.That(selection.Detail, Does.Contain("case-ambiguous"));
+        }
+
+        [Test]
         public void HostGenerationStore_FailsClosedAfterSelectedFileDrifts()
         {
             var generationFile = InstallCurrentGeneration();
@@ -66,6 +141,143 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
             Assert.That(selection.Detail, Does.Contain("drifted"));
+        }
+
+        [Test]
+        public void HostGenerationStore_FailsClosedForUnmanifestedGenerationFile()
+        {
+            var generationFile = InstallCurrentGeneration();
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(generationFile), "unmanifested.ps1"), "extra");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.Detail, Does.Contain("unmanifested file"));
+        }
+
+        [Test]
+        public void HostGenerationStore_FailsClosedForUnmanifestedEmptyDirectory()
+        {
+            var generationFile = InstallCurrentGeneration();
+            var generationRoot = Path.GetDirectoryName(Path.GetDirectoryName(generationFile));
+            Directory.CreateDirectory(Path.Combine(generationRoot, "unmanifested-empty"));
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.Detail, Does.Contain("unmanifested directory"));
+        }
+
+        [Test]
+        public void HostGenerationStore_FailsClosedForGenerationDirectoryReparsePoint()
+        {
+            var generationFile = InstallCurrentGeneration();
+            var generationRoot = Path.GetDirectoryName(Path.GetDirectoryName(generationFile));
+            var externalRoot = Path.Combine(
+                Path.GetTempPath(),
+                "Rice-AICodedb-Generation-Reparse-Tests",
+                Guid.NewGuid().ToString("N"));
+            var junctionPath = Path.Combine(generationRoot, "unmanifested-junction");
+            Directory.CreateDirectory(externalRoot);
+            try
+            {
+                CreateDirectoryJunction(junctionPath, externalRoot);
+
+                var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+                Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+                Assert.That(selection.Detail, Does.Contain("reparse point"));
+            }
+            finally
+            {
+                if (Directory.Exists(junctionPath))
+                    Directory.Delete(junctionPath);
+                if (Directory.Exists(externalRoot))
+                    Directory.Delete(externalRoot, true);
+            }
+        }
+
+        [Test]
+        public void HostGenerationStore_ResolvesValidatedPreviousGenerationWithoutMarkingItInvalid()
+        {
+            InstallGeneration("0.2.5-preview.2", "poc.29", 29, "poc.29");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Previous));
+            Assert.That(selection.IsUsable, Is.False);
+            Assert.That(selection.GenerationId, Is.EqualTo("poc.29"));
+            Assert.That(selection.Detail, Does.Contain("compatible previous generation"));
+            Assert.That(
+                AICodedbHostGenerationStore.ResolveHostPath(
+                    _projectRoot,
+                    "scripts/fixture.ps1",
+                    AICodedbProjectSettings.WatchManageScriptRelativePath),
+                Does.EndWith("/host/generations/poc.29/scripts/fixture.ps1"));
+        }
+
+        [Test]
+        public void HostGenerationStore_ResolvesValidatedNewerGenerationAsDowngradeReviewRequired()
+        {
+            InstallGeneration("0.2.5-preview.4", "poc.31", 31, "poc.31");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.DowngradeReviewRequired));
+            Assert.That(selection.GenerationId, Is.EqualTo("poc.31"));
+            Assert.That(selection.Detail, Does.Contain("newer than the loaded Package"));
+        }
+
+        [Test]
+        public void HostGenerationStore_TreatsTrackedAdoptionWithoutRuntimeAsUnavailable()
+        {
+            var trackedFile = Path.Combine(_projectRoot, "AIWork", "codedb", "scripts", "fixture.ps1");
+            Directory.CreateDirectory(Path.GetDirectoryName(trackedFile));
+            File.WriteAllText(trackedFile, "tracked");
+            var markerPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostPayloadMarkerRelativePath);
+            File.WriteAllText(
+                markerPath,
+                "{\"schema_version\":2,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
+                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
+                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
+                + "\"payload_content_sha256\":\"" + new string('a', 64) + "\","
+                + "\"host_use_gate_version\":1,\"generation_lease_version\":2,"
+                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
+                + "\"current_pointer\":\"" + AICodedbProjectSettings.HostCurrentPointerRelativePath + "\","
+                + "\"files\":[{\"path\":\"AIWork/codedb/scripts/fixture.ps1\","
+                + "\"installed_sha256\":\"" + GetSha256(trackedFile) + "\"}]}");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Unavailable));
+            Assert.That(selection.Detail, Does.Contain("no runtime generation is selected"));
+        }
+
+        [Test]
+        public void HostGenerationStore_RejectsSchemaTwoMarkerThatClaimsIgnoredRuntimeOwnership()
+        {
+            var markerPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostPayloadMarkerRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(markerPath));
+            File.WriteAllText(
+                markerPath,
+                "{\"schema_version\":2,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
+                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
+                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
+                + "\"payload_content_sha256\":\"" + new string('a', 64) + "\","
+                + "\"host_use_gate_version\":1,\"generation_lease_version\":2,"
+                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
+                + "\"current_pointer\":\"" + AICodedbProjectSettings.HostCurrentPointerRelativePath + "\","
+                + "\"files\":[{\"path\":\"AIWork/.runtime/codedb/host/current.json\","
+                + "\"installed_sha256\":\"" + new string('b', 64) + "\"}]}");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.Detail, Does.Contain("invalid or duplicate path"));
         }
 
         [Test]
@@ -202,6 +414,34 @@ namespace Rice.AI.Codedb.Editor.Tests
                 _ => lease.process_start_ticks), Is.False);
         }
 
+        [TestCase("duplicate")]
+        [TestCase("wrong-token")]
+        [TestCase("bom")]
+        [TestCase("invalid-utf8")]
+        public void EditorLeaseRead_RejectsAmbiguousOrInvalidStrictJson(string invalidKind)
+        {
+            var leasePath = Path.Combine(_projectRoot, "editor-lease.json");
+            var json = "{\"schema_version\":1,"
+                       + "\"managed_by\":\"com.rice.ai-codedb\","
+                       + "\"session_id\":\"session-1\","
+                       + "\"editor_pid\":4321,"
+                       + "\"process_start_ticks\":\"638893440000000000\","
+                       + "\"project_root\":\"" + JsonPath(_projectRoot) + "\","
+                       + "\"project_identity\":\"" + AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot) + "\","
+                       + "\"created_at_utc\":\"2026-08-13T00:00:00.0000000Z\","
+                       + "\"heartbeat_at_utc\":\"2026-08-13T00:00:01.0000000Z\"}";
+            WriteInvalidJsonEvidence(
+                leasePath,
+                json,
+                invalidKind,
+                "\"schema_version\":1",
+                "\"schema_version\":1,\"schema_version\":1",
+                "\"editor_pid\":4321",
+                "\"editor_pid\":\"4321\"");
+
+            Assert.That(AICodedbEditorLifecycle.ReadEditorLease(leasePath), Is.Null);
+        }
+
         [Test]
         public void ReadHostStatusAfterUpgradeAsync_ConcurrentExitFourWaitsUntilCurrent()
         {
@@ -296,6 +536,66 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(policy.IsValid, Is.False);
         }
 
+        [TestCase("duplicate")]
+        [TestCase("wrong-token")]
+        [TestCase("bom")]
+        [TestCase("invalid-utf8")]
+        public void HostUpdatePolicyStore_RejectsAmbiguousOrInvalidStrictJson(string invalidKind)
+        {
+            var policyPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostUpdatePolicyRelativePath);
+            var json = "{\"schema_version\":1,"
+                       + "\"managed_by\":\"com.rice.ai-codedb\","
+                       + "\"project_root\":\"" + JsonPath(_projectRoot) + "\","
+                       + "\"automatic_updates\":true,"
+                       + "\"updated_at_utc\":\"2026-08-13T00:00:00.0000000Z\"}";
+            WriteInvalidJsonEvidence(
+                policyPath,
+                json,
+                invalidKind,
+                "\"schema_version\":1",
+                "\"schema_version\":1,\"SCHEMA_VERSION\":1",
+                "\"automatic_updates\":true",
+                "\"automatic_updates\":\"true\"");
+
+            var policy = AICodedbHostUpdatePolicyStore.Read(_projectRoot);
+
+            Assert.That(policy.IsValid, Is.False);
+            Assert.That(policy.IsEnabled, Is.False);
+        }
+
+        [TestCase("duplicate")]
+        [TestCase("wrong-token")]
+        [TestCase("bom")]
+        [TestCase("invalid-utf8")]
+        public void HostUpgradeStateStore_RejectsAmbiguousOrInvalidStrictJson(string invalidKind)
+        {
+            var statePath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
+            var json = "{\"schema_version\":1,"
+                       + "\"managed_by\":\"com.rice.ai-codedb\","
+                       + "\"project_root\":\"" + JsonPath(_projectRoot) + "\","
+                       + "\"state\":\"CURRENT\","
+                       + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                       + "\"updated_at_utc\":\"2026-08-13T00:00:00.0000000Z\","
+                       + "\"message\":null}";
+            WriteInvalidJsonEvidence(
+                statePath,
+                json,
+                invalidKind,
+                "\"schema_version\":1",
+                "\"schema_version\":1,\"schema_version\":1",
+                "\"schema_version\":1",
+                "\"schema_version\":true");
+
+            var status = AICodedbHostUpgradeStatusStore.Read(
+                _projectRoot,
+                AICodedbProjectSettings.CurrentGenerationId);
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+        }
+
         [Test]
         public void ShouldReconcileCoordinator_OldGenerationPointerWinsOverLiveCoordinator()
         {
@@ -387,6 +687,12 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbEditorLifecycle.CanEnsureHostGeneration(
                 upgradeReady,
                 AICodedbHostGenerationState.Invalid), Is.False);
+            Assert.That(AICodedbEditorLifecycle.CanEnsureHostGeneration(
+                upgradeReady,
+                AICodedbHostGenerationState.Previous), Is.False);
+            Assert.That(AICodedbEditorLifecycle.CanEnsureHostGeneration(
+                upgradeReady,
+                AICodedbHostGenerationState.DowngradeReviewRequired), Is.False);
         }
 
         [TestCase(false, false, ExpectedResult = false)]
@@ -417,21 +723,35 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostGenerationState.Legacy,
                 enabled,
                 unavailable,
-                "poc.29"), Is.True);
+                "poc.30"), Is.True);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 unavailable,
-                "poc.29"), Is.True);
+                "poc.30"), Is.True);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Current,
                 enabled,
                 unavailable,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
+            Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
+                true,
+                false,
+                AICodedbHostGenerationState.Unavailable,
+                enabled,
+                unavailable,
+                "poc.30"), Is.True);
+            Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
+                false,
+                false,
+                AICodedbHostGenerationState.Unavailable,
+                enabled,
+                unavailable,
+                "poc.30"), Is.True);
         }
 
         [Test]
@@ -442,14 +762,14 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.29",
-                "CHECK_FAILED / poc.29",
+                "poc.30",
+                "CHECK_FAILED / poc.30",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.28",
-                "CHECK_FAILED / poc.28",
+                "poc.29",
+                "CHECK_FAILED / poc.29",
                 "fixture failure");
 
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
@@ -458,28 +778,28 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedPrevious,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 disabled,
                 failedPrevious,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedCurrent,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldReconcileAutomaticHostUpgrade(
                 true,
                 true,
                 AICodedbHostGenerationState.Invalid,
                 enabled,
                 failedPrevious,
-                "poc.29"), Is.True);
+                "poc.30"), Is.True);
         }
 
         [Test]
@@ -488,31 +808,31 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.29",
-                "CHECK_FAILED / poc.29",
+                "poc.30",
+                "CHECK_FAILED / poc.30",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.28",
-                "CHECK_FAILED / poc.28",
+                "poc.29",
+                "CHECK_FAILED / poc.29",
                 "fixture failure");
             var switchingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Switching,
                 AICodedbStatusState.Warning,
-                "poc.29",
-                "SWITCHING / poc.29",
+                "poc.30",
+                "SWITCHING / poc.30",
                 string.Empty);
 
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 failedCurrent,
-                "poc.29"), Is.True);
+                "poc.30"), Is.True);
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 failedPrevious,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
             Assert.That(AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 switchingCurrent,
-                "poc.29"), Is.False);
+                "poc.30"), Is.False);
         }
 
         private AICodedbEditorLifecycle.ManualRuntimeDocument CreateManualRuntime(string mode, params string[] sessionIds)
@@ -542,12 +862,83 @@ namespace Rice.AI.Codedb.Editor.Tests
             return new AICodedbCommandResult(0, output, string.Empty, false);
         }
 
+        private static string JsonPath(string path)
+        {
+            return AICodedbPaths.NormalizePath(path).Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        private static void WriteInvalidJsonEvidence(
+            string path,
+            string validJson,
+            string invalidKind,
+            string duplicateSource,
+            string duplicateReplacement,
+            string wrongTokenSource,
+            string wrongTokenReplacement)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            switch (invalidKind)
+            {
+                case "duplicate":
+                    WriteUtf8NoBom(path, validJson.Replace(duplicateSource, duplicateReplacement));
+                    return;
+                case "wrong-token":
+                    WriteUtf8NoBom(path, validJson.Replace(wrongTokenSource, wrongTokenReplacement));
+                    return;
+                case "bom":
+                    var payload = Encoding.UTF8.GetBytes(validJson);
+                    var preamble = new UTF8Encoding(true).GetPreamble();
+                    var bomBytes = new byte[preamble.Length + payload.Length];
+                    Buffer.BlockCopy(preamble, 0, bomBytes, 0, preamble.Length);
+                    Buffer.BlockCopy(payload, 0, bomBytes, preamble.Length, payload.Length);
+                    File.WriteAllBytes(path, bomBytes);
+                    return;
+                case "invalid-utf8":
+                    File.WriteAllBytes(path, new byte[] { (byte)'{', (byte)'\"', 0xc3, 0x28, (byte)'\"', (byte)':', (byte)'1', (byte)'}' });
+                    return;
+                default:
+                    Assert.Fail("Unknown invalid JSON evidence kind: " + invalidKind);
+                    return;
+            }
+        }
+
+        private static void WriteUtf8NoBom(string path, string content)
+        {
+            File.WriteAllText(path, content, new UTF8Encoding(false));
+        }
+
         private string InstallCurrentGeneration()
         {
+            var sourceRoot = Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Payload~",
+                "Generations",
+                AICodedbProjectSettings.CurrentGenerationId);
             var generationRoot = Path.Combine(
                 _projectRoot,
                 AICodedbProjectSettings.HostGenerationsRelativePath,
                 AICodedbProjectSettings.CurrentGenerationId);
+            CopyDirectory(sourceRoot, generationRoot);
+
+            var currentPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(currentPath));
+            File.Copy(
+                Path.Combine(AICodedbPaths.PackageRootPath, "Payload~", "host-current.json"),
+                currentPath,
+                true);
+            return Path.Combine(generationRoot, "scripts", "verify-codedb-project.ps1");
+        }
+
+        private string InstallGeneration(
+            string packageVersion,
+            string payloadVersion,
+            int payloadSequence,
+            string generationId)
+        {
+            var generationRoot = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostGenerationsRelativePath,
+                generationId);
             var generationFile = Path.Combine(generationRoot, "scripts", "fixture.ps1");
             Directory.CreateDirectory(Path.GetDirectoryName(generationFile));
             File.WriteAllText(generationFile, "current");
@@ -556,10 +947,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             File.WriteAllText(
                 manifestPath,
                 "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
-                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
-                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
-                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
-                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
+                + "\"generation_id\":\"" + generationId + "\","
+                + "\"package_version\":\"" + packageVersion + "\","
+                + "\"payload_version\":\"" + payloadVersion + "\","
+                + "\"payload_sequence\":" + payloadSequence + ","
                 + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
                 + "\"files\":[{\"path\":\"scripts/fixture.ps1\","
                 + "\"sha256\":\"" + GetSha256(generationFile) + "\"}]}");
@@ -569,12 +960,12 @@ namespace Rice.AI.Codedb.Editor.Tests
             File.WriteAllText(
                 currentPath,
                 "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
-                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
-                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
-                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
-                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                + "\"package_version\":\"" + packageVersion + "\","
+                + "\"payload_version\":\"" + payloadVersion + "\","
+                + "\"payload_sequence\":" + payloadSequence + ","
+                + "\"generation_id\":\"" + generationId + "\","
                 + "\"generation_relative_path\":\"" + AICodedbProjectSettings.HostGenerationsRelativePath
-                + "/" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                + "/" + generationId + "\","
                 + "\"generation_manifest_sha256\":\"" + GetSha256(manifestPath) + "\","
                 + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + "}");
             return generationFile;
@@ -585,6 +976,69 @@ namespace Rice.AI.Codedb.Editor.Tests
             using (var stream = File.OpenRead(path))
             using (var sha256 = SHA256.Create())
                 return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+        }
+
+        private void RewriteCurrentPointerManifestHash(string manifestPath)
+        {
+            var currentPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
+            var current = File.ReadAllText(currentPath);
+            var start = current.IndexOf("\"generation_manifest_sha256\": \"", StringComparison.Ordinal);
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            start += "\"generation_manifest_sha256\": \"".Length;
+            var end = current.IndexOf('"', start);
+            Assert.That(end, Is.GreaterThan(start));
+            File.WriteAllText(currentPath, current.Substring(0, start) + GetSha256(manifestPath) + current.Substring(end));
+        }
+
+        private static void CopyDirectory(string sourceRoot, string targetRoot)
+        {
+            Assert.That(Directory.Exists(sourceRoot), Is.True, "Package-owned Current generation fixture is missing.");
+            foreach (var sourceDirectory in Directory.GetDirectories(sourceRoot, "*", SearchOption.AllDirectories))
+            {
+                var relative = sourceDirectory.Substring(sourceRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                Directory.CreateDirectory(Path.Combine(targetRoot, relative));
+            }
+            Directory.CreateDirectory(targetRoot);
+            foreach (var sourceFile in Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            {
+                var relative = sourceFile.Substring(sourceRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var targetFile = Path.Combine(targetRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFile));
+                File.Copy(sourceFile, targetFile, true);
+            }
+        }
+
+        private static void CreateDirectoryJunction(string junctionPath, string targetPath)
+        {
+            var command = "New-Item -ItemType Junction -Path '"
+                          + junctionPath.Replace("'", "''")
+                          + "' -Target '"
+                          + targetPath.Replace("'", "''")
+                          + "' -ErrorAction Stop | Out-Null";
+            var encodedCommand = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(command));
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (var process = System.Diagnostics.Process.Start(startInfo))
+            {
+                Assert.That(process, Is.Not.Null);
+                var standardOutput = process.StandardOutput.ReadToEnd();
+                var standardError = process.StandardError.ReadToEnd();
+                Assert.That(process.WaitForExit(10000), Is.True, "Timed out creating the reparse-point fixture.");
+                Assert.That(process.ExitCode, Is.Zero, standardOutput + Environment.NewLine + standardError);
+            }
+
+            Assert.That(
+                (File.GetAttributes(junctionPath) & FileAttributes.ReparsePoint) != 0,
+                Is.True,
+                "The fixture junction was not marked as a reparse point.");
         }
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ namespace Rice.AI.Codedb.Editor
         Verify,
         Upgrade,
         Redeploy,
+        Repair,
         Sync,
         Remove
     }
@@ -24,70 +26,71 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult ReadStatus()
         {
-            return Run(AICodedbHostPayloadAction.DryRun, string.Empty, false, false);
+            return Run(AICodedbHostPayloadAction.DryRun, false, false);
         }
 
         internal static Task<AICodedbCommandResult> ReadStatusAsync()
         {
-            var scriptPath = AICodedbPaths.HostPayloadMaterializerScriptPath;
-            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.DryRun, string.Empty, false);
-            return AICodedbProcessRunner.RunPowerShellScriptAsync(scriptPath, ReadTimeoutMilliseconds, arguments);
+            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.DryRun, false);
+            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
+                ReadTimeoutMilliseconds,
+                arguments);
         }
 
         internal static AICodedbCommandResult RunDryRun()
         {
-            return Run(AICodedbHostPayloadAction.DryRun, string.Empty, false, true);
+            return Run(AICodedbHostPayloadAction.DryRun, false, true);
         }
 
         internal static AICodedbCommandResult RunVerify()
         {
-            return Run(AICodedbHostPayloadAction.Verify, string.Empty, false, true);
+            return Run(AICodedbHostPayloadAction.Verify, false, true);
         }
 
         internal static AICodedbCommandResult RunUpgrade()
         {
-            return Run(AICodedbHostPayloadAction.Upgrade, string.Empty, false, true);
+            return Run(AICodedbHostPayloadAction.Upgrade, false, true);
         }
 
         internal static Task<AICodedbCommandResult> RunUpgradeAsync()
         {
-            var scriptPath = AICodedbPaths.HostPayloadMaterializerScriptPath;
-            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.Upgrade, string.Empty, false);
-            return AICodedbProcessRunner.RunPowerShellScriptAsync(scriptPath, MutationTimeoutMilliseconds, arguments);
+            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.Upgrade, false);
+            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
+                MutationTimeoutMilliseconds,
+                arguments);
         }
 
-        internal static AICodedbCommandResult RunRedeploy()
+        internal static AICodedbCommandResult RunRedeploy(bool confirmedProjectMutation)
         {
-            return Run(AICodedbHostPayloadAction.Redeploy, string.Empty, false, true);
+            return Run(AICodedbHostPayloadAction.Redeploy, confirmedProjectMutation, true);
         }
 
-        internal static AICodedbCommandResult RunSync(string authorizationPath, bool confirmLegacyMcpStopped)
+        internal static AICodedbCommandResult RunRepair()
         {
-            return Run(AICodedbHostPayloadAction.Sync, authorizationPath, confirmLegacyMcpStopped, true);
+            return Run(AICodedbHostPayloadAction.Repair, true, true);
         }
 
-        internal static AICodedbCommandResult RunRemove(string authorizationPath, bool confirmLegacyMcpStopped)
+        internal static AICodedbCommandResult RunSync()
         {
-            return Run(AICodedbHostPayloadAction.Remove, authorizationPath, confirmLegacyMcpStopped, true);
+            return Run(AICodedbHostPayloadAction.Sync, true, true);
+        }
+
+        internal static AICodedbCommandResult RunRemove()
+        {
+            return Run(AICodedbHostPayloadAction.Remove, true, true);
         }
 
         internal static string[] BuildScriptArguments(
             AICodedbHostPayloadAction action,
-            string authorizationPath,
-            bool confirmLegacyMcpStopped)
+            bool confirmedProjectMutation)
         {
-            var requiresAuthorization = RequiresAuthorization(action);
-            if (requiresAuthorization && string.IsNullOrWhiteSpace(authorizationPath))
-                throw new ArgumentException("Sync and Remove require an explicitly selected tracked-host authorization path.", nameof(authorizationPath));
-
-            if (requiresAuthorization && !Path.IsPathRooted(authorizationPath.Trim()))
-                throw new ArgumentException("Tracked-host authorization path must be absolute.", nameof(authorizationPath));
-
-            if (!requiresAuthorization && !string.IsNullOrWhiteSpace(authorizationPath))
-                throw new ArgumentException("DryRun, Verify, Upgrade, and Redeploy do not accept tracked-host authorization.", nameof(authorizationPath));
-
-            if (!requiresAuthorization && confirmLegacyMcpStopped)
-                throw new ArgumentException("Legacy MCP confirmation is valid only for Sync or Remove.", nameof(confirmLegacyMcpStopped));
+            var requiresConfirmation = RequiresConfirmation(action);
+            if (requiresConfirmation != confirmedProjectMutation)
+                throw new ArgumentException(
+                    requiresConfirmation
+                        ? "Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."
+                        : "DryRun, Verify, and Upgrade do not accept project mutation confirmation.",
+                    nameof(confirmedProjectMutation));
 
             var arguments = new List<string>
             {
@@ -97,39 +100,38 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbPaths.ProjectRoot
             };
 
-            if (requiresAuthorization)
-            {
-                arguments.Add("-TrackedHostAuthorizationPath");
-                arguments.Add(authorizationPath.Trim());
-                if (confirmLegacyMcpStopped)
-                    arguments.Add("-ConfirmLegacyMcpStopped");
-            }
+            if (requiresConfirmation)
+                arguments.Add("-ConfirmedProjectMutation");
 
             return arguments.ToArray();
         }
 
-        private static bool RequiresAuthorization(AICodedbHostPayloadAction action)
+        private static bool RequiresConfirmation(AICodedbHostPayloadAction action)
         {
-            return action == AICodedbHostPayloadAction.Sync || action == AICodedbHostPayloadAction.Remove;
+            return action == AICodedbHostPayloadAction.Redeploy
+                   || action == AICodedbHostPayloadAction.Repair
+                   || action == AICodedbHostPayloadAction.Sync
+                   || action == AICodedbHostPayloadAction.Remove;
         }
 
         private static bool IsMutation(AICodedbHostPayloadAction action)
         {
             return action == AICodedbHostPayloadAction.Upgrade
                    || action == AICodedbHostPayloadAction.Redeploy
-                   || RequiresAuthorization(action);
+                   || action == AICodedbHostPayloadAction.Repair
+                   || action == AICodedbHostPayloadAction.Sync
+                   || action == AICodedbHostPayloadAction.Remove;
         }
 
         private static AICodedbCommandResult Run(
             AICodedbHostPayloadAction action,
-            string authorizationPath,
-            bool confirmLegacyMcpStopped,
+            bool confirmedProjectMutation,
             bool showProgress)
         {
             string[] arguments;
             try
             {
-                arguments = BuildScriptArguments(action, authorizationPath, confirmLegacyMcpStopped);
+                arguments = BuildScriptArguments(action, confirmedProjectMutation);
             }
             catch (ArgumentException exception)
             {
@@ -147,8 +149,7 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
-                return AICodedbProcessRunner.RunPowerShellScript(
-                    AICodedbPaths.HostPayloadMaterializerScriptPath,
+                return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
                     timeout,
                     arguments);
             }
@@ -469,6 +470,7 @@ namespace Rice.AI.Codedb.Editor
         Rollback,
         Current,
         CheckFailed,
+        Historical,
         Invalid
     }
 
@@ -496,6 +498,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal AICodedbStatusItem ToStatusItem(bool hostPayloadMarkerExists)
         {
+            if (Phase == AICodedbHostUpgradePhase.Historical)
+                return AICodedbStatusItem.Inactive("Host upgrade", Summary, Detail);
             if (!hostPayloadMarkerExists
                 && Phase != AICodedbHostUpgradePhase.Unavailable
                 && Phase != AICodedbHostUpgradePhase.Invalid)
@@ -525,6 +529,11 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbHostUpgradeStatus Read(string projectRoot)
         {
+            return Read(projectRoot, string.Empty);
+        }
+
+        internal static AICodedbHostUpgradeStatus Read(string projectRoot, string expectedGenerationId)
+        {
             try
             {
                 var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
@@ -542,10 +551,8 @@ namespace Rice.AI.Codedb.Editor
                         AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
                 }
 
-                var fileInfo = new FileInfo(path);
-                if (fileInfo.Length <= 0 || fileInfo.Length > 64 * 1024)
-                    throw new InvalidOperationException("Host upgrade state has an invalid size.");
-                return Parse(File.ReadAllText(path), normalizedRoot, path);
+                var value = AICodedbStrictJson.ReadObject(path, 64 * 1024, "Host upgrade state");
+                return ParseDocument(value, normalizedRoot, path, expectedGenerationId);
             }
             catch (Exception exception)
             {
@@ -558,45 +565,92 @@ namespace Rice.AI.Codedb.Editor
             string projectRoot,
             string detailPath)
         {
+            return Parse(json, projectRoot, detailPath, string.Empty);
+        }
+
+        internal static AICodedbHostUpgradeStatus Parse(
+            string json,
+            string projectRoot,
+            string detailPath,
+            string expectedGenerationId)
+        {
             try
             {
                 var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
-                var document = UnityEngine.JsonUtility.FromJson<HostUpgradeStateDocument>(json);
-                DateTime updatedAt;
-                if (document == null
-                    || document.schema_version != 1
+                var value = AICodedbStrictJson.ParseObject(json, "Host upgrade state");
+                return ParseDocument(value, normalizedRoot, detailPath, expectedGenerationId);
+            }
+            catch (Exception exception)
+            {
+                return Invalid(exception.Message);
+            }
+        }
+
+        private static AICodedbHostUpgradeStatus ParseDocument(
+            Dictionary<string, object> value,
+            string normalizedRoot,
+            string detailPath,
+            string expectedGenerationId)
+        {
+            var document = new HostUpgradeStateDocument
+            {
+                schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "Host upgrade state"),
+                managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", "Host upgrade state"),
+                project_root = AICodedbStrictJson.GetRequiredString(value, "project_root", "Host upgrade state"),
+                state = AICodedbStrictJson.GetRequiredString(value, "state", "Host upgrade state"),
+                generation_id = AICodedbStrictJson.GetRequiredString(value, "generation_id", "Host upgrade state"),
+                updated_at_utc = AICodedbStrictJson.GetRequiredString(value, "updated_at_utc", "Host upgrade state"),
+                message = AICodedbStrictJson.GetRequiredNullableString(value, "message", "Host upgrade state")
+            };
+            DateTime updatedAt;
+            if (document.schema_version != 1
                     || !string.Equals(document.managed_by, ManagedBy, StringComparison.Ordinal)
                     || !string.Equals(
                         AICodedbPaths.NormalizePath(document.project_root).TrimEnd('/'),
                         normalizedRoot,
                         StringComparison.OrdinalIgnoreCase)
                     || !IsValidGenerationId(document.generation_id)
-                    || !DateTime.TryParse(document.updated_at_utc, out updatedAt)
+                    || !DateTime.TryParse(
+                        document.updated_at_utc,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out updatedAt)
                     || (document.message != null && document.message.Length > 512))
-                    throw new InvalidOperationException("Host upgrade state has invalid identity or schema.");
+                throw new InvalidOperationException("Host upgrade state has invalid identity or schema.");
 
-                var detail = string.IsNullOrWhiteSpace(document.message)
-                    ? (detailPath ?? string.Empty)
-                    : document.message.Trim();
-                switch (document.state)
-                {
-                    case "INSTALLING":
-                        return Create(AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning, document, detail);
-                    case "SWITCHING":
-                        return Create(AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning, document, detail);
-                    case "ROLLBACK":
-                        return Create(AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error, document, detail);
-                    case "CURRENT":
-                        return Create(AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok, document, detail);
-                    case "CHECK_FAILED":
-                        return Create(AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error, document, detail);
-                    default:
-                        throw new InvalidOperationException("Host upgrade state has an unsupported phase.");
-                }
-            }
-            catch (Exception exception)
+            var detail = string.IsNullOrWhiteSpace(document.message)
+                ? (detailPath ?? string.Empty)
+                : document.message.Trim();
+            if (document.state != "INSTALLING"
+                && document.state != "SWITCHING"
+                && document.state != "ROLLBACK"
+                && document.state != "CURRENT"
+                && document.state != "CHECK_FAILED")
+                throw new InvalidOperationException("Host upgrade state has an unsupported phase.");
+            if (!string.IsNullOrWhiteSpace(expectedGenerationId)
+                && !string.Equals(document.generation_id, expectedGenerationId, StringComparison.Ordinal))
             {
-                return Invalid(exception.Message);
+                return new AICodedbHostUpgradeStatus(
+                    AICodedbHostUpgradePhase.Historical,
+                    AICodedbStatusState.Inactive,
+                    document.generation_id,
+                    "Historical " + document.state + " / " + document.generation_id,
+                    "Recorded for a previous target generation; current target is " + expectedGenerationId + ". " + detail);
+            }
+            switch (document.state)
+            {
+                case "INSTALLING":
+                    return Create(AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning, document, detail);
+                case "SWITCHING":
+                    return Create(AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning, document, detail);
+                case "ROLLBACK":
+                    return Create(AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error, document, detail);
+                case "CURRENT":
+                    return Create(AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok, document, detail);
+                case "CHECK_FAILED":
+                    return Create(AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error, document, detail);
+                default:
+                    throw new InvalidOperationException("Host upgrade state has an unsupported phase.");
             }
         }
 

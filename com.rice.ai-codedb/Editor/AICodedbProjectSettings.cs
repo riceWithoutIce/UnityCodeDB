@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
 
@@ -10,10 +11,10 @@ namespace Rice.AI.Codedb.Editor
         internal const string DisplayName = "Rice AI Codedb";
         internal const string MenuRoot = "Tools/Rice AI/Codedb/";
         internal const string DefaultToolProfile = "Discover Read";
-        internal const string CurrentPackageVersion = "0.2.5-preview.2";
-        internal const string CurrentPayloadVersion = "poc.29";
-        internal const string CurrentGenerationId = "poc.29";
-        internal const int CurrentPayloadSequence = 29;
+        internal const string CurrentPackageVersion = "0.2.5-preview.3";
+        internal const string CurrentPayloadVersion = "poc.30";
+        internal const string CurrentGenerationId = "poc.30";
+        internal const int CurrentPayloadSequence = 30;
         internal const int CurrentBootstrapProtocol = 1;
         internal const string LegacyPackageVersion = "0.2.2";
         internal const string LegacyPayloadVersion = "poc.21";
@@ -25,7 +26,6 @@ namespace Rice.AI.Codedb.Editor
 
         internal static string RuntimeRelativePath => "AIWork/.runtime/codedb/" + ProviderSlug;
         internal static string ScriptRootRelativePath => "AIWork/codedb/scripts";
-        internal static string PackageProjectRelativePath => "Packages/" + PackageName;
         internal static string LegacyHostRootRelativePath => "AIWork/codedb";
         internal static string HostPayloadMarkerRelativePath => "AIWork/codedb/.rice-ai-codedb-payload.json";
         internal static string HostRuntimeRelativePath => "AIWork/.runtime/codedb/host";
@@ -36,7 +36,6 @@ namespace Rice.AI.Codedb.Editor
         internal static string HostUnavailableRelativePath => HostRuntimeRelativePath + "/unavailable";
         internal static string HostPayloadMaterializerRuntimeRelativePath => "AIWork/.runtime/codedb/payload-materializer";
         internal static string HostPayloadUpgradeStateRelativePath => HostPayloadMaterializerRuntimeRelativePath + "/upgrade-state.json";
-        internal static string TrackedHostAuthorizationRelativePath => HostPayloadMaterializerRuntimeRelativePath + "/authorizations";
         internal static string HostPayloadMaterializerScriptPackageRelativePath => "Tools~/materialize-codedb-host-payload.ps1";
         internal static string ProviderExecutableRelativePath => RuntimeRelativePath + "/bin/codebase-mcp.exe";
         internal static string ProviderConfigRelativePath => RuntimeRelativePath + "/config/codedb-mcp.toml";
@@ -90,14 +89,21 @@ namespace Rice.AI.Codedb.Editor
             return string.IsNullOrWhiteSpace(projectName) ? "UnityProject" : projectName;
         }
 
-        private static string CreateSlug(string value)
+        internal static string CreateSlug(string value)
         {
+            var normalizedValue = (value ?? string.Empty).Normalize(NormalizationForm.FormC);
             var builder = new StringBuilder();
             var previousWasSeparator = false;
+            var containsNonAscii = false;
 
-            foreach (var character in value)
+            foreach (var character in normalizedValue)
             {
-                if (char.IsLetterOrDigit(character))
+                if (character > 0x7f)
+                    containsNonAscii = true;
+
+                if ((character >= 'A' && character <= 'Z')
+                    || (character >= 'a' && character <= 'z')
+                    || (character >= '0' && character <= '9'))
                 {
                     builder.Append(char.ToLowerInvariant(character));
                     previousWasSeparator = false;
@@ -114,7 +120,25 @@ namespace Rice.AI.Codedb.Editor
             while (builder.Length > 0 && builder[builder.Length - 1] == '-')
                 builder.Length--;
 
-            return builder.Length == 0 ? "unity-project" : builder.ToString();
+            var result = builder.Length == 0 ? "unity-project" : builder.ToString();
+            var requiresHash = containsNonAscii;
+            if (result.Length > 96)
+            {
+                result = result.Substring(0, 96).TrimEnd('-');
+                requiresHash = true;
+            }
+
+            if (!requiresHash)
+                return result;
+
+            using (var sha256 = SHA256.Create())
+            {
+                var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedValue));
+                var hashBuilder = new StringBuilder(12);
+                for (var index = 0; index < 6; index++)
+                    hashBuilder.Append(hash[index].ToString("x2"));
+                return result + "-" + hashBuilder;
+            }
         }
     }
 }

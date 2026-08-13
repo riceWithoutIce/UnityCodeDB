@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.5-preview.3 - 2026-08-13
+
+- Split tracked project adoption from ignored Host runtime ownership with a
+  schema-2 marker. Existing schema-1 markers remain readable, while missing or
+  valid previous runtime generations can now be reconstructed automatically
+  without being misclassified as tracked-file drift.
+- Added validated `Previous` generation state, target-correlated upgrade
+  history, full last-known-good validation, and a centralized readiness gate
+  that prevents every Host command from resolving or launching an unavailable
+  script path.
+- Added one confirmed `Repair CodeDB` workflow that reconstructs or quarantines
+  only reviewed Host state, preserves Provider/index/adapter/config/policies and
+  classifies active MCP leases against exact mutation paths. Non-conflicting
+  current or historical immutable generations, leases, and processes are
+  retained without Stop while intersecting or unprovable closures block before
+  recovery writes. Repair atomically merges only the current project MCP table
+  with recoverable backup and fail-closed TOML validation.
+- Removed version-control metadata, commands, and authorization JSON from the
+  current materializer and Editor contracts. Empty-scope adoption, Upgrade,
+  Repair, Verify, advanced Sync, and Remove now behave identically with no VCS,
+  Git metadata, or SVN metadata and with VCS executables absent from `PATH`.
+- Resolve Package tools from Unity's loaded Package location and payloads
+  relative to the Package-owned materializer. Cached, local, and embedded
+  read-only layout fixtures verify Package source immutability.
+- Advanced the immutable Host generation to `poc.30`, retained the published
+  `poc.29` closure, and extended direct and skipped upgrade coverage through
+  `v0.2.5-preview.2`.
+
 ## 0.2.5-preview.2 - 2026-07-31
 
 - Made `Redeploy host` a complete Manager workflow for supported flat legacy

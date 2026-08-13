@@ -60,24 +60,41 @@ function Get-ProjectCodedbContext {
         [string]$UnityRoot
     )
 
-    $scriptsRoot = $PSScriptRoot
+    $scriptsRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+    $operationalRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptsRoot ".."))
     if ([string]::IsNullOrWhiteSpace($UnityRoot)) {
-        $UnityRoot = Join-Path $scriptsRoot "..\..\.."
+        if (-not [string]::IsNullOrWhiteSpace($env:RICE_CODEDB_UNITY_ROOT)) {
+            $UnityRoot = $env:RICE_CODEDB_UNITY_ROOT
+        } else {
+            $workingRoot = [System.IO.Path]::GetFullPath((Get-Location).Path)
+            $hasUnityMarkers = (Test-Path -LiteralPath (Join-Path $workingRoot "Assets") -PathType Container) -and
+                (Test-Path -LiteralPath (Join-Path $workingRoot "Packages\manifest.json") -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $workingRoot "ProjectSettings\ProjectVersion.txt") -PathType Leaf)
+            if (-not $hasUnityMarkers) {
+                throw "CodeDB generation scripts require RICE_CODEDB_UNITY_ROOT or a Unity-project working directory."
+            }
+            $UnityRoot = $workingRoot
+        }
     }
 
     $unityRoot = [System.IO.Path]::GetFullPath($UnityRoot)
     $projectName = Split-Path -Leaf $unityRoot.TrimEnd('\', '/')
     $projectSlug = ConvertTo-CodedbProjectSlug -Value $projectName
     $providerName = "codedb-$projectSlug"
-    $codedbRoot = Join-Path $unityRoot "AIWork\codedb"
+    $bootstrapRoot = Join-Path $unityRoot "AIWork\codedb"
     $runtimeRoot = Join-Path $unityRoot "AIWork\.runtime\codedb"
+    $hostRoot = Join-Path $runtimeRoot "host"
     $providerRoot = Join-Path $runtimeRoot $providerName
+    $generationId = Split-Path -Leaf $operationalRoot.TrimEnd('\', '/')
 
     [pscustomobject]@{
         UnityRoot = $unityRoot
         ProjectName = $projectName
         ProjectSlug = $projectSlug
-        CodedbRoot = $codedbRoot
+        CodedbRoot = $operationalRoot
+        BootstrapRoot = $bootstrapRoot
+        HostRoot = $hostRoot
+        GenerationId = $generationId
         RuntimeRoot = $runtimeRoot
         ProviderName = $providerName
         ProviderRuntimeRelativePath = "AIWork/.runtime/codedb/$providerName"
@@ -93,9 +110,9 @@ function Get-ProjectCodedbContext {
         TextAdapterManifestPath = Join-Path $providerRoot "adapter\text-index\manifest.json"
         TextAdapterFilesPath = Join-Path $providerRoot "adapter\text-index\files.jsonl"
         TextAdapterIndexPath = Join-Path $providerRoot "adapter\text-index\index.jsonl"
-        WrapperScriptPath = Join-Path $codedbRoot "wrapper\codedb-project-wrapper.mjs"
-        IgnoreTemplatePath = Join-Path $codedbRoot "codedbignore.example"
-        RuntimeConfigTemplatePath = Join-Path $codedbRoot "codedb-mcp.runtime.example.toml"
+        WrapperScriptPath = Join-Path $bootstrapRoot "wrapper\codedb-project-wrapper.mjs"
+        IgnoreTemplatePath = Join-Path $operationalRoot "codedbignore.example"
+        RuntimeConfigTemplatePath = Join-Path $operationalRoot "codedb-mcp.runtime.example.toml"
         GeneratedUnityIgnorePath = Join-Path $unityRoot ".codedbignore"
     }
 }
@@ -111,7 +128,8 @@ function Assert-CodedbUnityProject {
         (Join-Path $Context.UnityRoot "Packages\manifest.json"),
         (Join-Path $Context.UnityRoot "ProjectSettings\ProjectVersion.txt"),
         $Context.CodedbRoot,
-        (Join-Path $Context.CodedbRoot "scripts\codedb-project-common.ps1")
+        (Join-Path $Context.CodedbRoot "scripts\codedb-project-common.ps1"),
+        $Context.WrapperScriptPath
     )
 
     foreach ($path in $requiredPaths) {
@@ -454,6 +472,8 @@ function Get-ProjectCodedbActiveReadConfigPath {
     $watchConfigPath = Join-Path $Context.ProviderConfigRoot "codedb-mcp.watch.toml"
     $adapterBuilderPath = Join-Path $Context.CodedbRoot "scripts\build-codedb-project-text-adapter.ps1"
     $adapterWorkerPath = Join-Path $Context.CodedbRoot "scripts\run-codedb-project-text-adapter-worker.ps1"
+    $legacyAdapterBuilderPath = Join-Path $Context.BootstrapRoot "scripts\build-codedb-project-text-adapter.ps1"
+    $legacyAdapterWorkerPath = Join-Path $Context.BootstrapRoot "scripts\run-codedb-project-text-adapter-worker.ps1"
     $watchRoot = Join-Path $Context.ProviderRoot "watch"
     $desiredStatePath = Join-Path $watchRoot "lifecycle\desired-state.json"
     $coordinatorRuntime = Join-Path $watchRoot "coordinator"
@@ -463,6 +483,9 @@ function Get-ProjectCodedbActiveReadConfigPath {
     }
     foreach ($path in @($adapterBuilderPath, $adapterWorkerPath)) {
         Assert-CodedbPathInside -Path $path -Root $Context.CodedbRoot -Label "watch integration script"
+    }
+    foreach ($path in @($legacyAdapterBuilderPath, $legacyAdapterWorkerPath)) {
+        Assert-CodedbPathInside -Path $path -Root $Context.BootstrapRoot -Label "legacy watch integration alias"
     }
 
     if (-not (Test-Path -LiteralPath $watchConfigPath -PathType Leaf) -or
@@ -490,8 +513,11 @@ function Get-ProjectCodedbActiveReadConfigPath {
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.root), [System.IO.Path]::GetFullPath($Context.UnityRoot), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.provider_executable), [System.IO.Path]::GetFullPath($providerPaths.ExecutablePath), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.provider_config), [System.IO.Path]::GetFullPath($watchConfigPath), [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.adapter_builder), [System.IO.Path]::GetFullPath($adapterBuilderPath), [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.adapter_worker), [System.IO.Path]::GetFullPath($adapterWorkerPath), [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([string]$state.generation_id, [string]$Context.GenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.adapter_builder), [System.IO.Path]::GetFullPath($legacyAdapterBuilderPath), [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.adapter_worker), [System.IO.Path]::GetFullPath($legacyAdapterWorkerPath), [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.generation_adapter_builder), [System.IO.Path]::GetFullPath($adapterBuilderPath), [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.generation_adapter_worker), [System.IO.Path]::GetFullPath($adapterWorkerPath), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([string]$state.adapter_worker_state, "ready", [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.adapter_manifest), [System.IO.Path]::GetFullPath($Context.TextAdapterManifestPath), [StringComparison]::OrdinalIgnoreCase)) {
             return $providerPaths.ConfigPath

@@ -8,14 +8,14 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The `0.2.5-preview.2` validation prerelease
-targets Unity `2022.3` on Windows; stable remains `0.2.4`.
+and bounded MCP discovery surface. The `0.2.5-preview.3` / `poc.30` validation
+prerelease targets Unity `2022.3` on Windows; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.2`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.3`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The `0.2.5-preview.2` package keeps a tracked stable wrapper and byte-exact
+The `0.2.5-preview.3` package keeps a tracked stable wrapper and byte-exact
 v0.2.2 compatibility files under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
 `AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
@@ -35,75 +35,67 @@ template plus project-neutral provider guidance, verification, refresh, and
 controlled index-clear entries, provider and Shader/HLSL probes, the read-only
 freshness check, owner-selective refresh-if-stale, MCP registration draft
 emission, and project-config validation. The tool defaults to
-read-only `DryRun`. `Sync` and `Remove` require exactly one explicit mutation
-mode. `-PocFixture` retains the fixed run-id, ignored-root, fixture-marker, and
-reparse-point constraints used by the test suite. A tracked project instead
-requires an absolute `-TrackedHostAuthorizationPath` naming a reviewed JSON
-file under its own ignored materializer runtime. Both modes reject unowned or
-drifted files and use a deterministic UTF-8, LF-only payload ownership marker.
-Semantically valid but non-canonical marker JSON is stale and Sync rewrites only
-that marker to the canonical serialization. Sync and Remove
+read-only `DryRun`. `Repair`, `Sync`, and `Remove` require the Manager's
+second-level project mutation confirmation. `-PocFixture` retains the fixed
+run-id, fixture-marker, and reparse-point constraints used only by the test
+suite. Production actions do not accept version-control metadata or an
+authorization document. They reject unowned or drifted files and use a
+deterministic UTF-8, LF-only payload ownership marker.
+The schema-2 marker owns only tracked `AIWork/codedb/` files; ignored generation
+files and `current.json` are validated from their runtime manifests and pointer
+instead of being inferred from tracked adoption. Schema-1 markers remain
+readable for upgrades. Semantically valid but non-canonical marker JSON is stale
+and Sync rewrites only that marker to the canonical serialization. Sync and Remove
 publish a durable transaction journal before their first host mutation, recover
 interrupted transactions in a new process, reject recovery over third-state
 external changes, and use same-volume atomic replacement for existing managed
-files.
-When the host is in a Git worktree, plans inspect the active Git index and
-reject staged changes to package-managed targets or the ownership marker;
-staged files outside that exact ownership scope remain untouched and do not
-block the operation. Lower payload sequences and same-sequence payload identity
-or hash collisions are conflicts for both Sync and Remove.
+files. Lower payload sequences and same-sequence payload identity or hash
+collisions are conflicts for both Sync and Remove.
 Before recovery or planning, strict Sync and Remove publish a
 materializer-active marker, hold existing watcher management locks, prune only
 dead host-use leases, and reject live MCP, coordinator, provider,
 adapter-worker, or adapter-build PIDs. Owned lower-version Upgrade uses a
 separate generation path: it verifies byte ownership, publishes an immutable
 generation, switches the pointer at a request boundary, and rolls back the
-selection and watcher if readiness fails. Legacy or unowned wrappers still
-require explicit `-ConfirmLegacyMcpStopped` for first adoption or strict Sync.
+selection and watcher if readiness fails. A completely empty managed scope is
+eligible for automatic first adoption; unknown same-name content still blocks
+with zero writes.
 Published flat payloads that predate the live generation transition can instead
 report `REDEPLOY_REQUIRED`. The Manager's `Redeploy host` action refreshes owner
 status, accepts only the reviewed `poc.9`, `poc.16`, and `poc.20` identities,
 gracefully stops a recognized legacy watcher, and re-verifies every owned byte
-and staged ownership path before using the same durable Sync transaction to
-publish the current flat payload, immutable generation, pointer, and marker.
-External MCP clients remain user-owned and must disconnect before mutation. The
-workflow regenerates the ignored runtime config but preserves Provider binaries,
-indexes, adapters, MCP registration, unowned host files, and unrelated project
-content.
+before using the same durable Sync transaction to publish the current flat
+payload, immutable generation, pointer, and marker.
+External MCP clients remain user-owned and are never terminated. Repair
+classifies their immutable-generation leases against the exact planned mutation
+paths: non-conflicting current or historical generations remain pinned for the
+existing session, while an intersecting or unprovable closure blocks before the
+related write. The workflow regenerates the ignored runtime config but preserves
+Provider binaries, indexes, adapters, MCP registration, unowned host files, and
+unrelated project content.
 
-A tracked-host authorization must be a direct child of
-`AIWork/.runtime/codedb/payload-materializer/authorizations/`, must remain Git
-ignored and untracked, and must have a lowercase 32-hex ID matching its file
-name. Its closed schema is:
+`Repair CodeDB` is the end-user recovery path. One confirmation runs the
+Package-owned preflight, bounded Host reconstruction or quarantine, pointer and
+rollback repair, watcher handoff, policy preservation, project MCP registration
+merge, and verification. It changes only `[mcp_servers.<project-slug>]`, keeps
+unrelated TOML content and line endings, and creates a recoverable backup before
+rewriting an existing config. Invalid TOML, duplicate or ambiguous target
+tables, path escapes, unknown Host content, and managed drift fail closed.
+Results are `REPAIRED`, `PARTIALLY_REPAIRED`, or `BLOCKED`; a repaired
+registration applies to new client sessions and does not claim hot reload.
+Retaining a valid non-conflicting MCP generation is still `REPAIRED` and does
+not require the user to wait for drain or click Repair again.
 
-```json
-{
-  "schema_version": 1,
-  "managed_by": "com.rice.ai-codedb",
-  "purpose": "tracked-host-payload-mutation",
-  "authorization_id": "<32 lowercase hex characters>",
-  "project_root": "<absolute Unity project root>",
-  "git_head": "<current repository HEAD>",
-  "action": "Sync",
-  "package_version": "0.2.5-preview.2",
-  "payload_version": "poc.29",
-  "payload_sequence": 29,
-  "payload_manifest_sha256": "<raw payload-manifest.json SHA256>",
-  "target_count": 43,
-  "acknowledgement": "I authorize com.rice.ai-codedb to mutate only its audited host payload scope."
-}
-```
-
-`action` is exactly `Sync` or `Remove`. The Unity project markers must be
-tracked, and the authorization must match the current project root, Git HEAD,
-complete manifest identity, and target count. The materializer neither creates
-nor deletes authorization files; the caller owns review and cleanup. Passing a
-Sync authorization cannot authorize Remove, and the separate legacy MCP-stop,
-active-process, staged-index, conflict, and transaction gates still apply.
+Unity supplies the Package's resolved physical location. The Editor and
+materializer do not inspect installation URLs or assume a writable embedded
+directory. Cached, local, embedded, and registry-backed Packages use the same
+payload-relative logic, and the Package source is never mutated. Likewise,
+DryRun, automatic Upgrade, Repair, Verify, advanced Sync, and Remove do not
+detect or invoke a project version-control system.
 
 The package materializer is wired into the Manager Setup tab for read-only
-status/DryRun, strict Verify, controlled legacy Redeploy, and explicitly
-authorized Sync/Remove. Manager
+status/DryRun, strict Verify, controlled legacy Redeploy, confirmed advanced
+Sync/Remove, and the single user-facing `Repair CodeDB` recovery action. Manager
 status distinguishes `INSTALLING`, `SWITCHING`, `CURRENT`, `DRAINING`,
 `ROLLBACK`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, `REDEPLOY_REQUIRED`, conflict,
 active host-use blockers, and check-failed outcomes. It shows selected/watcher generations,
@@ -111,11 +103,8 @@ bootstrap protocol, legacy session count, and all active owners. The Index view
 separates the persistent `Start with Unity Editor` policy from Start, Stop, and
 Restart commands associated with the Editor cohort present when they are
 issued; automatic host updates have an independent persistent policy. DryRun
-reports every active MCP or watcher owner before an authorized mutation is
-attempted. It does not
-create, persist, infer, or delete production
-authorization files; the selected path and optional legacy-MCP confirmation are
-session-only and are cleared after each mutation attempt. Existing runtime,
+reports every active MCP or watcher owner before a confirmed mutation is
+attempted. Existing runtime,
 index, watch, and probe actions continue to resolve the materialized host paths.
 This package still does not include the external CodeDB provider, host
 acceptance probes, MCP client configuration, generated project data, or any
@@ -159,11 +148,9 @@ v0.2.2 migration with live legacy owners, watcher handoff rollback, automatic
 journal recovery, PID-reuse handling, manual state, and exact candidate/LKG
 Remove cleanup. It also checks active MCP and watcher refusal for strict
 mutations, legacy watcher-state refusal, normal lease cleanup, hard-kill stale
-lease recovery, legacy adoption confirmation, staged-index refusal including
-interrupted recovery, scoped unrelated-stage preservation, downgrade/sequence
-collision refusal, and exact LF-versus-CRLF conflict behavior. It also
-validates tracked-host authorization refusal plus exact authorized Sync and
-Remove in a separate nested Git project. Payload hashes remain byte exact and
+lease recovery, legacy adoption confirmation, interrupted recovery,
+downgrade/sequence collision refusal, and exact LF-versus-CRLF conflict
+behavior. Payload hashes remain byte exact and
 no payload-file EOL normalization occurs in the materializer. Ownership markers
 are serialized canonically as LF-only JSON. The first reviewed tracked-host
 adoption is recorded in the host handoff; real tracked-host Remove/rollback
@@ -178,8 +165,19 @@ startup while rejecting paths outside that generation, and keeps failed
 automatic-upgrade status and retry guidance visible in the Manager. It adds the
 legacy Redeploy path for published `poc.9`, `poc.16`, and `poc.20` flat
 payloads, including Manager-owned watcher shutdown, while preserving Provider
-and index state. A
-representative third-party project passed no-click upgrade, same-transport Editor restart,
+and index state.
+The `0.2.5-preview.3` validation prerelease adds tracked-adoption recovery for schema-1 and
+schema-2 markers with absent runtime, accepts a fully validated `poc.29` as a
+usable previous generation during automatic handoff, rejects partial,
+unmanifested, or invalid runtime candidates without writes, and gates Host
+commands on validated generation readiness. Its direct and skipped materializer
+matrix extends through published `poc.29`. It also covers one-click Repair,
+project MCP merge/refusal, identical action outcomes with no VCS metadata or
+Git/SVN metadata, zero VCS command invocation, and cached/local/embedded
+read-only Package layouts. Local Unity EditMode and Manager UI acceptance passed;
+third-party Package-only acceptance for preview.3 remains a separate release gate.
+An earlier representative third-party project passed no-click upgrade,
+same-transport Editor restart,
 manual lifecycle controls, Domain Reload, Play Mode, normal-permission queries,
 and BatchMode isolation. Live two-project concurrency and Elevated Unity with
 a NotElevated MCP client are accepted deferred validation risks tracked in the

@@ -87,7 +87,7 @@ Assert-Equal -Actual ($actualTopLevel -join "|") -Expected ($expectedTopLevel -j
 
 $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $packageManifest.name -Expected "com.rice.ai-codedb" -Label "Package name"
-Assert-Equal -Actual $packageManifest.version -Expected "0.2.5-preview.2" -Label "Package version"
+Assert-Equal -Actual $packageManifest.version -Expected "0.2.5-preview.3" -Label "Package version"
 Assert-Equal -Actual $packageManifest.unity -Expected "2022.3" -Label "Unity version"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.documentationUrl)) -Message "Package documentationUrl is missing."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$packageManifest.changelogUrl)) -Message "Package changelogUrl is missing."
@@ -119,6 +119,46 @@ foreach ($file in $textFiles) {
         throw "Package contains a machine-local absolute path: $(Get-RelativePath -Root $packageRoot -Path $file.FullName)"
     }
 }
+
+$runtimeSourceRoots = @(
+    (Join-Path $packageRoot "Editor"),
+    (Join-Path $packageRoot "Tools~"),
+    (Join-Path $payloadRoot "AIWork"),
+    (Join-Path $payloadRoot "Generations\poc.30")
+)
+$runtimeSourceFiles = @(foreach ($root in $runtimeSourceRoots) {
+    Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object {
+        $_.Extension.ToLowerInvariant() -in @(".cs", ".mjs", ".ps1")
+    }
+})
+$forbiddenVcsInvocationPatterns = @(
+    '(?i)\b(?:git|svn|p4|perforce)(?:\.exe|\.cmd)?\b\s+(?:status|rev-parse|check-ignore|diff|ls-files|info)',
+    '(?i)\bGet-Command\s+(?:git|svn|p4|perforce)(?:\.exe|\.cmd)?\b',
+    '(?i)&\s*(?:git|svn|p4|perforce)(?:\.exe|\.cmd)?\b',
+    '(?i)\b(?:GIT_INDEX_FILE|TrackedHostAuthorizationPath|ConfirmLegacyMcpStopped|GitStaged|GitWorktree|GitHead)\b',
+    '(?i)\bPackageInfo\s*\.\s*(?:source|packageId|git|url)\b',
+    '(?i)\bpackageInfo\s*\.\s*(?:source|packageId|git|url)\b'
+)
+foreach ($file in $runtimeSourceFiles) {
+    $content = [System.IO.File]::ReadAllText($file.FullName)
+    foreach ($pattern in $forbiddenVcsInvocationPatterns) {
+        Assert-True `
+            -Condition (-not [regex]::IsMatch($content, $pattern)) `
+            -Message "Package runtime contains a version-control invocation or authorization contract: $(Get-RelativePath -Root $packageRoot -Path $file.FullName)"
+    }
+}
+
+$pathsSourcePath = Join-Path $packageRoot "Editor\AICodedbPaths.cs"
+$pathsSource = [System.IO.File]::ReadAllText($pathsSourcePath)
+Assert-True `
+    -Condition ($pathsSource.IndexOf("PackageInfo.FindForAssembly", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Editor Package resolution does not use Unity's loaded Package metadata."
+Assert-True `
+    -Condition ($pathsSource.IndexOf("packageInfo.resolvedPath", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Editor Package resolution does not use Unity's resolved physical path."
+Assert-True `
+    -Condition ($pathsSource.IndexOf("Packages/" + $packageManifest.name, [StringComparison]::OrdinalIgnoreCase) -lt 0) `
+    -Message "Editor Package resolution contains a fixed embedded-package fallback."
 
 $iconSourcePath = Join-Path $packageRoot "Documentation~\images\codedb-icon.svg"
 $iconTexturePath = Join-Path $packageRoot "Editor\Icons\CodedbIcon.png"
@@ -170,16 +210,16 @@ $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertF
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
 Assert-Equal -Actual $payloadManifest.package_version -Expected $packageManifest.version -Label "Payload package version"
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.29" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 29 -Label "Payload sequence"
-Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.29" -Label "Payload generation"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.30" -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 30 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.30" -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 43 -Label "Payload target count"
 
 $flatTargetPrefix = "AIWork/codedb/"
-$generationSourcePrefix = "Generations/poc.29/"
-$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.29"
+$generationSourcePrefix = "Generations/poc.30/"
+$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.30"
 $generationTargetPrefix = $generationTargetRoot + "/"
 $currentPointerSource = "host-current.json"
 $currentPointerTarget = "AIWork/.runtime/codedb/host/current.json"
@@ -227,7 +267,7 @@ Assert-Equal -Actual $flatSources.Count -Expected 21 -Label "Flat payload target
 Assert-Equal -Actual $generationSources.Count -Expected 21 -Label "Generation payload target count"
 Assert-Equal -Actual $currentPointerSources.Count -Expected 1 -Label "Current pointer target count"
 
-$expectedRetiredTargets = @(foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28")) {
+$expectedRetiredTargets = @(foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29")) {
     foreach ($generationSource in $generationSources) {
         $generationSuffix = $generationSource.Substring($generationSourcePrefix.Length)
         "AIWork/.runtime/codedb/host/generations/$retiredGenerationId/$generationSuffix"
@@ -243,7 +283,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 147 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 168 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -255,7 +295,7 @@ $actualFlatSources = @(Get-ChildItem -LiteralPath $flatSourceRoot -Recurse -File
 } | Sort-Object)
 Assert-Equal -Actual ($actualFlatSources -join "|") -Expected (($flatSources | Sort-Object) -join "|") -Label "Flat payload source closure"
 
-$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.29"
+$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
 $actualGenerationSources = @(Get-ChildItem -LiteralPath $generationSourceRoot -Recurse -File | ForEach-Object {
     Get-RelativePath -Root $payloadRoot -Path $_.FullName
 } | Sort-Object)
@@ -272,6 +312,12 @@ Assert-Equal -Actual $generationManifest.payload_version -Expected $payloadManif
 Assert-Equal -Actual $generationManifest.payload_sequence -Expected $payloadManifest.payload_sequence -Label "Generation manifest payload sequence"
 Assert-Equal -Actual $generationManifest.bootstrap_protocol -Expected $payloadManifest.bootstrap_protocol -Label "Generation manifest bootstrap protocol"
 Assert-Equal -Actual @($generationManifest.files).Count -Expected 20 -Label "Generation manifest file count"
+$generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
+$generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
+Assert-Equal `
+    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.30";$').Count) `
+    -Expected 1 `
+    -Label "Generation lease identity closure"
 
 $generationManifestPaths = @()
 $seenGenerationPaths = @{}
@@ -336,10 +382,69 @@ foreach ($requiredRule in @(
     "Payload~/**/*.mjs text eol=lf",
     "Payload~/**/*.json text eol=lf",
     "Tools~/**/*.ps1 text eol=lf",
+    "Tools~/**/*.mjs text eol=lf",
     "Tests~/**/*.ps1 text eol=lf"
 )) {
     Assert-True -Condition ($packageAttributes.IndexOf($requiredRule, [StringComparison]::Ordinal) -ge 0) -Message "Missing package EOL rule: $requiredRule"
 }
+
+$legacyStopClientPath = Join-Path $packageRoot "Tools~\stop-codedb-legacy-watcher.mjs"
+Assert-True -Condition (Test-Path -LiteralPath $legacyStopClientPath -PathType Leaf) -Message "Package-owned legacy watcher Stop client is missing."
+$materializerSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Tools~\materialize-codedb-host-payload.ps1"))
+Assert-True `
+    -Condition ($materializerSource.IndexOf("stop-codedb-legacy-watcher.mjs", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Materializer does not reference the Package-owned legacy watcher Stop client."
+$pendingRecoveryFunction = [regex]::Match(
+    $materializerSource,
+    '(?s)function\s+Invoke-PendingTransactionRecovery\s*\{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction\s+Remove-EmptyManagedParents')
+Assert-True -Condition $pendingRecoveryFunction.Success -Message "Package boundary could not isolate pending transaction recovery."
+Assert-True `
+    -Condition (-not [regex]::IsMatch($pendingRecoveryFunction.Groups["body"].Value, '(?m)^\s*&\s*\$[A-Za-z]*WatcherManager(?:Path)?\b')) `
+    -Message "Pending transaction recovery still executes a selected historical watcher manager."
+$rollbackResolverFunction = [regex]::Match(
+    $materializerSource,
+    '(?s)function\s+Resolve-RollbackWatcherManager\s*\{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction\s+Get-LegacyWatchManagerPath')
+Assert-True -Condition $rollbackResolverFunction.Success -Message "Package boundary could not isolate rollback watcher identity validation."
+Assert-True `
+    -Condition (-not [regex]::IsMatch($rollbackResolverFunction.Groups["body"].Value, '(?m)^\s*&\s*\$[A-Za-z]*WatcherManager(?:Path)?\b')) `
+    -Message "Rollback watcher identity validation executes the historical watcher manager."
+$repairFunction = [regex]::Match(
+    $materializerSource,
+    '(?s)function\s+Invoke-Repair\s*\{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction\s+Get-ValidatedInstalledGenerationPointer')
+Assert-True -Condition $repairFunction.Success -Message "Package boundary could not isolate Invoke-Repair."
+Assert-True `
+    -Condition ($repairFunction.Groups["body"].Value.IndexOf("Complete-OwnedLegacyRedeployHostUseGate", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Repair must never use the Redeploy-only gate that can stop a recognized legacy watcher."
+$editorMaterializerSource = Get-Content -LiteralPath (Join-Path $packageRoot "Editor\AICodedbHostPayloadMaterializer.cs") -Raw
+Assert-True `
+    -Condition ([regex]::IsMatch($editorMaterializerSource, 'RunRedeploy\s*\(\s*bool\s+confirmedProjectMutation\s*\)')) `
+    -Message "Editor Redeploy must require an explicit second-level confirmation credential."
+$editorConfirmationFunction = [regex]::Match(
+    $editorMaterializerSource,
+    '(?s)private\s+static\s+bool\s+RequiresConfirmation\s*\([^)]*\)\s*\{(?<body>.*?)\}')
+Assert-True -Condition $editorConfirmationFunction.Success -Message "Package boundary could not isolate the Editor confirmation gate."
+Assert-True `
+    -Condition ($editorConfirmationFunction.Groups["body"].Value.IndexOf("AICodedbHostPayloadAction.Redeploy", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Editor Redeploy is missing from the second-level confirmation gate."
+Assert-True `
+    -Condition ([regex]::IsMatch($materializerSource, 'ValidateSet\("Redeploy",\s*"Sync",\s*"Remove",\s*"Repair"\)\]\[string\]\$MutationAction')) `
+    -Message "PowerShell Redeploy is missing from the mutation confirmation contract."
+$materializerTokens = $null
+$materializerParseErrors = $null
+$materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $packageRoot "Tools~\materialize-codedb-host-payload.ps1"),
+    [ref]$materializerTokens,
+    [ref]$materializerParseErrors)
+Assert-Equal -Actual $materializerParseErrors.Count -Expected 0 -Label "Materializer AST parse errors"
+$confirmationDispatchGates = @($materializerAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.IndexOf('$Action -in @("Redeploy", "Sync", "Remove", "Repair")', [StringComparison]::Ordinal) -ge 0 -and
+        $node.Extent.Text.IndexOf('Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action', [StringComparison]::Ordinal) -ge 0
+}, $true))
+Assert-True `
+    -Condition ($confirmationDispatchGates.Count -eq 1) `
+    -Message "PowerShell Redeploy does not enter the confirmation gate before dispatch."
 
 if ($hashMismatches.Count -gt 0) {
     throw "Payload hash validation failed:`n - $($hashMismatches -join "`n - ")"

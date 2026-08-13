@@ -15,7 +15,6 @@ namespace Rice.AI.Codedb.Editor
         internal static string HostUpdatePolicyPath => GetProjectPath(AICodedbProjectSettings.HostUpdatePolicyRelativePath);
         internal static string HostPayloadMaterializerRuntimePath => GetProjectPath(AICodedbProjectSettings.HostPayloadMaterializerRuntimeRelativePath);
         internal static string HostPayloadUpgradeStatePath => GetProjectPath(AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
-        internal static string TrackedHostAuthorizationPath => GetProjectPath(AICodedbProjectSettings.TrackedHostAuthorizationRelativePath);
         internal static string HostPayloadMaterializerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
         internal static string RuntimePath => GetProjectPath(AICodedbProjectSettings.RuntimeRelativePath);
         internal static string ProviderExecutablePath => GetProjectPath(AICodedbProjectSettings.ProviderExecutableRelativePath);
@@ -44,7 +43,6 @@ namespace Rice.AI.Codedb.Editor
         internal static string FreshnessScriptPath => GetHostPath("scripts/check-codedb-project-freshness.ps1", AICodedbProjectSettings.FreshnessScriptRelativePath);
         internal static string RefreshIfStaleScriptPath => GetHostPath("scripts/refresh-codedb-project-if-stale.ps1", AICodedbProjectSettings.RefreshIfStaleScriptRelativePath);
         internal static string WatchManageScriptPath => GetHostPath("scripts/manage-codedb-project-watch.ps1", AICodedbProjectSettings.WatchManageScriptRelativePath);
-        internal static string LegacyWatchManageScriptPath => GetProjectPath(AICodedbProjectSettings.WatchManageScriptRelativePath);
         internal static string TextAdapterBuildScriptPath => GetHostPath("scripts/build-codedb-project-text-adapter.ps1", AICodedbProjectSettings.TextAdapterBuildScriptRelativePath);
         internal static string TextAdapterProbeScriptPath => GetHostPath("scripts/probe-codedb-project-text-adapter.ps1", AICodedbProjectSettings.TextAdapterProbeScriptRelativePath);
         internal static string RegistrationDraftScriptPath => GetHostPath("scripts/emit-codedb-mcp-registration-draft.ps1", AICodedbProjectSettings.RegistrationDraftScriptRelativePath);
@@ -118,22 +116,19 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
-        /// Resolves the physical package root for embedded and PackageCache installs.
+        /// Resolves the physical package root selected by Unity Package Manager.
         /// </summary>
         private static string ResolvePackageRootPath()
         {
-            try
-            {
-                var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
-                if (packageInfo != null && !string.IsNullOrWhiteSpace(packageInfo.resolvedPath))
-                    return NormalizePath(packageInfo.resolvedPath);
-            }
-            catch
-            {
-                // Fall back to the embedded-package path while Unity refreshes package metadata.
-            }
+            var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
+            if (packageInfo == null
+                || !string.Equals(packageInfo.name, AICodedbProjectSettings.PackageName, StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(packageInfo.resolvedPath)
+                || !Path.IsPathRooted(packageInfo.resolvedPath))
+                throw new InvalidOperationException(
+                    "Unity Package Manager did not provide the expected resolved CodeDB Package identity and path.");
 
-            return GetProjectPath(AICodedbProjectSettings.PackageProjectRelativePath);
+            return NormalizePath(packageInfo.resolvedPath);
         }
     }
 }

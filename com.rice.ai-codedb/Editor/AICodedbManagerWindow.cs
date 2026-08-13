@@ -47,6 +47,15 @@ namespace Rice.AI.Codedb.Editor
         private const float HeaderControlsMinWidth = 174f;
         private const float HeaderPackageVersionHeight = 16f;
         private const double TransientStatusRefreshSeconds = 5d;
+        internal const string RepairCodeDBConfirmationTitle = "Repair CodeDB";
+        internal const string RepairCodeDBConfirmationMessage =
+            "Repair this project's CodeDB Host runtime and project MCP registration?\n\n"
+            + "CodeDB may quarantine deterministic package-owned residue under AIWork/.runtime/codedb/host/ "
+            + "and recover materializer transaction state before reconstructing the current immutable Host generation. "
+            + "It will repair only this project's [mcp_servers.<project-slug>] section in .codex/config.toml.\n\n"
+            + "Provider binaries, custom runtime configuration, indexes, adapters, unrelated generations, business files, "
+            + "version-control metadata, active leased generations, and unrelated MCP tables, keys, comments, and ordering are preserved. "
+            + "External MCP clients are never terminated. An already running MCP client may require a new session to use the repaired registration.";
         private const float CustomProbeSingleRowMinWidth =
             CustomProbeLanguageLabelWidth
             + CustomProbeLanguageWidth
@@ -84,8 +93,6 @@ namespace Rice.AI.Codedb.Editor
         private bool _showPolicyDetails;
         private int _customProbeLanguageIndex;
         private string _customProbeQuery = string.Empty;
-        private string _trackedHostAuthorizationPath = string.Empty;
-        private bool _confirmLegacyMcpStopped;
 
         internal static void Open()
         {
@@ -413,10 +420,17 @@ namespace Rice.AI.Codedb.Editor
             menu.AddItem(new GUIContent("Open/Runtime"), false, AICodedbActions.OpenRuntimeFolder);
             menu.AddItem(new GUIContent("Open/Config"), false, AICodedbActions.OpenConfigFolder);
             menu.AddSeparator(string.Empty);
-            menu.AddItem(
-                new GUIContent("Provider Guidance"),
-                false,
-                () => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance));
+            if (CanUseHostCommands(_statusSnapshot.HostGenerationSelection.State))
+            {
+                menu.AddItem(
+                    new GUIContent("Provider Guidance"),
+                    false,
+                    () => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance));
+            }
+            else
+            {
+                menu.AddDisabledItem(new GUIContent("Provider Guidance"));
+            }
             menu.ShowAsContext();
         }
 
@@ -485,12 +499,18 @@ namespace Rice.AI.Codedb.Editor
         private void DrawOverviewTab()
         {
             AICodedbSectionView.DrawPageHeader("Overview", "项目状态与建议操作", string.Empty, null);
+            var repairAction = IsRepairCodeDBAvailable(
+                _statusSnapshot.HostGenerationSelection.State,
+                _statusSnapshot.HostPayloadStatus.State,
+                _statusSnapshot.HostUpgradeStatus.Phase)
+                    ? (Action)RunPrimaryAction
+                    : null;
             AICodedbSectionView.DrawBanner(
                 GetOverviewStatusTitle(),
                 GetOverviewStatusDescription(),
                 _statusSnapshot.OverallState,
                 GetPrimaryActionLabel(),
-                RunPrimaryAction);
+                repairAction);
 
             AICodedbSectionView.DrawStatusGroup("Components", string.Empty, null, () =>
             {
@@ -541,7 +561,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderConfig);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeConfigTemplate);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeDirectory);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeGitIgnored);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeBoundary);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.IndexManifest);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.TextAdapterManifest);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProjectMcpConfig);
@@ -554,7 +574,7 @@ namespace Rice.AI.Codedb.Editor
                 "Setup",
                 "Provider、配置与项目本地运行时",
                 "Verify runtime",
-                () => RunAction("Verify Runtime", AICodedbActions.RunVerifyRuntime));
+                GetHostAction(() => RunAction("Verify Runtime", AICodedbActions.RunVerifyRuntime)));
 
             AICodedbSectionView.DrawStatusGroup("Environment", string.Empty, null, () =>
             {
@@ -567,18 +587,18 @@ namespace Rice.AI.Codedb.Editor
                     providerState == AICodedbStatusState.Ok ? "Open" : "Guidance",
                     providerState == AICodedbStatusState.Ok
                         ? (Action)AICodedbActions.OpenProviderFolder
-                        : () => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance));
+                        : GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance)));
 
                 var runtimeState = _statusSnapshot.GetRuntimeState();
                 AICodedbSectionView.DrawStatusRow(
                     "Runtime",
-                    "Project-local and ignored by Git",
+                    "Project-local runtime",
                     runtimeState,
                     GetStateLabel(runtimeState, "Ready"),
                     runtimeState == AICodedbStatusState.Ok ? "Open" : "Prepare",
                     runtimeState == AICodedbStatusState.Ok
                         ? (Action)AICodedbActions.OpenRuntimeFolder
-                        : () => RunAction("Prepare Runtime", AICodedbActions.RunPrepareRuntime));
+                        : GetHostAction(() => RunAction("Prepare Runtime", AICodedbActions.RunPrepareRuntime)));
 
                 var configState = _statusSnapshot.GetConfigState();
                 AICodedbSectionView.DrawStatusRow(
@@ -587,7 +607,7 @@ namespace Rice.AI.Codedb.Editor
                     configState,
                     GetStateLabel(configState, "Current"),
                     "Regenerate",
-                    () => RunAction("Regenerate Runtime Config", AICodedbActions.RunRegenerateRuntimeConfig));
+                    GetHostAction(() => RunAction("Regenerate Runtime Config", AICodedbActions.RunRegenerateRuntimeConfig)));
             });
 
             _showProviderGuidance = AICodedbSectionView.DrawDisclosure(
@@ -595,7 +615,7 @@ namespace Rice.AI.Codedb.Editor
                 "Provider guidance",
                 "Install or update",
                 () => DrawActionGrid(
-                    AICodedbActionButton.Create("Show guidance", () => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance)),
+                    AICodedbActionButton.Create("Show guidance", GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance))),
                     AICodedbActionButton.Create("Open provider", AICodedbActions.OpenProviderFolder),
                     AICodedbActionButton.Create("Open config", AICodedbActions.OpenConfigFolder)));
 
@@ -608,9 +628,6 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawAdvancedHostFiles()
         {
-            DrawHostPayloadAuthorizationControls();
-            EditorGUILayout.Space(6f);
-            var hasAuthorization = !string.IsNullOrWhiteSpace(_trackedHostAuthorizationPath);
             var updateAction = _statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically
                 && !IsCurrentHostUpgradeInProgress(
                     _statusSnapshot.HostUpgradeStatus,
@@ -632,8 +649,8 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbActionButton.Create("Verify host files", () => RunAction("Host Payload Verify", AICodedbActions.RunHostPayloadVerify)),
                 AICodedbActionButton.Create(updateLabel, updateAction),
                 AICodedbActionButton.Create("Redeploy host", redeployAction),
-                AICodedbActionButton.Create("Sync host files", hasAuthorization ? (Action)RunHostPayloadSyncWithConfirmation : null),
-                AICodedbActionButton.Create("Remove host files", hasAuthorization ? (Action)RunHostPayloadRemoveWithConfirmation : null));
+                AICodedbActionButton.Create("Sync host files", RunHostPayloadSyncWithConfirmation),
+                AICodedbActionButton.Create("Remove host files", RunHostPayloadRemoveWithConfirmation));
             EditorGUILayout.Space(6f);
             DrawDetailsPanel(() =>
             {
@@ -646,7 +663,6 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbDetailRowView.DrawValue("Ownership marker", "Project path", AICodedbProjectSettings.HostPayloadMarkerRelativePath);
                 AICodedbDetailRowView.DrawValue("Current pointer", "Ignored runtime", AICodedbProjectSettings.HostCurrentPointerRelativePath);
                 AICodedbDetailRowView.DrawValue("Rollback pointer", "Ignored runtime", AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath);
-                AICodedbDetailRowView.DrawValue("Authorization", "Ignored runtime", AICodedbProjectSettings.TrackedHostAuthorizationRelativePath);
                 if (_statusSnapshot.HostPayloadStatus.LegacyMcpSessionCount > 0)
                 {
                     AICodedbDetailRowView.DrawValue(
@@ -670,13 +686,13 @@ namespace Rice.AI.Codedb.Editor
                 "Index",
                 "自动刷新、Freshness 与发现后端",
                 "Refresh if stale",
-                () => RunAction("Refresh If Stale", AICodedbActions.RunRefreshIfStale));
+                GetHostAction(() => RunAction("Refresh If Stale", AICodedbActions.RunRefreshIfStale)));
 
             DrawAutomaticRefresh();
             AICodedbSectionView.DrawStatusGroup(
                 "Discovery data",
                 "Check freshness",
-                () => RunAction("Check Freshness", AICodedbActions.RunFreshnessCheck),
+                GetHostAction(() => RunAction("Check Freshness", AICodedbActions.RunFreshnessCheck)),
                 () =>
                 {
                     var indexState = _statusSnapshot.GetIndexState();
@@ -740,7 +756,7 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbActionButton.Create("Stop now", hasCurrentGeneration ? (Action)(() => RunAction("Stop Now", AICodedbActions.RunStopWatcher)) : null),
                     AICodedbActionButton.Create("Restart", hasCurrentGeneration ? (Action)(() => RunAction("Restart", AICodedbActions.RunRestartWatcher)) : null));
                 if (!hasCurrentGeneration)
-                    EditorGUILayout.HelpBox("Lifecycle controls require the current host generation. Use Update now first.", MessageType.Info);
+                    EditorGUILayout.HelpBox("Lifecycle controls require the current host generation. Return to Overview and use Repair CodeDB.", MessageType.Info);
 
                 var repairLabel = GetWatcherRepairLabel();
                 if (!string.IsNullOrWhiteSpace(repairLabel))
@@ -800,13 +816,13 @@ namespace Rice.AI.Codedb.Editor
         private void DrawIndexDiagnostics()
         {
             DrawActionGrid(
-                AICodedbActionButton.Create("Check freshness", () => RunAction("Check Freshness", AICodedbActions.RunFreshnessCheck)),
-                AICodedbActionButton.Create("Watcher status", () => RunAction("Watcher Status", AICodedbActions.RunWatcherStatus)),
-                AICodedbActionButton.Create("Runtime health", () => RunAction("Runtime Health", AICodedbActions.RunRuntimeHealth)),
-                AICodedbActionButton.Create("Unity smoke", () => RunAction("Unity Project Smoke", AICodedbActions.RunUnityProjectSmoke)),
-                AICodedbActionButton.Create("Language probe", () => RunAction("Language Probe", AICodedbActions.RunLanguageProbe)),
-                AICodedbActionButton.Create("C# probe", () => RunAction("C# Probe", AICodedbActions.RunCSharpProbe)),
-                AICodedbActionButton.Create("Shader probe", () => RunAction("Shader Adapter Probe", AICodedbActions.RunShaderAdapterProbe)));
+                AICodedbActionButton.Create("Check freshness", GetHostAction(() => RunAction("Check Freshness", AICodedbActions.RunFreshnessCheck))),
+                AICodedbActionButton.Create("Watcher status", GetHostAction(() => RunAction("Watcher Status", AICodedbActions.RunWatcherStatus))),
+                AICodedbActionButton.Create("Runtime health", GetHostAction(() => RunAction("Runtime Health", AICodedbActions.RunRuntimeHealth))),
+                AICodedbActionButton.Create("Unity smoke", GetHostAction(() => RunAction("Unity Project Smoke", AICodedbActions.RunUnityProjectSmoke))),
+                AICodedbActionButton.Create("Language probe", GetHostAction(() => RunAction("Language Probe", AICodedbActions.RunLanguageProbe))),
+                AICodedbActionButton.Create("C# probe", GetHostAction(() => RunAction("C# Probe", AICodedbActions.RunCSharpProbe))),
+                AICodedbActionButton.Create("Shader probe", GetHostAction(() => RunAction("Shader Adapter Probe", AICodedbActions.RunShaderAdapterProbe))));
             EditorGUILayout.Space(6f);
             EditorGUILayout.LabelField("Custom probe", EditorStyles.miniBoldLabel);
             DrawCustomProbeSection();
@@ -815,11 +831,11 @@ namespace Rice.AI.Codedb.Editor
         private void DrawIndexMaintenance()
         {
             DrawActionGrid(
-                AICodedbActionButton.Create("Refresh index", () => RunAction("Refresh Index", AICodedbActions.RunRefreshIndex)),
-                AICodedbActionButton.Create("Build shader", () => RunAction("Build Shader Adapter", AICodedbActions.RunBuildShaderAdapter)),
+                AICodedbActionButton.Create("Refresh index", GetHostAction(() => RunAction("Refresh Index", AICodedbActions.RunRefreshIndex))),
+                AICodedbActionButton.Create("Build shader", GetHostAction(() => RunAction("Build Shader Adapter", AICodedbActions.RunBuildShaderAdapter))),
                 AICodedbActionButton.Create("Open runtime", AICodedbActions.OpenRuntimeFolder),
-                AICodedbActionButton.Create("Clean index", RunCleanIndexWithConfirmation),
-                AICodedbActionButton.Create("Rebuild index", RunRebuildIndexWithConfirmation));
+                AICodedbActionButton.Create("Clean index", GetHostAction(RunCleanIndexWithConfirmation)),
+                AICodedbActionButton.Create("Rebuild index", GetHostAction(RunRebuildIndexWithConfirmation)));
             EditorGUILayout.Space(6f);
             DrawDetailsPanel(() =>
             {
@@ -839,7 +855,7 @@ namespace Rice.AI.Codedb.Editor
                 "MCP",
                 "当前项目的客户端注册",
                 "Verify registration",
-                () => RunAction("Project Config Validation", AICodedbActions.RunRegistrationValidation));
+                GetHostAction(() => RunAction("Project Config Validation", AICodedbActions.RunRegistrationValidation)));
 
             var mcpState = _statusSnapshot.GetMcpState();
             AICodedbSectionView.DrawBanner(
@@ -889,7 +905,7 @@ namespace Rice.AI.Codedb.Editor
                 "Target: " + AICodedbProjectSettings.ProjectMcpConfigRelativePath,
                 EditorStyles.miniLabel);
             DrawActionGrid(
-                AICodedbActionButton.Create("Show draft", () => RunAction("Registration Draft", AICodedbActions.RunRegistrationDraft)),
+                AICodedbActionButton.Create("Show draft", GetHostAction(() => RunAction("Registration Draft", AICodedbActions.RunRegistrationDraft))),
                 AICodedbActionButton.Create("Copy snippet", CopyMcpSnippet));
             var snippet = AICodedbProjectSettings.BuildProjectMcpRegistrationSnippet();
             var rect = GUILayoutUtility.GetRect(
@@ -1014,54 +1030,6 @@ namespace Rice.AI.Codedb.Editor
             AICodedbActionGridView.Draw(availableWidth, maxColumns, buttons);
         }
 
-        private void DrawHostPayloadAuthorizationControls()
-        {
-            EditorGUILayout.LabelField("Tracked-host authorization", EditorStyles.miniBoldLabel);
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                _trackedHostAuthorizationPath = EditorGUILayout.TextField(
-                    _trackedHostAuthorizationPath ?? string.Empty,
-                    GUILayout.ExpandWidth(true));
-
-                if (GUILayout.Button("Browse...", GUILayout.Width(76f), GUILayout.Height(22f)))
-                    SelectTrackedHostAuthorization();
-
-                using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_trackedHostAuthorizationPath)))
-                {
-                    if (GUILayout.Button("Clear", GUILayout.Width(54f), GUILayout.Height(22f)))
-                        ClearTrackedHostAuthorization();
-                }
-            }
-
-            _confirmLegacyMcpStopped = EditorGUILayout.ToggleLeft(
-                "Confirm all legacy MCP sessions are stopped (initial adoption only)",
-                _confirmLegacyMcpStopped);
-            if (_statusSnapshot.HostPayloadStatus.State == AICodedbHostPayloadState.Blocked)
-                EditorGUILayout.HelpBox(_statusSnapshot.HostPayloadStatus.Detail, MessageType.Warning);
-            EditorGUILayout.HelpBox(
-                "DryRun and Verify are read-only. Sync and Remove require a reviewed ignored/untracked authorization file, no active project MCP session, and a paused watcher. The Manager never creates or deletes authorization files.",
-                MessageType.Info);
-        }
-
-        private void SelectTrackedHostAuthorization()
-        {
-            var initialDirectory = Directory.Exists(AICodedbPaths.TrackedHostAuthorizationPath)
-                ? AICodedbPaths.TrackedHostAuthorizationPath
-                : AICodedbPaths.ProjectRoot;
-            var selectedPath = EditorUtility.OpenFilePanel(
-                "Select tracked-host mutation authorization",
-                initialDirectory,
-                "json");
-            if (!string.IsNullOrWhiteSpace(selectedPath))
-                _trackedHostAuthorizationPath = AICodedbPaths.NormalizePath(selectedPath);
-        }
-
-        private void ClearTrackedHostAuthorization()
-        {
-            _trackedHostAuthorizationPath = string.Empty;
-            _confirmLegacyMcpStopped = false;
-        }
-
         private void DrawCustomProbeSection()
         {
             var availableWidth = Mathf.Max(
@@ -1123,7 +1091,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawRunProbeButton()
         {
-            using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_customProbeQuery)))
+            using (new EditorGUI.DisabledScope(
+                       string.IsNullOrWhiteSpace(_customProbeQuery)
+                       || !CanUseHostCommands(_statusSnapshot.HostGenerationSelection.State)))
             {
                 if (GUILayout.Button(
                         "Run probe",
@@ -1138,47 +1108,49 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetPrimaryActionLabel()
         {
-            if (IsCurrentHostUpgradeInProgress(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
-            {
-                return string.Empty;
-            }
-
-            if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
-            {
-                return GetHostUpgradeActionLabel(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId);
-            }
-            if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
-                return "Redeploy host";
-            if (!_statusSnapshot.IsHostPayloadCurrent())
-                return "Inspect host files";
-            if (_statusSnapshot.IsReady())
-                return "Refresh if stale";
-            return "Verify runtime";
+            return "Repair CodeDB";
         }
 
         private void RunPrimaryAction()
         {
-            if (IsCurrentHostUpgradeInProgress(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
-            {
-                return;
-            }
+            RunRepairCodeDBWithConfirmation();
+        }
 
-            if (_statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically)
-                RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade);
-            else if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
-                RunHostPayloadRedeployWithConfirmation();
-            else if (!_statusSnapshot.IsHostPayloadCurrent())
-                RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun);
-            else if (_statusSnapshot.IsReady())
-                RunAction("Refresh If Stale", AICodedbActions.RunRefreshIfStale);
-            else
-                RunAction("Verify Runtime", AICodedbActions.RunVerifyRuntime);
+        private void RunRepairCodeDBWithConfirmation()
+        {
+            ConfirmAndRunRepairCodeDB(
+                () => EditorUtility.DisplayDialog(
+                    RepairCodeDBConfirmationTitle,
+                    RepairCodeDBConfirmationMessage,
+                    "Repair CodeDB",
+                    "Cancel"),
+                () => RunAction("Repair CodeDB", AICodedbActions.RunRepairCodeDB));
+        }
+
+        internal static bool ConfirmAndRunRepairCodeDB(Func<bool> confirm, Action repair)
+        {
+            if (confirm == null)
+                throw new ArgumentNullException(nameof(confirm));
+            if (repair == null)
+                throw new ArgumentNullException(nameof(repair));
+            if (!confirm())
+                return false;
+
+            repair();
+            return true;
+        }
+
+        internal static bool IsRepairCodeDBAvailable(
+            AICodedbHostGenerationState generationState,
+            AICodedbHostPayloadState payloadState,
+            AICodedbHostUpgradePhase upgradePhase)
+        {
+            // Repair executes the Package-owned materializer and performs its
+            // own fail-closed preflight, so installed Host readiness never
+            // disables this final recovery entry point.
+            return Enum.IsDefined(typeof(AICodedbHostGenerationState), generationState)
+                   && Enum.IsDefined(typeof(AICodedbHostPayloadState), payloadState)
+                   && Enum.IsDefined(typeof(AICodedbHostUpgradePhase), upgradePhase);
         }
 
         private void CopyMcpSnippet()
@@ -1230,33 +1202,18 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunHostPayloadSyncWithConfirmation()
         {
-            var authorizationPath = (_trackedHostAuthorizationPath ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(authorizationPath))
-                return;
-
-            var displayPath = GetTrackedHostAuthorizationDisplayPath(authorizationPath);
             if (!EditorUtility.DisplayDialog(
                     "Sync package-managed host files",
-                    "Authorization:\n" + displayPath
-                    + "\n\nSynchronize only the audited CodeDB host payload and ownership marker? "
-                    + "The materializer will reject a mismatched project, Git HEAD, action, payload, target count, staged ownership path, or live host-use lease.",
+                    "Synchronize only the manifest-closed CodeDB Host payload and ownership marker in this Unity project? "
+                    + "Unknown content, drift, path collisions, invalid ownership, and active unsafe owners remain blocked. "
+                    + "Provider data, business files, version-control metadata, and external MCP clients are preserved.",
                     "Sync Host Files",
                     "Cancel"))
             {
                 return;
             }
 
-            var confirmLegacyMcpStopped = _confirmLegacyMcpStopped;
-            try
-            {
-                RunAction(
-                    "Host Payload Sync",
-                    () => AICodedbActions.RunHostPayloadSync(authorizationPath, confirmLegacyMcpStopped));
-            }
-            finally
-            {
-                ClearTrackedHostAuthorization();
-            }
+            RunAction("Host Payload Sync", AICodedbActions.RunHostPayloadSync);
         }
 
         private void RunHostPayloadRedeployWithConfirmation()
@@ -1305,58 +1262,31 @@ namespace Rice.AI.Codedb.Editor
                     "Redeploy legacy CodeDB host",
                     watcherGuidance
                     + "Replace only byte-exact package-owned legacy Host files with the current generation and regenerate the ignored runtime config? "
-                    + "The Provider executable, indexes, Shader adapter, MCP registration, business Assets, unowned files, and Git staging are preserved. "
-                    + "Any drift, staged ownership path, unexpected generation state, or new active owner will stop the operation.",
+                    + "The Provider executable, indexes, Shader adapter, MCP registration, business Assets, unowned files, and version-control metadata are preserved. "
+                    + "Any drift, unexpected generation state, or new active owner will stop the operation.",
                     stopLegacyWatcher ? "Stop and Redeploy" : "Redeploy Host",
                     "Cancel"))
             {
                 return;
             }
 
-            RunAction("Host Payload Redeploy", AICodedbActions.RunHostPayloadRedeploy);
+            RunAction("Host Payload Redeploy", () => AICodedbActions.RunHostPayloadRedeploy(true));
         }
 
         private void RunHostPayloadRemoveWithConfirmation()
         {
-            var authorizationPath = (_trackedHostAuthorizationPath ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(authorizationPath))
-                return;
-
-            var displayPath = GetTrackedHostAuthorizationDisplayPath(authorizationPath);
             if (!EditorUtility.DisplayDialog(
                     "Remove package-managed host files",
-                    "Authorization:\n" + displayPath
-                    + "\n\nRemove only files owned by the installed CodeDB payload and its ownership marker? "
-                    + "Provider data, MCP client configuration, business Assets, unrelated host files, and Git staging are outside this action.",
+                    "Remove only files proven byte-exact and owned by the installed CodeDB marker, its validated selected generation, and CodeDB pointers? "
+                    + "Provider data, MCP client configuration, business Assets, unrelated generations, unrelated Host files, and version-control metadata are outside this action. "
+                    + "Unknown content or drift blocks the operation without deletion.",
                     "Remove Host Files",
                     "Cancel"))
             {
                 return;
             }
 
-            var confirmLegacyMcpStopped = _confirmLegacyMcpStopped;
-            try
-            {
-                RunAction(
-                    "Host Payload Remove",
-                    () => AICodedbActions.RunHostPayloadRemove(authorizationPath, confirmLegacyMcpStopped));
-            }
-            finally
-            {
-                ClearTrackedHostAuthorization();
-            }
-        }
-
-        private static string GetTrackedHostAuthorizationDisplayPath(string authorizationPath)
-        {
-            try
-            {
-                return AICodedbPaths.ToProjectRelativeDisplayPath(authorizationPath);
-            }
-            catch (Exception)
-            {
-                return authorizationPath;
-            }
+            RunAction("Host Payload Remove", AICodedbActions.RunHostPayloadRemove);
         }
 
         private AICodedbCommandResult RunLanguageCustomProbe()
@@ -1501,6 +1431,18 @@ namespace Rice.AI.Codedb.Editor
         internal static bool CanUseLifecycleControls(AICodedbHostGenerationState generationState)
         {
             return generationState == AICodedbHostGenerationState.Current;
+        }
+
+        internal static bool CanUseHostCommands(AICodedbHostGenerationState generationState)
+        {
+            return generationState == AICodedbHostGenerationState.Current;
+        }
+
+        private Action GetHostAction(Action action)
+        {
+            return CanUseHostCommands(_statusSnapshot.HostGenerationSelection.State)
+                ? action
+                : null;
         }
 
         internal static string ResolveWatcherRepairLabel(

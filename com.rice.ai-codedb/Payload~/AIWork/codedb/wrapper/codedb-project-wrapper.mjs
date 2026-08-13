@@ -485,10 +485,15 @@ function assertCodedbUnityProjectRoot(unityRoot) {
 }
 
 function createProjectSlug(value) {
+  const normalizedValue = String(value ?? "").normalize("NFC");
   let result = "";
   let previousWasSeparator = false;
-  for (const character of String(value ?? "")) {
-    if (/^[\p{L}\p{N}]$/u.test(character)) {
+  let containsNonAscii = false;
+  for (const character of normalizedValue) {
+    if (character.codePointAt(0) > 0x7f) {
+      containsNonAscii = true;
+    }
+    if (/^[A-Za-z0-9]$/.test(character)) {
       result += character.toLowerCase();
       previousWasSeparator = false;
       continue;
@@ -502,7 +507,17 @@ function createProjectSlug(value) {
     previousWasSeparator = true;
   }
 
-  return result.replace(/-+$/, "") || "unity-project";
+  result = result.replace(/-+$/, "") || "unity-project";
+  let requiresHash = containsNonAscii;
+  if (result.length > 96) {
+    result = result.slice(0, 96).replace(/-+$/, "");
+    requiresHash = true;
+  }
+  if (requiresHash) {
+    const hash = crypto.createHash("sha256").update(normalizedValue, "utf8").digest("hex");
+    result = `${result}-${hash.slice(0, 12)}`;
+  }
+  return result;
 }
 
 function createProjectIdentity(rootPath) {

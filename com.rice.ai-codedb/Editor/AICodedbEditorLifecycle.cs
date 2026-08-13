@@ -157,7 +157,9 @@ namespace Rice.AI.Codedb.Editor
                         Debug.LogWarning("CodeDB automatic host update policy is invalid: " + updatePolicy.Detail);
                     }
                     else if (updatePolicy.IsEnabled && !IsAutomaticHostUpgradeSuppressed(
-                                 AICodedbHostUpgradeStatusStore.Read(_projectRoot),
+                                 AICodedbHostUpgradeStatusStore.Read(
+                                     _projectRoot,
+                                     AICodedbProjectSettings.CurrentGenerationId),
                                  AICodedbProjectSettings.CurrentGenerationId))
                     {
                         var upgradeResult = await AICodedbHostPayloadMaterializer.RunUpgradeAsync();
@@ -210,13 +212,15 @@ namespace Rice.AI.Codedb.Editor
                     File.Exists(AICodedbPaths.HostCurrentPointerPath),
                     generation.State,
                     AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot),
-                    AICodedbHostUpgradeStatusStore.Read(_projectRoot),
+                    AICodedbHostUpgradeStatusStore.Read(
+                        _projectRoot,
+                        AICodedbProjectSettings.CurrentGenerationId),
                     AICodedbProjectSettings.CurrentGenerationId))
             {
                 return true;
             }
 
-            var manual = ReadJson<ManualRuntimeDocument>(AICodedbPaths.WatchManualRuntimePath);
+            var manual = ReadManualRuntime(AICodedbPaths.WatchManualRuntimePath);
             var manualMode = GetApplicableManualMode(
                 manual,
                 GetActiveEditorSessionIds(),
@@ -225,13 +229,16 @@ namespace Rice.AI.Codedb.Editor
             if (string.Equals(manualMode, "stopped", StringComparison.Ordinal))
                 return false;
 
-            var desired = ReadJson<DesiredStateDocument>(AICodedbPaths.WatchDesiredStatePath);
+            var desired = ReadDesiredState(
+                AICodedbPaths.WatchDesiredStatePath,
+                _projectRoot,
+                _projectIdentity);
             if (desired != null
                 && string.Equals(desired.desired_state, "disabled", StringComparison.Ordinal)
                 && !string.Equals(manualMode, "started", StringComparison.Ordinal))
                 return false;
 
-            var state = ReadJson<CoordinatorStateDocument>(AICodedbPaths.WatchCoordinatorStatePath);
+            var state = ReadCoordinatorState(AICodedbPaths.WatchCoordinatorStatePath, _projectRoot);
             return ShouldReconcileCoordinator(
                 File.Exists(AICodedbPaths.HostCurrentPointerPath),
                 generation.State,
@@ -249,11 +256,16 @@ namespace Rice.AI.Codedb.Editor
             string coordinatorGenerationId,
             Func<int, bool> processAliveProvider)
         {
-            if (currentPointerExists && generationState != AICodedbHostGenerationState.Current)
+            if (currentPointerExists
+                && generationState != AICodedbHostGenerationState.Current
+                && generationState != AICodedbHostGenerationState.Previous
+                && generationState != AICodedbHostGenerationState.DowngradeReviewRequired)
                 return true;
             if (coordinatorPid <= 0)
                 return true;
-            if (generationState == AICodedbHostGenerationState.Current
+            if ((generationState == AICodedbHostGenerationState.Current
+                 || generationState == AICodedbHostGenerationState.Previous
+                 || generationState == AICodedbHostGenerationState.DowngradeReviewRequired)
                 && !string.Equals(coordinatorGenerationId, selectedGenerationId, StringComparison.Ordinal))
                 return true;
             if (processAliveProvider == null)
@@ -265,7 +277,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbHostPayloadStatus hostStatus,
             AICodedbHostGenerationState generationState)
         {
-            return hostStatus.IsCurrent || generationState == AICodedbHostGenerationState.Legacy;
+            return hostStatus.IsCurrent
+                   || generationState == AICodedbHostGenerationState.Legacy;
         }
 
         internal static bool ShouldDeferReconcile(bool isCompiling, bool isUpdating)
@@ -281,13 +294,20 @@ namespace Rice.AI.Codedb.Editor
             AICodedbHostUpgradeStatus upgradeStatus,
             string currentGenerationId)
         {
-            if (!markerExists || !updatePolicy.IsValid || !updatePolicy.IsEnabled)
+            if (!updatePolicy.IsValid || !updatePolicy.IsEnabled)
+                return false;
+            if (generationState == AICodedbHostGenerationState.DowngradeReviewRequired)
                 return false;
             if (IsAutomaticHostUpgradeSuppressed(upgradeStatus, currentGenerationId))
                 return false;
+            if (!markerExists)
+            {
+                return !currentPointerExists
+                       && generationState == AICodedbHostGenerationState.Unavailable;
+            }
             if (generationState == AICodedbHostGenerationState.Legacy)
                 return true;
-            return currentPointerExists && generationState != AICodedbHostGenerationState.Current;
+            return generationState != AICodedbHostGenerationState.Current;
         }
 
         internal static bool IsAutomaticHostUpgradeSuppressed(
@@ -372,7 +392,7 @@ namespace Rice.AI.Codedb.Editor
                 var now = DateTime.UtcNow;
                 foreach (var path in Directory.GetFiles(AICodedbPaths.WatchEditorLeasesPath, "*.json"))
                 {
-                    var lease = ReadJson<EditorLeaseDocument>(path);
+                    var lease = ReadEditorLease(path);
                     if (IsActiveEditorLease(
                             lease,
                             path,
@@ -623,16 +643,135 @@ namespace Rice.AI.Codedb.Editor
             return value;
         }
 
-        private static T ReadJson<T>(string path) where T : class
+        internal static EditorLeaseDocument ReadEditorLease(string path)
         {
             try
             {
-                return File.Exists(path) ? JsonUtility.FromJson<T>(File.ReadAllText(path)) : null;
+                var value = ReadEvidenceObject(path, "CodeDB Editor lease");
+                if (value == null)
+                    return null;
+                return new EditorLeaseDocument
+                {
+                    schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "CodeDB Editor lease"),
+                    managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", "CodeDB Editor lease"),
+                    session_id = AICodedbStrictJson.GetRequiredString(value, "session_id", "CodeDB Editor lease"),
+                    editor_pid = AICodedbStrictJson.GetRequiredInt32(value, "editor_pid", "CodeDB Editor lease"),
+                    process_start_ticks = AICodedbStrictJson.GetRequiredString(value, "process_start_ticks", "CodeDB Editor lease"),
+                    project_root = AICodedbStrictJson.GetRequiredString(value, "project_root", "CodeDB Editor lease"),
+                    project_identity = AICodedbStrictJson.GetRequiredString(value, "project_identity", "CodeDB Editor lease"),
+                    created_at_utc = AICodedbStrictJson.GetRequiredString(value, "created_at_utc", "CodeDB Editor lease"),
+                    heartbeat_at_utc = AICodedbStrictJson.GetRequiredString(value, "heartbeat_at_utc", "CodeDB Editor lease")
+                };
             }
             catch
             {
                 return null;
             }
+        }
+
+        private static ManualRuntimeDocument ReadManualRuntime(string path)
+        {
+            try
+            {
+                var value = ReadEvidenceObject(path, "CodeDB manual runtime state");
+                if (value == null)
+                    return null;
+                return new ManualRuntimeDocument
+                {
+                    schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "CodeDB manual runtime state"),
+                    managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", "CodeDB manual runtime state"),
+                    mode = AICodedbStrictJson.GetRequiredString(value, "mode", "CodeDB manual runtime state"),
+                    project_root = AICodedbStrictJson.GetRequiredString(value, "project_root", "CodeDB manual runtime state"),
+                    project_identity = AICodedbStrictJson.GetRequiredString(value, "project_identity", "CodeDB manual runtime state"),
+                    editor_session_ids = AICodedbStrictJson.GetRequiredStringArray(
+                        value,
+                        "editor_session_ids",
+                        "CodeDB manual runtime state")
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static DesiredStateDocument ReadDesiredState(
+            string path,
+            string expectedProjectRoot,
+            string expectedProjectIdentity)
+        {
+            try
+            {
+                var value = ReadEvidenceObject(path, "CodeDB desired state");
+                if (value == null)
+                    return null;
+                var document = new DesiredStateDocument
+                {
+                    schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "CodeDB desired state"),
+                    managed_by = AICodedbStrictJson.GetRequiredString(value, "managed_by", "CodeDB desired state"),
+                    desired_state = AICodedbStrictJson.GetRequiredString(value, "desired_state", "CodeDB desired state"),
+                    project_root = AICodedbStrictJson.GetRequiredString(value, "project_root", "CodeDB desired state"),
+                    project_identity = AICodedbStrictJson.GetRequiredString(value, "project_identity", "CodeDB desired state")
+                };
+                string actualRoot;
+                string expectedRoot;
+                if (document.schema_version != LeaseSchemaVersion
+                    || !string.Equals(document.managed_by, ManagedBy, StringComparison.Ordinal)
+                    || (document.desired_state != "enabled" && document.desired_state != "disabled")
+                    || !TryNormalizeRoot(document.project_root, out actualRoot)
+                    || !TryNormalizeRoot(expectedProjectRoot, out expectedRoot)
+                    || !string.Equals(actualRoot, expectedRoot, StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(expectedProjectIdentity)
+                    || !string.Equals(
+                        document.project_identity,
+                        expectedProjectIdentity,
+                        StringComparison.Ordinal))
+                    return null;
+                return document;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static CoordinatorStateDocument ReadCoordinatorState(string path, string expectedProjectRoot)
+        {
+            try
+            {
+                var value = ReadEvidenceObject(path, "CodeDB coordinator state");
+                if (value == null)
+                    return null;
+                var document = new CoordinatorStateDocument
+                {
+                    schema_version = AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "CodeDB coordinator state"),
+                    coordinator_pid = AICodedbStrictJson.GetRequiredInt32(value, "coordinator_pid", "CodeDB coordinator state"),
+                    generation_id = AICodedbStrictJson.GetRequiredString(value, "generation_id", "CodeDB coordinator state"),
+                    root = AICodedbStrictJson.GetRequiredString(value, "root", "CodeDB coordinator state")
+                };
+                string actualRoot;
+                string expectedRoot;
+                if (document.schema_version != 2
+                    || document.coordinator_pid <= 0
+                    || !TryNormalizeRoot(document.root, out actualRoot)
+                    || !TryNormalizeRoot(expectedProjectRoot, out expectedRoot)
+                    || !string.Equals(actualRoot, expectedRoot, StringComparison.OrdinalIgnoreCase))
+                    return null;
+                return document;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static Dictionary<string, object> ReadEvidenceObject(string path, string label)
+        {
+            if (!File.Exists(path))
+                return null;
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException(label + " cannot be a reparse point.");
+            return AICodedbStrictJson.ReadObject(path, 64 * 1024, label);
         }
 
         private static void WriteJsonAtomic(string targetPath, string content)
@@ -688,7 +827,11 @@ namespace Rice.AI.Codedb.Editor
         [Serializable]
         private sealed class DesiredStateDocument
         {
+            public int schema_version;
+            public string managed_by;
             public string desired_state;
+            public string project_root;
+            public string project_identity;
         }
 
         [Serializable]
@@ -705,8 +848,10 @@ namespace Rice.AI.Codedb.Editor
         [Serializable]
         private sealed class CoordinatorStateDocument
         {
+            public int schema_version;
             public int coordinator_pid;
             public string generation_id;
+            public string root;
         }
     }
 }

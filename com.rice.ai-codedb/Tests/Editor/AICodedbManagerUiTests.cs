@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Text;
 using NUnit.Framework;
+using UnityEditor.PackageManager;
 
 namespace Rice.AI.Codedb.Editor.Tests
 {
@@ -27,8 +29,25 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbProjectSettings.HostPayloadMarkerRelativePath, Is.EqualTo("AIWork/codedb/.rice-ai-codedb-payload.json"));
             Assert.That(AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath, Is.EqualTo("AIWork/.runtime/codedb/host/last-known-good.json"));
             Assert.That(AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/upgrade-state.json"));
-            Assert.That(AICodedbProjectSettings.TrackedHostAuthorizationRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/authorizations"));
             Assert.That(AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath, Is.EqualTo("Tools~/materialize-codedb-host-payload.ps1"));
+        }
+
+        [Test]
+        public void PackagePaths_UseUnityResolvedPackageLocation()
+        {
+            var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
+
+            Assert.That(packageInfo, Is.Not.Null);
+            Assert.That(packageInfo.name, Is.EqualTo(AICodedbProjectSettings.PackageName));
+            Assert.That(packageInfo.resolvedPath, Is.Not.Empty);
+            Assert.That(
+                AICodedbPaths.PackageRootPath,
+                Is.EqualTo(AICodedbPaths.NormalizePath(packageInfo.resolvedPath)));
+            Assert.That(
+                AICodedbPaths.HostPayloadMaterializerScriptPath,
+                Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
+                    packageInfo.resolvedPath,
+                    AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath))));
         }
 
         [Test]
@@ -493,14 +512,14 @@ namespace Rice.AI.Codedb.Editor.Tests
             var failedCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.29",
-                "CHECK_FAILED / poc.29",
+                "poc.30",
+                "CHECK_FAILED / poc.30",
                 "fixture failure");
             var failedPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.CheckFailed,
                 AICodedbStatusState.Error,
-                "poc.28",
-                "CHECK_FAILED / poc.28",
+                "poc.29",
+                "CHECK_FAILED / poc.29",
                 "historical failure");
             var invalid = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Invalid,
@@ -509,12 +528,12 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "CHECK_FAILED",
                 "invalid state");
 
-            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedCurrent, "poc.29"), Is.True);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedCurrent, "poc.29"), Is.EqualTo("Retry update"));
-            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedPrevious, "poc.29"), Is.False);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedPrevious, "poc.29"), Is.EqualTo("Update now"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(invalid, "poc.29"), Is.True);
-            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(invalid, "poc.29"), Is.EqualTo("Retry update"));
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedCurrent, "poc.30"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedCurrent, "poc.30"), Is.EqualTo("Retry update"));
+            Assert.That(AICodedbManagerWindow.IsCurrentHostUpgradeFailure(failedPrevious, "poc.30"), Is.False);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(failedPrevious, "poc.30"), Is.EqualTo("Update now"));
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(invalid, "poc.30"), Is.True);
+            Assert.That(AICodedbManagerWindow.GetHostUpgradeActionLabel(invalid, "poc.30"), Is.EqualTo("Retry update"));
         }
 
         [Test]
@@ -523,35 +542,35 @@ namespace Rice.AI.Codedb.Editor.Tests
             var installingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Installing,
                 AICodedbStatusState.Warning,
-                "poc.29",
-                "INSTALLING / poc.29",
+                "poc.30",
+                "INSTALLING / poc.30",
                 "installing");
             var switchingCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Switching,
                 AICodedbStatusState.Warning,
-                "poc.29",
-                "SWITCHING / poc.29",
+                "poc.30",
+                "SWITCHING / poc.30",
                 "switching");
             var rollbackCurrent = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Rollback,
                 AICodedbStatusState.Error,
-                "poc.29",
-                "ROLLBACK / poc.29",
+                "poc.30",
+                "ROLLBACK / poc.30",
                 "rollback");
             var installingPrevious = new AICodedbHostUpgradeStatus(
                 AICodedbHostUpgradePhase.Installing,
                 AICodedbStatusState.Warning,
-                "poc.28",
-                "INSTALLING / poc.28",
+                "poc.29",
+                "INSTALLING / poc.29",
                 "historical install");
 
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingCurrent, "poc.29"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingCurrent, "poc.30"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(installingCurrent.Phase), Is.EqualTo("INSTALLING"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(switchingCurrent, "poc.29"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(switchingCurrent, "poc.30"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(switchingCurrent.Phase), Is.EqualTo("SWITCHING"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(rollbackCurrent, "poc.29"), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(rollbackCurrent, "poc.30"), Is.True);
             Assert.That(AICodedbManagerWindow.GetHostUpgradeStatusLabel(rollbackCurrent.Phase), Is.EqualTo("ROLLBACK"));
-            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingPrevious, "poc.29"), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldPrioritizeHostUpgradeStatus(installingPrevious, "poc.30"), Is.False);
         }
 
         [TestCase(false, AICodedbHostPayloadState.SetupRequired, "SETUP_REQUIRED")]
@@ -602,7 +621,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var status = AICodedbHostPayloadStatusBuilder.Build(
                 true,
                 Result(
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.30 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.RedeployRequired));
@@ -620,7 +639,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     "[ACTIVE] mcp PID 101\n" +
                     "[ACTIVE] watcher PID 202\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.30 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
@@ -640,7 +659,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Result(
                     "[ACTIVE] watcher PID 202\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop.\n" +
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.30 after MCP and watcher owners stop.\n" +
                     "[STALE] Host payload requires a controlled legacy redeploy."));
 
             Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
@@ -656,9 +675,9 @@ namespace Rice.AI.Codedb.Editor.Tests
             var status = AICodedbHostPayloadStatusBuilder.Build(
                 true,
                 Result(
-                    "[ACTIVE] generation poc.28 mcp PID 303\n" +
+                    "[ACTIVE] generation poc.29 mcp PID 303\n" +
                     "[BLOCKED] Host payload Sync/Remove is blocked.\n" +
-                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.29 after MCP and watcher owners stop."));
+                    "[REDEPLOY_READY] Owned payload poc.16 can redeploy to generation poc.30 after MCP and watcher owners stop."));
 
             Assert.That(status.CanRedeploy, Is.True);
             Assert.That(status.ActiveMcpSessionCount, Is.EqualTo(1));
@@ -687,54 +706,276 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     internal sealed class AICodedbHostPayloadMaterializerTests
     {
-        [TestCase(AICodedbHostPayloadAction.DryRun)]
-        [TestCase(AICodedbHostPayloadAction.Verify)]
-        [TestCase(AICodedbHostPayloadAction.Upgrade)]
-        [TestCase(AICodedbHostPayloadAction.Redeploy)]
-        public void BuildScriptArguments_PackageManagedActionsHaveNoAuthorization(
-            AICodedbHostPayloadAction action)
+        [Test]
+        public void PackageMaterializerAuthorization_AcceptsUnityResolvedExactScript()
         {
-            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(action, string.Empty, false);
+            string authorizedPath;
+            string error;
+
+            var authorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                AICodedbPaths.PackageRootPath,
+                AICodedbPaths.HostPayloadMaterializerScriptPath,
+                out authorizedPath,
+                out error);
+
+            Assert.That(authorized, Is.True, error);
+            Assert.That(authorizedPath, Is.EqualTo(AICodedbPaths.HostPayloadMaterializerScriptPath));
+        }
+
+        [Test]
+        public void PackageMaterializerAuthorization_AcceptsExactExternalLocalPackageScript()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                var scriptPath = CreateMaterializerScript(packageRoot);
+                string authorizedPath;
+                string error;
+
+                Assert.That(AICodedbPaths.IsInsideProject(packageRoot), Is.False);
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    scriptPath,
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.True, error);
+                Assert.That(authorizedPath, Is.EqualTo(AICodedbPaths.NormalizePath(scriptPath)));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void MaterializerStatusEntryPoints_StartTheUnityResolvedPackageScript()
+        {
+            TestContext.WriteLine(
+                "Unity resolved Package root: " + AICodedbPaths.PackageRootPath
+                + "; outside project: " + (!AICodedbPaths.IsInsideProject(AICodedbPaths.PackageRootPath)));
+
+            var synchronousResult = AICodedbHostPayloadMaterializer.ReadStatus();
+            AssertMaterializerProcessStarted(synchronousResult, "synchronous Status");
+
+            var asynchronousResult = AICodedbHostPayloadMaterializer
+                .ReadStatusAsync()
+                .GetAwaiter()
+                .GetResult();
+            AssertMaterializerProcessStarted(asynchronousResult, "asynchronous Status");
+        }
+
+        [Test]
+        public void PackageMaterializerAuthorization_RejectsAnyOtherExternalScript()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                CreateMaterializerScript(packageRoot);
+                var otherScriptPath = Path.Combine(packageRoot, "Tools~", "other.ps1");
+                File.WriteAllText(otherScriptPath, "Write-Output 'must not run'", Encoding.UTF8);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    otherScriptPath,
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.False);
+                Assert.That(authorizedPath, Is.Empty);
+                Assert.That(error, Does.Contain("other than the resolved CodeDB Package materializer"));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageMaterializerAuthorization_RejectsExactLeafOutsideResolvedPackageRoot()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                CreateMaterializerScript(packageRoot);
+                var outsidePackageRoot = Path.Combine(fixtureRoot, "outside-package");
+                var outsideScriptPath = CreateMaterializerScript(outsidePackageRoot);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    outsideScriptPath,
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.False);
+                Assert.That(authorizedPath, Is.Empty);
+                Assert.That(error, Does.Contain("other than the resolved CodeDB Package materializer"));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void ProjectLocalRunner_StillRejectsExternalScriptsBeforeLaunch()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var scriptPath = Path.Combine(fixtureRoot, "must-not-run.ps1");
+                File.WriteAllText(scriptPath, "throw 'external script executed'", Encoding.UTF8);
+
+                var synchronousResult = AICodedbProcessRunner.RunPowerShellScript(scriptPath, 1000);
+                var asynchronousResult = AICodedbProcessRunner
+                    .RunPowerShellScriptAsync(scriptPath, 1000)
+                    .GetAwaiter()
+                    .GetResult();
+
+                AssertProjectLocalRunnerRejectedExternalScript(synchronousResult, "synchronous Host runner");
+                AssertProjectLocalRunnerRejectedExternalScript(asynchronousResult, "asynchronous Host runner");
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageMaterializerAuthorization_RejectsMissingOrWrongLeaf()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                Directory.CreateDirectory(Path.Combine(packageRoot, "Tools~"));
+                string authorizedPath;
+                string error;
+
+                var missingAuthorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    Path.Combine(packageRoot, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath),
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(missingAuthorized, Is.False);
+                Assert.That(error, Does.Contain("materializer was not found"));
+
+                Directory.CreateDirectory(Path.Combine(
+                    packageRoot,
+                    AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
+                var directoryAuthorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    Path.Combine(packageRoot, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath),
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(directoryAuthorized, Is.False);
+                Assert.That(error, Does.Contain("materializer was not found"));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageMaterializerAuthorization_RejectsReparsePointWithinPackagePath()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            var toolsJunction = string.Empty;
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                var externalToolsRoot = Path.Combine(fixtureRoot, "external-tools");
+                Directory.CreateDirectory(packageRoot);
+                Directory.CreateDirectory(externalToolsRoot);
+                File.WriteAllText(
+                    Path.Combine(externalToolsRoot, "materialize-codedb-host-payload.ps1"),
+                    "Write-Output 'must not run'",
+                    Encoding.UTF8);
+                toolsJunction = Path.Combine(packageRoot, "Tools~");
+                CreateDirectoryJunction(toolsJunction, externalToolsRoot);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageMaterializerScriptPath(
+                    packageRoot,
+                    Path.Combine(toolsJunction, "materialize-codedb-host-payload.ps1"),
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.False);
+                Assert.That(authorizedPath, Is.Empty);
+                Assert.That(error, Does.Contain("through a reparse point"));
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(toolsJunction) && Directory.Exists(toolsJunction))
+                    Directory.Delete(toolsJunction);
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [TestCase(AICodedbHostPayloadAction.DryRun, false)]
+        [TestCase(AICodedbHostPayloadAction.Verify, false)]
+        [TestCase(AICodedbHostPayloadAction.Upgrade, false)]
+        [TestCase(AICodedbHostPayloadAction.Redeploy, true)]
+        [TestCase(AICodedbHostPayloadAction.Repair, true)]
+        [TestCase(AICodedbHostPayloadAction.Sync, true)]
+        [TestCase(AICodedbHostPayloadAction.Remove, true)]
+        public void BuildScriptArguments_HaveNoVersionControlOrAuthorizationArguments(
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation)
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                action,
+                confirmedProjectMutation);
 
             Assert.That(arguments, Does.Contain("-ProjectRoot"));
             Assert.That(arguments, Does.Not.Contain("-TrackedHostAuthorizationPath"));
             Assert.That(arguments, Does.Not.Contain("-ConfirmLegacyMcpStopped"));
             Assert.That(arguments, Does.Not.Contain("-PocFixture"));
+            Assert.That(arguments, Does.Not.Contain("-GitIndexFile"));
         }
 
-        [Test]
-        public void BuildScriptArguments_ReadOnlyActionsRejectAuthorization()
-        {
-            var authorizationPath = Path.Combine(AICodedbPaths.TrackedHostAuthorizationPath, "reviewed.json");
-            Assert.Throws<ArgumentException>(() =>
-                AICodedbHostPayloadMaterializer.BuildScriptArguments(
-                    AICodedbHostPayloadAction.DryRun,
-                    authorizationPath,
-                    false));
-        }
-
-        [TestCase(AICodedbHostPayloadAction.Sync, "")]
-        [TestCase(AICodedbHostPayloadAction.Sync, "relative.json")]
-        [TestCase(AICodedbHostPayloadAction.Remove, "")]
-        [TestCase(AICodedbHostPayloadAction.Remove, "relative.json")]
-        public void BuildScriptArguments_MutationsRequireExplicitAbsoluteAuthorization(
-            AICodedbHostPayloadAction action,
-            string authorizationPath)
+        [TestCase(AICodedbHostPayloadAction.DryRun)]
+        [TestCase(AICodedbHostPayloadAction.Verify)]
+        [TestCase(AICodedbHostPayloadAction.Upgrade)]
+        public void BuildScriptArguments_PackageManagedActionsRejectProjectConfirmation(
+            AICodedbHostPayloadAction action)
         {
             Assert.Throws<ArgumentException>(() =>
                 AICodedbHostPayloadMaterializer.BuildScriptArguments(
                     action,
-                    authorizationPath,
+                    true));
+        }
+
+        [TestCase(AICodedbHostPayloadAction.Redeploy)]
+        [TestCase(AICodedbHostPayloadAction.Repair)]
+        [TestCase(AICodedbHostPayloadAction.Sync)]
+        [TestCase(AICodedbHostPayloadAction.Remove)]
+        public void BuildScriptArguments_ProjectMutationsRequireConfirmation(
+            AICodedbHostPayloadAction action)
+        {
+            Assert.Throws<ArgumentException>(() =>
+                AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                    action,
                     false));
         }
 
         [Test]
-        public void BuildScriptArguments_SyncUsesOnlyReviewedAuthorizationAndConfirmation()
+        public void BuildScriptArguments_SyncUsesOnlyProjectConfirmation()
         {
-            var authorizationPath = Path.Combine(AICodedbPaths.TrackedHostAuthorizationPath, "reviewed.json");
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
                 AICodedbHostPayloadAction.Sync,
-                authorizationPath,
                 true);
 
             Assert.That(arguments, Is.EqualTo(new[]
@@ -743,9 +984,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "Sync",
                 "-ProjectRoot",
                 AICodedbPaths.ProjectRoot,
-                "-TrackedHostAuthorizationPath",
-                authorizationPath,
-                "-ConfirmLegacyMcpStopped"
+                "-ConfirmedProjectMutation"
             }));
         }
 
@@ -754,7 +993,6 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
                 AICodedbHostPayloadAction.Upgrade,
-                string.Empty,
                 false);
 
             Assert.That(arguments, Is.EqualTo(new[]
@@ -771,16 +1009,136 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
                 AICodedbHostPayloadAction.Redeploy,
-                string.Empty,
-                false);
+                true);
 
             Assert.That(arguments, Is.EqualTo(new[]
             {
                 "-Action",
                 "Redeploy",
                 "-ProjectRoot",
-                AICodedbPaths.ProjectRoot
+                AICodedbPaths.ProjectRoot,
+                "-ConfirmedProjectMutation"
             }));
+        }
+
+        [Test]
+        public void RunRedeploy_RejectsMissingConfirmationBeforeLaunchingMaterializer()
+        {
+            var result = AICodedbHostPayloadMaterializer.RunRedeploy(false);
+
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."));
+        }
+
+        [Test]
+        public void RunHostPayloadRedeploy_RejectsMissingConfirmationBeforePreflight()
+        {
+            var result = AICodedbActions.RunHostPayloadRedeploy(false);
+
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."));
+        }
+
+        [Test]
+        public void BuildScriptArguments_RepairUsesExactPackageOwnedActionAndProjectRoot()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.Repair,
+                true);
+
+            Assert.That(arguments, Is.EqualTo(new[]
+            {
+                "-Action",
+                "Repair",
+                "-ProjectRoot",
+                AICodedbPaths.ProjectRoot,
+                "-ConfirmedProjectMutation"
+            }));
+        }
+
+        private static string CreateExternalPackageFixture()
+        {
+            var fixtureRoot = Path.Combine(
+                Path.GetTempPath(),
+                "codedb-editor-package-runner-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(fixtureRoot);
+            return fixtureRoot;
+        }
+
+        private static void AssertMaterializerProcessStarted(
+            AICodedbCommandResult result,
+            string label)
+        {
+            Assert.That(result.TimedOut, Is.False, label + " timed out.");
+            Assert.That(
+                result.Succeeded,
+                Is.True,
+                label + " did not complete through the Package-owned materializer." + Environment.NewLine + result.GetDisplayText());
+            Assert.That(
+                result.StandardError,
+                Does.Not.Contain("Refusing to run a script outside the Unity project"),
+                label + " used the project-local Host script boundary.");
+        }
+
+        private static void AssertProjectLocalRunnerRejectedExternalScript(
+            AICodedbCommandResult result,
+            string label)
+        {
+            Assert.That(result.Succeeded, Is.False, label);
+            Assert.That(result.ExitCode, Is.EqualTo(-1), label);
+            Assert.That(
+                result.StandardError,
+                Does.Contain("Refusing to run a script outside the Unity project"),
+                label);
+        }
+
+        private static string CreateMaterializerScript(string packageRoot)
+        {
+            var scriptPath = Path.Combine(
+                packageRoot,
+                AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(scriptPath));
+            File.WriteAllText(scriptPath, "Write-Output 'fixture materializer'", Encoding.UTF8);
+            return scriptPath;
+        }
+
+        private static void CreateDirectoryJunction(string junctionPath, string targetPath)
+        {
+            var command = "New-Item -ItemType Junction -Path '"
+                          + junctionPath.Replace("'", "''")
+                          + "' -Target '"
+                          + targetPath.Replace("'", "''")
+                          + "' -ErrorAction Stop | Out-Null";
+            var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (var process = System.Diagnostics.Process.Start(startInfo))
+            {
+                Assert.That(process, Is.Not.Null);
+                var standardOutput = process.StandardOutput.ReadToEnd();
+                var standardError = process.StandardError.ReadToEnd();
+                Assert.That(process.WaitForExit(10000), Is.True, "Timed out creating the reparse-point fixture.");
+                Assert.That(process.ExitCode, Is.Zero, standardOutput + Environment.NewLine + standardError);
+            }
+
+            Assert.That(
+                (File.GetAttributes(junctionPath) & FileAttributes.ReparsePoint) != 0,
+                Is.True,
+                "The fixture junction was not marked as a reparse point.");
+        }
+
+        private static void DeleteFixtureDirectory(string fixtureRoot)
+        {
+            if (!string.IsNullOrWhiteSpace(fixtureRoot) && Directory.Exists(fixtureRoot))
+                Directory.Delete(fixtureRoot, true);
         }
     }
 
@@ -837,6 +1195,23 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(item.Detail, Does.StartWith("No installed host payload marker exists."));
         }
 
+        [Test]
+        public void Parse_MarksOlderTargetStateHistoricalInsteadOfCurrentOrFailed()
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", projectRoot),
+                projectRoot,
+                "upgrade-state.json",
+                "poc.30");
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Historical));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Inactive));
+            Assert.That(status.Summary, Is.EqualTo("Historical CURRENT / poc.22"));
+            Assert.That(status.Detail, Does.Contain("current target is poc.30"));
+            Assert.That(status.ToStatusItem(true).State, Is.EqualTo(AICodedbStatusState.Inactive));
+        }
+
         private static string UpgradeStateJson(string phase, string projectRoot)
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot);
@@ -852,6 +1227,59 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     internal sealed class AICodedbLifecycleControlTests
     {
+        [TestCase(AICodedbHostGenerationState.Unavailable, AICodedbHostPayloadState.SetupRequired, AICodedbHostUpgradePhase.Unavailable)]
+        [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Historical)]
+        [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Blocked, AICodedbHostUpgradePhase.Invalid)]
+        [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Conflict, AICodedbHostUpgradePhase.CheckFailed)]
+        [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Rollback)]
+        [TestCase(AICodedbHostGenerationState.Current, AICodedbHostPayloadState.Current, AICodedbHostUpgradePhase.Current)]
+        public void RepairCodeDB_RemainsAvailableAcrossRecoveryStates(
+            AICodedbHostGenerationState generationState,
+            AICodedbHostPayloadState payloadState,
+            AICodedbHostUpgradePhase upgradePhase)
+        {
+            Assert.That(
+                AICodedbManagerWindow.IsRepairCodeDBAvailable(generationState, payloadState, upgradePhase),
+                Is.True);
+        }
+
+        [Test]
+        public void RepairCodeDB_CancelDoesNotInvokeRecoveryAction()
+        {
+            var confirmationCount = 0;
+            var repairCount = 0;
+
+            var ran = AICodedbManagerWindow.ConfirmAndRunRepairCodeDB(
+                () =>
+                {
+                    confirmationCount++;
+                    return false;
+                },
+                () => repairCount++);
+
+            Assert.That(ran, Is.False);
+            Assert.That(confirmationCount, Is.EqualTo(1));
+            Assert.That(repairCount, Is.Zero);
+        }
+
+        [Test]
+        public void RepairCodeDB_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
+        {
+            var repairCount = 0;
+
+            var ran = AICodedbManagerWindow.ConfirmAndRunRepairCodeDB(
+                () => true,
+                () => repairCount++);
+
+            Assert.That(ran, Is.True);
+            Assert.That(repairCount, Is.EqualTo(1));
+            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationTitle, Is.EqualTo("Repair CodeDB"));
+            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("AIWork/.runtime/codedb/host/"));
+            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("unrelated MCP tables, keys, comments, and ordering are preserved"));
+            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("External MCP clients are never terminated"));
+            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("may require a new session"));
+        }
+
         [TestCase("Enable")]
         [TestCase("Disable")]
         [TestCase("Start")]
@@ -883,6 +1311,84 @@ namespace Rice.AI.Codedb.Editor.Tests
                     AICodedbHostGenerationState.Current,
                     AICodedbWatcherState.Stale),
                 Is.EqualTo("Repair watcher"));
+        }
+
+        [Test]
+        public void HostCommandControls_AllowOnlyCurrentWithoutExecutingOlderHosts()
+        {
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.Current), Is.True);
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.Previous), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.Legacy), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.Unavailable), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.DowngradeReviewRequired), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseHostCommands(AICodedbHostGenerationState.Invalid), Is.False);
+        }
+
+        [Test]
+        public void HostCommandReadiness_RejectsUnavailableGenerationBeforeProcessLaunch()
+        {
+            var unavailable = new AICodedbHostGenerationSelection(
+                AICodedbHostGenerationState.Unavailable,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                0,
+                0,
+                string.Empty,
+                "No selected generation.");
+
+            var failure = AICodedbActions.GetHostCommandReadinessFailure(
+                unavailable,
+                Path.Combine(AICodedbPaths.ProjectRoot, "AIWork", ".runtime", "codedb", "host", "unavailable", "scripts", "fixture.ps1"));
+
+            Assert.That(failure, Is.Not.Null);
+            Assert.That(failure.ExitCode, Is.EqualTo(4));
+            Assert.That(failure.StandardError, Does.Contain("generation state is Unavailable"));
+        }
+
+        [Test]
+        public void HostCommandReadiness_RejectsPreviousGenerationBeforeProcessLaunch()
+        {
+            var previous = new AICodedbHostGenerationSelection(
+                AICodedbHostGenerationState.Previous,
+                "poc.29",
+                "0.2.5-preview.2",
+                "poc.29",
+                29,
+                1,
+                Path.Combine(AICodedbPaths.ProjectRoot, "AIWork", ".runtime", "codedb", "host", "generations", "poc.29"),
+                "Validated previous generation.");
+
+            var failure = AICodedbActions.GetHostCommandReadinessFailure(
+                previous,
+                Path.Combine(previous.RootPath, "scripts", "verify-codedb-project.ps1"));
+
+            Assert.That(failure, Is.Not.Null);
+            Assert.That(failure.ExitCode, Is.EqualTo(4));
+            Assert.That(failure.StandardError, Does.Contain("generation state is Previous"));
+        }
+
+        [Test]
+        public void HostCommandReadiness_RejectsLegacyHostBeforeProcessLaunch()
+        {
+            var legacyRoot = Path.Combine(AICodedbPaths.ProjectRoot, "AIWork", "codedb");
+            var legacy = new AICodedbHostGenerationSelection(
+                AICodedbHostGenerationState.Legacy,
+                "poc.20",
+                "0.2.1",
+                "poc.20",
+                20,
+                0,
+                legacyRoot,
+                "Validated legacy flat Host.");
+
+            var failure = AICodedbActions.GetHostCommandReadinessFailure(
+                legacy,
+                Path.Combine(legacyRoot, "scripts", "verify-codedb-project.ps1"));
+
+            Assert.That(failure, Is.Not.Null);
+            Assert.That(failure.ExitCode, Is.EqualTo(4));
+            Assert.That(failure.StandardError, Does.Contain("generation state is Legacy"));
         }
     }
 

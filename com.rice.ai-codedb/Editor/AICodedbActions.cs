@@ -68,11 +68,21 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Runs the Package-owned one-click Host and project MCP recovery workflow.
+        /// </summary>
+        internal static AICodedbCommandResult RunRepairCodeDB()
+        {
+            return AICodedbHostPayloadMaterializer.RunRepair();
+        }
+
+        /// <summary>
         /// Replaces a recognized byte-exact legacy host payload and regenerates its ignored runtime config.
         /// </summary>
-        internal static AICodedbCommandResult RunHostPayloadRedeploy()
+        internal static AICodedbCommandResult RunHostPayloadRedeploy(bool confirmedProjectMutation)
         {
-            AICodedbCommandResult stopResult = null;
+            if (!confirmedProjectMutation)
+                return AICodedbHostPayloadMaterializer.RunRedeploy(false);
+
             var preflightResult = AICodedbHostPayloadMaterializer.RunDryRun();
             if (!preflightResult.Succeeded)
                 return preflightResult;
@@ -104,40 +114,28 @@ namespace Rice.AI.Codedb.Editor
                     preflightResult.ElapsedMilliseconds);
             }
 
-            if (preflight.LegacyWatcherCount > 0)
-            {
-                stopResult = RunScript(
-                    "Codedb Stop Legacy Watcher",
-                    AICodedbPaths.LegacyWatchManageScriptPath,
-                    0,
-                    BuildWatcherScriptArguments("Stop"));
-                if (!stopResult.Succeeded)
-                    return stopResult;
-            }
-
-            var redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy();
+            var redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy(true);
             if (!redeployResult.Succeeded)
-                return stopResult == null ? redeployResult : CombineResults(stopResult, redeployResult);
+                return redeployResult;
 
             var configResult = RunRegenerateRuntimeConfig();
-            var result = CombineResults(redeployResult, configResult);
-            return stopResult == null ? result : CombineResults(stopResult, result);
+            return CombineResults(redeployResult, configResult);
         }
 
         /// <summary>
-        /// Synchronizes the audited host payload under explicit tracked-host authorization.
+        /// Synchronizes the audited host payload after the Manager's project-scoped confirmation.
         /// </summary>
-        internal static AICodedbCommandResult RunHostPayloadSync(string authorizationPath, bool confirmLegacyMcpStopped)
+        internal static AICodedbCommandResult RunHostPayloadSync()
         {
-            return AICodedbHostPayloadMaterializer.RunSync(authorizationPath, confirmLegacyMcpStopped);
+            return AICodedbHostPayloadMaterializer.RunSync();
         }
 
         /// <summary>
-        /// Removes only package-owned host payload paths under explicit tracked-host authorization.
+        /// Removes only package-owned host payload paths after project-scoped confirmation.
         /// </summary>
-        internal static AICodedbCommandResult RunHostPayloadRemove(string authorizationPath, bool confirmLegacyMcpStopped)
+        internal static AICodedbCommandResult RunHostPayloadRemove()
         {
-            return AICodedbHostPayloadMaterializer.RunRemove(authorizationPath, confirmLegacyMcpStopped);
+            return AICodedbHostPayloadMaterializer.RunRemove();
         }
 
         /// <summary>
@@ -266,6 +264,11 @@ namespace Rice.AI.Codedb.Editor
         internal static Task<AICodedbCommandResult> RunEnsureWatcherAsync()
         {
             var scriptPath = AICodedbPaths.WatchManageScriptPath;
+            var readinessFailure = GetHostCommandReadinessFailure(
+                AICodedbPaths.HostGeneration,
+                scriptPath);
+            if (readinessFailure != null)
+                return Task.FromResult(readinessFailure);
             return AICodedbProcessRunner.RunPowerShellScriptAsync(
                 scriptPath,
                 RefreshIndexTimeoutMilliseconds,
@@ -446,6 +449,12 @@ namespace Rice.AI.Codedb.Editor
         /// <param name="scriptArguments">Optional arguments passed to the script.</param>
         private static AICodedbCommandResult RunScript(string title, string scriptPath, int timeoutMilliseconds, params string[] scriptArguments)
         {
+            var readinessFailure = GetHostCommandReadinessFailure(
+                AICodedbPaths.HostGeneration,
+                scriptPath);
+            if (readinessFailure != null)
+                return readinessFailure;
+
             EditorUtility.DisplayProgressBar(AICodedbProjectSettings.DisplayName, $"Running {Path.GetFileName(scriptPath)}", 0.5f);
 
             try
@@ -456,6 +465,45 @@ namespace Rice.AI.Codedb.Editor
             {
                 EditorUtility.ClearProgressBar();
             }
+        }
+
+        internal static AICodedbCommandResult GetHostCommandReadinessFailure(
+            AICodedbHostGenerationSelection selection,
+            string scriptPath)
+        {
+            if (!selection.IsUsable)
+            {
+                return new AICodedbCommandResult(
+                    4,
+                    string.Empty,
+                    "Host command is unavailable while generation state is " + selection.State + ". " + selection.Detail,
+                    false);
+            }
+
+            try
+            {
+                var normalizedRoot = AICodedbPaths.NormalizePath(selection.RootPath).TrimEnd('/');
+                var normalizedScript = AICodedbPaths.NormalizePath(scriptPath);
+                if (string.IsNullOrWhiteSpace(normalizedRoot)
+                    || !normalizedScript.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase)
+                    || !File.Exists(normalizedScript))
+                {
+                    return new AICodedbCommandResult(
+                        4,
+                        string.Empty,
+                        "Host command path is unavailable for the validated generation: " + normalizedScript,
+                        false);
+                }
+            }
+            catch (Exception exception)
+            {
+                return new AICodedbCommandResult(
+                    4,
+                    string.Empty,
+                    "Host command path validation failed: " + exception.Message,
+                    false);
+            }
+            return null;
         }
     }
 }
