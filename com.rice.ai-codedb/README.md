@@ -10,7 +10,7 @@
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
 and bounded MCP discovery surface. The `0.2.5-preview.5` validation prerelease
 candidate targets Unity `2022.3` on Windows and advances the immutable Host to
-`poc.31` while retaining published historical generations; stable remains `0.2.4`.
+`poc.32` while retaining published historical generations; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
 `https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5`.
@@ -28,7 +28,7 @@ watcher state, generation leases, and rollback evidence remain under ignored
 `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` are prerequisites and are not
 bundled or copied into the project.
 
-`Payload~`, `Tools~`, and `Tests~` contain a 45-target host-payload
+`Payload~`, `Tools~`, and `Tests~` contain a 46-target host-payload
 materialization POC. Its canonical payload is intentionally limited to the
 shared PowerShell helper, runtime preparation and TOML template, the
 project-neutral watch coordinator, watch-config generator and watch manager,
@@ -71,7 +71,7 @@ status, accepts only the reviewed `poc.9`, `poc.16`, and `poc.20` identities,
 gracefully stops a recognized legacy watcher, and re-verifies every owned byte
 before using the same durable Sync transaction to publish the current flat
 payload, immutable generation, pointer, and marker.
-External MCP clients remain user-owned and are never terminated. Repair
+External MCP clients remain user-owned and are never terminated. Reinstall
 classifies their immutable-generation leases against the exact planned mutation
 paths: non-conflicting current or historical generations remain pinned for the
 existing session, while an intersecting or unprovable closure blocks before the
@@ -79,22 +79,18 @@ related write. The workflow regenerates the ignored runtime config but preserves
 Provider binaries, indexes, adapters, MCP registration, unowned host files, and
 unrelated project content.
 
-`Repair CodeDB` is the end-user recovery path. One confirmation runs the
-Package-owned preflight, bounded Host reconstruction or quarantine, pointer and
-rollback repair, watcher handoff, policy preservation, project MCP registration
-merge, and verification. It changes only the direct `command`, `cwd`, `args`,
-and `startup_timeout_sec` keys in `[mcp_servers.<project-slug>]`. Other direct
-keys and descendant tables such as `tools.*` remain byte-preserved together
-with unrelated TOML content and line endings, and Repair creates a recoverable
-backup before rewriting an existing config. Invalid TOML, duplicate or
-incompatible target declarations, target array tables, managed-key namespace
-conflicts, path escapes, unknown Host content, and managed drift fail closed.
-Every mutating action also emits one versioned command result with outcome,
-phase, reason code, actual broad mutation scopes, cleanup state, and one next
-action. Results are `REPAIRED`, `PARTIALLY_REPAIRED`, or `BLOCKED`; a repaired
-registration applies to new client sessions and does not claim hot reload.
-Retaining a valid non-conflicting MCP generation is still `REPAIRED` and does
-not require the user to wait for drain or click Repair again.
+`Reinstall CodeDB` is the ordinary recovery path. One confirmation provisions
+and verifies a fresh isolated instance, merges only the four managed direct
+keys in `[mcp_servers.<project-slug>]`, and activates it atomically after the
+wrapper handshake and bounded query succeed. Other direct keys and descendant
+tables such as `tools.*` remain byte-preserved together with unrelated TOML
+content and line endings. Invalid TOML, duplicate or incompatible target
+declarations, target array tables, managed-key namespace conflicts, path
+escapes, unknown Host content, and managed drift fail closed. A valid active
+external MCP session keeps its immutable closure and is never terminated;
+retirement is asynchronous and may remain `PENDING` without requiring another
+user action. The legacy `Repair CodeDB` workflow remains available only as a
+diagnostic compatibility path.
 
 Unity supplies the Package's resolved physical location. The Editor and
 materializer do not inspect installation URLs or assume a writable embedded
@@ -105,7 +101,7 @@ detect or invoke a project version-control system.
 
 The package materializer is wired into the Manager Setup tab for read-only
 status/DryRun, strict Verify, controlled legacy Redeploy, confirmed advanced
-Sync/Remove, and the single user-facing `Repair CodeDB` recovery action. Manager
+Sync/Remove, and the single user-facing `Reinstall CodeDB` recovery action. Manager
 status distinguishes `INSTALLING`, `SWITCHING`, `CURRENT`, `DRAINING`,
 `ROLLBACK`, `SETUP_REQUIRED`, `UPDATE_REQUIRED`, `REDEPLOY_REQUIRED`, conflict,
 active host-use blockers, and check-failed outcomes. It shows selected/watcher generations,
@@ -205,8 +201,8 @@ four managed launch keys atomically with the desired-state transition. Unrelated
 MCP configuration, Provider, indexes, adapters, custom runtime settings, policy,
 and business files remain preserved.
 The product state is reduced through `INSTALLED`, `CONFIGURED`, and
-`MCP_AVAILABLE` before `READY`. Automatic convergence, confirmed `Fix CodeDB`,
-and Install launch the current Package-owned wrapper from the Unity project
+`MCP_AVAILABLE` before `READY`. Automatic convergence, confirmed `Reinstall
+CodeDB`, and Install launch the current Package-owned wrapper from the Unity project
 working directory and require MCP initialize, the exact bounded `tools/list`, a
 usable project status from `codedb_status`, and a successful bounded
 `codedb_text_search`. The ordinary Manager shows only `Starting`, `Ready`,

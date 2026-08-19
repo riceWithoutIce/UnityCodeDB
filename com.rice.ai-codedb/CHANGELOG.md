@@ -3,7 +3,7 @@
 ## 0.2.5-preview.5 - 2026-08-14
 
 - Added explicit `INSTALLED -> CONFIGURED -> MCP_AVAILABLE -> READY` product
-  layers. Automatic convergence, confirmed Fix, and Install now run a
+  layers. Automatic convergence, confirmed Reinstall, and Install now run a
   Package-owned wrapper probe from the Unity project working directory and
   require MCP initialize, the exact bounded tool list, a usable project status
   from `codedb_status`, and a successful bounded `codedb_text_search` before
@@ -19,7 +19,7 @@
   layers rather than inferring success from an installed Host alone.
 - Reduced the ordinary Manager surface to `Starting`, `Ready`,
   `Needs attention`, and `Uninstalled`, with at most one contextual primary
-  action. Recovery is labeled `Fix CodeDB`; project Uninstall remains in a
+  action. Recovery is labeled `Reinstall CodeDB`; project Uninstall remains in a
   separately confirmed secondary menu, while generation and process controls
   remain diagnostics.
 - Moved Manager actions and lifecycle materializer work off synchronous UI and
@@ -31,9 +31,9 @@
   inspecting the process name or terminating that process. Unavailable or
   ambiguous identity remains fail-closed.
 - Kept genuine external MCP sessions alive and preserved their exact immutable
-  execution closure while Repair publishes a disjoint current generation and
+  execution closure while Reinstall publishes a disjoint current generation and
   registration for future sessions. Deferred closure cleanup is reported as
-  `REPAIRED / PENDING` and completes automatically after leases drain.
+  `REINSTALLED / PENDING` and completes automatically after leases drain.
 - Added the confirmed user-level `Uninstall CodeDB from Project` workflow. It
   persists `UNINSTALLED` before cleanup, preserves the target MCP namespace as
   state-bound inert TOML comments, removes proved-owned Host/runtime state, and
@@ -41,13 +41,13 @@
   `tools.*`, comments, BOM/EOL, unrelated configuration, and active external MCP
   sessions remain preserved.
 - Added one confirmed `Install CodeDB` action for an uninstalled project. It
-  clears the desired-state override only after the shared Repair path restores
+  clears the desired-state override only after the shared instance path restores
   and verifies Host plus MCP registration under the same materializer lock.
   Automatic cleanup rechecks the same persisted state identity, records a
   terminal `COMPLETE` state, and cannot delete a successfully installed Host.
   Repeated Uninstall, automatic cleanup, crash/retry, and Install are covered as
   idempotent and deterministic concurrent transitions.
-- Advanced the unpublished candidate to immutable generation `poc.31` while
+- Advanced the unpublished candidate to immutable generation `poc.32` while
   retaining published `poc.30` and earlier closures for lease drain, rollback,
   and reviewed upgrade coverage.
   The Package-owned probe does not replace the still-required new Codex Desktop

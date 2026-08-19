@@ -24,7 +24,7 @@ the project by the Package.
 
 - Package name: `com.rice.ai-codedb`
 - Latest stable release: `v0.2.4`
-- Latest validation prerelease candidate: `v0.2.5-preview.5` / `poc.31`
+- Latest validation prerelease candidate: `v0.2.5-preview.5` / `poc.32`
 - Unity: `2022.3` or newer within the `2022.3` compatibility line
 - Editor menu: `Tools/Rice AI/Codedb/Manager`
 
@@ -68,14 +68,16 @@ vendor its source or redistribute its binary.
 3. The Manager reports only `Starting`, `Ready`, `Needs attention`,
    `Uninstalled`, or `Missing prerequisite` on its ordinary surface. `Ready` requires Package-owned Host
    files, a safe project registration, and a real project-context wrapper probe
-   that completes MCP initialize, `tools/list`, and `codedb_status`.
-4. If recovery is needed, click `Fix CodeDB` and confirm its exact project-local
-   scope. That one action repairs the Host runtime and only the four
-   CodeDB-managed direct keys in the current project's MCP server table, then
-   verifies the wrapper handshake. Custom direct keys and descendant tables
-   such as `tools.*` are preserved; the action does not require an authorization
-   file, copied registration snippet, manual TOML edit, or a second CodeDB
-   action. Advanced diagnostics are not part of installation or recovery.
+   that completes MCP initialize, `tools/list`, usable `codedb_status`, and a
+   bounded `codedb_text_search`.
+4. If recovery is needed, click `Reinstall CodeDB` and confirm its exact
+   project-local scope. The action provisions and verifies a fresh isolated
+   instance, then switches future sessions only after the wrapper handshake and
+   bounded query succeed. It preserves custom direct keys and descendant tables
+   such as `tools.*`, and does not require an authorization file, copied
+   registration snippet, manual TOML edit, or a second CodeDB action. Advanced
+   diagnostics and the legacy Repair path are not ordinary installation or
+   recovery steps.
 5. After setup completes, each interactive Unity Editor session publishes
    project demand and starts CodeDB asynchronously. `Start with Unity Editor`
    controls the persistent policy; Start, Stop, and Restart control the Editor

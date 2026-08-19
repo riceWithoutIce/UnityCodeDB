@@ -46,10 +46,11 @@ until retained leases drain, persists a terminal cleanup state, and offers one
 confirmed Install action that atomically restores the verified integration. It
 also separates `INSTALLED`, `CONFIGURED`, and `MCP_AVAILABLE` before `READY`:
 the Package launches its current wrapper from the project working directory and
-requires MCP initialize, the bounded tool list, and callable `codedb_status`.
+requires MCP initialize, the bounded tool list, usable `codedb_status`, and a
+bounded `codedb_text_search`.
 This Package-owned probe supports but does not replace the real new Codex
 Desktop task acceptance. It advances the Package-owned immutable Host to
-`poc.31`, requires Node.js `22.x` or `24.x`, and validates the reviewed Provider
+`poc.32`, requires Node.js `22.x` or `24.x`, and validates the reviewed Provider
 `0.5.0` manifest, protocol, Package range, and executable hash from
 `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` before project mutation.
 The underlying design and stable acceptance decision are tracked in the
@@ -92,7 +93,7 @@ validation of unpublished development changes.
 Open `Tools/Rice AI/Codedb/Manager` when status or recovery is needed; initial
 convergence does not require opening it. The ordinary surface shows only
 `Starting`, `Ready`, `Needs attention`, or `Uninstalled`, and at most one
-contextual action: `Fix CodeDB` for recovery or `Install CodeDB` after an
+contextual action: `Reinstall CodeDB` for recovery or `Install CodeDB` after an
 intentional Uninstall. `Uninstall CodeDB from Project` is available from a
 separately confirmed secondary menu. The Manager also provides five focused
 views for diagnostics:
@@ -123,7 +124,7 @@ and watcher owners to stop, then transactionally replaces only the recognized
 `poc.9`, `poc.16`, or `poc.20` Host closure, publishes the current generation,
 and regenerates the ignored runtime config. Provider binaries, indexes,
 adapters, MCP registration, unowned files, and unrelated project content remain
-outside that action. `Repair CodeDB`, advanced Sync, and Remove use a
+outside that action. `Reinstall CodeDB`, advanced Sync, and Remove use a
 second-level Manager confirmation scoped to the manifest-closed CodeDB paths.
 No authorization document or version-control state is required.
 
@@ -137,16 +138,16 @@ No authorization document or version-control state is required.
   CodeDB.
 - Owned, byte-exact lower generations can be installed and selected
   automatically while generation-scoped leases protect active requests.
-  An empty managed scope can be adopted automatically. Confirmed Repair handles
-  safe first adoption when needed; downgrade, drift, and unknown same-name
-  content retain their fail-closed review gates.
+  An empty managed scope can be adopted automatically. Confirmed Reinstall
+  provisions a fresh instance when recovery is needed; downgrade, drift, and
+  unknown same-name content retain their fail-closed review gates.
 - Opening or refreshing the Manager is read-only. MCP wrappers attach only to
   an Editor-owned ready coordinator and never start a one-shot Provider.
 - The tracked provider config remains `watch=false`; the coordinator owns a
   generated watch-enabled config and the Shader/HLSL adapter lifecycle.
 - Provider watch and the Shader/HLSL adapter have separate ownership.
 - Generated indexes, provider binaries, logs, and watcher state remain ignored.
-- `Repair CodeDB` updates only `command`, `cwd`, `args`, and
+- `Reinstall CodeDB` updates only `command`, `cwd`, `args`, and
   `startup_timeout_sec` directly in the current project's MCP server table.
   Custom direct keys, legal descendant tables such as `tools.*`, and unrelated
   TOML remain byte-preserved, with a recoverable pre-image backup. Invalid,
