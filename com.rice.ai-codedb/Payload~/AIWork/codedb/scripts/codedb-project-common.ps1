@@ -1,6 +1,10 @@
 #requires -Version 5.1
 
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "..\shared\codedb-machine-provider-contract.ps1")
+
+$script:CodedbHostPackageVersion = "0.2.5-preview.5"
+$script:CodedbMachineProviderCache = $null
 
 function ConvertTo-CodedbProjectSlug {
     param(
@@ -82,7 +86,6 @@ function Get-ProjectCodedbContext {
         ProviderName = $providerName
         ProviderRuntimeRelativePath = "AIWork/.runtime/codedb/$providerName"
         ProviderRoot = $providerRoot
-        ProviderBinRoot = Join-Path $providerRoot "bin"
         ProviderConfigRoot = Join-Path $providerRoot "config"
         ProviderIndexRoot = Join-Path $providerRoot "index"
         ProviderLogsRoot = Join-Path $providerRoot "logs"
@@ -174,6 +177,19 @@ function ConvertTo-CodedbProjectRelativePath {
     return $fullPath.Substring($rootPrefix.Length).Replace("\", "/")
 }
 
+function ConvertTo-CodedbDisplayPath {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Context,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        return ConvertTo-CodedbProjectRelativePath -Context $Context -Path $Path
+    } catch {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+}
+
 function New-ProjectCodedbRuntime {
     param(
         [Parameter(Mandatory = $true)]
@@ -184,7 +200,6 @@ function New-ProjectCodedbRuntime {
     Assert-CodedbPathInside -Path $Context.ProviderRoot -Root $Context.RuntimeRoot -Label "provider runtime"
 
     foreach ($path in @(
-        $Context.ProviderBinRoot,
         $Context.ProviderConfigRoot,
         $Context.ProviderIndexRoot,
         $Context.ProviderLogsRoot,
@@ -238,8 +253,12 @@ function Get-ProjectCodedbProviderPaths {
         [pscustomobject]$Context
     )
 
+    if ($null -eq $script:CodedbMachineProviderCache) {
+        $script:CodedbMachineProviderCache = Assert-CodedbMachineProvider -PackageVersion $script:CodedbHostPackageVersion
+    }
     [pscustomobject]@{
-        ExecutablePath = Join-Path $Context.ProviderBinRoot "codebase-mcp.exe"
+        ExecutablePath = $script:CodedbMachineProviderCache.ExecutablePath
+        ManifestPath = $script:CodedbMachineProviderCache.ManifestPath
         ConfigPath = Join-Path $Context.ProviderConfigRoot "codedb-mcp.toml"
     }
 }
@@ -252,13 +271,7 @@ function Assert-ProjectCodedbProviderFiles {
 
     $providerPaths = Get-ProjectCodedbProviderPaths -Context $Context
 
-    Assert-CodedbPathInside -Path $providerPaths.ExecutablePath -Root $Context.ProviderRoot -Label "provider executable"
     Assert-CodedbPathInside -Path $providerPaths.ConfigPath -Root $Context.ProviderRoot -Label "provider config"
-
-    if (-not (Test-Path -LiteralPath $providerPaths.ExecutablePath)) {
-        $relativePath = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $providerPaths.ExecutablePath
-        throw "Missing provider executable: $relativePath. Prepare codebase-mcp.exe in ignored runtime before refreshing the index."
-    }
 
     if (-not (Test-Path -LiteralPath $providerPaths.ConfigPath)) {
         $relativePath = ConvertTo-CodedbProjectRelativePath -Context $Context -Path $providerPaths.ConfigPath

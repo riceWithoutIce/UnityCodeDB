@@ -60,8 +60,9 @@ $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
-$expectedUpmPackageVersion = "0.2.5-preview.4"
-$expectedHostCompatibilityPackageVersion = "0.2.5-preview.3"
+$expectedUpmPackageVersion = "0.2.5-preview.5"
+$expectedHostCompatibilityPackageVersion = "0.2.5-preview.5"
+$expectedGenerationId = "poc.32"
 
 $expectedTopLevel = @(
     ".gitattributes",
@@ -147,7 +148,7 @@ $runtimeSourceRoots = @(
     (Join-Path $packageRoot "Editor"),
     (Join-Path $packageRoot "Tools~"),
     (Join-Path $payloadRoot "AIWork"),
-    (Join-Path $payloadRoot "Generations\poc.30")
+    (Join-Path $payloadRoot "Generations\$expectedGenerationId")
 )
 $runtimeSourceFiles = @(foreach ($root in $runtimeSourceRoots) {
     Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object {
@@ -236,22 +237,30 @@ Assert-Equal `
     -Actual $payloadManifest.package_version `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
-Assert-True `
-    -Condition (-not [string]::Equals(
-        [string]$packageManifest.version,
-        [string]$payloadManifest.package_version,
-        [StringComparison]::Ordinal)) `
-    -Message "Preview.4 must keep UPM metadata separate from the immutable preview.3/poc.30 Host identity."
-Assert-Equal -Actual $payloadManifest.payload_version -Expected "poc.30" -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 30 -Label "Payload sequence"
-Assert-Equal -Actual $payloadManifest.generation_id -Expected "poc.30" -Label "Payload generation"
+Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 32 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
-Assert-Equal -Actual @($payloadManifest.files).Count -Expected 43 -Label "Payload target count"
+Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
+$bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 1 -Label "Reviewed bootstrap transition count"
+$v024Transition = $bootstrapTransitions[0]
+Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
+Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
+Assert-Equal -Actual ([string]$v024Transition.source_payload_version) -Expected "poc.27" -Label "Reviewed bootstrap transition payload"
+Assert-Equal -Actual ([int]$v024Transition.source_payload_sequence) -Expected 27 -Label "Reviewed bootstrap transition sequence"
+Assert-Equal -Actual ([string]$v024Transition.source_generation_id) -Expected "poc.27" -Label "Reviewed bootstrap transition generation"
+Assert-Equal -Actual ([int]$v024Transition.source_bootstrap_protocol) -Expected 1 -Label "Reviewed bootstrap transition protocol"
+Assert-Equal -Actual ([int]$v024Transition.source_marker_schema_version) -Expected 1 -Label "Reviewed bootstrap transition marker schema"
+Assert-Equal -Actual ([int]$v024Transition.source_host_use_gate_version) -Expected 1 -Label "Reviewed bootstrap transition host-use gate"
+Assert-Equal -Actual ([int]$v024Transition.source_generation_lease_version) -Expected 2 -Label "Reviewed bootstrap transition generation lease"
+Assert-Equal -Actual ([int]$v024Transition.source_flat_file_count) -Expected 21 -Label "Reviewed bootstrap transition flat file count"
+Assert-Equal -Actual ([string]$v024Transition.source_flat_closure_sha256) -Expected "d6d64725fbc15066ea6062cb8d8de46ff1eb0133d13ff9906c1a5231da6a484c" -Label "Reviewed bootstrap transition closure"
 
 $flatTargetPrefix = "AIWork/codedb/"
-$generationSourcePrefix = "Generations/poc.30/"
-$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/poc.30"
+$generationSourcePrefix = "Generations/$expectedGenerationId/"
+$generationTargetRoot = "AIWork/.runtime/codedb/host/generations/$expectedGenerationId"
 $generationTargetPrefix = $generationTargetRoot + "/"
 $currentPointerSource = "host-current.json"
 $currentPointerTarget = "AIWork/.runtime/codedb/host/current.json"
@@ -295,13 +304,17 @@ foreach ($entry in $payloadManifest.files) {
     $manifestSources += $source
 }
 
-Assert-Equal -Actual $flatSources.Count -Expected 21 -Label "Flat payload target count"
-Assert-Equal -Actual $generationSources.Count -Expected 21 -Label "Generation payload target count"
+Assert-Equal -Actual $flatSources.Count -Expected 22 -Label "Flat payload target count"
+Assert-Equal -Actual $generationSources.Count -Expected 23 -Label "Generation payload target count"
 Assert-Equal -Actual $currentPointerSources.Count -Expected 1 -Label "Current pointer target count"
 
-$expectedRetiredTargets = @(foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29")) {
-    foreach ($generationSource in $generationSources) {
-        $generationSuffix = $generationSource.Substring($generationSourcePrefix.Length)
+$retiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
+$retiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $retiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $retiredGenerationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual $retiredGenerationRelativePaths.Count -Expected 21 -Label "Retired generation compatibility closure"
+$expectedRetiredTargets = @(foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
+    foreach ($generationSuffix in $retiredGenerationRelativePaths) {
         "AIWork/.runtime/codedb/host/generations/$retiredGenerationId/$generationSuffix"
     }
 }) | Sort-Object
@@ -315,7 +328,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 168 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 189 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -327,7 +340,7 @@ $actualFlatSources = @(Get-ChildItem -LiteralPath $flatSourceRoot -Recurse -File
 } | Sort-Object)
 Assert-Equal -Actual ($actualFlatSources -join "|") -Expected (($flatSources | Sort-Object) -join "|") -Label "Flat payload source closure"
 
-$generationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
+$generationSourceRoot = Join-Path $payloadRoot "Generations\$expectedGenerationId"
 $actualGenerationSources = @(Get-ChildItem -LiteralPath $generationSourceRoot -Recurse -File | ForEach-Object {
     Get-RelativePath -Root $payloadRoot -Path $_.FullName
 } | Sort-Object)
@@ -343,11 +356,11 @@ Assert-Equal -Actual $generationManifest.package_version -Expected $payloadManif
 Assert-Equal -Actual $generationManifest.payload_version -Expected $payloadManifest.payload_version -Label "Generation manifest payload version"
 Assert-Equal -Actual $generationManifest.payload_sequence -Expected $payloadManifest.payload_sequence -Label "Generation manifest payload sequence"
 Assert-Equal -Actual $generationManifest.bootstrap_protocol -Expected $payloadManifest.bootstrap_protocol -Label "Generation manifest bootstrap protocol"
-Assert-Equal -Actual @($generationManifest.files).Count -Expected 20 -Label "Generation manifest file count"
+Assert-Equal -Actual @($generationManifest.files).Count -Expected 22 -Label "Generation manifest file count"
 $generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
 $generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
 Assert-Equal `
-    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.30";$').Count) `
+    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.32";$').Count) `
     -Expected 1 `
     -Label "Generation lease identity closure"
 
@@ -425,16 +438,33 @@ $projectSettingsSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "
 Assert-Equal `
     -Actual ([regex]::Matches(
         $projectSettingsSource,
-        'internal const string CurrentPackageVersion = "0\.2\.5-preview\.3";').Count) `
+        'internal const string CurrentPackageVersion = "0\.2\.5-preview\.5";').Count) `
     -Expected 1 `
     -Label "Editor Host compatibility identity"
 
 $legacyStopClientPath = Join-Path $packageRoot "Tools~\stop-codedb-legacy-watcher.mjs"
 Assert-True -Condition (Test-Path -LiteralPath $legacyStopClientPath -PathType Leaf) -Message "Package-owned legacy watcher Stop client is missing."
+$mcpAvailabilityProbePath = Join-Path $packageRoot "Tools~\probe-codedb-mcp-availability.mjs"
+Assert-True -Condition (Test-Path -LiteralPath $mcpAvailabilityProbePath -PathType Leaf) -Message "Package-owned MCP availability probe is missing."
+$mcpAvailabilityProbeSource = [System.IO.File]::ReadAllText($mcpAvailabilityProbePath)
+foreach ($requiredProbeBoundary in @(
+    '"Lifecycle reason: READY"',
+    '"Watch coordinator: ready"',
+    'name: "codedb_text_search"',
+    'codedb_status_usable: false',
+    'codedb_text_search_callable: false'
+)) {
+    Assert-True `
+        -Condition ($mcpAvailabilityProbeSource.IndexOf($requiredProbeBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "MCP availability probe is missing the usable-backend boundary: $requiredProbeBoundary"
+}
 $materializerSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Tools~\materialize-codedb-host-payload.ps1"))
 Assert-True `
     -Condition ($materializerSource.IndexOf("stop-codedb-legacy-watcher.mjs", [StringComparison]::Ordinal) -ge 0) `
     -Message "Materializer does not reference the Package-owned legacy watcher Stop client."
+Assert-True `
+    -Condition ($materializerSource.IndexOf("probe-codedb-mcp-availability.mjs", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Materializer does not reference the Package-owned MCP availability probe."
 $pendingRecoveryFunction = [regex]::Match(
     $materializerSource,
     '(?s)function\s+Invoke-PendingTransactionRecovery\s*\{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction\s+Remove-EmptyManagedParents')
@@ -456,6 +486,63 @@ Assert-True -Condition $repairFunction.Success -Message "Package boundary could 
 Assert-True `
     -Condition ($repairFunction.Groups["body"].Value.IndexOf("Complete-OwnedLegacyRedeployHostUseGate", [StringComparison]::Ordinal) -lt 0) `
     -Message "Repair must never use the Redeploy-only gate that can stop a recognized legacy watcher."
+$editorLifecycleSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbEditorLifecycle.cs"))
+$initializeFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+Initialize\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*\[DidReloadScripts\]')
+Assert-True -Condition $initializeFunction.Success -Message "Package boundary could not isolate Editor lifecycle Initialize."
+Assert-True `
+    -Condition ($initializeFunction.Groups["body"].Value.IndexOf("BeginReconcile(true)", [StringComparison]::Ordinal) -ge 0 -and
+        $initializeFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Editor cold start must reconcile prerequisites before it can queue a lease refresh."
+foreach ($forbiddenMainThreadCall in @(
+    "PublishLease(",
+    "RefreshEditorLeaseForIntegrationState(",
+    "BackendNeedsReconcile(",
+    "AICodedbHostGenerationStore.Resolve(",
+    "AICodedbHostPayloadMaterializer.",
+    "AICodedbActions.RunEnsureWatcher("
+)) {
+    Assert-True `
+        -Condition ($initializeFunction.Groups["body"].Value.IndexOf($forbiddenMainThreadCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Editor cold start directly invokes main-thread work: $forbiddenMainThreadCall"
+}
+$editorUpdateFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+OnEditorUpdate\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*internal\s+static\s+bool\s+ShouldRunScheduledReconcile')
+Assert-True -Condition $editorUpdateFunction.Success -Message "Package boundary could not isolate Editor lifecycle heartbeat."
+$missingPrerequisiteHeartbeatIndex = $editorUpdateFunction.Groups["body"].Value.IndexOf(
+    "_lastProductState == AICodedbProductState.MissingPrerequisite",
+    [StringComparison]::Ordinal)
+$heartbeatLeaseIndex = $editorUpdateFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal)
+Assert-True `
+    -Condition ($missingPrerequisiteHeartbeatIndex -ge 0 -and $heartbeatLeaseIndex -gt $missingPrerequisiteHeartbeatIndex) `
+    -Message "Editor heartbeat must return through the read-only prerequisite recheck before lease refresh."
+foreach ($forbiddenMainThreadCall in @(
+    "PublishLease(",
+    "RefreshEditorLeaseForIntegrationState(",
+    "BackendNeedsReconcile(",
+    "AICodedbHostGenerationStore.Resolve(",
+    "AICodedbHostPayloadMaterializer.",
+    "AICodedbActions.RunEnsureWatcher("
+)) {
+    Assert-True `
+        -Condition ($editorUpdateFunction.Groups["body"].Value.IndexOf($forbiddenMainThreadCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Editor heartbeat directly invokes main-thread work: $forbiddenMainThreadCall"
+}
+$reconcileWorkerFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+LifecycleReconcileResult\s+RunReconcileWorker\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static')
+Assert-True -Condition $reconcileWorkerFunction.Success -Message "Package boundary could not isolate Editor lifecycle reconcile worker."
+$readStatusIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "AICodedbHostPayloadMaterializer.ReadStatus(context)",
+    [StringComparison]::Ordinal)
+$prerequisiteLeaseGateIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "ApplyPrerequisiteGatedLeaseRefresh(",
+    [StringComparison]::Ordinal)
+Assert-True `
+    -Condition ($readStatusIndex -ge 0 -and $prerequisiteLeaseGateIndex -gt $readStatusIndex) `
+    -Message "Editor lifecycle must classify machine prerequisites before any lease publication gate."
 $editorMaterializerSource = Get-Content -LiteralPath (Join-Path $packageRoot "Editor\AICodedbHostPayloadMaterializer.cs") -Raw
 Assert-True `
     -Condition ([regex]::IsMatch($editorMaterializerSource, 'RunRedeploy\s*\(\s*bool\s+confirmedProjectMutation\s*\)')) `
@@ -464,12 +551,14 @@ $editorConfirmationFunction = [regex]::Match(
     $editorMaterializerSource,
     '(?s)private\s+static\s+bool\s+RequiresConfirmation\s*\([^)]*\)\s*\{(?<body>.*?)\}')
 Assert-True -Condition $editorConfirmationFunction.Success -Message "Package boundary could not isolate the Editor confirmation gate."
+foreach ($confirmedAction in @("Redeploy", "Uninstall", "Install")) {
+    Assert-True `
+        -Condition ($editorConfirmationFunction.Groups["body"].Value.IndexOf("AICodedbHostPayloadAction.$confirmedAction", [StringComparison]::Ordinal) -ge 0) `
+        -Message "Editor $confirmedAction is missing from the second-level confirmation gate."
+}
 Assert-True `
-    -Condition ($editorConfirmationFunction.Groups["body"].Value.IndexOf("AICodedbHostPayloadAction.Redeploy", [StringComparison]::Ordinal) -ge 0) `
-    -Message "Editor Redeploy is missing from the second-level confirmation gate."
-Assert-True `
-    -Condition ([regex]::IsMatch($materializerSource, 'ValidateSet\("Redeploy",\s*"Sync",\s*"Remove",\s*"Repair"\)\]\[string\]\$MutationAction')) `
-    -Message "PowerShell Redeploy is missing from the mutation confirmation contract."
+    -Condition ([regex]::IsMatch($materializerSource, 'ValidateSet\("Redeploy",\s*"Sync",\s*"Remove",\s*"Repair",\s*"Reinstall",\s*"Uninstall",\s*"Install"\)\]\[string\]\$MutationAction')) `
+    -Message "PowerShell user mutations are missing from the second-level confirmation contract."
 $materializerTokens = $null
 $materializerParseErrors = $null
 $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -480,12 +569,12 @@ Assert-Equal -Actual $materializerParseErrors.Count -Expected 0 -Label "Material
 $confirmationDispatchGates = @($materializerAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text.IndexOf('$Action -in @("Redeploy", "Sync", "Remove", "Repair")', [StringComparison]::Ordinal) -ge 0 -and
+        $node.Extent.Text.IndexOf('$Action -in @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")', [StringComparison]::Ordinal) -ge 0 -and
         $node.Extent.Text.IndexOf('Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action', [StringComparison]::Ordinal) -ge 0
 }, $true))
 Assert-True `
     -Condition ($confirmationDispatchGates.Count -eq 1) `
-    -Message "PowerShell Redeploy does not enter the confirmation gate before dispatch."
+    -Message "PowerShell user mutations do not enter the confirmation gate before dispatch."
 
 if ($hashMismatches.Count -gt 0) {
     throw "Payload hash validation failed:`n - $($hashMismatches -join "`n - ")"

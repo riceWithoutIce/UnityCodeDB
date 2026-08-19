@@ -60,6 +60,24 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbHostGenerationSelection Resolve(string projectRoot)
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot);
+            if (currentInstance.Present)
+            {
+                if (!currentInstance.IsCurrent)
+                {
+                    return new AICodedbHostGenerationSelection(
+                        AICodedbHostGenerationState.Invalid,
+                        string.Empty,
+                        string.Empty,
+                        string.Empty,
+                        0,
+                        0,
+                        string.Empty,
+                        currentInstance.Detail);
+                }
+                return ResolveSelectedInstanceGeneration(normalizedRoot, currentInstance.GenerationRoot);
+            }
+
             var currentPath = AICodedbPaths.NormalizePath(Path.Combine(
                 normalizedRoot,
                 AICodedbProjectSettings.HostCurrentPointerRelativePath));
@@ -68,6 +86,67 @@ namespace Rice.AI.Codedb.Editor
                 return ResolveCurrent(normalizedRoot, currentPath);
 
             return ResolveLegacy(normalizedRoot);
+        }
+
+        private static AICodedbHostGenerationSelection ResolveSelectedInstanceGeneration(
+            string projectRoot,
+            string generationRoot)
+        {
+            try
+            {
+                var expectedGenerationRoot = CombineInside(
+                    projectRoot,
+                    AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId,
+                    "selected instance generation");
+                if (!string.Equals(
+                        AICodedbPaths.NormalizePath(generationRoot).TrimEnd('/'),
+                        AICodedbPaths.NormalizePath(expectedGenerationRoot).TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("Selected instance generation targets an unexpected directory.");
+                }
+
+                var packageRoot = AICodedbPaths.PackageRootPath.TrimEnd('/');
+                var packagePointerPath = CombineInside(packageRoot, "Payload~/host-current.json", "Package Current pointer");
+                var installedManifestPath = CombineInside(generationRoot, "generation-manifest.json", "selected instance generation manifest");
+                AssertNoReparsePoints(projectRoot, generationRoot, "selected instance generation");
+                AssertNoReparsePoints(projectRoot, installedManifestPath, "selected instance generation manifest");
+                var packagePointer = ReadCurrentPointer(packagePointerPath, "Package Current pointer");
+                ValidatePointer(packagePointer);
+                if (ClassifyValidatedPointer(packagePointer) != AICodedbHostGenerationState.Current)
+                    throw new InvalidOperationException("Package Current pointer does not identify the loaded instance generation.");
+                if (!string.Equals(
+                        GetFileSha256(installedManifestPath),
+                        packagePointer.generation_manifest_sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("Selected instance generation manifest does not match the Package pointer.");
+                }
+                var installedManifest = ReadGenerationManifest(installedManifestPath, "selected instance generation manifest");
+                ValidateGenerationManifest(packagePointer, installedManifest, generationRoot);
+                ValidatePackageOwnedCurrentGeneration(packagePointer, installedManifestPath, generationRoot);
+                return new AICodedbHostGenerationSelection(
+                    AICodedbHostGenerationState.Current,
+                    packagePointer.generation_id,
+                    packagePointer.package_version,
+                    packagePointer.payload_version,
+                    packagePointer.payload_sequence,
+                    packagePointer.bootstrap_protocol,
+                    generationRoot,
+                    "Package-owned generation selected by control/current-instance.json.");
+            }
+            catch (Exception exception)
+            {
+                return new AICodedbHostGenerationSelection(
+                    AICodedbHostGenerationState.Invalid,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    0,
+                    string.Empty,
+                    exception.Message);
+            }
         }
 
         internal static string ResolveHostPath(
@@ -139,7 +218,7 @@ namespace Rice.AI.Codedb.Editor
                 if (state == AICodedbHostGenerationState.Current)
                     ValidatePackageOwnedCurrentGeneration(pointer, manifestPath, generationRoot);
                 var detail = state == AICodedbHostGenerationState.Previous
-                    ? "Validated compatible previous generation selected by " + AICodedbPaths.ToProjectRelativeDisplayPath(currentPath) + ". Use Repair CodeDB or Update now before running Host commands."
+                    ? "Validated compatible previous generation selected by " + AICodedbPaths.ToProjectRelativeDisplayPath(currentPath) + ". Use Reinstall CodeDB before running Host commands."
                     : state == AICodedbHostGenerationState.DowngradeReviewRequired
                         ? "Validated generation " + pointer.generation_id + " is newer than the loaded Package and requires downgrade review. Host commands and automatic mutation are disabled."
                         : AICodedbPaths.ToProjectRelativeDisplayPath(currentPath);
@@ -276,7 +355,7 @@ namespace Rice.AI.Codedb.Editor
                     marker.payload_sequence,
                     0,
                     legacyRoot,
-                    "Validated legacy flat Host. Use Repair CodeDB or advanced Redeploy before running Host commands. Marker: "
+                    "Validated legacy flat Host. Use Reinstall CodeDB before running Host commands. Marker: "
                     + AICodedbPaths.ToProjectRelativeDisplayPath(markerPath));
             }
             catch (Exception exception)

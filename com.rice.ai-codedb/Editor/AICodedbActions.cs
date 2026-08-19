@@ -26,10 +26,14 @@ namespace Rice.AI.Codedb.Editor
         internal static void OpenProviderFolder()
         {
             var providerFolder = Path.GetDirectoryName(AICodedbPaths.ProviderExecutablePath);
-            if (string.IsNullOrWhiteSpace(providerFolder))
-                providerFolder = AICodedbPaths.RuntimePath;
-
-            Directory.CreateDirectory(providerFolder);
+            if (string.IsNullOrWhiteSpace(providerFolder) || !Directory.Exists(providerFolder))
+            {
+                EditorUtility.DisplayDialog(
+                    "CodeDB Provider",
+                    "The reviewed machine Provider folder is not present. Install the supported Provider under %LOCALAPPDATA%\\Rice\\CodeDB\\providers\\0.5.0, then let Unity recheck automatically.",
+                    "OK");
+                return;
+            }
             EditorUtility.RevealInFinder(providerFolder);
         }
 
@@ -73,6 +77,13 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunRepairCodeDB()
         {
             return AICodedbHostPayloadMaterializer.RunRepair();
+        }
+
+        internal static async Task<AICodedbCommandResult> RunRepairCodeDBAsync()
+        {
+            var result = await AICodedbHostPayloadMaterializer.RunRepairAsync();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
         }
 
         /// <summary>
@@ -136,6 +147,48 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunHostPayloadRemove()
         {
             return AICodedbHostPayloadMaterializer.RunRemove();
+        }
+
+        internal static AICodedbCommandResult RunUninstallCodeDB()
+        {
+            var result = AICodedbHostPayloadMaterializer.RunUninstall();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunUninstallCodeDBAsync()
+        {
+            var result = await AICodedbHostPayloadMaterializer.RunUninstallAsync();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static AICodedbCommandResult RunInstallCodeDB()
+        {
+            var result = AICodedbHostPayloadMaterializer.RunInstall();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunInstallCodeDBAsync()
+        {
+            var result = await AICodedbHostPayloadMaterializer.RunInstallAsync();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static AICodedbCommandResult RunReinstallCodeDB()
+        {
+            var result = AICodedbHostPayloadMaterializer.RunReinstall();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunReinstallCodeDBAsync()
+        {
+            var result = await AICodedbHostPayloadMaterializer.RunReinstallAsync();
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
         }
 
         /// <summary>
@@ -263,16 +316,16 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static Task<AICodedbCommandResult> RunEnsureWatcherAsync()
         {
-            var scriptPath = AICodedbPaths.WatchManageScriptPath;
-            var readinessFailure = GetHostCommandReadinessFailure(
-                AICodedbPaths.HostGeneration,
-                scriptPath);
-            if (readinessFailure != null)
-                return Task.FromResult(readinessFailure);
-            return AICodedbProcessRunner.RunPowerShellScriptAsync(
-                scriptPath,
-                RefreshIndexTimeoutMilliseconds,
-                BuildWatcherScriptArguments("Ensure"));
+            var context = AICodedbPaths.CaptureExecutionContext();
+            return Task.Run(() => RunWatcherScript(
+                context,
+                "Ensure",
+                RefreshIndexTimeoutMilliseconds));
+        }
+
+        internal static AICodedbCommandResult RunEnsureWatcher(AICodedbEditorExecutionContext context)
+        {
+            return RunWatcherScript(context, "Ensure", RefreshIndexTimeoutMilliseconds);
         }
 
         /// <summary>
@@ -281,6 +334,12 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunWatcherStatus()
         {
             return RunScript("Codedb Watcher Status", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Status"));
+        }
+
+        internal static Task<AICodedbCommandResult> RunWatcherStatusAsync()
+        {
+            var context = AICodedbPaths.CaptureExecutionContext();
+            return Task.Run(() => RunWatcherScript(context, "Status", 0));
         }
 
         /// <summary>
@@ -314,6 +373,27 @@ namespace Rice.AI.Codedb.Editor
                 default:
                     throw new ArgumentException("Unsupported CodeDB watcher action.", nameof(action));
             }
+        }
+
+        private static AICodedbCommandResult RunWatcherScript(
+            AICodedbEditorExecutionContext context,
+            string action,
+            int timeoutMilliseconds)
+        {
+            var selection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot);
+            var scriptPath = selection.IsUsable
+                ? AICodedbPaths.NormalizePath(Path.Combine(
+                    selection.RootPath,
+                    "scripts/manage-codedb-project-watch.ps1"))
+                : string.Empty;
+            var readinessFailure = GetHostCommandReadinessFailure(selection, scriptPath);
+            if (readinessFailure != null)
+                return readinessFailure;
+            return AICodedbProcessRunner.RunPowerShellScript(
+                context,
+                scriptPath,
+                timeoutMilliseconds,
+                BuildWatcherScriptArguments(action));
         }
 
         /// <summary>

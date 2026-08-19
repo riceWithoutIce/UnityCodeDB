@@ -37,6 +37,21 @@ The `0.2.5-preview.4` validation candidate reuses that immutable `poc.30` Host
 closure and fixes Package-owned MCP merge compatibility: CodeDB rewrites only
 the target table's four managed direct keys while preserving custom direct keys
 and legal descendant tables such as `tools.*`.
+The `0.2.5-preview.5` validation candidate distinguishes stale schema-1 leases
+from PID reuse without inspecting or stopping unrelated processes. Repair keeps
+live external MCP sessions on their immutable closure while restoring future
+sessions, and a confirmed project Uninstall persists `UNINSTALLED`, preserves
+the target MCP namespace as inert recoverable comments, defers physical cleanup
+until retained leases drain, persists a terminal cleanup state, and offers one
+confirmed Install action that atomically restores the verified integration. It
+also separates `INSTALLED`, `CONFIGURED`, and `MCP_AVAILABLE` before `READY`:
+the Package launches its current wrapper from the project working directory and
+requires MCP initialize, the bounded tool list, and callable `codedb_status`.
+This Package-owned probe supports but does not replace the real new Codex
+Desktop task acceptance. It advances the Package-owned immutable Host to
+`poc.31`, requires Node.js `22.x` or `24.x`, and validates the reviewed Provider
+`0.5.0` manifest, protocol, Package range, and executable hash from
+`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` before project mutation.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -49,8 +64,9 @@ marked passed; they remain in the
 - Unity `2022.3`
 - Windows Editor
 - Windows PowerShell 5.1
-- Node.js
-- External `killop/codedb-mcp` / `codebase-mcp` provider
+- Node.js `22.x` or `24.x`
+- External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0` with its
+  schema-1 manifest under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0`
 
 The package does not bundle or redistribute the external provider.
 
@@ -62,7 +78,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.4"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5"
   }
 }
 ```
@@ -73,10 +89,16 @@ validation of unpublished development changes.
 
 ## Manager
 
-Open `Tools/Rice AI/Codedb/Manager`. The Manager provides five focused views:
+Open `Tools/Rice AI/Codedb/Manager` when status or recovery is needed; initial
+convergence does not require opening it. The ordinary surface shows only
+`Starting`, `Ready`, `Needs attention`, or `Uninstalled`, and at most one
+contextual action: `Fix CodeDB` for recovery or `Install CodeDB` after an
+intentional Uninstall. `Uninstall CodeDB from Project` is available from a
+separately confirmed secondary menu. The Manager also provides five focused
+views for diagnostics:
 
 - Overview: package, runtime, index, MCP, and watcher health.
-- Setup: Host status, one-click recovery, and advanced payload diagnostics.
+- Setup: Host status and advanced payload diagnostics.
 - Index: provider and Shader/HLSL refresh, probes, and watcher lifecycle.
 - MCP: project registration guidance and validation.
 - Policy: the active read-only and project-ownership boundaries.

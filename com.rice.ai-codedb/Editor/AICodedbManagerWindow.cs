@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -47,15 +48,26 @@ namespace Rice.AI.Codedb.Editor
         private const float HeaderControlsMinWidth = 174f;
         private const float HeaderPackageVersionHeight = 16f;
         private const double TransientStatusRefreshSeconds = 5d;
-        internal const string RepairCodeDBConfirmationTitle = "Repair CodeDB";
-        internal const string RepairCodeDBConfirmationMessage =
-            "Repair this project's CodeDB Host runtime and project MCP registration?\n\n"
-            + "CodeDB may quarantine deterministic package-owned residue under AIWork/.runtime/codedb/host/ "
-            + "and recover materializer transaction state before reconstructing the current immutable Host generation. "
-            + "It will repair only this project's [mcp_servers.<project-slug>] section in .codex/config.toml.\n\n"
-            + "Provider binaries, custom runtime configuration, indexes, adapters, unrelated generations, business files, "
-            + "version-control metadata, active leased generations, and unrelated MCP tables, keys, comments, and ordering are preserved. "
-            + "External MCP clients are never terminated. An already running MCP client may require a new session to use the repaired registration.";
+        internal const string ReinstallCodeDBConfirmationTitle = "Reinstall CodeDB";
+        internal const string ReinstallCodeDBConfirmationMessage =
+            "Reinstall CodeDB integration for this Unity project?\n\n"
+            + "CodeDB will create and validate a fresh project-local instance, update only its owned project MCP registration keys, "
+            + "and switch future sessions only after initialize, tools/list, codedb_status, and a bounded query succeed.\n\n"
+            + "The machine Provider, reviewed custom runtime configuration, business files, user policy, unrelated MCP content, "
+            + "comments, ordering, and existing immutable instances are preserved. Retired Package-owned state is cleaned in the background. "
+            + "External MCP clients and unrelated processes are never terminated.";
+        internal const string UninstallCodeDBConfirmationTitle = "Uninstall CodeDB from Project";
+        internal const string UninstallCodeDBConfirmationMessage =
+            "Uninstall CodeDB integration from this Unity project?\n\n"
+            + "The Unity Package remains installed. CodeDB will first publish the logical UNINSTALLED state, remove only its owned MCP registration keys and current instance selection, "
+            + "then retire authenticated Package-owned state in the background.\n\n"
+            + "Provider binaries, indexes, adapters, custom runtime configuration, user policy, business files, unrelated MCP content, and external processes are preserved. "
+            + "A live external MCP keeps its exact execution closure until it exits naturally; cleanup then completes automatically.";
+        internal const string InstallCodeDBConfirmationTitle = "Install CodeDB";
+        internal const string InstallCodeDBConfirmationMessage =
+            "Install CodeDB integration into this Unity project?\n\n"
+            + "CodeDB will create and validate a fresh project-local instance, restore only its owned project MCP registration keys, "
+            + "and atomically publish INSTALLED only after the complete status and bounded-query path succeeds. Unrelated project and MCP configuration remains unchanged.";
         private const float CustomProbeSingleRowMinWidth =
             CustomProbeLanguageLabelWidth
             + CustomProbeLanguageWidth
@@ -69,6 +81,7 @@ namespace Rice.AI.Codedb.Editor
 
         private Vector2 _scrollPosition;
         private AICodedbStatusSnapshot _statusSnapshot;
+        private AICodedbEditorExecutionContext _executionContext;
         private AICodedbCommandResult _lastResult;
         private string _lastResultTitle = string.Empty;
         private float _activitySidebarWidth = AICodedbManagerLayout.ActivityDefaultWidth;
@@ -80,6 +93,8 @@ namespace Rice.AI.Codedb.Editor
         private bool _watcherStatusLoaded;
         private bool _watcherRefreshScheduled;
         private bool _hostStatusRefreshInFlight;
+        private bool _watcherStatusRefreshInFlight;
+        private bool _userActionInFlight;
         private double _nextHostStatusRefreshAt;
         private int _selectedTab;
         private bool _showOverviewDetails;
@@ -106,13 +121,15 @@ namespace Rice.AI.Codedb.Editor
             window.minSize = new Vector2(900f, 460f);
             window._selectedTab = (int)tab;
             window.Show();
-            window.RefreshStatus();
-            window.ScheduleWatcherStatusRefresh();
+            window.BeginStatusRefresh();
+            if (tab == AICodedbManagerTab.Index)
+                window.ScheduleWatcherStatusRefresh();
             window.Repaint();
         }
 
         private void OnEnable()
         {
+            _executionContext = AICodedbPaths.CaptureExecutionContext();
             ApplyWindowTitle();
             _activitySidebarWidth = EditorPrefs.GetFloat(
                 ActivitySidebarWidthPrefsKey,
@@ -124,7 +141,7 @@ namespace Rice.AI.Codedb.Editor
             EditorApplication.update += ObserveTransientHostStatus;
             RefreshStatus();
             _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + 1d;
-            ScheduleWatcherStatusRefresh();
+            BeginStatusRefresh();
         }
 
         private void OnDisable()
@@ -177,9 +194,10 @@ namespace Rice.AI.Codedb.Editor
 
         private void RefreshStatus()
         {
-            var initializeDisclosures = _statusSnapshot == null;
-            _statusSnapshot = AICodedbStatusSnapshot.Refresh();
-            ApplyDisclosurePolicy(initializeDisclosures);
+            if (_statusSnapshot != null)
+                return;
+            _statusSnapshot = AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName);
+            ApplyDisclosurePolicy(true);
         }
 
         private void RefreshStatus(AICodedbCommandResult hostPayloadResult)
@@ -193,13 +211,18 @@ namespace Rice.AI.Codedb.Editor
         {
             if (_statusSnapshot == null || _hostStatusRefreshInFlight)
                 return;
-            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            if (_statusSnapshot.IsProjectUninstalled)
+                return;
+            if (EditorApplication.isCompiling
+                || EditorApplication.isUpdating
+                || EditorApplication.isPlayingOrWillChangePlaymode)
                 return;
 
             var suppressed = AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 _statusSnapshot.HostUpgradeStatus,
                 AICodedbProjectSettings.CurrentGenerationId);
-            if (!ShouldAutoObserveHostStatus(
+            if (_statusSnapshot.ProductStatus.State == AICodedbProductState.Ready
+                && !ShouldAutoObserveHostStatus(
                     _statusSnapshot.HostPayloadStatus.State,
                     _statusSnapshot.HostUpgradeStatus.Phase,
                     _statusSnapshot.HostUpdatePolicyValue.IsEnabled,
@@ -221,10 +244,11 @@ namespace Rice.AI.Codedb.Editor
             _hostStatusRefreshInFlight = true;
             try
             {
-                var result = await AICodedbHostPayloadMaterializer.ReadStatusAsync();
+                var result = await AICodedbHostPayloadMaterializer.ReadStatusAsync(_executionContext);
+                var snapshot = await AICodedbStatusSnapshot.RefreshAsync(_executionContext, result);
                 if (this == null)
                     return;
-                RefreshStatus(result);
+                ApplyStatusSnapshot(snapshot);
                 Repaint();
             }
             catch (Exception exception)
@@ -236,6 +260,36 @@ namespace Rice.AI.Codedb.Editor
             {
                 _hostStatusRefreshInFlight = false;
             }
+        }
+
+        private void ApplyStatusSnapshot(AICodedbStatusSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return;
+            var initializeDisclosures = _statusSnapshot == null;
+            _statusSnapshot = snapshot;
+            ApplyDisclosurePolicy(initializeDisclosures);
+        }
+
+        private async Task RefreshStatusAsync(AICodedbCommandResult hostPayloadResult)
+        {
+            var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
+                _executionContext,
+                hostPayloadResult);
+            if (this != null)
+                ApplyStatusSnapshot(snapshot);
+        }
+
+        private void BeginStatusRefresh()
+        {
+            if (_hostStatusRefreshInFlight
+                || EditorApplication.isCompiling
+                || EditorApplication.isUpdating
+                || EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                return;
+            }
+            RefreshTransientHostStatusAsync();
         }
 
         internal static bool ShouldAutoObserveHostStatus(
@@ -320,7 +374,9 @@ namespace Rice.AI.Codedb.Editor
         private void RefreshAllStatus()
         {
             RefreshStatus();
-            RefreshWatcherStatusSilently();
+            BeginStatusRefresh();
+            if (_selectedTab == (int)AICodedbManagerTab.Index)
+                ScheduleWatcherStatusRefresh();
         }
 
         private void DrawHeader()
@@ -431,6 +487,14 @@ namespace Rice.AI.Codedb.Editor
             {
                 menu.AddDisabledItem(new GUIContent("Provider Guidance"));
             }
+            if (!_statusSnapshot.IsProjectUninstalled)
+            {
+                menu.AddSeparator(string.Empty);
+                menu.AddItem(
+                    new GUIContent("Uninstall CodeDB from Project"),
+                    false,
+                    RunUninstallCodeDBWithConfirmation);
+            }
             menu.ShowAsContext();
         }
 
@@ -453,6 +517,12 @@ namespace Rice.AI.Codedb.Editor
             _mainContentWidth = Mathf.Max(0f, width);
             using (new EditorGUILayout.VerticalScope(GUILayout.Width(width), GUILayout.ExpandHeight(true)))
             {
+                if (_statusSnapshot.IsProjectUninstalled)
+                {
+                    DrawUninstalledContent();
+                    return;
+                }
+
                 DrawTabBar();
                 _scrollPosition = EditorGUILayout.BeginScrollView(
                     _scrollPosition,
@@ -472,6 +542,40 @@ namespace Rice.AI.Codedb.Editor
                 }
                 EditorGUILayout.EndScrollView();
             }
+        }
+
+        private void DrawUninstalledContent()
+        {
+            _scrollPosition = EditorGUILayout.BeginScrollView(
+                _scrollPosition,
+                false,
+                false,
+                GUIStyle.none,
+                GUI.skin.verticalScrollbar,
+                GUI.skin.scrollView,
+                GUILayout.ExpandWidth(true),
+                GUILayout.ExpandHeight(true));
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Space(ContentHorizontalPadding);
+                using (new EditorGUILayout.VerticalScope(GUILayout.ExpandWidth(true)))
+                {
+                    EditorGUILayout.Space(6f);
+                    AICodedbSectionView.DrawPageHeader(
+                        "CodeDB",
+                        "Project integration",
+                        string.Empty,
+                        null);
+                    AICodedbSectionView.DrawBanner(
+                        "CodeDB is uninstalled from this project",
+                        "The Package remains available, while automatic installation and watcher attachment are disabled.",
+                        AICodedbStatusState.Inactive,
+                        "Install CodeDB",
+                        _userActionInFlight ? null : (Action)RunInstallCodeDBWithConfirmation);
+                }
+                GUILayout.Space(ContentHorizontalPadding);
+            }
+            EditorGUILayout.EndScrollView();
         }
 
         private void DrawSelectedTabContent()
@@ -499,10 +603,14 @@ namespace Rice.AI.Codedb.Editor
         private void DrawOverviewTab()
         {
             AICodedbSectionView.DrawPageHeader("Overview", "项目状态与建议操作", string.Empty, null);
-            var repairAction = IsRepairCodeDBAvailable(
+            var reinstallAvailable = IsReinstallCodeDBAvailable(
                 _statusSnapshot.HostGenerationSelection.State,
                 _statusSnapshot.HostPayloadStatus.State,
-                _statusSnapshot.HostUpgradeStatus.Phase)
+                _statusSnapshot.HostUpgradeStatus.Phase);
+            var primaryAction = ResolvePrimaryAction(
+                _statusSnapshot.ProductStatus.State,
+                reinstallAvailable,
+                _userActionInFlight)
                     ? (Action)RunPrimaryAction
                     : null;
             AICodedbSectionView.DrawBanner(
@@ -510,36 +618,7 @@ namespace Rice.AI.Codedb.Editor
                 GetOverviewStatusDescription(),
                 _statusSnapshot.OverallState,
                 GetPrimaryActionLabel(),
-                repairAction);
-
-            AICodedbSectionView.DrawStatusGroup("Components", string.Empty, null, () =>
-            {
-                AICodedbSectionView.DrawStatusRow(
-                    "Host files",
-                    "Package-managed project files",
-                    _statusSnapshot.GetHostPayloadState(),
-                    GetHostPayloadLabel());
-                AICodedbSectionView.DrawStatusRow(
-                    "Provider",
-                    "External codebase-mcp executable",
-                    _statusSnapshot.GetProviderState(),
-                    GetStateLabel(_statusSnapshot.GetProviderState(), "Ready"));
-                AICodedbSectionView.DrawStatusRow(
-                    "Project index",
-                    "C#, Lua and JavaScript discovery",
-                    _statusSnapshot.GetIndexState(),
-                    GetStateLabel(_statusSnapshot.GetIndexState(), "Current"));
-                AICodedbSectionView.DrawStatusRow(
-                    "Shader / HLSL",
-                    "Shader, HLSL, Compute and CGINC adapter",
-                    _statusSnapshot.GetTextAdapterState(),
-                    GetStateLabel(_statusSnapshot.GetTextAdapterState(), "Current"));
-                AICodedbSectionView.DrawStatusRow(
-                    "MCP registration",
-                    "Project-level client configuration",
-                    _statusSnapshot.GetMcpState(),
-                    GetStateLabel(_statusSnapshot.GetMcpState(), "Configured"));
-            });
+                primaryAction);
 
             _showOverviewDetails = AICodedbSectionView.DrawDisclosure(
                 _showOverviewDetails,
@@ -565,6 +644,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.IndexManifest);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.TextAdapterManifest);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProjectMcpConfig);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.McpAvailability);
             });
         }
 
@@ -624,6 +704,7 @@ namespace Rice.AI.Codedb.Editor
                 "Advanced host files",
                 GetHostPayloadSummary(),
                 DrawAdvancedHostFiles);
+
         }
 
         private void DrawAdvancedHostFiles()
@@ -756,7 +837,7 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbActionButton.Create("Stop now", hasCurrentGeneration ? (Action)(() => RunAction("Stop Now", AICodedbActions.RunStopWatcher)) : null),
                     AICodedbActionButton.Create("Restart", hasCurrentGeneration ? (Action)(() => RunAction("Restart", AICodedbActions.RunRestartWatcher)) : null));
                 if (!hasCurrentGeneration)
-                    EditorGUILayout.HelpBox("Lifecycle controls require the current host generation. Return to Overview and use Repair CodeDB.", MessageType.Info);
+                    EditorGUILayout.HelpBox("Lifecycle controls require the current selected instance. Return to Overview and use Reinstall CodeDB.", MessageType.Info);
 
                 var repairLabel = GetWatcherRepairLabel();
                 if (!string.IsNullOrWhiteSpace(repairLabel))
@@ -1108,49 +1189,121 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetPrimaryActionLabel()
         {
-            return "Repair CodeDB";
+            if (_statusSnapshot == null || _userActionInFlight)
+                return string.Empty;
+            switch (_statusSnapshot.ProductStatus.State)
+            {
+                case AICodedbProductState.Uninstalled:
+                    return "Install CodeDB";
+                case AICodedbProductState.NeedsAttention:
+                    return "Reinstall CodeDB";
+                case AICodedbProductState.MissingPrerequisite:
+                    return string.Empty;
+                default:
+                    return string.Empty;
+            }
         }
 
         private void RunPrimaryAction()
         {
-            RunRepairCodeDBWithConfirmation();
+            if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
+                RunInstallCodeDBWithConfirmation();
+            else
+                RunReinstallCodeDBWithConfirmation();
         }
 
-        private void RunRepairCodeDBWithConfirmation()
+        private void RunReinstallCodeDBWithConfirmation()
         {
-            ConfirmAndRunRepairCodeDB(
+            ConfirmAndRunReinstallCodeDB(
                 () => EditorUtility.DisplayDialog(
-                    RepairCodeDBConfirmationTitle,
-                    RepairCodeDBConfirmationMessage,
-                    "Repair CodeDB",
+                    ReinstallCodeDBConfirmationTitle,
+                    ReinstallCodeDBConfirmationMessage,
+                    "Reinstall CodeDB",
                     "Cancel"),
-                () => RunAction("Repair CodeDB", AICodedbActions.RunRepairCodeDB));
+                () => RunUserActionAsync("Reinstall CodeDB", AICodedbActions.RunReinstallCodeDBAsync));
         }
 
-        internal static bool ConfirmAndRunRepairCodeDB(Func<bool> confirm, Action repair)
+        internal static bool ConfirmAndRunReinstallCodeDB(Func<bool> confirm, Action reinstall)
         {
             if (confirm == null)
                 throw new ArgumentNullException(nameof(confirm));
-            if (repair == null)
-                throw new ArgumentNullException(nameof(repair));
+            if (reinstall == null)
+                throw new ArgumentNullException(nameof(reinstall));
             if (!confirm())
                 return false;
 
-            repair();
+            reinstall();
             return true;
         }
 
-        internal static bool IsRepairCodeDBAvailable(
+        private void RunUninstallCodeDBWithConfirmation()
+        {
+            ConfirmAndRunUninstallCodeDB(
+                () => EditorUtility.DisplayDialog(
+                    UninstallCodeDBConfirmationTitle,
+                    UninstallCodeDBConfirmationMessage,
+                    "Uninstall CodeDB",
+                    "Cancel"),
+                () => RunUserActionAsync("Uninstall CodeDB from Project", AICodedbActions.RunUninstallCodeDBAsync));
+        }
+
+        private void RunInstallCodeDBWithConfirmation()
+        {
+            ConfirmAndRunInstallCodeDB(
+                () => EditorUtility.DisplayDialog(
+                    InstallCodeDBConfirmationTitle,
+                    InstallCodeDBConfirmationMessage,
+                    "Install CodeDB",
+                    "Cancel"),
+                () => RunUserActionAsync("Install CodeDB", AICodedbActions.RunInstallCodeDBAsync));
+        }
+
+        internal static bool ConfirmAndRunUninstallCodeDB(Func<bool> confirm, Action uninstall)
+        {
+            return ConfirmAndRunProjectIntegrationAction(confirm, uninstall);
+        }
+
+        internal static bool ConfirmAndRunInstallCodeDB(Func<bool> confirm, Action install)
+        {
+            return ConfirmAndRunProjectIntegrationAction(confirm, install);
+        }
+
+        private static bool ConfirmAndRunProjectIntegrationAction(Func<bool> confirm, Action action)
+        {
+            if (confirm == null)
+                throw new ArgumentNullException(nameof(confirm));
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            if (!confirm())
+                return false;
+
+            action();
+            return true;
+        }
+
+        internal static bool IsReinstallCodeDBAvailable(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
             AICodedbHostUpgradePhase upgradePhase)
         {
-            // Repair executes the Package-owned materializer and performs its
-            // own fail-closed preflight, so installed Host readiness never
-            // disables this final recovery entry point.
+            // Reinstall provisions a disjoint Package-owned candidate and
+            // performs its own fail-closed preflight, so historical Host
+            // readiness never disables this recovery entry point.
             return Enum.IsDefined(typeof(AICodedbHostGenerationState), generationState)
                    && Enum.IsDefined(typeof(AICodedbHostPayloadState), payloadState)
                    && Enum.IsDefined(typeof(AICodedbHostUpgradePhase), upgradePhase);
+        }
+
+        internal static bool ResolvePrimaryAction(
+            AICodedbProductState productState,
+            bool reinstallAvailable,
+            bool actionInFlight)
+        {
+            if (actionInFlight)
+                return false;
+            if (productState == AICodedbProductState.Uninstalled)
+                return true;
+            return productState == AICodedbProductState.NeedsAttention && reinstallAvailable;
         }
 
         private void CopyMcpSnippet()
@@ -1317,6 +1470,44 @@ namespace Rice.AI.Codedb.Editor
 
             GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
             RefreshStatus();
+            BeginStatusRefresh();
+            Repaint();
+        }
+
+        private async void RunUserActionAsync(
+            string title,
+            Func<Task<AICodedbCommandResult>> action)
+        {
+            if (_userActionInFlight || action == null)
+                return;
+
+            _userActionInFlight = true;
+            _lastResultTitle = title;
+            _lastResult = null;
+            RefreshStatus();
+            Repaint();
+            try
+            {
+                _lastResult = await action();
+            }
+            catch (Exception exception)
+            {
+                _lastResult = new AICodedbCommandResult(
+                    -1,
+                    string.Empty,
+                    exception.Message,
+                    false);
+            }
+            finally
+            {
+                _userActionInFlight = false;
+            }
+
+            if (this == null)
+                return;
+            GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
+            await RefreshStatusAsync(_lastResult);
+            AICodedbEditorLifecycle.RequestReconcile();
             Repaint();
         }
 
@@ -1347,16 +1538,38 @@ namespace Rice.AI.Codedb.Editor
             _watcherRefreshScheduled = false;
             if (this == null)
                 return;
-            RefreshWatcherStatusSilently();
+            RefreshWatcherStatusSilentlyAsync();
         }
 
-        private void RefreshWatcherStatusSilently()
+        private async void RefreshWatcherStatusSilentlyAsync()
         {
-            var result = AICodedbActions.RunWatcherStatus();
-            _watcherStatus = AICodedbWatcherStatusBuilder.Build(result);
-            _watcherStatusLoaded = true;
-            ApplyWatcherDisclosurePolicy();
-            Repaint();
+            if (_watcherStatusRefreshInFlight
+                || EditorApplication.isCompiling
+                || EditorApplication.isUpdating
+                || EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                return;
+            }
+            _watcherStatusRefreshInFlight = true;
+            try
+            {
+                var result = await AICodedbActions.RunWatcherStatusAsync();
+                if (this == null)
+                    return;
+                _watcherStatus = AICodedbWatcherStatusBuilder.Build(result);
+                _watcherStatusLoaded = true;
+                ApplyWatcherDisclosurePolicy();
+                Repaint();
+            }
+            catch (Exception exception)
+            {
+                if (this != null)
+                    Debug.LogWarning("CodeDB Manager watcher status refresh failed: " + exception.Message);
+            }
+            finally
+            {
+                _watcherStatusRefreshInFlight = false;
+            }
         }
 
         private void ApplyDisclosurePolicy(bool initialize)
@@ -1558,121 +1771,34 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetHeaderTitle()
         {
-            if (ShouldPrioritizeHostUpgradeStatus(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
-            {
-                return AICodedbProjectSettings.ProjectDisplayName
-                       + " / "
-                       + GetHostUpgradeStatusLabel(_statusSnapshot.HostUpgradeStatus.Phase);
-            }
-
-            if (!_statusSnapshot.IsHostPayloadCurrent())
-                return AICodedbProjectSettings.ProjectDisplayName + " · " + GetHostPayloadLabel();
-
-            var state = _statusSnapshot.OverallState;
-            var label = state == AICodedbStatusState.Ok
-                ? "Ready"
-                : state == AICodedbStatusState.Warning
-                    ? "Needs setup"
-                    : "Blocked";
-            return AICodedbProjectSettings.ProjectDisplayName + " · " + label;
+            return _statusSnapshot.OverallTitle;
         }
 
         private string GetHeaderDescription()
         {
-            switch (_statusSnapshot.OverallState)
-            {
-                case AICodedbStatusState.Ok:
-                    return "Provider、运行时和索引均可用";
-                case AICodedbStatusState.Warning:
-                    return "存在需要处理的本地配置或索引状态";
-                default:
-                    return "存在阻塞 CodeDB 使用的问题";
-            }
+            return _statusSnapshot.OverallDescription;
         }
 
         private string GetOverviewStatusTitle()
         {
-            if (ShouldPrioritizeHostUpgradeStatus(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
+            switch (_statusSnapshot.ProductStatus.State)
             {
-                return GetHostUpgradeStatusLabel(_statusSnapshot.HostUpgradeStatus.Phase);
-            }
-
-            switch (_statusSnapshot.HostPayloadStatus.State)
-            {
-                case AICodedbHostPayloadState.SetupRequired:
-                    return "SETUP_REQUIRED";
-                case AICodedbHostPayloadState.UpgradeReady:
-                    return "UPGRADE_READY";
-                case AICodedbHostPayloadState.RedeployRequired:
-                    return "REDEPLOY_REQUIRED";
-                case AICodedbHostPayloadState.Draining:
-                    return "READY / DRAINING";
-                case AICodedbHostPayloadState.UpdateRequired:
-                    return "UPDATE_REQUIRED";
-                case AICodedbHostPayloadState.Conflict:
-                    return "HOST FILE CONFLICT";
-                case AICodedbHostPayloadState.Blocked:
-                    return "HOST UPDATE BLOCKED";
-            }
-
-            switch (_statusSnapshot.OverallState)
-            {
-                case AICodedbStatusState.Ok:
+                case AICodedbProductState.Ready:
                     return "CodeDB is ready";
-                case AICodedbStatusState.Warning:
-                    return "Setup requires attention";
+                case AICodedbProductState.Starting:
+                    return "CodeDB is starting";
+                case AICodedbProductState.Uninstalled:
+                    return "CodeDB is uninstalled";
+                case AICodedbProductState.MissingPrerequisite:
+                    return "CodeDB needs a prerequisite";
                 default:
-                    return "CodeDB is blocked";
+                    return "CodeDB needs attention";
             }
         }
 
         private string GetOverviewStatusDescription()
         {
-            if (ShouldPrioritizeHostUpgradeStatus(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
-            {
-                if (!string.IsNullOrWhiteSpace(_statusSnapshot.HostUpgradeStatus.Detail))
-                    return _statusSnapshot.HostUpgradeStatus.Detail;
-                return IsCurrentHostUpgradeFailure(
-                    _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId)
-                        ? "The automatic host update failed. Review the activity output, then retry the update."
-                        : "The automatic host update is in progress. No action is required.";
-            }
-
-            switch (_statusSnapshot.HostPayloadStatus.State)
-            {
-                case AICodedbHostPayloadState.SetupRequired:
-                    return "Install the package-managed host files before relying on discovery.";
-                case AICodedbHostPayloadState.UpgradeReady:
-                    return "The installed owned host generation can update without stopping active CodeDB sessions.";
-                case AICodedbHostPayloadState.RedeployRequired:
-                    return "Redeploy the recognized legacy Host. The Manager will stop its watcher safely and configure the current generation.";
-                case AICodedbHostPayloadState.Draining:
-                    return "CodeDB is ready. Older sessions remain compatible on their original generation and finish naturally; no action is required.";
-                case AICodedbHostPayloadState.UpdateRequired:
-                    return "Update the installed host files to match this package.";
-                case AICodedbHostPayloadState.Conflict:
-                    return "Review the reported host-file conflict before attempting Sync.";
-                case AICodedbHostPayloadState.Blocked:
-                    if (_statusSnapshot.HostPayloadStatus.CanRedeploy)
-                    {
-                        if (_statusSnapshot.HostPayloadStatus.ActiveMcpSessionCount > 0)
-                            return "Disconnect this project from its MCP clients, then click Redeploy host again. The Manager will stop the legacy watcher.";
-                        if (_statusSnapshot.HostPayloadStatus.HasOnlyLegacyWatcherOwners)
-                            return "Click Redeploy host. The Manager will stop the legacy watcher and configure the current generation.";
-                        return "Close the connected CodeDB client, then click Redeploy host again.";
-                    }
-                    return _statusSnapshot.HostPayloadStatus.Detail;
-            }
-            if (_statusSnapshot.IsReady())
-                return "All discovery backends are current.";
-            return "Verify the project-local runtime and resolve the reported status.";
+            return _statusSnapshot.OverallDescription;
         }
 
         private string GetHostPayloadLabel()

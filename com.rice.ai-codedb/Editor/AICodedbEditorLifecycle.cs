@@ -28,6 +28,7 @@ namespace Rice.AI.Codedb.Editor
         private const string SessionCreatedAtKey = "Rice.AICodedb.EditorLifecycle.CreatedAtUtc";
 
         private static string _projectRoot;
+        private static AICodedbEditorExecutionContext _executionContext;
         private static string _projectIdentity;
         private static string _sessionId;
         private static string _sessionCreatedAtUtc;
@@ -37,8 +38,16 @@ namespace Rice.AI.Codedb.Editor
         private static double _nextHeartbeatAt;
         private static double _nextReconcileAt;
         private static int _reconcileInFlight;
+        private static int _leaseRefreshInFlight;
+        private static int _prerequisiteRecheckInFlight;
+        private static int _leasePrerequisiteCurrent;
+        private static string _missingPrerequisiteFingerprint = string.Empty;
+        private static AICodedbProductState _lastProductState = AICodedbProductState.Starting;
+        private static readonly object LeaseIoLock = new object();
+        private static readonly AICodedbEditorBackgroundScheduler BackgroundScheduler =
+            new AICodedbEditorBackgroundScheduler();
         private static bool _initialized;
-        private static bool _quitting;
+        private static volatile bool _quitting;
 
         static AICodedbEditorLifecycle()
         {
@@ -48,10 +57,13 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 _projectRoot = ValidateProjectRoot(AICodedbPaths.ProjectRoot);
+                _executionContext = AICodedbPaths.CaptureExecutionContext();
                 _projectIdentity = CreateProjectIdentity(_projectRoot);
                 _sessionId = GetOrCreateSessionValue(SessionIdKey, () => Guid.NewGuid().ToString("N"));
                 _sessionCreatedAtUtc = GetOrCreateSessionValue(SessionCreatedAtKey, () => DateTime.UtcNow.ToString("o"));
-                _leasePath = Path.Combine(AICodedbPaths.WatchEditorLeasesPath, _sessionId + ".json");
+                // The immutable-instance engine owns the runtime lease location.
+                // Do not create a legacy lease before a validated instance is selected.
+                _leasePath = string.Empty;
 
                 using (var process = Process.GetCurrentProcess())
                 {
@@ -63,6 +75,8 @@ namespace Rice.AI.Codedb.Editor
                 EditorApplication.update += OnEditorUpdate;
                 EditorApplication.quitting -= OnEditorQuitting;
                 EditorApplication.quitting += OnEditorQuitting;
+                EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+                EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
                 EditorApplication.delayCall += Initialize;
             }
             catch (Exception exception)
@@ -77,9 +91,9 @@ namespace Rice.AI.Codedb.Editor
                 return;
 
             _initialized = true;
-            PublishLease();
+            BackgroundScheduler.SetMaintenanceSuspended(EditorApplication.isPlayingOrWillChangePlaymode);
             _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-            BeginReconcile();
+            BeginReconcile(true);
         }
 
         [DidReloadScripts]
@@ -94,12 +108,26 @@ namespace Rice.AI.Codedb.Editor
                 return;
 
             _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-            PublishLease();
-            if (ShouldRunScheduledReconcile(
-                EditorApplication.timeSinceStartup,
-                ref _nextReconcileAt,
-                BackendNeedsReconcile))
-                BeginReconcile();
+            var playTransition = EditorApplication.isPlayingOrWillChangePlaymode;
+            BackgroundScheduler.SetMaintenanceSuspended(playTransition);
+            if (playTransition)
+            {
+                _nextReconcileAt = Math.Max(
+                    _nextReconcileAt,
+                    EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
+                return;
+            }
+            if (_lastProductState == AICodedbProductState.MissingPrerequisite)
+            {
+                QueuePrerequisiteRecheck();
+                return;
+            }
+            if (ShouldQueueScheduledReconcile(
+                    EditorApplication.timeSinceStartup,
+                    ref _nextReconcileAt,
+                    false))
+                BeginReconcile(false);
+            QueueLeaseRefresh();
         }
 
         internal static bool ShouldRunScheduledReconcile(
@@ -114,14 +142,38 @@ namespace Rice.AI.Codedb.Editor
             return backendNeedsReconcile != null && backendNeedsReconcile();
         }
 
+        internal static bool ShouldQueueScheduledReconcile(
+            double now,
+            ref double nextReconcileAt,
+            bool maintenanceSuspended)
+        {
+            if (maintenanceSuspended || now < nextReconcileAt)
+                return false;
+
+            nextReconcileAt = now + ReconcileRetrySeconds;
+            return true;
+        }
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            var suspended = state != PlayModeStateChange.EnteredEditMode;
+            BackgroundScheduler.SetMaintenanceSuspended(suspended);
+            if (!suspended && !_quitting)
+            {
+                _nextReconcileAt = 0d;
+                BeginReconcile(true);
+            }
+        }
+
         private static void OnEditorQuitting()
         {
             _quitting = true;
+            BackgroundScheduler.SetMaintenanceSuspended(true);
             EditorApplication.update -= OnEditorUpdate;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
             try
             {
-                if (!string.IsNullOrWhiteSpace(_leasePath))
-                    File.Delete(_leasePath);
+                DeleteEditorLease();
             }
             catch (Exception exception)
             {
@@ -129,11 +181,14 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static async void BeginReconcile()
+        private static async void BeginReconcile(bool force)
         {
             if (_quitting)
                 return;
-            if (ShouldDeferReconcile(EditorApplication.isCompiling, EditorApplication.isUpdating))
+            if (ShouldDeferReconcile(
+                    EditorApplication.isCompiling,
+                    EditorApplication.isUpdating,
+                    EditorApplication.isPlayingOrWillChangePlaymode))
             {
                 _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
                 return;
@@ -144,54 +199,25 @@ namespace Rice.AI.Codedb.Editor
             _nextReconcileAt = EditorApplication.timeSinceStartup + ReconcileRetrySeconds;
             try
             {
-                var hostResult = await AICodedbHostPayloadMaterializer.ReadStatusAsync();
-                if (_quitting)
+                var previousProductState = _lastProductState;
+                var result = await BackgroundScheduler.QueueMaintenance(
+                    canContinue => RunReconcileWorker(
+                        _executionContext,
+                        force,
+                        previousProductState,
+                        canContinue));
+                if (result == null || _quitting)
                     return;
-
-                var hostStatus = BuildHostPayloadStatus(hostResult);
-                if (hostStatus.CanUpgradeAutomatically)
+                if (result.HasProductState)
+                    _lastProductState = result.ProductState;
+                if (result.RetrySoon)
                 {
-                    var updatePolicy = AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot);
-                    if (!updatePolicy.IsValid)
-                    {
-                        Debug.LogWarning("CodeDB automatic host update policy is invalid: " + updatePolicy.Detail);
-                    }
-                    else if (updatePolicy.IsEnabled && !IsAutomaticHostUpgradeSuppressed(
-                                 AICodedbHostUpgradeStatusStore.Read(
-                                     _projectRoot,
-                                     AICodedbProjectSettings.CurrentGenerationId),
-                                 AICodedbProjectSettings.CurrentGenerationId))
-                    {
-                        var upgradeResult = await AICodedbHostPayloadMaterializer.RunUpgradeAsync();
-                        if (_quitting)
-                            return;
-                        hostStatus = await ReadHostStatusAfterUpgradeAsync(
-                            upgradeResult,
-                            AICodedbHostPayloadMaterializer.ReadStatusAsync,
-                            () => File.Exists(AICodedbPaths.HostPayloadMarkerPath),
-                            GetCurrentHostGenerationId,
-                            milliseconds => Task.Delay(milliseconds),
-                            ConcurrentUpgradeStatusReadAttempts);
-                        if (_quitting)
-                            return;
-                        if (!hostStatus.IsCurrent)
-                        {
-                            if (!IsConcurrentUpgrade(upgradeResult))
-                                Debug.LogWarning($"CodeDB automatic host upgrade failed: {upgradeResult.GetSummary()} {upgradeResult.StandardError}".Trim());
-                            else
-                            {
-                                _nextReconcileAt = Math.Min(_nextReconcileAt, EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
-                                return;
-                            }
-                        }
-                    }
+                    _nextReconcileAt = Math.Min(
+                        _nextReconcileAt,
+                        EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
                 }
-                if (!CanEnsureHostGeneration(hostStatus, AICodedbPaths.HostGeneration.State))
-                    return;
-
-                var result = await AICodedbActions.RunEnsureWatcherAsync();
-                if (!result.Succeeded && !_quitting)
-                    Debug.LogWarning($"CodeDB Editor lifecycle reconcile failed: {result.GetSummary()} {result.StandardError}".Trim());
+                if (!string.IsNullOrWhiteSpace(result.Warning))
+                    Debug.LogWarning(result.Warning);
             }
             catch (Exception exception)
             {
@@ -204,48 +230,310 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static bool BackendNeedsReconcile()
+        private static LifecycleReconcileResult RunReconcileWorker(
+            AICodedbEditorExecutionContext context,
+            bool force,
+            AICodedbProductState previousProductState,
+            Func<bool> canContinue)
         {
-            var generation = AICodedbPaths.HostGeneration;
-            if (ShouldReconcileAutomaticHostUpgrade(
-                    File.Exists(AICodedbPaths.HostPayloadMarkerPath),
-                    File.Exists(AICodedbPaths.HostCurrentPointerPath),
-                    generation.State,
-                    AICodedbHostUpdatePolicyStore.Read(AICodedbPaths.ProjectRoot),
-                    AICodedbHostUpgradeStatusStore.Read(
-                        _projectRoot,
-                        AICodedbProjectSettings.CurrentGenerationId),
-                    AICodedbProjectSettings.CurrentGenerationId))
+            if (!canContinue() || (!force && !BackendNeedsReconcile(context, previousProductState)))
+                return null;
+
+            var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            if (integrationStatus.State == AICodedbProjectIntegrationState.Invalid)
             {
-                return true;
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                DeleteEditorLease();
+                return LifecycleReconcileResult.WithWarning(
+                    AICodedbProductState.NeedsAttention,
+                    "CodeDB project integration desired state is invalid: " + integrationStatus.Detail);
+            }
+            if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
+            {
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                DeleteEditorLease();
+                if (!canContinue())
+                    return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
+                var cleanupResult = AICodedbHostPayloadMaterializer.RunUpgrade(context);
+                return cleanupResult.Succeeded
+                    ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
+                    : LifecycleReconcileResult.WithWarning(
+                        AICodedbProductState.Uninstalled,
+                        $"CodeDB automatic uninstall cleanup failed: {cleanupResult.GetSummary()} {cleanupResult.StandardError}".Trim());
+            }
+            if (integrationStatus.IsUninstalled)
+            {
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                DeleteEditorLease();
+                return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
             }
 
-            var manual = ReadManualRuntime(AICodedbPaths.WatchManualRuntimePath);
-            var manualMode = GetApplicableManualMode(
-                manual,
-                GetActiveEditorSessionIds(),
-                _projectRoot,
-                _projectIdentity);
-            if (string.Equals(manualMode, "stopped", StringComparison.Ordinal))
-                return false;
+            if (!canContinue())
+                return null;
+            var hostResult = AICodedbHostPayloadMaterializer.ReadStatus(context);
+            var hostStatus = BuildHostPayloadStatus(hostResult, context);
+            var productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, hostResult);
+            var workerResult = LifecycleReconcileResult.WithState(productStatus.State);
+            if (productStatus.State == AICodedbProductState.MissingPrerequisite)
+            {
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                Interlocked.Exchange(
+                    ref _missingPrerequisiteFingerprint,
+                    CaptureMachinePrerequisiteEvidenceFingerprint(context));
+                return workerResult;
+            }
+            if (!ApplyPrerequisiteGatedLeaseRefresh(
+                    integrationStatus,
+                    productStatus,
+                    () =>
+                    {
+                        Interlocked.Exchange(ref _leasePrerequisiteCurrent, 1);
+                        Interlocked.Exchange(ref _missingPrerequisiteFingerprint, string.Empty);
+                        RefreshEditorLeaseForIntegrationState(context);
+                    }))
+            {
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                return workerResult;
+            }
+            if (!canContinue())
+                return workerResult;
 
-            var desired = ReadDesiredState(
-                AICodedbPaths.WatchDesiredStatePath,
-                _projectRoot,
-                _projectIdentity);
-            if (desired != null
-                && string.Equals(desired.desired_state, "disabled", StringComparison.Ordinal)
-                && !string.Equals(manualMode, "started", StringComparison.Ordinal))
-                return false;
+            // Automatic lifecycle convergence is instance-first. The legacy
+            // flat/generation path remains available to diagnostics, but it
+            // must not be selected after a Package reload.
+            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+            if (currentInstance.Present && !currentInstance.IsCurrent)
+            {
+                workerResult.ProductState = AICodedbProductState.NeedsAttention;
+                workerResult.Warning = "CodeDB current instance identity is invalid: " + currentInstance.Detail;
+                return workerResult;
+            }
+            if (!currentInstance.Present || currentInstance.IsCurrent)
+            {
+                var instanceNeedsConvergence = !currentInstance.IsCurrent
+                    || productStatus.State != AICodedbProductState.Ready
+                    || integrationStatus.CleanupState == AICodedbProjectCleanupState.Pending;
+                if (instanceNeedsConvergence)
+                {
+                    if (!canContinue())
+                        return workerResult;
+                    var instanceResult = AICodedbHostPayloadMaterializer.RunUpgrade(context);
+                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, instanceResult);
+                    workerResult.ProductState = productStatus.State;
+                    if (!canContinue())
+                        return workerResult;
+                    var verifiedInstanceResult = AICodedbHostPayloadMaterializer.ReadStatus(context);
+                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedInstanceResult);
+                    workerResult.ProductState = productStatus.State;
+                    if (productStatus.State == AICodedbProductState.Ready)
+                    {
+                        RefreshEditorLeaseForIntegrationState(context);
+                        return workerResult;
+                    }
+                    workerResult.Warning =
+                        $"CodeDB automatic instance convergence failed: {instanceResult.GetSummary()} {instanceResult.StandardError}".Trim();
+                    return workerResult;
+                }
 
-            var state = ReadCoordinatorState(AICodedbPaths.WatchCoordinatorStatePath, _projectRoot);
-            return ShouldReconcileCoordinator(
-                File.Exists(AICodedbPaths.HostCurrentPointerPath),
-                generation.State,
-                generation.GenerationId,
-                state == null ? 0 : state.coordinator_pid,
-                state == null ? string.Empty : state.generation_id,
-                IsProcessAlive);
+                RefreshEditorLeaseForIntegrationState(context);
+                return workerResult;
+            }
+
+            var watcherEnsured = false;
+            var availabilityConvergedByUpgrade = false;
+            var upgradeStatus = AICodedbHostUpgradeStatusStore.Read(
+                context.ProjectRoot,
+                AICodedbProjectSettings.CurrentGenerationId);
+            if (hostStatus.IsCurrent && ShouldRunAutomaticGenerationCleanup(
+                    upgradeStatus,
+                    AICodedbProjectSettings.CurrentGenerationId))
+            {
+                if (!canContinue())
+                    return workerResult;
+                var cleanupResult = AICodedbHostPayloadMaterializer.RunUpgrade(context);
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, cleanupResult);
+                workerResult.ProductState = productStatus.State;
+                if (!canContinue())
+                    return workerResult;
+                hostStatus = ReadHostStatusAfterUpgrade(
+                    context,
+                    cleanupResult,
+                    canContinue,
+                    ConcurrentUpgradeStatusReadAttempts);
+                if (!hostStatus.IsCurrent)
+                {
+                    if (!IsConcurrentUpgrade(cleanupResult))
+                    {
+                        workerResult.Warning =
+                            $"CodeDB automatic generation cleanup failed: {cleanupResult.GetSummary()} {cleanupResult.StandardError}".Trim();
+                    }
+                    else
+                    {
+                        workerResult.RetrySoon = true;
+                    }
+                    return workerResult;
+                }
+                availabilityConvergedByUpgrade = cleanupResult.Succeeded && productStatus.IsReady;
+                watcherEnsured = availabilityConvergedByUpgrade;
+            }
+            else if (hostStatus.CanUpgradeAutomatically)
+            {
+                var updatePolicy = AICodedbHostUpdatePolicyStore.Read(context.ProjectRoot);
+                if (!updatePolicy.IsValid)
+                {
+                    workerResult.Warning = "CodeDB automatic host update policy is invalid: " + updatePolicy.Detail;
+                }
+                else if (updatePolicy.IsEnabled && !IsAutomaticHostUpgradeSuppressed(
+                             upgradeStatus,
+                             AICodedbProjectSettings.CurrentGenerationId))
+                {
+                    if (!canContinue())
+                        return workerResult;
+                    var upgradeResult = AICodedbHostPayloadMaterializer.RunUpgrade(context);
+                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, upgradeResult);
+                    workerResult.ProductState = productStatus.State;
+                    if (!canContinue())
+                        return workerResult;
+                    hostStatus = ReadHostStatusAfterUpgrade(
+                        context,
+                        upgradeResult,
+                        canContinue,
+                        ConcurrentUpgradeStatusReadAttempts);
+                    if (!hostStatus.IsCurrent)
+                    {
+                        if (!IsConcurrentUpgrade(upgradeResult))
+                        {
+                            workerResult.Warning =
+                                $"CodeDB automatic host upgrade failed: {upgradeResult.GetSummary()} {upgradeResult.StandardError}".Trim();
+                        }
+                        else
+                        {
+                            workerResult.RetrySoon = true;
+                        }
+                        return workerResult;
+                    }
+                    availabilityConvergedByUpgrade = upgradeResult.Succeeded && productStatus.IsReady;
+                    watcherEnsured = availabilityConvergedByUpgrade;
+                }
+            }
+
+            if (!canContinue())
+                return workerResult;
+            var generation = AICodedbHostGenerationStore.Resolve(context.ProjectRoot);
+            if (!CanEnsureHostGeneration(hostStatus, generation.State))
+                return workerResult;
+
+            if (ShouldRunAvailabilityConvergence(hostStatus, availabilityConvergedByUpgrade))
+            {
+                if (!canContinue())
+                    return workerResult;
+                AICodedbCommandResult ensureResult;
+                var convergenceResult = RunWatcherThenAvailability(
+                    canContinue,
+                    () => AICodedbActions.RunEnsureWatcher(context),
+                    () => productStatus.Configured == AICodedbProductLayerState.Current
+                        ? AICodedbHostPayloadMaterializer.RunProbe(context)
+                        : AICodedbHostPayloadMaterializer.RunUpgrade(context),
+                    out ensureResult);
+                if (!ensureResult.Succeeded)
+                {
+                    workerResult.ProductState = AICodedbProductState.NeedsAttention;
+                    workerResult.Warning =
+                        $"CodeDB Editor lifecycle reconcile failed: {ensureResult.GetSummary()} {ensureResult.StandardError}".Trim();
+                    return workerResult;
+                }
+                watcherEnsured = true;
+                if (convergenceResult == null)
+                    return workerResult;
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, convergenceResult);
+                workerResult.ProductState = productStatus.State;
+                if (!convergenceResult.Succeeded)
+                {
+                    workerResult.Warning =
+                        $"CodeDB automatic project availability convergence failed: {convergenceResult.GetSummary()} {convergenceResult.StandardError}".Trim();
+                    return workerResult;
+                }
+
+                if (!canContinue())
+                    return workerResult;
+                var verifiedResult = AICodedbHostPayloadMaterializer.ReadStatus(context);
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedResult);
+                workerResult.ProductState = productStatus.State;
+                if (!productStatus.IsReady)
+                {
+                    workerResult.Warning =
+                        "CodeDB automatic convergence completed without reaching Ready: " + productStatus.Detail;
+                    return workerResult;
+                }
+            }
+
+            if (!watcherEnsured)
+            {
+                if (!canContinue())
+                    return workerResult;
+                var ensureResult = AICodedbActions.RunEnsureWatcher(context);
+                if (!ensureResult.Succeeded)
+                {
+                    workerResult.ProductState = AICodedbProductState.NeedsAttention;
+                    workerResult.Warning =
+                        $"CodeDB Editor lifecycle reconcile failed: {ensureResult.GetSummary()} {ensureResult.StandardError}".Trim();
+                }
+            }
+            return workerResult;
+        }
+
+        internal static AICodedbCommandResult RunWatcherThenAvailability(
+            Func<bool> canContinue,
+            Func<AICodedbCommandResult> ensureWatcher,
+            Func<AICodedbCommandResult> availability,
+            out AICodedbCommandResult ensureResult)
+        {
+            if (canContinue == null)
+                throw new ArgumentNullException(nameof(canContinue));
+            if (ensureWatcher == null)
+                throw new ArgumentNullException(nameof(ensureWatcher));
+            if (availability == null)
+                throw new ArgumentNullException(nameof(availability));
+
+            ensureResult = ensureWatcher();
+            if (!ensureResult.Succeeded || !canContinue())
+                return null;
+            return availability();
+        }
+
+        internal static bool ShouldRunAvailabilityConvergence(
+            AICodedbHostPayloadStatus hostStatus,
+            bool availabilityConvergedByUpgrade)
+        {
+            return hostStatus.IsCurrent && !availabilityConvergedByUpgrade;
+        }
+
+        private static bool BackendNeedsReconcile(
+            AICodedbEditorExecutionContext context,
+            AICodedbProductState lastProductState)
+        {
+            var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
+                return true;
+            if (integrationStatus.IsUninstalled)
+                return false;
+            if (!integrationStatus.IsValid)
+                return false;
+            if (!ShouldInspectBackendForScheduledReconcile(lastProductState))
+                return false;
+            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+            if (!currentInstance.Present)
+                return true;
+            if (!currentInstance.IsCurrent)
+                return false;
+            return lastProductState != AICodedbProductState.Ready
+                   || integrationStatus.CleanupState == AICodedbProjectCleanupState.Pending;
+        }
+
+        internal static bool ShouldInspectBackendForScheduledReconcile(
+            AICodedbProductState lastProductState)
+        {
+            return lastProductState != AICodedbProductState.MissingPrerequisite;
         }
 
         internal static bool ShouldReconcileCoordinator(
@@ -283,7 +571,15 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool ShouldDeferReconcile(bool isCompiling, bool isUpdating)
         {
-            return isCompiling || isUpdating;
+            return ShouldDeferReconcile(isCompiling, isUpdating, false);
+        }
+
+        internal static bool ShouldDeferReconcile(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayingOrWillChangePlaymode)
+        {
+            return isCompiling || isUpdating || isPlayingOrWillChangePlaymode;
         }
 
         internal static bool ShouldReconcileAutomaticHostUpgrade(
@@ -308,6 +604,19 @@ namespace Rice.AI.Codedb.Editor
             if (generationState == AICodedbHostGenerationState.Legacy)
                 return true;
             return generationState != AICodedbHostGenerationState.Current;
+        }
+
+        internal static bool ShouldRunAutomaticGenerationCleanup(
+            AICodedbHostUpgradeStatus upgradeStatus,
+            string currentGenerationId)
+        {
+            return upgradeStatus.Phase == AICodedbHostUpgradePhase.Current
+                   && upgradeStatus.CleanupState == AICodedbProjectCleanupState.Pending
+                   && !string.IsNullOrWhiteSpace(currentGenerationId)
+                   && string.Equals(
+                       upgradeStatus.GenerationId,
+                       currentGenerationId,
+                       StringComparison.Ordinal);
         }
 
         internal static bool IsAutomaticHostUpgradeSuppressed(
@@ -338,8 +647,158 @@ namespace Rice.AI.Codedb.Editor
         internal static void RequestReconcile()
         {
             _nextReconcileAt = 0d;
-            if (_initialized && !_quitting)
-                BeginReconcile();
+            if (_initialized
+                && !_quitting
+                && !EditorApplication.isPlayingOrWillChangePlaymode)
+                BeginReconcile(true);
+        }
+
+        internal static bool ShouldPublishEditorLease(AICodedbProjectIntegrationStatus integrationStatus)
+        {
+            return integrationStatus.State == AICodedbProjectIntegrationState.Installed;
+        }
+
+        internal static bool ShouldPublishEditorLeaseAfterPrerequisite(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbProductStatus productStatus)
+        {
+            return ShouldPublishEditorLease(integrationStatus)
+                   && productStatus.Prerequisite == AICodedbProductLayerState.Current;
+        }
+
+        internal static bool ApplyPrerequisiteGatedLeaseRefresh(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbProductStatus productStatus,
+            Action refreshLease)
+        {
+            if (refreshLease == null)
+                throw new ArgumentNullException(nameof(refreshLease));
+            if (!ShouldPublishEditorLeaseAfterPrerequisite(integrationStatus, productStatus))
+                return false;
+            refreshLease();
+            return true;
+        }
+
+        internal static bool ShouldRunAutomaticUninstallCleanup(AICodedbProjectIntegrationStatus integrationStatus)
+        {
+            return integrationStatus.State == AICodedbProjectIntegrationState.Uninstalled
+                   && integrationStatus.CleanupState == AICodedbProjectCleanupState.Pending;
+        }
+
+        internal static bool ShouldRefreshEditorLease(
+            bool prerequisiteCurrent,
+            bool reconcileInFlight,
+            bool quitting)
+        {
+            return prerequisiteCurrent && !reconcileInFlight && !quitting;
+        }
+
+        internal static bool ShouldTriggerPrerequisiteRecheck(
+            string recordedFingerprint,
+            string observedFingerprint)
+        {
+            return !string.IsNullOrWhiteSpace(recordedFingerprint)
+                   && !string.IsNullOrWhiteSpace(observedFingerprint)
+                   && !string.Equals(recordedFingerprint, observedFingerprint, StringComparison.Ordinal);
+        }
+
+        private static async void QueueLeaseRefresh()
+        {
+            if (!ShouldRefreshEditorLease(
+                    Volatile.Read(ref _leasePrerequisiteCurrent) != 0,
+                    Volatile.Read(ref _reconcileInFlight) != 0,
+                    _quitting)
+                || Interlocked.CompareExchange(ref _leaseRefreshInFlight, 1, 0) != 0)
+                return;
+            try
+            {
+                await BackgroundScheduler.QueueLease(() =>
+                {
+                    if (ShouldRefreshEditorLease(
+                            Volatile.Read(ref _leasePrerequisiteCurrent) != 0,
+                            Volatile.Read(ref _reconcileInFlight) != 0,
+                            _quitting))
+                    {
+                        RefreshEditorLeaseForIntegrationState(_executionContext);
+                    }
+                });
+            }
+            catch (Exception exception)
+            {
+                if (!_quitting)
+                    Debug.LogWarning($"CodeDB Editor lease heartbeat failed: {exception.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _leaseRefreshInFlight, 0);
+            }
+        }
+
+        private static async void QueuePrerequisiteRecheck()
+        {
+            if (_quitting
+                || Volatile.Read(ref _reconcileInFlight) != 0
+                || Interlocked.CompareExchange(ref _prerequisiteRecheckInFlight, 1, 0) != 0)
+                return;
+            try
+            {
+                var observedFingerprint = await BackgroundScheduler.QueueMaintenance(
+                    canContinue => canContinue()
+                        ? CaptureMachinePrerequisiteEvidenceFingerprint(_executionContext)
+                        : string.Empty);
+                if (_quitting || BackgroundScheduler.IsMaintenanceSuspended)
+                    return;
+                var recordedFingerprint = Volatile.Read(ref _missingPrerequisiteFingerprint);
+                if (!ShouldTriggerPrerequisiteRecheck(recordedFingerprint, observedFingerprint))
+                    return;
+
+                RefreshProcessPathFromMachineEvidence();
+                _nextReconcileAt = 0d;
+                BeginReconcile(true);
+            }
+            catch (Exception exception)
+            {
+                if (!_quitting)
+                    Debug.LogWarning($"CodeDB prerequisite recheck failed: {exception.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _prerequisiteRecheckInFlight, 0);
+            }
+        }
+
+        private static void RefreshEditorLeaseForIntegrationState(AICodedbEditorExecutionContext context)
+        {
+            lock (LeaseIoLock)
+            {
+                var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+                if (ShouldPublishEditorLease(integrationStatus) && currentInstance.IsCurrent)
+                {
+                    var previousLeasePath = _leasePath;
+                    _leasePath = Path.Combine(
+                        context.GetProjectPath(currentInstance.EditorLeaseRelativePath),
+                        _sessionId + ".json");
+                    if (!string.IsNullOrWhiteSpace(previousLeasePath)
+                        && !string.Equals(previousLeasePath, _leasePath, StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(previousLeasePath))
+                    {
+                        File.Delete(previousLeasePath);
+                    }
+                    PublishLease();
+                }
+                else
+                    DeleteEditorLease();
+            }
+        }
+
+        private static void DeleteEditorLease()
+        {
+            lock (LeaseIoLock)
+            {
+                if (!string.IsNullOrWhiteSpace(_leasePath) && File.Exists(_leasePath))
+                    File.Delete(_leasePath);
+            }
         }
 
         internal static string GetApplicableManualMode(
@@ -381,16 +840,20 @@ namespace Rice.AI.Codedb.Editor
             return "none";
         }
 
-        private static string[] GetActiveEditorSessionIds()
+        private static string[] GetActiveEditorSessionIds(AICodedbEditorExecutionContext context)
         {
             var sessions = new HashSet<string>(StringComparer.Ordinal);
             try
             {
-                if (!Directory.Exists(AICodedbPaths.WatchEditorLeasesPath))
+                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+                if (!currentInstance.IsCurrent)
+                    return new string[0];
+                var leaseRoot = context.GetProjectPath(currentInstance.EditorLeaseRelativePath);
+                if (!Directory.Exists(leaseRoot))
                     return new string[0];
 
                 var now = DateTime.UtcNow;
-                foreach (var path in Directory.GetFiles(AICodedbPaths.WatchEditorLeasesPath, "*.json"))
+                foreach (var path in Directory.GetFiles(leaseRoot, "*.json"))
                 {
                     var lease = ReadEditorLease(path);
                     if (IsActiveEditorLease(
@@ -495,6 +958,33 @@ namespace Rice.AI.Codedb.Editor
             return status;
         }
 
+        private static AICodedbHostPayloadStatus ReadHostStatusAfterUpgrade(
+            AICodedbEditorExecutionContext context,
+            AICodedbCommandResult upgradeResult,
+            Func<bool> canContinue,
+            int concurrentReadAttempts)
+        {
+            var attempts = IsConcurrentUpgrade(upgradeResult) ? concurrentReadAttempts : 1;
+            AICodedbHostPayloadStatus status = default(AICodedbHostPayloadStatus);
+            for (var attempt = 0; attempt < attempts; attempt++)
+            {
+                if (!canContinue())
+                    return status;
+                status = BuildHostPayloadStatus(
+                    AICodedbHostPayloadMaterializer.ReadStatus(context),
+                    context);
+                if (status.IsCurrent || attempt + 1 >= attempts)
+                    return status;
+                for (var waited = 0; waited < ConcurrentUpgradeRetryDelayMilliseconds; waited += 25)
+                {
+                    if (!canContinue())
+                        return status;
+                    Thread.Sleep(Math.Min(25, ConcurrentUpgradeRetryDelayMilliseconds - waited));
+                }
+            }
+            return status;
+        }
+
         internal static bool IsConcurrentUpgrade(AICodedbCommandResult result)
         {
             if (result == null || result.ExitCode != 4 || result.TimedOut)
@@ -503,17 +993,19 @@ namespace Rice.AI.Codedb.Editor
             return combined.IndexOf("Another payload materialization is active", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static AICodedbHostPayloadStatus BuildHostPayloadStatus(AICodedbCommandResult result)
+        private static AICodedbHostPayloadStatus BuildHostPayloadStatus(
+            AICodedbCommandResult result,
+            AICodedbEditorExecutionContext context)
         {
             return AICodedbHostPayloadStatusBuilder.Build(
-                File.Exists(AICodedbPaths.HostPayloadMarkerPath),
+                File.Exists(context.GetProjectPath(AICodedbProjectSettings.HostPayloadMarkerRelativePath)),
                 result,
-                GetCurrentHostGenerationId());
+                GetCurrentHostGenerationId(context));
         }
 
-        private static string GetCurrentHostGenerationId()
+        private static string GetCurrentHostGenerationId(AICodedbEditorExecutionContext context)
         {
-            var generation = AICodedbPaths.HostGeneration;
+            var generation = AICodedbHostGenerationStore.Resolve(context.ProjectRoot);
             return generation.State == AICodedbHostGenerationState.Current
                 ? generation.GenerationId
                 : string.Empty;
@@ -579,29 +1071,140 @@ namespace Rice.AI.Codedb.Editor
             return true;
         }
 
-        private static void PublishLease()
+        private static string CaptureMachinePrerequisiteEvidenceFingerprint(
+            AICodedbEditorExecutionContext context)
         {
+            var providerExecutablePath = context.MachineProviderExecutablePath;
+            var providerManifestPath = string.IsNullOrWhiteSpace(providerExecutablePath)
+                ? string.Empty
+                : Path.Combine(Path.GetDirectoryName(providerExecutablePath), "provider-manifest.json");
+            return CreateMachinePrerequisiteEvidenceFingerprint(
+                Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Process),
+                Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User),
+                Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Machine),
+                providerManifestPath,
+                providerExecutablePath);
+        }
+
+        internal static string CreateMachinePrerequisiteEvidenceFingerprint(
+            string processPath,
+            string userPath,
+            string machinePath,
+            string providerManifestPath,
+            string providerExecutablePath)
+        {
+            var evidence = new StringBuilder();
+            evidence.Append("process_path=").Append(processPath ?? string.Empty).Append('\n');
+            evidence.Append("user_path=").Append(userPath ?? string.Empty).Append('\n');
+            evidence.Append("machine_path=").Append(machinePath ?? string.Empty).Append('\n');
+            AppendPrerequisiteFileEvidence(evidence, "provider_manifest", providerManifestPath);
+            AppendPrerequisiteFileEvidence(evidence, "provider_executable", providerExecutablePath);
+            using (var sha256 = SHA256.Create())
+            {
+                var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(evidence.ToString()));
+                var result = new StringBuilder(bytes.Length * 2);
+                foreach (var value in bytes)
+                    result.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+                return result.ToString();
+            }
+        }
+
+        private static void AppendPrerequisiteFileEvidence(
+            StringBuilder evidence,
+            string label,
+            string path)
+        {
+            evidence.Append(label).Append("_path=").Append(path ?? string.Empty).Append('\n');
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                evidence.Append(label).Append("_state=missing\n");
+                return;
+            }
             try
             {
-                Directory.CreateDirectory(AICodedbPaths.WatchEditorLeasesPath);
-                var document = new EditorLeaseDocument
+                var file = new FileInfo(path);
+                file.Refresh();
+                if (!file.Exists)
                 {
-                    schema_version = LeaseSchemaVersion,
-                    managed_by = ManagedBy,
-                    session_id = _sessionId,
-                    editor_pid = _editorPid,
-                    process_start_ticks = _processStartTicks,
-                    project_root = _projectRoot,
-                    project_identity = _projectIdentity,
-                    created_at_utc = _sessionCreatedAtUtc,
-                    heartbeat_at_utc = DateTime.UtcNow.ToString("o")
-                };
-                WriteJsonAtomic(_leasePath, JsonUtility.ToJson(document, true) + "\n");
+                    evidence.Append(label).Append("_state=missing\n");
+                    return;
+                }
+                evidence.Append(label).Append("_state=present\n");
+                evidence.Append(label).Append("_length=").Append(file.Length).Append('\n');
+                evidence.Append(label).Append("_write_ticks=")
+                    .Append(file.LastWriteTimeUtc.Ticks)
+                    .Append('\n');
+                evidence.Append(label).Append("_attributes=")
+                    .Append(((int)file.Attributes).ToString(CultureInfo.InvariantCulture))
+                    .Append('\n');
             }
             catch (Exception exception)
             {
-                Debug.LogWarning($"CodeDB Editor lease heartbeat failed: {exception.Message}");
+                evidence.Append(label).Append("_state=unreadable:")
+                    .Append(exception.GetType().FullName)
+                    .Append('\n');
             }
+        }
+
+        private static void RefreshProcessPathFromMachineEvidence()
+        {
+            var processPath = Environment.GetEnvironmentVariable(
+                "PATH",
+                EnvironmentVariableTarget.Process);
+            var userPath = Environment.GetEnvironmentVariable(
+                "PATH",
+                EnvironmentVariableTarget.User);
+            var machinePath = Environment.GetEnvironmentVariable(
+                "PATH",
+                EnvironmentVariableTarget.Machine);
+            var mergedPath = MergePrerequisitePathEvidence(processPath, userPath, machinePath);
+            if (!string.IsNullOrWhiteSpace(mergedPath))
+                Environment.SetEnvironmentVariable(
+                    "PATH",
+                    mergedPath,
+                    EnvironmentVariableTarget.Process);
+        }
+
+        internal static string MergePrerequisitePathEvidence(
+            string processPath,
+            string userPath,
+            string machinePath)
+        {
+            var paths = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var value in new[] { processPath, userPath, machinePath })
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    continue;
+                foreach (var entry in value.Split(Path.PathSeparator))
+                {
+                    var normalized = entry.Trim().Trim('"');
+                    if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
+                        continue;
+                    paths.Add(normalized);
+                }
+            }
+            return string.Join(Path.PathSeparator.ToString(), paths.ToArray());
+        }
+
+        private static void PublishLease()
+        {
+            if (string.IsNullOrWhiteSpace(_leasePath))
+                return;
+            Directory.CreateDirectory(Path.GetDirectoryName(_leasePath));
+            var document = new EditorLeaseDocument
+            {
+                schema_version = LeaseSchemaVersion,
+                managed_by = ManagedBy,
+                session_id = _sessionId,
+                editor_pid = _editorPid,
+                process_start_ticks = _processStartTicks,
+                project_root = _projectRoot,
+                project_identity = _projectIdentity,
+                created_at_utc = _sessionCreatedAtUtc,
+                heartbeat_at_utc = DateTime.UtcNow.ToString("o")
+            };
+            WriteJsonAtomic(_leasePath, JsonUtility.ToJson(document, true) + "\n");
         }
 
         internal static string ValidateProjectRoot(string projectRoot)
@@ -810,6 +1413,33 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        private sealed class LifecycleReconcileResult
+        {
+            internal bool HasProductState { get; private set; }
+            internal AICodedbProductState ProductState { get; set; }
+            internal bool RetrySoon { get; set; }
+            internal string Warning { get; set; }
+
+            internal static LifecycleReconcileResult WithState(AICodedbProductState state)
+            {
+                return new LifecycleReconcileResult
+                {
+                    HasProductState = true,
+                    ProductState = state,
+                    Warning = string.Empty
+                };
+            }
+
+            internal static LifecycleReconcileResult WithWarning(
+                AICodedbProductState state,
+                string warning)
+            {
+                var result = WithState(state);
+                result.Warning = warning ?? string.Empty;
+                return result;
+            }
+        }
+
         [Serializable]
         internal sealed class EditorLeaseDocument
         {
@@ -852,6 +1482,37 @@ namespace Rice.AI.Codedb.Editor
             public int coordinator_pid;
             public string generation_id;
             public string root;
+        }
+    }
+
+    internal sealed class AICodedbEditorBackgroundScheduler
+    {
+        private int _maintenanceSuspended;
+
+        internal bool IsMaintenanceSuspended => Volatile.Read(ref _maintenanceSuspended) != 0;
+
+        internal void SetMaintenanceSuspended(bool suspended)
+        {
+            Interlocked.Exchange(ref _maintenanceSuspended, suspended ? 1 : 0);
+        }
+
+        internal Task<T> QueueMaintenance<T>(Func<Func<bool>, T> work)
+        {
+            if (work == null)
+                throw new ArgumentNullException(nameof(work));
+            return Task.Run(() =>
+            {
+                if (IsMaintenanceSuspended)
+                    return default(T);
+                return work(() => !IsMaintenanceSuspended);
+            });
+        }
+
+        internal Task QueueLease(Action work)
+        {
+            if (work == null)
+                throw new ArgumentNullException(nameof(work));
+            return Task.Run(work);
         }
     }
 }

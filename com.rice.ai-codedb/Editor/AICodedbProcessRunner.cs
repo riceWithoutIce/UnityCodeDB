@@ -166,6 +166,21 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunPowerShellScript(string scriptPath, int timeoutMilliseconds, params string[] scriptArguments)
         {
             return RunPowerShellScript(
+                AICodedbPaths.CaptureExecutionContext(),
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                scriptArguments);
+        }
+
+        internal static AICodedbCommandResult RunPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
                 scriptPath,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ProjectLocal,
@@ -182,6 +197,20 @@ namespace Rice.AI.Codedb.Editor
             params string[] scriptArguments)
         {
             return RunPowerShellScript(
+                AICodedbPaths.CaptureExecutionContext(),
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
+        }
+
+        internal static AICodedbCommandResult RunResolvedPackageMaterializerPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
                 string.Empty,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
@@ -200,6 +229,21 @@ namespace Rice.AI.Codedb.Editor
             params string[] scriptArguments)
         {
             return RunPowerShellScriptAsync(
+                AICodedbPaths.CaptureExecutionContext(),
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                scriptArguments);
+        }
+
+        internal static Task<AICodedbCommandResult> RunPowerShellScriptAsync(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsync(
+                context,
                 scriptPath,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ProjectLocal,
@@ -216,6 +260,20 @@ namespace Rice.AI.Codedb.Editor
             params string[] scriptArguments)
         {
             return RunPowerShellScriptAsync(
+                AICodedbPaths.CaptureExecutionContext(),
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
+        }
+
+        internal static Task<AICodedbCommandResult> RunResolvedPackageMaterializerPowerShellScriptAsync(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsync(
+                context,
                 string.Empty,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
@@ -223,12 +281,13 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static AICodedbCommandResult RunPowerShellScript(
+            AICodedbEditorExecutionContext context,
             string scriptPath,
             int timeoutMilliseconds,
             PowerShellScriptPathPolicy pathPolicy,
             string[] scriptArguments)
         {
-            if (Application.platform != RuntimePlatform.WindowsEditor)
+            if (context.Platform != RuntimePlatform.WindowsEditor)
                 return UnsupportedPlatformResult();
 
             if (timeoutMilliseconds <= 0)
@@ -238,6 +297,7 @@ namespace Rice.AI.Codedb.Editor
             string authorizationError;
             if (!TryAuthorizePowerShellScriptPath(
                     pathPolicy,
+                    context,
                     scriptPath,
                     out normalizedScriptPath,
                     out authorizationError))
@@ -246,40 +306,30 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return RunProcess(
-                BuildPowerShellStartInfo(normalizedScriptPath, scriptArguments),
+                BuildPowerShellStartInfo(context, normalizedScriptPath, scriptArguments),
                 timeoutMilliseconds);
         }
 
         private static Task<AICodedbCommandResult> RunPowerShellScriptAsync(
+            AICodedbEditorExecutionContext context,
             string scriptPath,
             int timeoutMilliseconds,
             PowerShellScriptPathPolicy pathPolicy,
             string[] scriptArguments)
         {
-            if (Application.platform != RuntimePlatform.WindowsEditor)
+            if (context.Platform != RuntimePlatform.WindowsEditor)
                 return Task.FromResult(UnsupportedPlatformResult());
 
             if (timeoutMilliseconds <= 0)
                 timeoutMilliseconds = DefaultTimeoutMilliseconds;
 
-            string normalizedScriptPath;
-            string authorizationError;
-            if (!TryAuthorizePowerShellScriptPath(
-                    pathPolicy,
-                    scriptPath,
-                    out normalizedScriptPath,
-                    out authorizationError))
-            {
-                return Task.FromResult(new AICodedbCommandResult(
-                    -1,
-                    string.Empty,
-                    authorizationError,
-                    false));
-            }
-
-            var startInfo = BuildPowerShellStartInfo(normalizedScriptPath, scriptArguments);
             var effectiveTimeout = timeoutMilliseconds;
-            return Task.Run(() => RunProcess(startInfo, effectiveTimeout));
+            return Task.Run(() => RunPowerShellScript(
+                context,
+                scriptPath,
+                effectiveTimeout,
+                pathPolicy,
+                scriptArguments));
         }
 
         private static AICodedbCommandResult UnsupportedPlatformResult()
@@ -293,6 +343,7 @@ namespace Rice.AI.Codedb.Editor
 
         private static bool TryAuthorizePowerShellScriptPath(
             PowerShellScriptPathPolicy pathPolicy,
+            AICodedbEditorExecutionContext context,
             string scriptPath,
             out string normalizedScriptPath,
             out string error)
@@ -304,7 +355,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 if (pathPolicy == PowerShellScriptPathPolicy.ResolvedPackageMaterializer)
                 {
-                    var resolvedPackageRoot = AICodedbPaths.PackageRootPath;
+                    var resolvedPackageRoot = context.PackageRoot;
                     var materializerPath = AICodedbPaths.NormalizePath(Path.Combine(
                         resolvedPackageRoot,
                         AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
@@ -316,7 +367,7 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 normalizedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
-                if (!AICodedbPaths.IsInsideProject(normalizedScriptPath))
+                if (!IsInsideRoot(context.ProjectRoot, normalizedScriptPath))
                 {
                     error = $"Refusing to run a script outside the Unity project: {normalizedScriptPath}";
                     normalizedScriptPath = string.Empty;
@@ -325,7 +376,7 @@ namespace Rice.AI.Codedb.Editor
 
                 if (!File.Exists(normalizedScriptPath))
                 {
-                    error = $"Script not found: {AICodedbPaths.ToProjectRelativeDisplayPath(normalizedScriptPath)}";
+                    error = $"Script not found: {ToRootRelativeDisplayPath(context.ProjectRoot, normalizedScriptPath)}";
                     normalizedScriptPath = string.Empty;
                     return false;
                 }
@@ -452,6 +503,7 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static ProcessStartInfo BuildPowerShellStartInfo(
+            AICodedbEditorExecutionContext context,
             string normalizedScriptPath,
             string[] scriptArguments)
         {
@@ -459,7 +511,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 FileName = "powershell.exe",
                 Arguments = BuildPowerShellArguments(normalizedScriptPath, scriptArguments),
-                WorkingDirectory = AICodedbPaths.ProjectRoot,
+                WorkingDirectory = context.ProjectRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -467,8 +519,26 @@ namespace Rice.AI.Codedb.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
-            startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = AICodedbPaths.ProjectRoot;
+            startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = context.ProjectRoot;
             return startInfo;
+        }
+
+        private static bool IsInsideRoot(string root, string path)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(root).TrimEnd('/', '\\');
+            var normalizedPath = AICodedbPaths.NormalizePath(path);
+            return string.Equals(normalizedRoot, normalizedPath, StringComparison.OrdinalIgnoreCase)
+                   || normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ToRootRelativeDisplayPath(string root, string path)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(root).TrimEnd('/', '\\');
+            var normalizedPath = AICodedbPaths.NormalizePath(path);
+            var prefix = normalizedRoot + "/";
+            return normalizedPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? normalizedPath.Substring(prefix.Length)
+                : normalizedPath;
         }
 
         /// <summary>

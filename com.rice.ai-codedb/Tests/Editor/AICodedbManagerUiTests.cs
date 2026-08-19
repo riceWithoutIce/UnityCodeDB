@@ -29,6 +29,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbProjectSettings.HostPayloadMarkerRelativePath, Is.EqualTo("AIWork/codedb/.rice-ai-codedb-payload.json"));
             Assert.That(AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath, Is.EqualTo("AIWork/.runtime/codedb/host/last-known-good.json"));
             Assert.That(AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/upgrade-state.json"));
+            Assert.That(AICodedbProjectSettings.ProjectIntegrationStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/integration-state.json"));
+            Assert.That(AICodedbProjectSettings.McpAvailabilityStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"));
             Assert.That(AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath, Is.EqualTo("Tools~/materialize-codedb-host-payload.ps1"));
         }
 
@@ -64,6 +66,186 @@ namespace Rice.AI.Codedb.Editor.Tests
                     "cwd = \".\"\n" +
                     "args = [\"AIWork/codedb/wrapper/codedb-project-wrapper.mjs\", \"--root\", \".\"]\n" +
                     "startup_timeout_sec = 120"));
+        }
+    }
+
+    internal sealed class AICodedbProductStatusTests
+    {
+        private static readonly AICodedbProjectIntegrationStatus Installed =
+            new AICodedbProjectIntegrationStatus(
+                AICodedbProjectIntegrationState.Installed,
+                AICodedbProjectCleanupState.None,
+                string.Empty,
+                "installed");
+
+        [Test]
+        public void Build_RequiresEveryProductLayerBeforeReady()
+        {
+            var result = Result(
+                "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                "[PRODUCT_LAYER MCP_AVAILABLE] PENDING\n" +
+                "[PRODUCT_STATE] READY\n");
+
+            var status = AICodedbProductStatusBuilder.Build(Installed, result);
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Starting));
+            Assert.That(status.Installed, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(status.Configured, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(status.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Pending));
+            Assert.That(status.IsReady, Is.False);
+        }
+
+        [Test]
+        public void CreateStarting_ManagerFirstFrameDoesNotRunOrClaimCompleteStatus()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateStarting("FixtureProject");
+
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.Starting));
+            Assert.That(snapshot.ProductStatus.IsReady, Is.False);
+            Assert.That(snapshot.HostPayloadStatus.Summary, Is.EqualTo("Checking"));
+            Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Starting"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("background"));
+        }
+
+        [Test]
+        public void Build_MapsVerifiedPackageHandshakeToReady()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                Result(
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n" +
+                    "[PRODUCT_STATE] READY\n"));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
+            Assert.That(status.IsReady, Is.True);
+        }
+
+        [Test]
+        public void Build_FailedCommandCannotClaimReady()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    8,
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n" +
+                    "[PRODUCT_STATE] READY\n",
+                    "probe failed",
+                    false));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(status.IsReady, Is.False);
+        }
+
+        [Test]
+        public void Build_UnavailableHandshakeNeedsAttention()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                Result(
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE - initialize failed\n" +
+                    "[PRODUCT_STATE] NEEDS_ATTENTION\n"));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(status.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Unavailable));
+        }
+
+        [TestCase(AICodedbProductState.Starting, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Ready, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, false, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, false, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Uninstalled, true, true, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, true, false, ExpectedResult = false)]
+        public bool ResolvePrimaryAction_ExposesOnlyOneContextualUserAction(
+            AICodedbProductState state,
+            bool reinstallAvailable,
+            bool actionInFlight)
+        {
+            return AICodedbManagerWindow.ResolvePrimaryAction(
+                state,
+                reinstallAvailable,
+                actionInFlight);
+        }
+
+        [Test]
+        public void Build_CombinesValidatedCommandResultWithReadiness()
+        {
+            const string command =
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"REPAIR\",\"outcome\":\"REPAIRED\",\"phase\":\"COMPLETE\",\"reason_code\":\"REPAIR_COMPLETE\",\"mutated_scopes\":[\"host_runtime\",\"mcp_registration\"],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Start a new Codex task.\",\"exit_code\":0,\"detail\":\"\"}";
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                Result(
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n" +
+                    "[PRODUCT_STATE] READY\n" +
+                    command));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
+            Assert.That(status.Command.Present, Is.True);
+            Assert.That(status.Command.IsValid, Is.True);
+            Assert.That(status.Command.Outcome, Is.EqualTo("REPAIRED"));
+            Assert.That(status.Command.MutatedScopes, Is.EqualTo(new[] { "host_runtime", "mcp_registration" }));
+        }
+
+        [Test]
+        public void Build_InvalidOrMismatchedCommandResultCannotClaimReady()
+        {
+            const string ready =
+                "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n" +
+                "[PRODUCT_STATE] READY\n";
+            const string mismatched =
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"REPAIR\",\"outcome\":\"REPAIRED\",\"phase\":\"COMPLETE\",\"reason_code\":\"REPAIR_COMPLETE\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"No action required.\",\"exit_code\":4,\"detail\":\"\"}";
+
+            var mismatchStatus = AICodedbProductStatusBuilder.Build(Installed, Result(ready + mismatched));
+            var duplicateStatus = AICodedbProductStatusBuilder.Build(
+                Installed,
+                Result(ready + mismatched + "\n" + mismatched));
+
+            Assert.That(mismatchStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(duplicateStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(duplicateStatus.Command.IsValid, Is.False);
+        }
+
+        [Test]
+        public void Build_MissingPrerequisitePreservesOneGuidanceAndNoFixAction()
+        {
+            const string command =
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"BLOCKED\",\"phase\":\"PREFLIGHT\",\"reason_code\":\"PROVIDER_MISSING\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Install the reviewed machine Provider, then let Unity recheck automatically.\",\"exit_code\":4,\"detail\":\"Provider missing.\"}";
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    4,
+                    "[PRODUCT_LAYER PREREQUISITE] MISSING - Provider missing.\n" +
+                    "[PRODUCT_STATE] MISSING_PREREQUISITE\n" +
+                    command,
+                    "Provider missing.",
+                    false));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.MissingPrerequisite));
+            Assert.That(status.Command.ReasonCode, Is.EqualTo("PROVIDER_MISSING"));
+            Assert.That(status.Command.MutatedScopes, Is.Empty);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+        }
+
+        private static AICodedbCommandResult Result(string output)
+        {
+            return new AICodedbCommandResult(0, output, string.Empty, false);
         }
     }
 
@@ -925,12 +1107,15 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [TestCase(AICodedbHostPayloadAction.DryRun, false)]
+        [TestCase(AICodedbHostPayloadAction.Probe, false)]
         [TestCase(AICodedbHostPayloadAction.Verify, false)]
         [TestCase(AICodedbHostPayloadAction.Upgrade, false)]
         [TestCase(AICodedbHostPayloadAction.Redeploy, true)]
         [TestCase(AICodedbHostPayloadAction.Repair, true)]
         [TestCase(AICodedbHostPayloadAction.Sync, true)]
         [TestCase(AICodedbHostPayloadAction.Remove, true)]
+        [TestCase(AICodedbHostPayloadAction.Uninstall, true)]
+        [TestCase(AICodedbHostPayloadAction.Install, true)]
         public void BuildScriptArguments_HaveNoVersionControlOrAuthorizationArguments(
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation)
@@ -947,6 +1132,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [TestCase(AICodedbHostPayloadAction.DryRun)]
+        [TestCase(AICodedbHostPayloadAction.Probe)]
         [TestCase(AICodedbHostPayloadAction.Verify)]
         [TestCase(AICodedbHostPayloadAction.Upgrade)]
         public void BuildScriptArguments_PackageManagedActionsRejectProjectConfirmation(
@@ -962,6 +1148,8 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostPayloadAction.Repair)]
         [TestCase(AICodedbHostPayloadAction.Sync)]
         [TestCase(AICodedbHostPayloadAction.Remove)]
+        [TestCase(AICodedbHostPayloadAction.Uninstall)]
+        [TestCase(AICodedbHostPayloadAction.Install)]
         public void BuildScriptArguments_ProjectMutationsRequireConfirmation(
             AICodedbHostPayloadAction action)
         {
@@ -1005,6 +1193,22 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void BuildScriptArguments_ProbeUsesExactPackageOwnedActionAndProjectRoot()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.Probe,
+                false);
+
+            Assert.That(arguments, Is.EqualTo(new[]
+            {
+                "-Action",
+                "Probe",
+                "-ProjectRoot",
+                AICodedbPaths.ProjectRoot
+            }));
+        }
+
+        [Test]
         public void BuildScriptArguments_RedeployUsesExactActionAndProjectRoot()
         {
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
@@ -1027,7 +1231,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var result = AICodedbHostPayloadMaterializer.RunRedeploy(false);
 
             Assert.That(result.Succeeded, Is.False);
-            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."));
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, and Install require second-level project mutation confirmation."));
         }
 
         [Test]
@@ -1036,7 +1240,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var result = AICodedbActions.RunHostPayloadRedeploy(false);
 
             Assert.That(result.Succeeded, Is.False);
-            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."));
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, and Install require second-level project mutation confirmation."));
         }
 
         [Test]
@@ -1050,6 +1254,24 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 "-Action",
                 "Repair",
+                "-ProjectRoot",
+                AICodedbPaths.ProjectRoot,
+                "-ConfirmedProjectMutation"
+            }));
+        }
+
+        [TestCase(AICodedbHostPayloadAction.Uninstall, "Uninstall")]
+        [TestCase(AICodedbHostPayloadAction.Install, "Install")]
+        public void BuildScriptArguments_ProjectIntegrationActionsUseExactConfirmedContract(
+            AICodedbHostPayloadAction action,
+            string actionName)
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(action, true);
+
+            Assert.That(arguments, Is.EqualTo(new[]
+            {
+                "-Action",
+                actionName,
                 "-ProjectRoot",
                 AICodedbPaths.ProjectRoot,
                 "-ConfirmedProjectMutation"
@@ -1163,6 +1385,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.Phase, Is.EqualTo(expectedPhase));
             Assert.That(status.DisplayState, Is.EqualTo(expectedState));
             Assert.That(status.GenerationId, Is.EqualTo("poc.22"));
+            Assert.That(status.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Complete));
             Assert.That(status.Summary, Is.EqualTo(phase + " / poc.22"));
             Assert.That(status.Detail, Is.EqualTo("upgrade detail"));
         }
@@ -1177,6 +1400,56 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
             Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+        }
+
+        [Test]
+        public void Parse_MapsPendingCleanupAndDefaultsLegacyFieldlessStateToComplete()
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var pending = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", projectRoot, "PENDING"),
+                projectRoot,
+                "upgrade-state.json");
+            var fieldless = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", projectRoot, null),
+                projectRoot,
+                "upgrade-state.json");
+
+            Assert.That(pending.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Current));
+            Assert.That(pending.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Pending));
+            Assert.That(fieldless.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Current));
+            Assert.That(fieldless.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Complete));
+        }
+
+        [TestCase("UNKNOWN")]
+        [TestCase("pending")]
+        public void Parse_FailsClosedForInvalidCleanupState(string cleanupState)
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                UpgradeStateJson("CURRENT", projectRoot, cleanupState),
+                projectRoot,
+                "upgrade-state.json");
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(status.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Invalid));
+        }
+
+        [Test]
+        public void Parse_FailsClosedForWrongTypeCleanupState()
+        {
+            var projectRoot = AICodedbPaths.ProjectRoot;
+            var json = UpgradeStateJson("CURRENT", projectRoot)
+                .Replace("\"cleanup_state\":\"COMPLETE\"", "\"cleanup_state\":true");
+            var status = AICodedbHostUpgradeStatusStore.Parse(
+                json,
+                projectRoot,
+                "upgrade-state.json");
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(status.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Invalid));
         }
 
         [Test]
@@ -1212,7 +1485,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.ToStatusItem(true).State, Is.EqualTo(AICodedbStatusState.Inactive));
         }
 
-        private static string UpgradeStateJson(string phase, string projectRoot)
+        private static string UpgradeStateJson(
+            string phase,
+            string projectRoot,
+            string cleanupState = "COMPLETE")
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot);
             return "{\"schema_version\":1," +
@@ -1220,6 +1496,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                    "\"project_root\":\"" + normalizedRoot + "\"," +
                    "\"state\":\"" + phase + "\"," +
                    "\"generation_id\":\"poc.22\"," +
+                   (cleanupState == null ? string.Empty : "\"cleanup_state\":\"" + cleanupState + "\",") +
                    "\"updated_at_utc\":\"" + DateTime.UtcNow.ToString("o") + "\"," +
                    "\"message\":\"upgrade detail\"}";
         }
@@ -1233,51 +1510,83 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Conflict, AICodedbHostUpgradePhase.CheckFailed)]
         [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Rollback)]
         [TestCase(AICodedbHostGenerationState.Current, AICodedbHostPayloadState.Current, AICodedbHostUpgradePhase.Current)]
-        public void RepairCodeDB_RemainsAvailableAcrossRecoveryStates(
+        public void ReinstallCodeDB_RemainsAvailableAcrossRecoveryStates(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
             AICodedbHostUpgradePhase upgradePhase)
         {
             Assert.That(
-                AICodedbManagerWindow.IsRepairCodeDBAvailable(generationState, payloadState, upgradePhase),
+                AICodedbManagerWindow.IsReinstallCodeDBAvailable(generationState, payloadState, upgradePhase),
                 Is.True);
         }
 
         [Test]
-        public void RepairCodeDB_CancelDoesNotInvokeRecoveryAction()
+        public void ReinstallCodeDB_CancelDoesNotInvokeRecoveryAction()
         {
             var confirmationCount = 0;
-            var repairCount = 0;
+            var reinstallCount = 0;
 
-            var ran = AICodedbManagerWindow.ConfirmAndRunRepairCodeDB(
+            var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
                 () =>
                 {
                     confirmationCount++;
                     return false;
                 },
-                () => repairCount++);
+                () => reinstallCount++);
 
             Assert.That(ran, Is.False);
             Assert.That(confirmationCount, Is.EqualTo(1));
-            Assert.That(repairCount, Is.Zero);
+            Assert.That(reinstallCount, Is.Zero);
         }
 
         [Test]
-        public void RepairCodeDB_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
+        public void ReinstallCodeDB_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
         {
-            var repairCount = 0;
+            var reinstallCount = 0;
 
-            var ran = AICodedbManagerWindow.ConfirmAndRunRepairCodeDB(
+            var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
                 () => true,
-                () => repairCount++);
+                () => reinstallCount++);
 
             Assert.That(ran, Is.True);
-            Assert.That(repairCount, Is.EqualTo(1));
-            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationTitle, Is.EqualTo("Repair CodeDB"));
-            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("AIWork/.runtime/codedb/host/"));
-            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("unrelated MCP tables, keys, comments, and ordering are preserved"));
-            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("External MCP clients are never terminated"));
-            Assert.That(AICodedbManagerWindow.RepairCodeDBConfirmationMessage, Does.Contain("may require a new session"));
+            Assert.That(reinstallCount, Is.EqualTo(1));
+            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationTitle, Is.EqualTo("Reinstall CodeDB"));
+            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("fresh project-local instance"));
+            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("unrelated MCP content"));
+            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("External MCP clients and unrelated processes are never terminated"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void UninstallCodeDB_ConfirmationControlsExactlyOneProjectAction(bool confirmed)
+        {
+            var actionCount = 0;
+
+            var ran = AICodedbManagerWindow.ConfirmAndRunUninstallCodeDB(
+                () => confirmed,
+                () => actionCount++);
+
+            Assert.That(ran, Is.EqualTo(confirmed));
+            Assert.That(actionCount, Is.EqualTo(confirmed ? 1 : 0));
+            Assert.That(AICodedbManagerWindow.UninstallCodeDBConfirmationTitle, Is.EqualTo("Uninstall CodeDB from Project"));
+            Assert.That(AICodedbManagerWindow.UninstallCodeDBConfirmationMessage, Does.Contain("Package remains installed"));
+            Assert.That(AICodedbManagerWindow.UninstallCodeDBConfirmationMessage, Does.Contain("external processes are preserved"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void InstallCodeDB_ConfirmationControlsExactlyOneProjectAction(bool confirmed)
+        {
+            var actionCount = 0;
+
+            var ran = AICodedbManagerWindow.ConfirmAndRunInstallCodeDB(
+                () => confirmed,
+                () => actionCount++);
+
+            Assert.That(ran, Is.EqualTo(confirmed));
+            Assert.That(actionCount, Is.EqualTo(confirmed ? 1 : 0));
+            Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationTitle, Is.EqualTo("Install CodeDB"));
+            Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationMessage, Does.Contain("clear the UNINSTALLED project state"));
         }
 
         [TestCase("Enable")]

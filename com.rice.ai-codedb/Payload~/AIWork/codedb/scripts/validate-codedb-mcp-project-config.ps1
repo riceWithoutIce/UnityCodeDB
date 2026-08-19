@@ -121,7 +121,7 @@ if (-not (Test-Path -LiteralPath $projectConfigPath)) {
 } else {
     $config = Get-Content -LiteralPath $projectConfigPath -Raw
     $providerPaths = Get-ProjectCodedbProviderPaths -Context $context
-    $relativeExePath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $providerPaths.ExecutablePath
+    $relativeExePath = ConvertTo-CodedbDisplayPath -Context $context -Path $providerPaths.ExecutablePath
     $relativeConfigPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $providerPaths.ConfigPath
     $relativeWrapperPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $context.WrapperScriptPath
     $compatibilityWrapperPath = Join-Path $context.CodedbRoot "wrapper\codedb-$($context.ProjectSlug)-wrapper.mjs"
@@ -180,7 +180,7 @@ if (-not (Test-Path -LiteralPath $projectConfigPath)) {
     try {
         $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context
         Assert-ProjectCodedbRuntimeConfig -Context $context -ProviderPaths $providerPaths
-        Record-Pass "Referenced provider executable and config are present under project-local runtime."
+        Record-Pass "Referenced machine Provider and project-local runtime config are valid."
     } catch {
         Record-Failure $_.Exception.Message
     }

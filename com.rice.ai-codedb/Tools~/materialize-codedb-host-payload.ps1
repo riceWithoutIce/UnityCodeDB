@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "Repair")]
+    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -38,7 +38,27 @@ param(
     [string]$TestRepairMarkerPublishedEventName,
 
     [ValidatePattern('^RiceAICodeDBRepair[A-Za-z0-9._-]{1,96}$')]
-    [string]$TestRepairContinueEventName
+    [string]$TestRepairContinueEventName,
+
+    [ValidateRange(0, 2147483647)]
+    [int]$TestProcessIdentityUnavailableForPid = 0,
+
+    [ValidatePattern('^RiceAICodeDBUninstall[A-Za-z0-9._-]{1,96}$')]
+    [string]$TestUninstallMcpPublishedEventName,
+
+    [ValidatePattern('^RiceAICodeDBUninstall[A-Za-z0-9._-]{1,96}$')]
+    [string]$TestUninstallContinueEventName,
+
+    [ValidatePattern('^RiceAICodeDBInstall[A-Za-z0-9._-]{1,96}$')]
+    [string]$TestInstallRepairCompletedEventName,
+
+    [ValidatePattern('^RiceAICodeDBInstall[A-Za-z0-9._-]{1,96}$')]
+    [string]$TestInstallContinueEventName,
+
+    [ValidatePattern('^RiceAICodeDBCleanup[A-Za-z0-9._-]{1,96}$')]
+    [string]$TestAutomaticCleanupStateCapturedEventName,
+
+    [switch]$TestFailInstanceCandidate
 )
 
 Set-StrictMode -Version Latest
@@ -48,7 +68,7 @@ $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:MarkerSchemaVersion = 2
 $script:TargetPrefix = "AIWork/codedb/"
-$script:GenerationId = "poc.30"
+$script:GenerationId = "poc.32"
 $script:BootstrapProtocol = 1
 $script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
 $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
@@ -59,6 +79,19 @@ $script:RuntimeRelativePath = "AIWork/.runtime/codedb/payload-materializer"
 $script:McpConfigRelativePath = ".codex/config.toml"
 $script:McpConfigBackupDirectoryName = "mcp-config-backups"
 $script:McpConfigBackupRelativePath = "$($script:RuntimeRelativePath)/$($script:McpConfigBackupDirectoryName)"
+$script:IntegrationStateRelativePath = "$($script:RuntimeRelativePath)/integration-state.json"
+$script:IntegrationStateSchemaVersion = 1
+$script:McpAvailabilityRelativePath = "$($script:RuntimeRelativePath)/mcp-availability.json"
+$script:McpAvailabilitySchemaVersion = 2
+$script:McpAvailabilityProbeName = "probe-codedb-mcp-availability.mjs"
+$script:ExpectedMcpTools = @(
+    "codedb_context",
+    "codedb_find",
+    "codedb_read",
+    "codedb_search",
+    "codedb_status",
+    "codedb_text_search"
+)
 $script:LegacyWatcherStopClientName = "stop-codedb-legacy-watcher.mjs"
 $script:PocFixtureMarkerName = ".rice-ai-codedb-poc-fixture.json"
 $script:HistoricalRuntimeDirectoryName = "authorizations"
@@ -71,12 +104,21 @@ $script:TransactionPrefix = "txn-v1-"
 $script:TransactionJournalName = "transaction.json"
 $script:RequestedExitCode = 0
 $script:MutationCount = 0
+$script:MachinePrerequisiteStatus = $null
+$script:CommandResultWritten = $false
+$script:CommandPhase = "PREFLIGHT"
+$script:CommandOutcome = ""
+$script:CommandReasonCode = ""
+$script:CommandCleanupState = ""
+$script:CommandNextAction = ""
+$script:CommandMutatedScopes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $script:AllowedTargetPaths = @{}
 $script:AllowedGenerationRelativePaths = @{}
 foreach ($allowedTarget in @(
     "AIWork/codedb/codedb-mcp.runtime.example.toml",
     "AIWork/codedb/codedbignore.example",
     "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
+    "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
     "AIWork/codedb/shared/codedb-host-use-gate.mjs",
     "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
     "AIWork/codedb/scripts/build-codedb-project-text-adapter.ps1",
@@ -119,12 +161,120 @@ foreach ($generationTarget in @(
     "scripts/show-codedb-project-provider-guidance.ps1",
     "scripts/validate-codedb-mcp-project-config.ps1",
     "scripts/verify-codedb-project.ps1",
-    "shared/codedb-host-use-gate.mjs"
+    "shared/codedb-machine-provider-contract.ps1",
+    "shared/codedb-host-use-gate.mjs",
+    "wrapper/codedb-project-instance-worker.mjs"
 )) {
     $script:AllowedGenerationRelativePaths[$generationTarget] = $true
     $script:AllowedTargetPaths[$script:GenerationTargetPrefix + $generationTarget] = $true
 }
 $script:AllowedTargetPaths[$script:CurrentPointerRelativePath] = $true
+
+function Test-MaterializerMutationAction {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return $Name -cin @("Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")
+}
+
+function Set-MaterializerCommandPhase {
+    param([Parameter(Mandatory = $true)][ValidatePattern('^[A-Z][A-Z0-9_]{0,63}$')][string]$Phase)
+
+    $script:CommandPhase = $Phase
+}
+
+function Add-MaterializerMutationScope {
+    param([Parameter(Mandatory = $true)][ValidatePattern('^[a-z][a-z0-9_]{0,63}$')][string]$Scope)
+
+    $null = $script:CommandMutatedScopes.Add($Scope)
+    if ([string]::Equals($script:CommandPhase, "PREFLIGHT", [StringComparison]::Ordinal)) {
+        $script:CommandPhase = "MUTATION"
+    }
+}
+
+function Set-MaterializerCommandOutcome {
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Z][A-Z0-9_]{0,63}$')][string]$Outcome,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Z][A-Z0-9_]{0,63}$')][string]$ReasonCode,
+        [Parameter(Mandatory = $true)][ValidateSet("COMPLETE", "PENDING")][string]$CleanupState,
+        [Parameter(Mandatory = $true)][string]$NextAction
+    )
+
+    $script:CommandOutcome = $Outcome
+    $script:CommandReasonCode = $ReasonCode
+    $script:CommandCleanupState = $CleanupState
+    $script:CommandNextAction = $NextAction
+}
+
+function Write-MaterializerCommandResult {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [AllowEmptyString()][string]$ErrorDetail = ""
+    )
+
+    if ($script:CommandResultWritten -or -not (Test-MaterializerMutationAction -Name $Action)) {
+        return
+    }
+
+    $succeeded = $ExitCode -eq 0
+    $outcome = $script:CommandOutcome
+    if ([string]::IsNullOrWhiteSpace($outcome)) {
+        if (-not $succeeded) {
+            $outcome = "BLOCKED"
+        } else {
+            $outcome = switch ($Action) {
+                "Repair" { "REPAIRED" }
+                "Install" { "INSTALLED" }
+                "Uninstall" { "UNINSTALLED" }
+                "Remove" { "REMOVED" }
+                default { "CONVERGED" }
+            }
+        }
+    }
+
+    $reasonCode = $script:CommandReasonCode
+    if ([string]::IsNullOrWhiteSpace($reasonCode)) {
+        if ($null -ne $script:MachinePrerequisiteStatus -and -not $script:MachinePrerequisiteStatus.Current) {
+            $reasonCode = [string]$script:MachinePrerequisiteStatus.ReasonCode
+        } elseif ($succeeded) {
+            $reasonCode = "ACTION_COMPLETE"
+        } else {
+            $reasonCode = "MATERIALIZER_EXIT_$ExitCode"
+        }
+    }
+
+    $cleanupState = $script:CommandCleanupState
+    if ([string]::IsNullOrWhiteSpace($cleanupState)) {
+        $cleanupState = if ($succeeded -or $script:CommandMutatedScopes.Count -eq 0) { "COMPLETE" } else { "PENDING" }
+    }
+    $nextAction = $script:CommandNextAction
+    if ([string]::IsNullOrWhiteSpace($nextAction)) {
+        if (-not $succeeded -and $null -ne $script:MachinePrerequisiteStatus -and -not $script:MachinePrerequisiteStatus.Current) {
+            $nextAction = [string]$script:MachinePrerequisiteStatus.NextAction
+        } elseif ($succeeded) {
+            $nextAction = "No action required."
+        } else {
+            $nextAction = "Review the reported CodeDB diagnostic, then retry the same confirmed action once."
+        }
+    }
+
+    $phase = $script:CommandPhase
+    if ([string]::IsNullOrWhiteSpace($phase)) { $phase = "PREFLIGHT" }
+    $result = [ordered]@{
+        schema_version = 1
+        managed_by = $script:ManagedBy
+        action = $Action.ToUpperInvariant()
+        outcome = $outcome
+        phase = $phase
+        reason_code = $reasonCode
+        mutated_scopes = @($script:CommandMutatedScopes | Sort-Object)
+        cleanup_state = $cleanupState
+        next_action = $nextAction
+        exit_code = $ExitCode
+        detail = $ErrorDetail
+    }
+    Write-Host "[COMMAND_RESULT] $($result | ConvertTo-Json -Compress -Depth 5)"
+    $script:CommandResultWritten = $true
+}
 
 function Throw-MaterializerError {
     param(
@@ -181,7 +331,9 @@ function Invoke-BoundedNativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [ValidateRange(1, 120000)][int]$TimeoutMilliseconds = 35000
+        [ValidateRange(1, 600000)][int]$TimeoutMilliseconds = 35000,
+        [AllowNull()][hashtable]$Environment,
+        [AllowNull()][scriptblock]$WhileRunning
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -191,18 +343,37 @@ function Invoke-BoundedNativeProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    if ($null -ne $Environment) {
+        foreach ($name in $Environment.Keys) {
+            $startInfo.EnvironmentVariables[[string]$name] = [string]$Environment[$name]
+        }
+    }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
         $null = $process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            $process.Kill()
-            $process.WaitForExit()
-            $null = $stdoutTask.Result
-            $null = $stderrTask.Result
-            return [pscustomobject]@{ ExitCode = -1; StandardOutput = ''; StandardError = 'Package-owned native client timed out.'; TimedOut = $true }
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+        $nextHeartbeat = [DateTime]::UtcNow
+        while (-not ($process.HasExited -and $stdoutTask.IsCompleted -and $stderrTask.IsCompleted)) {
+            $remaining = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remaining -le 0) {
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
+                return [pscustomobject]@{ ExitCode = -1; StandardOutput = ''; StandardError = 'Package-owned native client timed out.'; TimedOut = $true }
+            }
+            if ($null -ne $WhileRunning -and [DateTime]::UtcNow -ge $nextHeartbeat) {
+                & $WhileRunning
+                $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(5)
+            }
+            if (-not $process.HasExited) {
+                $null = $process.WaitForExit([Math]::Min(250, $remaining))
+            } else {
+                Start-Sleep -Milliseconds ([Math]::Min(250, $remaining))
+            }
         }
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
@@ -211,7 +382,139 @@ function Invoke-BoundedNativeProcess {
             TimedOut = $false
         }
     } finally {
+        if ($null -ne $WhileRunning) {
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
+            } catch {
+                # The child may have exited between the check and cleanup.
+            }
+        }
         $process.Dispose()
+    }
+}
+
+function Invoke-BoundedNativeProcessWithFileOutput {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [ValidateRange(1, 600000)][int]$TimeoutMilliseconds = 35000,
+        [AllowNull()][hashtable]$Environment,
+        [AllowNull()][scriptblock]$WhileRunning
+    )
+
+    Assert-NoReparsePoint -Path $OutputRoot -Root $OutputRoot -Label "native process output root"
+    $token = [Guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path $OutputRoot "native-$token.stdout.log"
+    $stderrPath = Join-Path $OutputRoot "native-$token.stderr.log"
+    foreach ($path in @($stdoutPath, $stderrPath)) {
+        Assert-PathInside -Path $path -Root $OutputRoot -Label "native process output"
+        if (Test-Path -LiteralPath $path) {
+            throw "Native process output path collided with an existing file."
+        }
+    }
+
+    $argumentText = (@($Arguments | ForEach-Object { ConvertTo-NativeProcessArgument -Value $_ }) -join ' ')
+    $savedEnvironment = @{}
+    $process = $null
+    try {
+        if ($null -ne $Environment) {
+            foreach ($name in $Environment.Keys) {
+                $environmentName = [string]$name
+                $savedEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable(
+                    $environmentName,
+                    [EnvironmentVariableTarget]::Process)
+                [Environment]::SetEnvironmentVariable(
+                    $environmentName,
+                    [string]$Environment[$name],
+                    [EnvironmentVariableTarget]::Process)
+            }
+        }
+        try {
+            $process = Start-Process `
+                -FilePath $FilePath `
+                -ArgumentList $argumentText `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -PassThru
+            # Windows PowerShell 5.1 can release a short-lived Start-Process
+            # handle before ExitCode is read unless the handle is opened here.
+            $null = $process.Handle
+        } finally {
+            foreach ($name in $savedEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable(
+                    [string]$name,
+                    $savedEnvironment[$name],
+                    [EnvironmentVariableTarget]::Process)
+            }
+        }
+
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+        $nextHeartbeat = [DateTime]::UtcNow
+        while (-not $process.HasExited) {
+            $remaining = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remaining -le 0) {
+                $process.Kill()
+                $process.WaitForExit()
+                return [pscustomobject]@{
+                    ExitCode = -1
+                    StandardOutput = ''
+                    StandardError = 'Package-owned native client timed out.'
+                    TimedOut = $true
+                }
+            }
+            if ($null -ne $WhileRunning -and [DateTime]::UtcNow -ge $nextHeartbeat) {
+                & $WhileRunning
+                $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(5)
+            }
+            $null = $process.WaitForExit([Math]::Min(250, $remaining))
+        }
+        $process.WaitForExit()
+        $process.Refresh()
+
+        $maximumOutputBytes = 4 * 1024 * 1024
+        $readOutput = {
+            param([Parameter(Mandatory = $true)][string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+            Assert-NoReparsePoint -Path $Path -Root $OutputRoot -Label "native process output"
+            $file = Get-Item -LiteralPath $Path -Force
+            if ($file.Length -gt $maximumOutputBytes) {
+                return '[Package-owned native client output exceeded the diagnostic limit.]'
+            }
+            try {
+                return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::Default)
+            } catch [System.IO.IOException] {
+                return '[Package-owned native client output remained locked after the direct process exited.]'
+            }
+        }.GetNewClosure()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = & $readOutput -Path $stdoutPath
+            StandardError = & $readOutput -Path $stderrPath
+            TimedOut = $false
+        }
+    } finally {
+        if ($null -ne $process) {
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
+            } catch {
+                # The direct child may have exited between the check and cleanup.
+            }
+            $process.Dispose()
+        }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                try { Remove-Item -LiteralPath $path -Force } catch { }
+            }
+        }
     }
 }
 
@@ -284,6 +587,66 @@ function Invoke-TestRepairAfterMarkerHandshake {
         }
     } finally {
         if ($null -ne $continueEvent) { $continueEvent.Dispose() }
+        if ($null -ne $readyEvent) { $readyEvent.Dispose() }
+    }
+}
+
+function Invoke-TestUninstallAfterMcpHandshake {
+    if ([string]::IsNullOrWhiteSpace($TestUninstallMcpPublishedEventName)) {
+        return
+    }
+
+    $readyEvent = $null
+    $continueEvent = $null
+    try {
+        $readyEvent = [System.Threading.EventWaitHandle]::OpenExisting($TestUninstallMcpPublishedEventName)
+        $continueEvent = [System.Threading.EventWaitHandle]::OpenExisting($TestUninstallContinueEventName)
+        if (-not $readyEvent.Set()) {
+            throw "Uninstall MCP-published fixture event could not be signaled."
+        }
+        if (-not $continueEvent.WaitOne(30000)) {
+            throw "Uninstall MCP-published fixture timed out waiting for continuation."
+        }
+    } finally {
+        if ($null -ne $continueEvent) { $continueEvent.Dispose() }
+        if ($null -ne $readyEvent) { $readyEvent.Dispose() }
+    }
+}
+
+function Invoke-TestInstallAfterRepairHandshake {
+    if ([string]::IsNullOrWhiteSpace($TestInstallRepairCompletedEventName)) {
+        return
+    }
+
+    $readyEvent = $null
+    $continueEvent = $null
+    try {
+        $readyEvent = [System.Threading.EventWaitHandle]::OpenExisting($TestInstallRepairCompletedEventName)
+        $continueEvent = [System.Threading.EventWaitHandle]::OpenExisting($TestInstallContinueEventName)
+        if (-not $readyEvent.Set()) {
+            throw "Install Repair-completed fixture event could not be signaled."
+        }
+        if (-not $continueEvent.WaitOne(30000)) {
+            throw "Install Repair-completed fixture timed out waiting for continuation."
+        }
+    } finally {
+        if ($null -ne $continueEvent) { $continueEvent.Dispose() }
+        if ($null -ne $readyEvent) { $readyEvent.Dispose() }
+    }
+}
+
+function Invoke-TestAutomaticCleanupStateCapturedSignal {
+    if ([string]::IsNullOrWhiteSpace($TestAutomaticCleanupStateCapturedEventName)) {
+        return
+    }
+
+    $readyEvent = $null
+    try {
+        $readyEvent = [System.Threading.EventWaitHandle]::OpenExisting($TestAutomaticCleanupStateCapturedEventName)
+        if (-not $readyEvent.Set()) {
+            throw "Automatic cleanup state-captured fixture event could not be signaled."
+        }
+    } finally {
         if ($null -ne $readyEvent) { $readyEvent.Dispose() }
     }
 }
@@ -392,7 +755,20 @@ function ConvertTo-AbsoluteChildPath {
 function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        return (($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Get-TextSha256 {
@@ -419,6 +795,10 @@ function Get-PayloadContentIdentitySha256 {
     $lines.Add("bootstrap_protocol=$($Manifest.BootstrapProtocol)")
     foreach ($target in @($Manifest.RetiredTargets | Sort-Object)) {
         $lines.Add("retired=$target")
+    }
+    foreach ($transition in @($Manifest.BootstrapTransitions | Sort-Object SourcePayloadSequence, SourcePackageVersion)) {
+        $lines.Add(
+            "bootstrap_transition=$($transition.SourceMarkerSchemaVersion):$($transition.SourcePackageVersion):$($transition.SourcePayloadVersion):$($transition.SourcePayloadSequence):$($transition.SourceGenerationId):$($transition.SourceBootstrapProtocol):$($transition.SourceHostUseGateVersion):$($transition.SourceGenerationLeaseVersion):$($transition.SourceFlatFileCount):$($transition.SourceFlatClosureSha256)")
     }
     foreach ($file in @($Manifest.Files | Sort-Object Target)) {
         if ([string]::Equals($file.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
@@ -851,7 +1231,7 @@ function Assert-PocMutationTarget {
         Throw-MaterializerError -Message "POC mutation target is outside the materializer fixture root: $Root" -ExitCode 4
     }
     $fixtureSuffix = $normalizedRoot.Substring($prefixIndex + $fixturePrefix.Length)
-    if ($fixtureSuffix -notmatch '^(?<run>[0-9a-fA-F]{32})/(?:fixture|repair-fixture|portability-fixture)$') {
+    if ($fixtureSuffix -notmatch '^(?<run>[0-9a-fA-F]{32})/(?:fixture|repair-fixture|uninstall-fixture|portability-fixture)$') {
         Throw-MaterializerError -Message "POC mutation target must match one reviewed materializer-poc/<run-id> fixture: $Root" -ExitCode 4
     }
     $runId = $Matches['run'].ToLowerInvariant()
@@ -926,6 +1306,7 @@ function Read-PayloadManifest {
     $payloadSequence = Get-RequiredJsonInt32 -Object $document -Name "payload_sequence" -Label "payload manifest"
     $generationId = Get-RequiredJsonString -Object $document -Name "generation_id" -Label "payload manifest"
     $bootstrapProtocol = Get-RequiredJsonInt32 -Object $document -Name "bootstrap_protocol" -Label "payload manifest"
+    $bootstrapTransitionDocuments = Get-RequiredJsonArray -Object $document -Name "bootstrap_transitions" -Label "payload manifest"
     $currentPointerTarget = Assert-TargetRelativePath -Path (Get-RequiredJsonString -Object $document -Name "current_pointer_target" -Label "payload manifest")
     $retiredTargets = Get-RequiredJsonArray -Object $document -Name "retired_targets" -Label "payload manifest"
     $manifestFiles = Get-RequiredJsonArray -Object $document -Name "files" -Label "payload manifest"
@@ -944,6 +1325,51 @@ function Read-PayloadManifest {
 
     $seenSources = @{}
     $seenTargets = @{}
+    $bootstrapTransitions = New-Object System.Collections.Generic.List[object]
+    $seenBootstrapTransitions = @{}
+    foreach ($entry in $bootstrapTransitionDocuments) {
+        $null = Assert-JsonObject -Value $entry -Label "payload bootstrap transition"
+        $sourceTag = Get-RequiredJsonString -Object $entry -Name "source_tag" -Label "payload bootstrap transition"
+        $sourcePackageVersion = Get-RequiredJsonString -Object $entry -Name "source_package_version" -Label "payload bootstrap transition"
+        $sourcePayloadVersion = Get-RequiredJsonString -Object $entry -Name "source_payload_version" -Label "payload bootstrap transition"
+        $sourcePayloadSequence = Get-RequiredJsonInt32 -Object $entry -Name "source_payload_sequence" -Label "payload bootstrap transition"
+        $sourceGenerationId = Get-RequiredJsonString -Object $entry -Name "source_generation_id" -Label "payload bootstrap transition"
+        $sourceBootstrapProtocol = Get-RequiredJsonInt32 -Object $entry -Name "source_bootstrap_protocol" -Label "payload bootstrap transition"
+        $sourceMarkerSchemaVersion = Get-RequiredJsonInt32 -Object $entry -Name "source_marker_schema_version" -Label "payload bootstrap transition"
+        $sourceHostUseGateVersion = Get-RequiredJsonInt32 -Object $entry -Name "source_host_use_gate_version" -Label "payload bootstrap transition"
+        $sourceGenerationLeaseVersion = Get-RequiredJsonInt32 -Object $entry -Name "source_generation_lease_version" -Label "payload bootstrap transition"
+        $sourceFlatFileCount = Get-RequiredJsonInt32 -Object $entry -Name "source_flat_file_count" -Label "payload bootstrap transition"
+        $sourceFlatClosureSha256 = (Get-RequiredJsonString -Object $entry -Name "source_flat_closure_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
+        $transitionKey = "$sourcePackageVersion|$sourcePayloadVersion|$sourcePayloadSequence|$sourceGenerationId"
+        if ($sourceTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$' -or
+            [string]::IsNullOrWhiteSpace($sourcePackageVersion) -or
+            [string]::IsNullOrWhiteSpace($sourcePayloadVersion) -or
+            $sourcePayloadSequence -lt 22 -or $sourcePayloadSequence -ge $payloadSequence -or
+            $sourceGenerationId -notmatch '^[A-Za-z0-9._-]{1,64}$' -or
+            $sourceBootstrapProtocol -lt 1 -or
+            $sourceMarkerSchemaVersion -notin @(1, $script:MarkerSchemaVersion) -or
+            $sourceHostUseGateVersion -lt 1 -or
+            $sourceGenerationLeaseVersion -lt 2 -or
+            $sourceFlatFileCount -lt 1 -or
+            $sourceFlatClosureSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $seenBootstrapTransitions.ContainsKey($transitionKey)) {
+            Throw-MaterializerError -Message "Payload manifest contains an invalid or duplicate bootstrap transition: $transitionKey" -ExitCode 2
+        }
+        $seenBootstrapTransitions[$transitionKey] = $true
+        $bootstrapTransitions.Add([pscustomobject]@{
+            SourceTag = $sourceTag
+            SourcePackageVersion = $sourcePackageVersion
+            SourcePayloadVersion = $sourcePayloadVersion
+            SourcePayloadSequence = $sourcePayloadSequence
+            SourceGenerationId = $sourceGenerationId
+            SourceBootstrapProtocol = $sourceBootstrapProtocol
+            SourceMarkerSchemaVersion = $sourceMarkerSchemaVersion
+            SourceHostUseGateVersion = $sourceHostUseGateVersion
+            SourceGenerationLeaseVersion = $sourceGenerationLeaseVersion
+            SourceFlatFileCount = $sourceFlatFileCount
+            SourceFlatClosureSha256 = $sourceFlatClosureSha256
+        })
+    }
     $retiredTargetMap = @{}
     foreach ($retiredTargetValue in $retiredTargets) {
         if ($retiredTargetValue -isnot [string]) {
@@ -1007,6 +1433,7 @@ function Read-PayloadManifest {
         PayloadSequence = $payloadSequence
         GenerationId = $generationId
         BootstrapProtocol = $bootstrapProtocol
+        BootstrapTransitions = $bootstrapTransitions.ToArray()
         CurrentPointerTarget = $currentPointerTarget
         RetiredTargets = @($retiredTargetMap.Keys | Sort-Object)
         RetiredTargetMap = $retiredTargetMap
@@ -1096,11 +1523,111 @@ function Assert-PayloadGenerationContract {
     }
 }
 
+function Get-MaterializerMachinePrerequisiteStatus {
+    param([Parameter(Mandatory = $true)]$Manifest)
+
+    $contractTarget = "AIWork/codedb/shared/codedb-machine-provider-contract.ps1"
+    if (-not $Manifest.TargetMap.ContainsKey($contractTarget)) {
+        Throw-MaterializerError -Message "Payload manifest is missing the machine Provider prerequisite contract." -ExitCode 2
+    }
+    $contractPath = [string]$Manifest.TargetMap[$contractTarget].SourcePath
+    try {
+        . $contractPath
+        return Get-CodedbMachinePrerequisiteStatus -PackageVersion $Manifest.PackageVersion
+    } catch {
+        return [pscustomobject]@{
+            Current = $false
+            State = "MISSING"
+            ReasonCode = "PREREQUISITE_CONTRACT_INVALID"
+            Detail = "The Package-owned machine prerequisite contract could not be evaluated: $($_.Exception.Message)"
+            NextAction = "Reinstall this CodeDB Package, then let Unity recheck automatically."
+            NodePath = ""
+            NodeVersion = ""
+            ProviderVersion = "0.5.0"
+            ProviderRoot = ""
+            ProviderManifestPath = ""
+            ProviderExecutablePath = ""
+        }
+    }
+}
+
+function Write-ReadinessSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Prerequisite,
+        [Parameter(Mandatory = $true)][string]$Installed,
+        [Parameter(Mandatory = $true)][string]$Configured,
+        [Parameter(Mandatory = $true)][string]$McpAvailable,
+        [Parameter(Mandatory = $true)][bool]$UsableStatus,
+        [Parameter(Mandatory = $true)][bool]$BoundedQuery,
+        [Parameter(Mandatory = $true)][string]$CleanupState,
+        [Parameter(Mandatory = $true)][string]$ProductState,
+        [Parameter(Mandatory = $true)][string]$Detail
+    )
+
+    $snapshot = [ordered]@{
+        schema_version = 1
+        managed_by = $script:ManagedBy
+        prerequisite = [ordered]@{
+            state = [string]$Prerequisite.State
+            reason_code = [string]$Prerequisite.ReasonCode
+            node_version = [string]$Prerequisite.NodeVersion
+            provider_version = [string]$Prerequisite.ProviderVersion
+        }
+        installed = $Installed
+        configured = $Configured
+        mcp_available = $McpAvailable
+        usable_status = $UsableStatus
+        bounded_query = $BoundedQuery
+        cleanup_state = $CleanupState
+        product_state = $ProductState
+        detail = $Detail
+    }
+    Write-Host "[READINESS_SNAPSHOT] $($snapshot | ConvertTo-Json -Compress -Depth 5)"
+}
+
+function Write-MachinePrerequisiteStatus {
+    param([Parameter(Mandatory = $true)]$Status)
+
+    if ($Status.Current) {
+        Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT - $($Status.Detail)"
+        return
+    }
+    Write-Host "[PRODUCT_LAYER PREREQUISITE] MISSING - $($Status.Detail)"
+    Write-Host "[REASON_CODE] $($Status.ReasonCode)"
+    Write-Host "[PRODUCT_STATE] MISSING_PREREQUISITE"
+    Write-Host "[NEXT] $($Status.NextAction)"
+    Write-ReadinessSnapshot `
+        -Prerequisite $Status `
+        -Installed "UNKNOWN" `
+        -Configured "UNKNOWN" `
+        -McpAvailable "UNKNOWN" `
+        -UsableStatus $false `
+        -BoundedQuery $false `
+        -CleanupState "UNKNOWN" `
+        -ProductState "MISSING_PREREQUISITE" `
+        -Detail ([string]$Status.Detail)
+}
+
+function Assert-MachinePrerequisiteForAction {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ActionName
+    )
+
+    $status = Get-MaterializerMachinePrerequisiteStatus -Manifest $Manifest
+    $script:MachinePrerequisiteStatus = $status
+    Write-MachinePrerequisiteStatus -Status $status
+    if (-not $status.Current) {
+        Throw-MaterializerError -Message $status.Detail -ExitCode 4
+    }
+    return $status
+}
+
 function Assert-MutationConfirmation {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][ValidateSet("Redeploy", "Sync", "Remove", "Repair")][string]$MutationAction
+        [Parameter(Mandatory = $true)][ValidateSet("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")][string]$MutationAction
     )
 
     if ($PocFixture) {
@@ -1492,7 +2019,7 @@ function Get-MaterializationPlan {
 
     $retiredPlans = New-Object System.Collections.Generic.List[object]
     if ($null -ne $marker) {
-        foreach ($oldEntry in $marker.Files) {
+        foreach ($oldEntry in $marker.AllFiles) {
             if ($desiredTargets.ContainsKey($oldEntry.Target)) {
                 continue
             }
@@ -1604,6 +2131,55 @@ function Test-SafeFirstAdoptionPlan {
     return -not (Test-Path -LiteralPath $lastKnownGoodPath)
 }
 
+function Get-InstalledFlatClosureSha256 {
+    param([Parameter(Mandatory = $true)]$Marker)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("schema_version=$($Marker.SchemaVersion)")
+    $lines.Add("managed_by=$($Marker.ManagedBy)")
+    $lines.Add("package_version=$($Marker.PackageVersion)")
+    $lines.Add("payload_version=$($Marker.PayloadVersion)")
+    $lines.Add("payload_sequence=$($Marker.PayloadSequence)")
+    $lines.Add("host_use_gate_version=$($Marker.HostUseGateVersion)")
+    $lines.Add("generation_lease_version=$($Marker.GenerationLeaseVersion)")
+    $lines.Add("generation_id=$($Marker.GenerationId)")
+    $lines.Add("bootstrap_protocol=$($Marker.BootstrapProtocol)")
+    [string[]]$targets = @($Marker.Files | ForEach-Object { [string]$_.Target })
+    [Array]::Sort($targets, [StringComparer]::Ordinal)
+    foreach ($target in $targets) {
+        $file = $Marker.Map[$target]
+        $lines.Add("file=$($file.Target):$($file.InstalledSha256)")
+    }
+    return Get-TextSha256 -Text (($lines -join "`n") + "`n")
+}
+
+function Get-ReviewedBootstrapTransition {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Marker
+    )
+
+    foreach ($transition in @($Manifest.BootstrapTransitions)) {
+        if ($Marker.SchemaVersion -eq $transition.SourceMarkerSchemaVersion -and
+            [string]::Equals($Marker.ManagedBy, $script:ManagedBy, [StringComparison]::Ordinal) -and
+            [string]::Equals($Marker.PackageVersion, $transition.SourcePackageVersion, [StringComparison]::Ordinal) -and
+            [string]::Equals($Marker.PayloadVersion, $transition.SourcePayloadVersion, [StringComparison]::Ordinal) -and
+            $Marker.PayloadSequence -eq $transition.SourcePayloadSequence -and
+            [string]::Equals($Marker.GenerationId, $transition.SourceGenerationId, [StringComparison]::Ordinal) -and
+            $Marker.BootstrapProtocol -eq $transition.SourceBootstrapProtocol -and
+            $Marker.HostUseGateVersion -eq $transition.SourceHostUseGateVersion -and
+            $Marker.GenerationLeaseVersion -eq $transition.SourceGenerationLeaseVersion -and
+            $Marker.Files.Count -eq $transition.SourceFlatFileCount -and
+            [string]::Equals(
+                (Get-InstalledFlatClosureSha256 -Marker $Marker),
+                $transition.SourceFlatClosureSha256,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $transition
+        }
+    }
+    return $null
+}
+
 function Get-AutomaticUpgradeEligibility {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -1641,6 +2217,11 @@ function Get-AutomaticUpgradeEligibility {
         $marker.BootstrapProtocol -ge 1 -and
         $marker.BootstrapProtocol -eq $Manifest.BootstrapProtocol -and
         -not [string]::Equals($marker.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal)
+    $bootstrapTransition = if ($knownGenerationUpgrade) {
+        Get-ReviewedBootstrapTransition -Manifest $Manifest -Marker $marker
+    } else {
+        $null
+    }
     $knownAdoptedRuntimeRepair = $marker.PayloadSequence -eq $Manifest.PayloadSequence -and
         $Plan.PayloadIdentityMatches -and
         $marker.GenerationLeaseVersion -ge 2 -and
@@ -1657,6 +2238,8 @@ function Get-AutomaticUpgradeEligibility {
                 $item.Status -eq "Upgradeable" -and
                     -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
                     [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
+            } elseif ($null -ne $bootstrapTransition) {
+                $true
             } else {
                 # A generation-only update must not replace the stable bridge.
                 # Bootstrap protocol migrations require their own reviewed path.
@@ -1665,7 +2248,9 @@ function Get-AutomaticUpgradeEligibility {
             if (-not $ownedWrapperTransition) {
                 return [pscustomobject]@{ Eligible = $false; Reason = "bootstrap wrapper is not byte-exact at a supported protocol transition" }
             }
-            continue
+            if ($null -eq $bootstrapTransition -or $knownLegacy) {
+                continue
+            }
         }
         if ($item.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
             if ($item.Status -notin @("Missing", "Current")) {
@@ -1684,6 +2269,20 @@ function Get-AutomaticUpgradeEligibility {
             }
             continue
         }
+        if ($null -ne $bootstrapTransition -and
+            $item.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $introducedTarget = [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256)
+            $ownedBootstrapTransition = if ($introducedTarget) {
+                $item.Status -in @("Missing", "Adoptable")
+            } else {
+                $item.Status -in @("Current", "Upgradeable") -and
+                    [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
+            }
+            if (-not $ownedBootstrapTransition) {
+                return [pscustomobject]@{ Eligible = $false; Reason = "reviewed bootstrap transition source is not byte-exact" }
+            }
+            continue
+        }
         $ownedUnmodifiedTarget = $item.Status -eq "Current" -and
             -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
             [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
@@ -1695,6 +2294,8 @@ function Get-AutomaticUpgradeEligibility {
         "owned poc.21 bootstrap can migrate without replacing active legacy scripts"
     } elseif ($knownAdoptedRuntimeRepair) {
         "tracked adoption is current and ignored runtime can be reconstructed safely"
+    } elseif ($null -ne $bootstrapTransition) {
+        "reviewed $($bootstrapTransition.SourceTag) flat bootstrap can transition while immutable generation leases remain protected"
     } else {
         "owned immutable generation can switch while its leases remain protected"
     }
@@ -1736,6 +2337,11 @@ function Get-OwnedLegacyRedeployEligibility {
             if ($item.Status -ne "Missing") {
                 return [pscustomobject]@{ Eligible = $false; Reason = "new generation target already exists and requires explicit review" }
             }
+            continue
+        }
+        $isNewMissingTarget = $item.Status -eq "Missing" -and
+            [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256)
+        if ($isNewMissingTarget) {
             continue
         }
         if (-not $item.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
@@ -1861,7 +2467,11 @@ function New-MarkerJson {
 }
 
 function Enter-MaterializerLock {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$WaitForExisting,
+        [ValidateRange(1, 120000)][int]$WaitTimeoutMilliseconds = 30000
+    )
 
     $lockRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label "materializer runtime"
     Assert-NoReparsePoint -Path $lockRoot -Root $ProjectRoot -Label "materializer runtime"
@@ -1872,10 +2482,22 @@ function Enter-MaterializerLock {
     if ((Test-Path -LiteralPath $lockPath) -and -not $lockFileExistedBefore) {
         Throw-MaterializerError -Message "Materializer lock path is not a regular file: $lockPath" -ExitCode 7
     }
-    try {
-        $stream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-    } catch {
-        Throw-MaterializerError -Message "Another payload materialization is active: $lockPath" -ExitCode 4
+    $stream = $null
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitTimeoutMilliseconds)
+    while ($null -eq $stream) {
+        try {
+            $stream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        } catch {
+            if (-not $WaitForExisting -or [DateTime]::UtcNow -ge $deadline) {
+                Throw-MaterializerError -Message "Another payload materialization is active: $lockPath" -ExitCode 4
+            }
+            if (-not (Test-Path -LiteralPath $lockRoot -PathType Container)) {
+                Assert-NoReparsePoint -Path $lockRoot -Root $ProjectRoot -Label "materializer runtime"
+                New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
+                Assert-NoReparsePoint -Path $lockRoot -Root $ProjectRoot -Label "materializer runtime"
+            }
+            Start-Sleep -Milliseconds 50
+        }
     }
 
     return [pscustomobject]@{
@@ -1891,10 +2513,10 @@ function Enter-MaterializerLock {
     }
 }
 
-function Exit-MaterializerLock {
+function Exit-MaterializerWatchManagementLocks {
     param($Lock)
 
-    if ($null -eq $Lock) {
+    if ($null -eq $Lock -or $null -eq $Lock.ManagementLocks) {
         return
     }
     foreach ($managementLock in @($Lock.ManagementLocks.ToArray()) | Sort-Object { $_.Path.Length } -Descending) {
@@ -1905,6 +2527,16 @@ function Exit-MaterializerLock {
             Remove-Item -LiteralPath $managementLock.Path -Force -ErrorAction SilentlyContinue
         }
     }
+    $Lock.ManagementLocks.Clear()
+}
+
+function Exit-MaterializerLock {
+    param($Lock)
+
+    if ($null -eq $Lock) {
+        return
+    }
+    Exit-MaterializerWatchManagementLocks -Lock $Lock
     $hasPendingTransaction = @(Get-ChildItem -LiteralPath $Lock.Root -Force -Directory -ErrorAction SilentlyContinue | Where-Object {
         $_.Name.StartsWith($script:TransactionPrefix, [StringComparison]::Ordinal)
     }).Count -gt 0
@@ -1947,6 +2579,10 @@ function Get-MaterializerProcessIdentity {
         return [pscustomobject]@{ Alive = $false; StartTicks = $null; StartUnixMilliseconds = $null }
     }
 
+    if ($PocFixture -and $TestProcessIdentityUnavailableForPid -eq $numericProcessId) {
+        return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+
     try {
         $process = [System.Diagnostics.Process]::GetProcessById($numericProcessId)
     } catch [System.ArgumentException] {
@@ -1977,6 +2613,26 @@ function Get-MaterializerProcessIdentity {
         # still treated as live, but it cannot prove an identity mismatch.
         return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
     }
+}
+
+function Get-MaterializerLegacyLeaseProcessDisposition {
+    param(
+        [Parameter(Mandatory = $true)]$ProcessIdentity,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$LeaseCreatedAt
+    )
+
+    if (-not $ProcessIdentity.Alive) {
+        return [pscustomobject]@{ State = "Stale"; Reason = "ProcessExited" }
+    }
+    if ($null -eq $ProcessIdentity.StartUnixMilliseconds) {
+        return [pscustomobject]@{ State = "Indeterminate"; Reason = "ProcessIdentityUnavailable" }
+    }
+
+    $leaseCreatedMilliseconds = $LeaseCreatedAt.ToUnixTimeMilliseconds()
+    if ([int64]$ProcessIdentity.StartUnixMilliseconds -gt $leaseCreatedMilliseconds) {
+        return [pscustomobject]@{ State = "Stale"; Reason = "PidReused" }
+    }
+    return [pscustomobject]@{ State = "Live"; Reason = "ProcessPredatesLease" }
 }
 
 function Get-MaterializerWindowsProcessCommandIdentity {
@@ -2588,18 +3244,24 @@ function Get-MaterializerHostUseLeaseReport {
         }
 
         $processIdentity = Get-MaterializerProcessIdentity -ProcessId $processId
-        if ($processIdentity.Alive) {
+        $disposition = Get-MaterializerLegacyLeaseProcessDisposition `
+            -ProcessIdentity $processIdentity `
+            -LeaseCreatedAt $createdAt
+        if (-not [string]::Equals($disposition.State, "Stale", [StringComparison]::Ordinal)) {
             $liveLeases.Add("$owner PID $processId")
             $liveLeaseDetails.Add([pscustomobject]@{
                 Owner = $owner
                 ProcessId = $processId
                 Path = $item.FullName
+                ProcessIdentityState = $disposition.State
+                ProcessIdentityReason = $disposition.Reason
             })
         } else {
             $staleLeases.Add([pscustomobject]@{
                 Owner = $owner
                 ProcessId = $processId
                 Path = $item.FullName
+                Reason = $disposition.Reason
             })
         }
     }
@@ -2785,6 +3447,210 @@ function ConvertTo-MaterializerProjectSlug {
         $result = "$result-$($hash.Substring(0, 12))"
     }
     return $result
+}
+
+function Get-MaterializerProjectIdentity {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $canonicalRoot = [System.IO.Path]::GetFullPath($ProjectRoot).Replace('\', '/').TrimEnd('/').ToLowerInvariant()
+    return "sha256:$(Get-TextSha256 -Text $canonicalRoot)"
+}
+
+function Get-ProjectIntegrationState {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $statePath = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:IntegrationStateRelativePath `
+        -Label "project integration desired state"
+    Assert-NoReparsePoint -Path $statePath -Root $ProjectRoot -Label "project integration desired state"
+    if (-not (Test-Path -LiteralPath $statePath)) {
+        return [pscustomobject]@{
+            Path = $statePath
+            Present = $false
+            Uninstalled = $false
+            DesiredState = $null
+            StateId = $null
+            CleanupState = $null
+        }
+    }
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        throw "Project integration desired state is not a regular file: $statePath"
+    }
+
+    $document = (Read-BoundedJsonDocument `
+        -Path $statePath `
+        -Label "project integration desired state" `
+        -MaximumBytes (64 * 1024)).Document
+    $schemaVersion = Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "project integration desired state"
+    $managedBy = Get-RequiredJsonString -Object $document -Name "managed_by" -Label "project integration desired state"
+    $desiredState = Get-RequiredJsonString -Object $document -Name "desired_state" -Label "project integration desired state"
+    $recordedRoot = Get-RequiredJsonString -Object $document -Name "project_root" -Label "project integration desired state"
+    $recordedIdentity = Get-RequiredJsonString -Object $document -Name "project_identity" -Label "project integration desired state"
+    $stateId = Get-RequiredJsonString -Object $document -Name "state_id" -Label "project integration desired state"
+    $cleanupState = Get-RequiredJsonString -Object $document -Name "cleanup_state" -Label "project integration desired state"
+    $updatedAtText = Get-RequiredJsonString -Object $document -Name "updated_at_utc" -Label "project integration desired state"
+    [DateTimeOffset]$updatedAt = [DateTimeOffset]::MinValue
+    $expectedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    try {
+        $actualRoot = [System.IO.Path]::GetFullPath($recordedRoot).TrimEnd('\', '/')
+    } catch {
+        throw "Project integration desired state contains an invalid project root."
+    }
+    if ($schemaVersion -ne $script:IntegrationStateSchemaVersion -or
+        -not [string]::Equals($managedBy, $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($desiredState, "UNINSTALLED", [StringComparison]::Ordinal) -or
+        -not [string]::Equals($actualRoot, $expectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($recordedIdentity, (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        $stateId -cnotmatch '^[0-9a-f]{32}$' -or
+        $cleanupState -cnotin @("PENDING", "COMPLETE") -or
+        -not [DateTimeOffset]::TryParse(
+            $updatedAtText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$updatedAt)) {
+        throw "Project integration desired state identity or schema is invalid."
+    }
+
+    return [pscustomobject]@{
+        Path = $statePath
+        Present = $true
+        Uninstalled = $true
+        DesiredState = $desiredState
+        StateId = $stateId
+        CleanupState = $cleanupState
+    }
+}
+
+function Assert-ProjectIntegrationStateId {
+    param([Parameter(Mandatory = $true)][string]$StateId)
+
+    if ($StateId -cnotmatch '^[0-9a-f]{32}$') {
+        throw "Project integration state id is invalid."
+    }
+    return $StateId
+}
+
+function Assert-ProjectIntegrationStateMatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [AllowNull()][string]$CleanupState
+    )
+
+    $null = Assert-ProjectIntegrationStateId -StateId $StateId
+    $current = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+    if (-not $current.Uninstalled -or
+        -not [string]::Equals([string]$current.StateId, $StateId, [StringComparison]::Ordinal) -or
+        (-not [string]::IsNullOrWhiteSpace($CleanupState) -and
+         -not [string]::Equals([string]$current.CleanupState, $CleanupState, [StringComparison]::Ordinal))) {
+        throw "Project integration desired state changed while the operation was waiting to mutate the project."
+    }
+    return $current
+}
+
+function Write-ProjectIntegrationState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [Parameter(Mandatory = $true)][ValidateSet("PENDING", "COMPLETE")][string]$CleanupState
+    )
+
+    $null = Assert-ProjectIntegrationStateId -StateId $StateId
+    $statePath = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:IntegrationStateRelativePath `
+        -Label "project integration desired state"
+    $document = [ordered]@{
+        schema_version = $script:IntegrationStateSchemaVersion
+        managed_by = $script:ManagedBy
+        desired_state = "UNINSTALLED"
+        state_id = $StateId
+        cleanup_state = $CleanupState
+        project_root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+        updated_at_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    $stagePath = Join-Path $Lock.Root ("integration-state-$([guid]::NewGuid().ToString('N')).tmp")
+    try {
+        Write-DurableUtf8File -Path $stagePath -Content (($document | ConvertTo-Json -Depth 6) + "`n")
+        Publish-TransactionFile -StagePath $stagePath -TargetPath $statePath
+        $published = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+        if (-not $published.Uninstalled -or
+            -not [string]::Equals([string]$published.StateId, $StateId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$published.CleanupState, $CleanupState, [StringComparison]::Ordinal)) {
+            throw "Project integration desired state publication failed verification."
+        }
+        Add-MaterializerMutationScope -Scope "desired_state"
+        Invoke-TestFaultAfterMutation
+        return $published
+    } finally {
+        Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Publish-ProjectIntegrationUninstalledState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId
+    )
+
+    $null = Assert-ProjectIntegrationStateId -StateId $StateId
+    $current = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+    if ($current.Uninstalled) {
+        if (-not [string]::Equals([string]$current.StateId, $StateId, [StringComparison]::Ordinal)) {
+            throw "Project integration desired state identity changed before Uninstall publication."
+        }
+        Write-Host "[PHASE DESIRED_STATE] CURRENT - project integration remains UNINSTALLED."
+        return $current
+    }
+
+    $published = Write-ProjectIntegrationState `
+        -Lock $Lock `
+        -ProjectRoot $ProjectRoot `
+        -StateId $StateId `
+        -CleanupState "PENDING"
+    Write-Host "[PHASE DESIRED_STATE] UNINSTALLED - automatic installation and watcher attachment are disabled."
+    return $published
+}
+
+function Publish-ProjectIntegrationCleanupState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [Parameter(Mandatory = $true)][ValidateSet("PENDING", "COMPLETE")][string]$CleanupState
+    )
+
+    $current = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $StateId
+    if ([string]::Equals([string]$current.CleanupState, $CleanupState, [StringComparison]::Ordinal)) {
+        return $current
+    }
+    return Write-ProjectIntegrationState `
+        -Lock $Lock `
+        -ProjectRoot $ProjectRoot `
+        -StateId $StateId `
+        -CleanupState $CleanupState
+}
+
+function Clear-ProjectIntegrationUninstalledState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId
+    )
+
+    $current = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $StateId
+    Remove-Item -LiteralPath $current.Path -Force
+    if (Test-Path -LiteralPath $current.Path) {
+        throw "Project integration desired state remained after Install."
+    }
+    Add-MaterializerMutationScope -Scope "desired_state"
+    Invoke-TestFaultAfterMutation
+    Write-Host "[PHASE DESIRED_STATE] INSTALLED - the UNINSTALLED override was cleared."
+    return $true
 }
 
 function Get-RepairMcpRegistrationContent {
@@ -3130,7 +3996,19 @@ function Assert-RepairTomlValue {
 }
 
 function Get-RepairMcpConfigPlan {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$RemoveManagedKeys,
+        [switch]$RestoreUninstalledNamespace,
+        [AllowNull()][string]$UninstallStateId
+    )
+
+    if ($RemoveManagedKeys -and $RestoreUninstalledNamespace) {
+        throw "Project MCP config cannot be removed and restored in the same plan."
+    }
+    if ($RemoveManagedKeys -or $RestoreUninstalledNamespace) {
+        $null = Assert-ProjectIntegrationStateId -StateId $UninstallStateId
+    }
 
     $configPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpConfigRelativePath -Label "project MCP config"
     $providerSlug = "codedb-$(ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ($ProjectRoot.TrimEnd('\', '/'))))"
@@ -3144,10 +4022,11 @@ function Get-RepairMcpConfigPlan {
         return [pscustomobject]@{
             Path = $configPath
             Exists = $false
-            Current = $false
+            Current = [bool]$RemoveManagedKeys
             OriginalBytes = [byte[]]@()
-            DesiredBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($desiredSectionLf + "`n")
+            DesiredBytes = if ($RemoveManagedKeys) { [byte[]]@() } else { [System.Text.UTF8Encoding]::new($false).GetBytes($desiredSectionLf + "`n") }
             NewLine = "`n"
+            RemovingRegistration = [bool]$RemoveManagedKeys
         }
     }
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
@@ -3182,6 +4061,33 @@ function Get-RepairMcpConfigPlan {
         throw "Project MCP config uses mixed line endings."
     }
     $newLine = if ($hasCrLf) { "`r`n" } else { "`n" }
+
+    $reservedPrefixStem = "# rice-ai-codedb-uninstalled:"
+    $reservedPrefix = if ([string]::IsNullOrWhiteSpace($UninstallStateId)) {
+        $null
+    } else {
+        "$reservedPrefixStem$UninstallStateId`: "
+    }
+    $preservedLineCount = 0
+    $encodedLines = [regex]::Split($text, "`r?`n")
+    for ($lineIndex = 0; $lineIndex -lt $encodedLines.Count; $lineIndex++) {
+        $encodedLine = $encodedLines[$lineIndex]
+        if (-not $encodedLine.StartsWith($reservedPrefixStem, [StringComparison]::Ordinal)) { continue }
+        if ([string]::IsNullOrWhiteSpace($reservedPrefix) -or
+            -not $encodedLine.StartsWith($reservedPrefix, [StringComparison]::Ordinal)) {
+            throw "Project MCP config contains a preserved CodeDB namespace for a different or invalid uninstall state."
+        }
+        $preservedLineCount += 1
+        if ($RestoreUninstalledNamespace) {
+            $encodedLines[$lineIndex] = $encodedLine.Substring($reservedPrefix.Length)
+        }
+    }
+    if ($preservedLineCount -gt 0 -and -not ($RemoveManagedKeys -or $RestoreUninstalledNamespace)) {
+        throw "Project MCP config contains an uninstalled CodeDB namespace that only Install CodeDB may restore."
+    }
+    if ($RestoreUninstalledNamespace -and $preservedLineCount -gt 0) {
+        $text = $encodedLines -join $newLine
+    }
 
     # The repairer deliberately supports a conservative TOML subset. Complex
     # multiline values are left for manual review rather than guessed at.
@@ -3352,7 +4258,30 @@ function Get-RepairMcpConfigPlan {
     }
 
     $desiredSection = $desiredSectionLf.Replace("`n", $newLine)
-    if ($targetTables.Count -eq 0) {
+    if ($RemoveManagedKeys) {
+        $targetNamespaceTables = @($tables | Where-Object {
+            [string]::Equals($_.Name, $targetTable, [StringComparison]::Ordinal) -or
+            $_.Name.StartsWith($targetTable + '.', [StringComparison]::Ordinal)
+        } | Sort-Object Line)
+        if ($preservedLineCount -gt 0 -and $targetNamespaceTables.Count -gt 0) {
+            throw "Project MCP config contains both active and preserved declarations for [$targetTable]."
+        }
+        if ($preservedLineCount -gt 0 -or $targetNamespaceTables.Count -eq 0) {
+            $desiredText = $text
+        } else {
+            $desiredLines = [System.Collections.Generic.List[string]]::new()
+            $desiredLines.AddRange([string[]]$lines)
+            $allTables = @($tables | Sort-Object Line)
+            foreach ($targetNamespaceTable in $targetNamespaceTables) {
+                $nextTable = @($allTables | Where-Object { $_.Line -gt $targetNamespaceTable.Line } | Select-Object -First 1)
+                $endLine = if ($nextTable.Count -eq 0) { $desiredLines.Count - 1 } else { [int]$nextTable[0].Line - 1 }
+                for ($lineIndex = [int]$targetNamespaceTable.Line; $lineIndex -le $endLine; $lineIndex++) {
+                    $desiredLines[$lineIndex] = $reservedPrefix + $desiredLines[$lineIndex]
+                }
+            }
+            $desiredText = $desiredLines.ToArray() -join $newLine
+        }
+    } elseif ($targetTables.Count -eq 0) {
         $separator = if ($text.Length -eq 0) { "" } elseif ($text.EndsWith($newLine)) { $newLine } else { $newLine + $newLine }
         $desiredText = $text + $separator + $desiredSection + $newLine
     } else {
@@ -3403,6 +4332,7 @@ function Get-RepairMcpConfigPlan {
         OriginalBytes = $bytes
         DesiredBytes = $desiredBytes
         NewLine = $newLine
+        RemovingRegistration = [bool]$RemoveManagedKeys
     }
 }
 
@@ -3414,7 +4344,11 @@ function Publish-RepairMcpConfig {
     )
 
     if ($Plan.Current) {
-        Write-Host "[PHASE MCP_REGISTRATION] CURRENT - target section already matches the reviewed project registration."
+        if ($Plan.RemovingRegistration) {
+            Write-Host "[PHASE MCP_REGISTRATION] DISABLED - the target namespace is already preserved as inert uninstall-state comments."
+        } else {
+            Write-Host "[PHASE MCP_REGISTRATION] CURRENT - target section already matches the reviewed project registration."
+        }
         return $null
     }
     $configDirectory = Split-Path -Parent $Plan.Path
@@ -3471,14 +4405,486 @@ function Publish-RepairMcpConfig {
         for ($index = 0; $index -lt $published.Length; $index++) {
             if ($published[$index] -ne $Plan.DesiredBytes[$index]) { throw "Project MCP config publication failed verification." }
         }
+        Add-MaterializerMutationScope -Scope "mcp_registration"
         Invoke-TestFaultAfterMutation
         $projectSlug = ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ($ProjectRoot.TrimEnd('\', '/')))
-        Write-Host "[PHASE MCP_REGISTRATION] REPAIRED - only [mcp_servers.codedb-$projectSlug] was published."
+        if ($Plan.RemovingRegistration) {
+            Write-Host "[PHASE MCP_REGISTRATION] DISABLED - [mcp_servers.codedb-$projectSlug] and its descendants were preserved as inert uninstall-state comments."
+        } else {
+            Write-Host "[PHASE MCP_REGISTRATION] REPAIRED - only [mcp_servers.codedb-$projectSlug] was published."
+        }
         if ($null -ne $backupPath) { Write-Host "[BACKUP] $backupPath" }
         return $backupPath
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
         Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-McpAvailabilityIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $markerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "installed payload marker"
+    $plan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $markerPath -ProjectRoot $ProjectRoot
+    if (-not $plan.IsCurrent) {
+        throw "MCP availability requires the current Package-owned Host runtime."
+    }
+    $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+    if (-not $mcpPlan.Current) {
+        throw "MCP availability requires the current ownership-safe project registration."
+    }
+
+    $wrapperRelativePath = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+    $wrapperPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $wrapperRelativePath -Label "project MCP wrapper"
+    Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label "project MCP wrapper"
+    if (-not (Test-Path -LiteralPath $wrapperPath -PathType Leaf)) {
+        throw "Project MCP wrapper is missing: $wrapperPath"
+    }
+    $wrapperFile = $Manifest.TargetMap[$wrapperRelativePath]
+    if ($null -eq $wrapperFile -or
+        -not [string]::Equals((Get-FileSha256 -Path $wrapperPath), [string]$wrapperFile.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Project MCP wrapper does not match the current Package-owned payload."
+    }
+
+    return [pscustomobject]@{
+        ConfigPath = $mcpPlan.Path
+        ConfigSha256 = Get-FileSha256 -Path $mcpPlan.Path
+        WrapperPath = $wrapperPath
+        WrapperRelativePath = $wrapperRelativePath
+        WrapperSha256 = Get-FileSha256 -Path $wrapperPath
+        ProviderSlug = "codedb-$(ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ($ProjectRoot.TrimEnd('\', '/'))))"
+    }
+}
+
+function Write-McpAvailabilityState {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Identity,
+        [Parameter(Mandatory = $true)][ValidateSet("AVAILABLE", "UNAVAILABLE")][string]$Availability,
+        [Parameter(Mandatory = $true)][string]$Detail,
+        [string[]]$ToolNames = @(),
+        [bool]$WrapperInitializeCallable = $false,
+        [bool]$ToolsListCallable = $false,
+        [bool]$CodedbStatusCallable = $false,
+        [bool]$CodedbStatusUsable = $false,
+        [bool]$CodedbTextSearchCallable = $false
+    )
+
+    $statePath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpAvailabilityRelativePath -Label "MCP availability state"
+    $stateRoot = Split-Path -Parent $statePath
+    Assert-NoReparsePoint -Path $stateRoot -Root $ProjectRoot -Label "MCP availability state root"
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+    Assert-NoReparsePoint -Path $stateRoot -Root $ProjectRoot -Label "MCP availability state root"
+    Assert-NoReparsePoint -Path $statePath -Root $ProjectRoot -Label "MCP availability state"
+
+    $document = [ordered]@{
+        schema_version = $script:McpAvailabilitySchemaVersion
+        managed_by = $script:ManagedBy
+        project_root = [System.IO.Path]::GetFullPath($ProjectRoot)
+        generation_id = $Manifest.GenerationId
+        provider_slug = $Identity.ProviderSlug
+        config_sha256 = $Identity.ConfigSha256
+        wrapper_relative_path = $Identity.WrapperRelativePath
+        wrapper_sha256 = $Identity.WrapperSha256
+        availability = $Availability
+        tool_names = @($ToolNames)
+        wrapper_initialize_callable = $WrapperInitializeCallable
+        tools_list_callable = $ToolsListCallable
+        codedb_status_callable = $CodedbStatusCallable
+        codedb_status_usable = $CodedbStatusUsable
+        codedb_text_search_callable = $CodedbTextSearchCallable
+        detail = $Detail
+        checked_at_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    $stagePath = Join-Path $Lock.Root ("mcp-availability-$([guid]::NewGuid().ToString('N')).tmp")
+    try {
+        Write-DurableUtf8File -Path $stagePath -Content (($document | ConvertTo-Json -Depth 6) + "`n")
+        Publish-TransactionFile -StagePath $stagePath -TargetPath $statePath
+        Add-MaterializerMutationScope -Scope "mcp_availability"
+    } finally {
+        Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-McpAvailabilityStatus {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $identity = Get-McpAvailabilityIdentity -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $statePath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpAvailabilityRelativePath -Label "MCP availability state"
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return [pscustomobject]@{ Current = $false; Pending = $true; Detail = "No Package-owned MCP handshake has completed for this Host and registration." }
+    }
+    Assert-NoReparsePoint -Path $statePath -Root $ProjectRoot -Label "MCP availability state"
+    $json = Read-BoundedJsonDocument -Path $statePath -Label "MCP availability state" -MaximumBytes (64 * 1024)
+    $document = $json.Document
+    $toolNames = Get-RequiredJsonArray -Object $document -Name "tool_names" -Label "MCP availability state"
+    foreach ($toolName in $toolNames) {
+        if ($toolName -isnot [string]) {
+            throw "MCP availability state tool_names must contain only JSON strings."
+        }
+    }
+    $expectedTools = @($script:ExpectedMcpTools | Sort-Object)
+    $actualTools = @($toolNames | ForEach-Object { [string]$_ } | Sort-Object)
+    $toolsCurrent = ($actualTools.Count -eq $expectedTools.Count) -and
+        [string]::Equals(($actualTools -join "|"), ($expectedTools -join "|"), [StringComparison]::Ordinal)
+    $current = (Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "MCP availability state") -eq $script:McpAvailabilitySchemaVersion -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label "MCP availability state"), $script:ManagedBy, [StringComparison]::Ordinal) -and
+        [string]::Equals([System.IO.Path]::GetFullPath((Get-RequiredJsonString -Object $document -Name "project_root" -Label "MCP availability state")), [System.IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_id" -Label "MCP availability state"), $Manifest.GenerationId, [StringComparison]::Ordinal) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "provider_slug" -Label "MCP availability state"), $identity.ProviderSlug, [StringComparison]::Ordinal) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "config_sha256" -Label "MCP availability state"), $identity.ConfigSha256, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "wrapper_relative_path" -Label "MCP availability state"), $identity.WrapperRelativePath, [StringComparison]::Ordinal) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "wrapper_sha256" -Label "MCP availability state"), $identity.WrapperSha256, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals((Get-RequiredJsonString -Object $document -Name "availability" -Label "MCP availability state"), "AVAILABLE", [StringComparison]::Ordinal) -and
+        (Get-RequiredJsonBoolean -Object $document -Name "wrapper_initialize_callable" -Label "MCP availability state") -and
+        (Get-RequiredJsonBoolean -Object $document -Name "tools_list_callable" -Label "MCP availability state") -and
+        (Get-RequiredJsonBoolean -Object $document -Name "codedb_status_callable" -Label "MCP availability state") -and
+        (Get-RequiredJsonBoolean -Object $document -Name "codedb_status_usable" -Label "MCP availability state") -and
+        (Get-RequiredJsonBoolean -Object $document -Name "codedb_text_search_callable" -Label "MCP availability state") -and
+        $toolsCurrent
+    $detail = Get-RequiredJsonString -Object $document -Name "detail" -Label "MCP availability state"
+    $null = Get-RequiredJsonString -Object $document -Name "checked_at_utc" -Label "MCP availability state"
+    return [pscustomobject]@{
+        Current = $current
+        Pending = $false
+        Detail = if ($current) { $detail } elseif ([string]::IsNullOrWhiteSpace($detail)) { "The last Package-owned MCP handshake is unavailable or stale." } else { $detail }
+    }
+}
+
+function Assert-McpAvailabilityStateArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    Assert-NoReparsePoint -Path $Path -Root $ProjectRoot -Label "MCP availability state"
+    $document = (Read-BoundedJsonDocument -Path $Path -Label "MCP availability state" -MaximumBytes (64 * 1024)).Document
+    $recordedRoot = Get-RequiredJsonString -Object $document -Name "project_root" -Label "MCP availability state"
+    $generationId = Get-RequiredJsonString -Object $document -Name "generation_id" -Label "MCP availability state"
+    $providerSlug = Get-RequiredJsonString -Object $document -Name "provider_slug" -Label "MCP availability state"
+    $configSha256 = Get-RequiredJsonString -Object $document -Name "config_sha256" -Label "MCP availability state"
+    $wrapperRelativePath = Get-RequiredJsonString -Object $document -Name "wrapper_relative_path" -Label "MCP availability state"
+    $wrapperSha256 = Get-RequiredJsonString -Object $document -Name "wrapper_sha256" -Label "MCP availability state"
+    $availability = Get-RequiredJsonString -Object $document -Name "availability" -Label "MCP availability state"
+    $toolNames = Get-RequiredJsonArray -Object $document -Name "tool_names" -Label "MCP availability state"
+    $wrapperInitializeCallable = Get-RequiredJsonBoolean -Object $document -Name "wrapper_initialize_callable" -Label "MCP availability state"
+    $toolsListCallable = Get-RequiredJsonBoolean -Object $document -Name "tools_list_callable" -Label "MCP availability state"
+    $statusCallable = Get-RequiredJsonBoolean -Object $document -Name "codedb_status_callable" -Label "MCP availability state"
+    $statusUsable = Get-RequiredJsonBoolean -Object $document -Name "codedb_status_usable" -Label "MCP availability state"
+    $textSearchCallable = Get-RequiredJsonBoolean -Object $document -Name "codedb_text_search_callable" -Label "MCP availability state"
+    $detail = Get-RequiredJsonString -Object $document -Name "detail" -Label "MCP availability state"
+    $checkedAtText = Get-RequiredJsonString -Object $document -Name "checked_at_utc" -Label "MCP availability state"
+    foreach ($toolName in $toolNames) {
+        if ($toolName -isnot [string]) {
+            throw "MCP availability state tool_names must contain only JSON strings."
+        }
+    }
+    $actualTools = @($toolNames | ForEach-Object { [string]$_ } | Sort-Object)
+    $expectedTools = @($script:ExpectedMcpTools | Sort-Object)
+    $hasExpectedTools = $actualTools.Count -eq $expectedTools.Count -and
+        [string]::Equals(($actualTools -join "|"), ($expectedTools -join "|"), [StringComparison]::Ordinal)
+    $usable = $wrapperInitializeCallable -and
+        $toolsListCallable -and
+        $statusCallable -and
+        $statusUsable -and
+        $textSearchCallable -and
+        $hasExpectedTools
+    [DateTimeOffset]$checkedAt = [DateTimeOffset]::MinValue
+    try {
+        $actualRoot = [System.IO.Path]::GetFullPath($recordedRoot).TrimEnd('\', '/')
+        $expectedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    } catch {
+        throw "MCP availability state contains an invalid project root."
+    }
+    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "MCP availability state") -ne $script:McpAvailabilitySchemaVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label "MCP availability state"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($actualRoot, $expectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $generationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $providerSlug -cnotmatch '^[a-z0-9][a-z0-9-]{0,126}$' -or
+        $configSha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
+        -not [string]::Equals($wrapperRelativePath, "AIWork/codedb/wrapper/codedb-project-wrapper.mjs", [StringComparison]::Ordinal) -or
+        $wrapperSha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
+        $availability -cnotin @("AVAILABLE", "UNAVAILABLE") -or
+        ($availability -ceq "AVAILABLE" -and -not $usable) -or
+        ($availability -ceq "UNAVAILABLE" -and $usable) -or
+        $detail.Length -gt (32 * 1024) -or
+        -not [DateTimeOffset]::TryParse(
+            $checkedAtText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$checkedAt)) {
+        throw "MCP availability state identity or schema is invalid."
+    }
+    return $document
+}
+
+function Open-McpAvailabilityProbeWindow {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if ($Lock.ActiveMarkerPublished -and (Test-Path -LiteralPath $Lock.ActiveMarkerPath -PathType Leaf)) {
+        Assert-NoReparsePoint -Path $Lock.ActiveMarkerPath -Root $ProjectRoot -Label "materializer active marker"
+        Remove-Item -LiteralPath $Lock.ActiveMarkerPath -Force
+        $Lock.ActiveMarkerPublished = $false
+    }
+}
+
+function Invoke-McpAvailabilityProbe {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Lock
+    )
+
+    $identity = Get-McpAvailabilityIdentity -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($PocFixture) {
+        # Fixture mode deliberately suppresses watcher process creation. Keep
+        # unrelated transaction/ownership regressions deterministic, while the
+        # production probe path is exercised by a separate non-fixture test.
+        $existingAvailability = $null
+        try {
+            $existingAvailability = Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+        } catch {
+            $existingAvailability = $null
+        }
+        if ($null -eq $existingAvailability -or -not $existingAvailability.Current) {
+            Write-McpAvailabilityState `
+                -Lock $Lock `
+                -ProjectRoot $ProjectRoot `
+                -Manifest $Manifest `
+                -Identity $identity `
+                -Availability "AVAILABLE" `
+                -Detail "Fixture-only usable backend evidence: initialize, tools/list, usable codedb_status, and bounded codedb_text_search succeeded." `
+                -ToolNames $script:ExpectedMcpTools `
+                -WrapperInitializeCallable $true `
+                -ToolsListCallable $true `
+                -CodedbStatusCallable $true `
+                -CodedbStatusUsable $true `
+                -CodedbTextSearchCallable $true
+        }
+        Write-Host "[PHASE MCP_AVAILABLE] READY - fixture-only backend evidence; production wrapper probing remains separately covered."
+        return Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+    }
+    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        Write-McpAvailabilityState -Lock $Lock -ProjectRoot $ProjectRoot -Manifest $Manifest -Identity $identity -Availability "UNAVAILABLE" -Detail "Node.js is unavailable to the project MCP registration."
+        throw "Node.js is unavailable to start the project MCP wrapper."
+    }
+    $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+    $probePath = Join-Path $PSScriptRoot $script:McpAvailabilityProbeName
+    Assert-NoReparsePoint -Path $probePath -Root $packageRoot -Label "Package-owned MCP availability probe"
+    if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) {
+        throw "Package-owned MCP availability probe is missing."
+    }
+
+    $global:LASTEXITCODE = 0
+    $output = @(& $nodeCommand.Source $probePath --project-root $ProjectRoot 2>&1)
+    $exitCode = $LASTEXITCODE
+    $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    if ($text.Length -gt (1024 * 1024)) {
+        $text = $text.Substring(0, 1024 * 1024)
+        $exitCode = 1
+    }
+    $jsonLines = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") })
+    if ($jsonLines.Count -ne 1) {
+        if ($exitCode -ne 0) {
+            $detail = if ([string]::IsNullOrWhiteSpace($text)) { "Package-owned MCP handshake failed without diagnostic output." } else { $text.Trim() }
+            Write-McpAvailabilityState -Lock $Lock -ProjectRoot $ProjectRoot -Manifest $Manifest -Identity $identity -Availability "UNAVAILABLE" -Detail $detail
+        }
+        throw "Package-owned MCP handshake returned an ambiguous result."
+    }
+    $result = ConvertFrom-StrictJsonText -Text $jsonLines[0] -Label "Package-owned MCP handshake result"
+    $resultSchema = Get-RequiredJsonInt32 -Object $result -Name "schema_version" -Label "Package-owned MCP handshake result"
+    $resultAvailability = Get-RequiredJsonString -Object $result -Name "availability" -Label "Package-owned MCP handshake result"
+    $serverName = Get-RequiredJsonString -Object $result -Name "server_name" -Label "Package-owned MCP handshake result"
+    $null = Get-RequiredJsonString -Object $result -Name "protocol_version" -Label "Package-owned MCP handshake result"
+    $statusSummary = Get-RequiredJsonString -Object $result -Name "status_summary" -Label "Package-owned MCP handshake result"
+    $resultDetail = Get-RequiredJsonString -Object $result -Name "detail" -Label "Package-owned MCP handshake result"
+    $wrapperInitializeCallable = Get-RequiredJsonBoolean -Object $result -Name "wrapper_initialize_callable" -Label "Package-owned MCP handshake result"
+    $toolsListCallable = Get-RequiredJsonBoolean -Object $result -Name "tools_list_callable" -Label "Package-owned MCP handshake result"
+    $statusCallable = Get-RequiredJsonBoolean -Object $result -Name "codedb_status_callable" -Label "Package-owned MCP handshake result"
+    $statusUsable = Get-RequiredJsonBoolean -Object $result -Name "codedb_status_usable" -Label "Package-owned MCP handshake result"
+    $textSearchCallable = Get-RequiredJsonBoolean -Object $result -Name "codedb_text_search_callable" -Label "Package-owned MCP handshake result"
+    $toolNames = Get-RequiredJsonArray -Object $result -Name "tool_names" -Label "Package-owned MCP handshake result"
+    foreach ($toolName in $toolNames) {
+        if ($toolName -isnot [string]) { throw "Package-owned MCP handshake tool_names must contain only strings." }
+    }
+    $actualTools = @($toolNames | ForEach-Object { [string]$_ } | Sort-Object)
+    $expectedTools = @($script:ExpectedMcpTools | Sort-Object)
+    $hasExpectedTools = $actualTools.Count -eq $expectedTools.Count -and
+        [string]::Equals(($actualTools -join "|"), ($expectedTools -join "|"), [StringComparison]::Ordinal)
+    $usable = $wrapperInitializeCallable -and
+        $toolsListCallable -and
+        $statusCallable -and
+        $statusUsable -and
+        $textSearchCallable -and
+        $hasExpectedTools
+    if ($resultSchema -ne $script:McpAvailabilitySchemaVersion -or
+        $resultAvailability -cnotin @("AVAILABLE", "UNAVAILABLE") -or
+        ($wrapperInitializeCallable -and -not [string]::Equals($serverName, "codedb-project-wrapper", [StringComparison]::Ordinal)) -or
+        ($resultAvailability -ceq "AVAILABLE" -and -not $usable) -or
+        ($resultAvailability -ceq "UNAVAILABLE" -and $usable) -or
+        ($exitCode -eq 0 -and $resultAvailability -cne "AVAILABLE") -or
+        ($exitCode -ne 0 -and $resultAvailability -cne "UNAVAILABLE")) {
+        throw "Package-owned MCP handshake returned an invalid availability result."
+    }
+    if ($exitCode -ne 0) {
+        Write-McpAvailabilityState `
+            -Lock $Lock `
+            -ProjectRoot $ProjectRoot `
+            -Manifest $Manifest `
+            -Identity $identity `
+            -Availability "UNAVAILABLE" `
+            -Detail $resultDetail `
+            -ToolNames $actualTools `
+            -WrapperInitializeCallable $wrapperInitializeCallable `
+            -ToolsListCallable $toolsListCallable `
+            -CodedbStatusCallable $statusCallable `
+            -CodedbStatusUsable $statusUsable `
+            -CodedbTextSearchCallable $textSearchCallable
+        throw "Package-owned MCP handshake did not reach a usable project backend. $resultDetail"
+    }
+    $existingAvailability = $null
+    try {
+        $existingAvailability = Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+    } catch {
+        $existingAvailability = $null
+    }
+    if ($null -eq $existingAvailability -or -not $existingAvailability.Current) {
+        Write-McpAvailabilityState `
+            -Lock $Lock `
+            -ProjectRoot $ProjectRoot `
+            -Manifest $Manifest `
+            -Identity $identity `
+            -Availability "AVAILABLE" `
+            -Detail $resultDetail `
+            -ToolNames $actualTools `
+            -WrapperInitializeCallable $wrapperInitializeCallable `
+            -ToolsListCallable $toolsListCallable `
+            -CodedbStatusCallable $statusCallable `
+            -CodedbStatusUsable $statusUsable `
+            -CodedbTextSearchCallable $textSearchCallable
+    }
+    Write-Host "[PHASE MCP_AVAILABLE] READY - initialize, tools/list, usable codedb_status, and bounded codedb_text_search succeeded from the Unity project working directory."
+    return Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+}
+
+function Write-ProductLayerStatus {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Plan,
+        [ValidateSet("COMPLETE", "PENDING")][string]$CleanupState = "COMPLETE"
+    )
+
+    $prerequisite = $script:MachinePrerequisiteStatus
+    if ($null -eq $prerequisite) {
+        $prerequisite = Get-MaterializerMachinePrerequisiteStatus -Manifest $Manifest
+        $script:MachinePrerequisiteStatus = $prerequisite
+        Write-MachinePrerequisiteStatus -Status $prerequisite
+    }
+    $installed = "PENDING"
+    $configured = "PENDING"
+    $mcpAvailable = "PENDING"
+    $usableStatus = $false
+    $boundedQuery = $false
+    $productState = "STARTING"
+    $detail = "CodeDB is converging the Package-owned Host, registration, and MCP availability."
+    if ($Plan.IsCurrent) {
+        $installed = "CURRENT"
+        try {
+            $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+            if ($mcpPlan.Current) {
+                $configured = "CURRENT"
+                $availability = Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+                if ($availability.Current) {
+                    $mcpAvailable = "CURRENT"
+                    $usableStatus = $true
+                    $boundedQuery = $true
+                    $productState = "READY"
+                    $detail = [string]$availability.Detail
+                } elseif ($availability.Pending) {
+                    $detail = [string]$availability.Detail
+                } else {
+                    $mcpAvailable = "UNAVAILABLE"
+                    $productState = "NEEDS_ATTENTION"
+                    $detail = [string]$availability.Detail
+                }
+            }
+        } catch {
+            $configured = "BLOCKED"
+            $productState = "NEEDS_ATTENTION"
+            $detail = $_.Exception.Message
+        }
+    }
+
+    Write-Host "[PRODUCT_LAYER INSTALLED] $installed"
+    Write-Host "[PRODUCT_LAYER CONFIGURED] $configured"
+    Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] $mcpAvailable$(if ([string]::IsNullOrWhiteSpace($detail)) { '' } else { " - $detail" })"
+    Write-Host "[PRODUCT_STATE] $productState"
+    Write-ReadinessSnapshot `
+        -Prerequisite $prerequisite `
+        -Installed $installed `
+        -Configured $configured `
+        -McpAvailable $mcpAvailable `
+        -UsableStatus $usableStatus `
+        -BoundedQuery $boundedQuery `
+        -CleanupState $CleanupState `
+        -ProductState $productState `
+        -Detail $detail
+}
+
+function Complete-AutomaticMcpConvergence {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)]$McpPlan,
+        [switch]$WatcherAlreadyEnsured
+    )
+
+    $null = Publish-RepairMcpConfig -Plan $McpPlan -ProjectRoot $ProjectRoot -Lock $Lock
+    $verifiedMcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+    if (-not $verifiedMcpPlan.Current) {
+        throw "Automatic convergence did not reach CONFIGURED."
+    }
+    if (-not $WatcherAlreadyEnsured) {
+        $currentPointerPath = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath $script:CurrentPointerRelativePath `
+            -Label "automatic convergence current pointer"
+        $current = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+        if ($null -eq $current) {
+            throw "Automatic convergence could not resolve the current Package-owned watcher."
+        }
+        Open-McpAvailabilityProbeWindow -Lock $Lock -ProjectRoot $ProjectRoot
+        Invoke-UpgradeWatcherEnsure `
+            -WatchManagerPath $current.WatchManagerPath `
+            -ProjectRoot $ProjectRoot `
+            -Label "current generation" `
+            -WithoutMaterializerHandoff
+    }
+    Open-McpAvailabilityProbeWindow -Lock $Lock -ProjectRoot $ProjectRoot
+    $availability = Invoke-McpAvailabilityProbe -Manifest $Manifest -ProjectRoot $ProjectRoot -Lock $Lock
+    if (-not $availability.Current) {
+        throw "Automatic convergence did not reach MCP_AVAILABLE."
+    }
+    $verifiedPlan = Get-MaterializationPlan `
+        -Manifest $Manifest `
+        -MarkerPath (ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "installed payload marker") `
+        -ProjectRoot $ProjectRoot
+    if (-not $verifiedPlan.IsCurrent) {
+        throw "Automatic convergence did not preserve the current Host generation."
     }
 }
 
@@ -3603,7 +5009,8 @@ function Publish-MaterializerUpgradeState {
         [Parameter(Mandatory = $true)]$Lock,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][ValidateSet("INSTALLING", "SWITCHING", "ROLLBACK", "CURRENT", "CHECK_FAILED")][string]$State,
-        [AllowNull()][string]$Message
+        [AllowNull()][string]$Message,
+        [ValidateSet("COMPLETE", "PENDING")][string]$CleanupState = "COMPLETE"
     )
 
     $statePath = Join-Path $Lock.Root $script:UpgradeStateName
@@ -3621,6 +5028,7 @@ function Publish-MaterializerUpgradeState {
         project_root = [System.IO.Path]::GetFullPath($ProjectRoot)
         state = $State
         generation_id = $script:GenerationId
+        cleanup_state = $CleanupState
         updated_at_utc = [DateTime]::UtcNow.ToString("o")
         message = $boundedMessage
     }
@@ -3637,7 +5045,8 @@ function Ensure-MaterializerUpgradeStateCurrent {
     param(
         [Parameter(Mandatory = $true)]$Lock,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$Message
+        [Parameter(Mandatory = $true)][string]$Message,
+        [ValidateSet("COMPLETE", "PENDING")][string]$CleanupState = "COMPLETE"
     )
 
     $statePath = Join-Path $Lock.Root $script:UpgradeStateName
@@ -3645,7 +5054,8 @@ function Ensure-MaterializerUpgradeStateCurrent {
         try {
             $state = Assert-MaterializerUpgradeStateArtifact -Path $statePath -ProjectRoot $ProjectRoot
             if ([string]::Equals((Get-RequiredJsonString -Object $state -Name "state" -Label "materializer upgrade state"), "CURRENT", [StringComparison]::Ordinal) -and
-                [string]::Equals((Get-RequiredJsonString -Object $state -Name "generation_id" -Label "materializer upgrade state"), $script:GenerationId, [StringComparison]::Ordinal)) {
+                [string]::Equals((Get-RequiredJsonString -Object $state -Name "generation_id" -Label "materializer upgrade state"), $script:GenerationId, [StringComparison]::Ordinal) -and
+                [string]::Equals((Get-RequiredJsonString -Object $state -Name "cleanup_state" -Label "materializer upgrade state"), $CleanupState, [StringComparison]::Ordinal)) {
                 return $false
             }
         } catch {
@@ -3653,7 +5063,12 @@ function Ensure-MaterializerUpgradeStateCurrent {
             # current status only after the full Repair workflow succeeds.
         }
     }
-    Publish-MaterializerUpgradeState -Lock $Lock -ProjectRoot $ProjectRoot -State "CURRENT" -Message $Message
+    Publish-MaterializerUpgradeState `
+        -Lock $Lock `
+        -ProjectRoot $ProjectRoot `
+        -State "CURRENT" `
+        -Message $Message `
+        -CleanupState $CleanupState
     return $true
 }
 
@@ -3671,6 +5086,17 @@ function Assert-MaterializerUpgradeStateArtifact {
     $stateGenerationId = Get-RequiredJsonString -Object $state -Name "generation_id" -Label "materializer upgrade state"
     $updatedAtText = Get-RequiredJsonString -Object $state -Name "updated_at_utc" -Label "materializer upgrade state"
     $message = Get-RequiredJsonNullableString -Object $state -Name "message" -Label "materializer upgrade state"
+    $cleanupStateProperty = Get-ExactJsonProperty -Object $state -Name "cleanup_state" -Label "materializer upgrade state"
+    $cleanupState = "COMPLETE"
+    if ($null -ne $cleanupStateProperty) {
+        if ($cleanupStateProperty.Value -isnot [string] -or
+            [string]$cleanupStateProperty.Value -notin @("COMPLETE", "PENDING")) {
+            throw "Materializer upgrade state cleanup_state is invalid."
+        }
+        $cleanupState = [string]$cleanupStateProperty.Value
+    } else {
+        Add-Member -InputObject $state -MemberType NoteProperty -Name "cleanup_state" -Value $cleanupState
+    }
     [DateTimeOffset]$updatedAt = [DateTimeOffset]::MinValue
     if ((Get-RequiredJsonInt32 -Object $state -Name "schema_version" -Label "materializer upgrade state") -ne 1 -or
         -not [string]::Equals((Get-RequiredJsonString -Object $state -Name "managed_by" -Label "materializer upgrade state"), $script:ManagedBy, [StringComparison]::Ordinal) -or
@@ -3686,6 +5112,33 @@ function Assert-MaterializerUpgradeStateArtifact {
         throw "Materializer upgrade state identity is invalid."
     }
     return $state
+}
+
+function Get-PersistedMaterializerCleanupState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$GenerationId
+    )
+
+    $statePath = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:UpgradeStateRelativePath `
+        -Label "materializer upgrade state"
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return "COMPLETE"
+    }
+    $state = Assert-MaterializerUpgradeStateArtifact -Path $statePath -ProjectRoot $ProjectRoot
+    if (-not [string]::Equals(
+            (Get-RequiredJsonString -Object $state -Name "state" -Label "materializer upgrade state"),
+            "CURRENT",
+            [StringComparison]::Ordinal) -or
+        -not [string]::Equals(
+            (Get-RequiredJsonString -Object $state -Name "generation_id" -Label "materializer upgrade state"),
+            $GenerationId,
+            [StringComparison]::Ordinal)) {
+        return "COMPLETE"
+    }
+    return Get-RequiredJsonString -Object $state -Name "cleanup_state" -Label "materializer upgrade state"
 }
 
 function Enter-MaterializerWatchManagementLocks {
@@ -4442,6 +5895,7 @@ function Invoke-PackageOwnedLegacyWatcherStop {
     if ($result.ExitCode -ne 0 -or $result.TimedOut) {
         Throw-MaterializerError -Message "Package-owned legacy watcher Stop was blocked for PID $($CoordinatorState.ProcessId)." -ExitCode 4
     }
+    Add-MaterializerMutationScope -Scope "watcher"
 }
 
 function Complete-OwnedLegacyRedeployHostUseGate {
@@ -4551,6 +6005,74 @@ function Complete-OwnedLegacyRedeployHostUseGate {
     return $watcherOwners.Count -eq 1
 }
 
+function Complete-RepairOwnedLegacyWatcherStop {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [Parameter(Mandatory = $true)]$Watcher
+    )
+
+    $validatedMarker = Read-InstalledMarker -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $validatedMarker) {
+        Throw-MaterializerError -Message "Repair cannot authenticate a legacy watcher without its ownership marker." -ExitCode 4
+    }
+    $null = Assert-ReviewedLegacyFlatPayloadClosure -Marker $validatedMarker -ProjectRoot $ProjectRoot
+    $markerSha256 = Get-FileSha256 -Path $MarkerPath
+    $matchingStates = New-Object System.Collections.Generic.List[object]
+    $otherLiveStates = New-Object System.Collections.Generic.List[string]
+    foreach ($providerRoot in $Lock.ProviderRuntimeRoots) {
+        $statePath = Join-Path $providerRoot "watch\coordinator\coordinator-state.json"
+        Assert-PathInside -Path $statePath -Root $ProjectRoot -Label "legacy coordinator state"
+        if (-not (Test-Path -LiteralPath $statePath)) { continue }
+        $coordinatorState = Get-ValidatedLegacyWatcherCoordinatorState `
+            -StatePath $statePath `
+            -ProjectRoot $ProjectRoot `
+            -Marker $validatedMarker
+        if ($coordinatorState.ProcessId -eq $Watcher.ProcessId) {
+            $matchingStates.Add($coordinatorState)
+        } elseif ($coordinatorState.LiveProcesses.Count -gt 0) {
+            $otherLiveStates.Add("$statePath ($($coordinatorState.LiveProcesses -join ', '))")
+        }
+    }
+    if ($otherLiveStates.Count -gt 0 -or $matchingStates.Count -ne 1) {
+        Throw-MaterializerError -Message "Repair could not correlate the legacy watcher lease with exactly one authenticated Package-owned coordinator." -ExitCode 4
+    }
+
+    $recheckedMarker = Read-InstalledMarker -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $recheckedMarker -or
+        -not [string]::Equals((Get-FileSha256 -Path $MarkerPath), $markerSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Throw-MaterializerError -Message "Legacy watcher ownership changed during Repair Stop preflight." -ExitCode 4
+    }
+    $null = Assert-ReviewedLegacyFlatPayloadClosure -Marker $recheckedMarker -ProjectRoot $ProjectRoot
+    $recheckedState = Get-ValidatedLegacyWatcherCoordinatorState `
+        -StatePath $matchingStates[0].Path `
+        -ProjectRoot $ProjectRoot `
+        -Marker $recheckedMarker
+    $leaseRoot = Join-Path $Lock.Root $script:HostUseLeaseDirectoryName
+    $recheckedReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $sameWatcher = @($recheckedReport.LiveDetails | Where-Object {
+        [string]::Equals($_.Owner, "watcher", [StringComparison]::Ordinal) -and
+        $_.ProcessId -eq $Watcher.ProcessId -and
+        [string]::Equals($_.Path, $Watcher.Path, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $otherWatchers = @($recheckedReport.LiveDetails | Where-Object {
+        [string]::Equals($_.Owner, "watcher", [StringComparison]::Ordinal) -and
+        ($_.ProcessId -ne $Watcher.ProcessId -or
+         -not [string]::Equals($_.Path, $Watcher.Path, [StringComparison]::OrdinalIgnoreCase))
+    })
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($recheckedReport.Invalid.Count -gt 0 -or $generationReport.Invalid.Count -gt 0 -or
+        $sameWatcher.Count -ne 1 -or $otherWatchers.Count -gt 0 -or
+        -not [string]::Equals($recheckedState.Sha256, $matchingStates[0].Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Throw-MaterializerError -Message "Legacy watcher ownership changed during Repair Stop preflight." -ExitCode 4
+    }
+
+    Write-Host "[STOPPING] Requesting authenticated Package-owned Stop for legacy watcher PID $($Watcher.ProcessId)."
+    Invoke-PackageOwnedLegacyWatcherStop -ProjectRoot $ProjectRoot -CoordinatorState $recheckedState
+    Write-Host "[STOPPED] Legacy watcher PID $($Watcher.ProcessId) released its execution closure."
+}
+
 function Complete-RepairFlatHostUseGate {
     param(
         [Parameter(Mandatory = $true)]$Lock,
@@ -4565,11 +6087,34 @@ function Complete-RepairFlatHostUseGate {
     if ($report.Invalid.Count -gt 0) {
         Throw-MaterializerError -Message "Legacy Host-use lease is invalid and requires manual review: $($report.Invalid[0])" -ExitCode 7
     }
-    foreach ($lease in $report.Live) {
-        Write-Host "[ACTIVE] $lease"
+    foreach ($lease in $report.Live) { Write-Host "[ACTIVE] $lease" }
+    $flatMcpOwners = @(Get-RepairFlatMcpOwners -ProjectRoot $ProjectRoot)
+    $watcherOwners = @($report.LiveDetails | Where-Object {
+        [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal)
+    })
+    if ($watcherOwners.Count -gt 1) {
+        Throw-MaterializerError -Message "Repair found multiple legacy watcher owners and cannot authenticate one safely." -ExitCode 4
     }
-    if ($report.Live.Count -gt 0) {
-        Throw-MaterializerError -Message "Repair cannot replace the flat legacy Host closure while its reported owner is active." -ExitCode 4
+    $legacyWatcherStopped = $false
+    if ($watcherOwners.Count -eq 1) {
+        $markerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "legacy watcher ownership marker"
+        Complete-RepairOwnedLegacyWatcherStop `
+            -Lock $Lock `
+            -ProjectRoot $ProjectRoot `
+            -MarkerPath $markerPath `
+            -Watcher $watcherOwners[0]
+        $legacyWatcherStopped = $true
+    }
+    $recheckedFlatReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $remainingWatchers = @($recheckedFlatReport.LiveDetails | Where-Object {
+        [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal)
+    })
+    if ($recheckedFlatReport.Invalid.Count -gt 0 -or $remainingWatchers.Count -gt 0) {
+        Throw-MaterializerError -Message "Legacy Host-use ownership changed during stale-lease reclamation." -ExitCode 4
+    }
+    foreach ($lease in $recheckedFlatReport.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Write-Host "[RECOVERED] Removed proved-stale $($lease.Owner) flat Host-use lease for PID $($lease.ProcessId) ($($lease.Reason))."
     }
     $retainedGenerationWatchers = @()
     Assert-NoLiveLegacyWatcherState `
@@ -4589,10 +6134,78 @@ function Complete-RepairFlatHostUseGate {
     foreach ($owner in $generationMcpOwners) {
         Write-Host "[RETAINED] generation $($owner.GenerationId) mcp PID $($owner.ProcessId) keeps its immutable Host closure."
     }
+    $recheckedGenerationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($recheckedGenerationReport.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Generation ownership changed during stale-lease reclamation." -ExitCode 4
+    }
+    foreach ($lease in $recheckedGenerationReport.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Write-Host "[RECOVERED] Removed proved-stale generation $($lease.GenerationId) $($lease.Owner) lease for PID $($lease.ProcessId)."
+    }
     return [pscustomobject]@{
         RetainedGenerationWatchers = @($retainedGenerationWatchers)
         RetainedGenerationMcps = @($generationMcpOwners)
+        RetainedFlatMcps = @($flatMcpOwners)
+        LegacyWatcherStopped = $legacyWatcherStopped
     }
+}
+
+function Complete-UninstallGenerationWatcherStop {
+    param(
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$PayloadRoot,
+        [Parameter(Mandatory = $true)]$Watcher
+    )
+
+    $runtime = [System.IO.Path]::GetFullPath((Get-RequiredJsonString `
+        -Object $Watcher.State `
+        -Name "runtime" `
+        -Label "generation coordinator state"))
+    $statePath = Join-Path $runtime "coordinator-state.json"
+    Assert-PathInside -Path $statePath -Root $ProjectRoot -Label "generation coordinator state"
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    $rechecked = Get-ValidatedGenerationWatcherCoordinatorState `
+        -StatePath $statePath `
+        -ProjectRoot $ProjectRoot `
+        -PayloadRoot $PayloadRoot `
+        -GenerationReport $generationReport
+    if ($null -eq $rechecked -or $rechecked.Rejected -or
+        $rechecked.ProcessId -ne $Watcher.ProcessId -or
+        -not [string]::Equals([string]$rechecked.GenerationId, [string]$Watcher.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$rechecked.LeasePath, [string]$Watcher.LeasePath, [StringComparison]::OrdinalIgnoreCase)) {
+        Throw-MaterializerError -Message "Uninstall generation watcher ownership changed before Package-owned Stop." -ExitCode 4
+    }
+
+    $coordinatorState = [pscustomobject]@{
+        ProcessId = [int]$rechecked.ProcessId
+        Runtime = $runtime
+        Sha256 = Get-FileSha256 -Path $statePath
+    }
+    Write-Host "[STOPPING] Requesting authenticated Package-owned Stop for generation $($rechecked.GenerationId) watcher PID $($rechecked.ProcessId)."
+    Invoke-PackageOwnedLegacyWatcherStop -ProjectRoot $ProjectRoot -CoordinatorState $coordinatorState
+
+    $finalReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($finalReport.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Generation ownership became invalid after Package-owned watcher Stop." -ExitCode 4
+    }
+    foreach ($stale in $finalReport.Stale) {
+        Remove-Item -LiteralPath $stale.Path -Force
+        Write-Host "[RECOVERED] Removed proved-stale generation $($stale.GenerationId) $($stale.Owner) lease for PID $($stale.ProcessId)."
+    }
+    $remainingReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($remainingReport.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Generation ownership became invalid while verifying Package-owned watcher Stop." -ExitCode 4
+    }
+    $remaining = @($remainingReport.LiveDetails | Where-Object {
+        [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal) -and
+        $_.ProcessId -eq $Watcher.ProcessId -and
+        [string]::Equals([string]$_.GenerationId, [string]$Watcher.GenerationId, [StringComparison]::Ordinal)
+    })
+    if ($remaining.Count -gt 0) {
+        Throw-MaterializerError -Message "Authenticated generation watcher retained its lease after Package-owned Stop." -ExitCode 4
+    }
+    Write-Host "[STOPPED] Generation $($rechecked.GenerationId) watcher PID $($rechecked.ProcessId) released its execution closure."
 }
 
 function Test-RepairPathIntersectsGenerationRoot {
@@ -4661,6 +6274,66 @@ function Get-RepairGenerationMcpOwners {
     return $owners.ToArray()
 }
 
+function Get-RepairFlatMcpOwners {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $leaseRoot = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath "$($script:RuntimeRelativePath)/$($script:HostUseLeaseDirectoryName)" `
+        -Label "flat Host-use lease root"
+    $report = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    if ($report.Invalid.Count -gt 0) {
+        Throw-MaterializerError -Message "Legacy Host-use lease is invalid and requires manual review: $($report.Invalid[0])" -ExitCode 7
+    }
+    $mcpLeases = @($report.LiveDetails | Where-Object {
+        [string]::Equals([string]$_.Owner, "mcp", [StringComparison]::Ordinal)
+    })
+    if ($mcpLeases.Count -eq 0) {
+        return @()
+    }
+    $indeterminateMcpLease = @($mcpLeases | Where-Object {
+        -not [string]::Equals([string]$_.ProcessIdentityState, "Live", [StringComparison]::Ordinal)
+    } | Select-Object -First 1)
+    if ($indeterminateMcpLease.Count -gt 0) {
+        Throw-MaterializerError `
+            -Message "A flat MCP lease process start identity is unavailable and cannot be retained safely: PID $($indeterminateMcpLease[0].ProcessId)." `
+            -ExitCode 4
+    }
+
+    $markerPath = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:MarkerRelativePath `
+        -Label "flat MCP ownership marker"
+    $marker = Read-InstalledMarker -MarkerPath $markerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $marker -or $marker.HostUseGateVersion -lt 1) {
+        Throw-MaterializerError -Message "A live flat MCP lease has no validated CodeDB ownership marker." -ExitCode 4
+    }
+    if ($marker.SchemaVersion -eq 1) {
+        $null = Assert-ReviewedLegacyFlatPayloadClosure -Marker $marker -ProjectRoot $ProjectRoot
+    }
+    foreach ($file in $marker.Files) {
+        if (-not $file.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $file.TargetPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), $file.InstalledSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            Throw-MaterializerError -Message "A live flat MCP lease does not have a byte-exact owned execution closure: $($file.Target)" -ExitCode 4
+        }
+    }
+    $closurePaths = @($marker.Files | ForEach-Object { [string]$_.TargetPath })
+    if ($closurePaths.Count -eq 0) {
+        Throw-MaterializerError -Message "A live flat MCP lease has an empty execution closure." -ExitCode 4
+    }
+
+    return @($mcpLeases | ForEach-Object {
+        [pscustomobject]@{
+            ProcessId = [int]$_.ProcessId
+            LeasePath = [string]$_.Path
+            ClosurePaths = $closurePaths
+            MarkerPath = $markerPath
+            PayloadVersion = [string]$marker.PayloadVersion
+        }
+    })
+}
+
 function Assert-RepairMutationPathsDoNotConflictWithGenerationMcp {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -4670,6 +6343,7 @@ function Assert-RepairMutationPathsDoNotConflictWithGenerationMcp {
     )
 
     $owners = @(Get-RepairGenerationMcpOwners -ProjectRoot $ProjectRoot -PayloadRoot $PayloadRoot)
+    $flatOwners = @(Get-RepairFlatMcpOwners -ProjectRoot $ProjectRoot)
     foreach ($pathValue in $Paths) {
         $path = [System.IO.Path]::GetFullPath([string]$pathValue)
         Assert-PathInside -Path $path -Root $ProjectRoot -Label "Repair $Boundary target"
@@ -4682,8 +6356,20 @@ function Assert-RepairMutationPathsDoNotConflictWithGenerationMcp {
                 -Message "Repair $Boundary would mutate generation $($owner.GenerationId) while MCP PID $($owner.ProcessId) owns its immutable Host closure." `
                 -ExitCode 4
         }
+        foreach ($owner in $flatOwners) {
+            foreach ($closurePath in $owner.ClosurePaths) {
+                if (-not (Test-RepairPathIntersectsGenerationRoot -Path $path -GenerationRoot $closurePath)) {
+                    continue
+                }
+                Write-Host "[ACTIVE] mcp PID $($owner.ProcessId)"
+                Write-Host "[CONFLICT] Retained flat MCP closure intersects $closurePath."
+                Throw-MaterializerError `
+                    -Message "Repair $Boundary would mutate the retained flat MCP closure at $closurePath while PID $($owner.ProcessId) is active." `
+                    -ExitCode 4
+            }
+        }
     }
-    return $owners
+    return [pscustomobject]@{ GenerationMcps = $owners; FlatMcps = $flatOwners }
 }
 
 function Assert-RepairOwnerGateStable {
@@ -4693,7 +6379,8 @@ function Assert-RepairOwnerGateStable {
         [Parameter(Mandatory = $true)][string]$PayloadRoot,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ExpectedGenerationWatchers,
         [AllowNull()][ref]$RetainedGenerationWatchers,
-        [AllowNull()][ref]$RetainedGenerationMcps
+        [AllowNull()][ref]$RetainedGenerationMcps,
+        [AllowNull()][ref]$RetainedFlatMcps
     )
 
     $leaseRoot = Join-Path $Lock.Root $script:HostUseLeaseDirectoryName
@@ -4702,9 +6389,13 @@ function Assert-RepairOwnerGateStable {
         Throw-MaterializerError -Message "Legacy Host-use lease is invalid and requires manual review: $($flatReport.Invalid[0])" -ExitCode 7
     }
     foreach ($lease in $flatReport.Live) { Write-Host "[ACTIVE] $lease" }
-    if ($flatReport.Live.Count -gt 0) {
-        Throw-MaterializerError -Message "Repair owner state changed while validating the flat Host closure." -ExitCode 4
+    $flatWatcherOwners = @($flatReport.LiveDetails | Where-Object {
+        [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal)
+    })
+    if ($flatWatcherOwners.Count -gt 0) {
+        Throw-MaterializerError -Message "Repair found a legacy watcher after its authenticated owner gate." -ExitCode 4
     }
+    $flatMcpOwners = @(Get-RepairFlatMcpOwners -ProjectRoot $ProjectRoot)
 
     $validatedWatchers = @()
     Assert-NoLiveLegacyWatcherState `
@@ -4741,6 +6432,9 @@ function Assert-RepairOwnerGateStable {
     if ($null -ne $RetainedGenerationMcps) {
         $RetainedGenerationMcps.Value = @($generationMcpOwners)
     }
+    if ($null -ne $RetainedFlatMcps) {
+        $RetainedFlatMcps.Value = @($flatMcpOwners)
+    }
 }
 
 function Initialize-MaterializerUpgradeGate {
@@ -4760,7 +6454,8 @@ function Assert-TransactionTargetRelativePath {
     $normalized = ConvertTo-SafeRelativePath -Path $Path -Label "transaction target"
     if ([string]::Equals($normalized, $script:MarkerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals($normalized, $script:LastKnownGoodPointerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($normalized, $script:UpgradeStateRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
+        [string]::Equals($normalized, $script:UpgradeStateRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($normalized, $script:McpAvailabilityRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
         return $normalized
     }
     return Assert-TargetRelativePath -Path $normalized
@@ -5705,6 +7400,7 @@ function Publish-ImmutableGeneration {
     Assert-NoReparsePoint -Path $generationParent -Root $ProjectRoot -Label "generation publication root"
     [System.IO.Directory]::Move($stagedGenerationRoot, $generationRoot)
     if ($null -ne $MutationOccurred) { $MutationOccurred.Value = $true }
+    Add-MaterializerMutationScope -Scope "host_runtime"
     Invoke-TestFaultAfterMutation
     Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $generationRoot -ProjectRoot $ProjectRoot
     Write-Host "[INSTALLING] Published immutable generation $($Manifest.GenerationId)."
@@ -5739,6 +7435,7 @@ function Move-RepairPathToQuarantine {
         throw "Repair quarantine source disappeared: $Path"
     }
     if ($null -ne $MutationOccurred) { $MutationOccurred.Value = $true }
+    Add-MaterializerMutationScope -Scope "host_runtime"
     Invoke-TestFaultAfterMutation
     Write-Host "[QUARANTINED] $Path -> $destination"
     return $destination
@@ -5917,7 +7614,9 @@ function Get-RepairHostPlan {
         }
     } else {
         foreach ($item in @($Plan.Files | Where-Object { $_.IsTrackedOwnership })) {
-            if ($item.Status -notin @("Current", "Upgradeable", "Adoptable")) {
+            $isNewMissingTarget = $item.Status -eq "Missing" -and
+                [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256)
+            if ($item.Status -notin @("Current", "Upgradeable", "Adoptable") -and -not $isNewMissingTarget) {
                 return [pscustomobject]@{ Allowed = $false; Reason = "tracked Host ownership is not byte-exact: $($item.Target)"; QuarantinePaths = @() }
             }
         }
@@ -5974,53 +7673,125 @@ function Get-RepairHostPlan {
     return [pscustomobject]@{ Allowed = $true; Reason = "reviewed Host state can be reconstructed"; QuarantinePaths = $quarantine.ToArray() }
 }
 
+function Assert-RepairPlannedHostMutationsDoNotConflictWithMcp {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)]$RepairPlan,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$MarkerPath
+    )
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $RepairPlan.QuarantinePaths) {
+        $paths.Add([string]$item.Path) | Out-Null
+    }
+    foreach ($item in $Plan.Files) {
+        if ($item.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($item.Status -eq "Missing") {
+                $paths.Add([string]$item.TargetPath) | Out-Null
+            }
+            continue
+        }
+        $needsWrite = $item.Status -in @("Missing", "Adoptable") -or
+            ($item.Status -eq "Upgradeable" -and
+             -not [string]::Equals([string]$item.TargetSha256, $item.SourceSha256, [StringComparison]::OrdinalIgnoreCase))
+        if ($needsWrite) {
+            $paths.Add([string]$item.TargetPath) | Out-Null
+        }
+    }
+    $markerJson = New-MarkerJson -Manifest $Manifest
+    if ($null -eq $Plan.Marker -or
+        -not [string]::Equals([string]$Plan.Marker.RawText, $markerJson, [StringComparison]::Ordinal)) {
+        $paths.Add($MarkerPath) | Out-Null
+    }
+    $null = Assert-RepairMutationPathsDoNotConflictWithGenerationMcp `
+        -ProjectRoot $ProjectRoot `
+        -PayloadRoot $Manifest.Root `
+        -Paths $paths.ToArray() `
+        -Boundary "planned Host recovery"
+}
+
 function Invoke-Repair {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
-        [Parameter(Mandatory = $true)][string]$MarkerPath
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [switch]$InstallMode,
+        [AllowNull()][ref]$ResultCleanupState,
+        [AllowNull()]$ExistingLock,
+        [AllowNull()][string]$InstallStateId
     )
 
-    $lock = $null
+    if ($InstallMode) {
+        $null = Assert-ProjectIntegrationStateId -StateId $InstallStateId
+    }
+    $mcpPlanParameters = @{ ProjectRoot = $ProjectRoot }
+    if ($InstallMode) {
+        $mcpPlanParameters.RestoreUninstalledNamespace = $true
+        $mcpPlanParameters.UninstallStateId = $InstallStateId
+    }
+    $lock = $ExistingLock
+    $ownsLock = $null -eq $ExistingLock
     $hostTransactionRoot = $null
     $hostEntries = $null
     $keepTransaction = $false
     $hostCommitted = $false
     $repairResidualMutation = $false
     $repairPhase = "PREFLIGHT"
+    Set-MaterializerCommandPhase -Phase $repairPhase
     $preservationSnapshot = $null
     try {
         # Invalid or ambiguous TOML must cause byte-exact zero writes.
-        $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+        $mcpPlan = Get-RepairMcpConfigPlan @mcpPlanParameters
         $preLockPlan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
         $preLockRepairPlan = Get-RepairHostPlan -Manifest $Manifest -Plan $preLockPlan -ProjectRoot $ProjectRoot
         if (-not $preLockRepairPlan.Allowed) {
             Throw-MaterializerError -Message "Repair Host preflight was blocked: $($preLockRepairPlan.Reason)." -ExitCode 4
         }
-        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
+        if ($ownsLock) {
+            $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
+        }
         # Re-check the config while holding the project materializer lock, then
         # snapshot preserved runtime bytes before any recovery mutation.
-        $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+        $mcpPlan = Get-RepairMcpConfigPlan @mcpPlanParameters
         $preservationSnapshot = Get-RepairPreservationSnapshot -ProjectRoot $ProjectRoot
-        $repairOwnerGate = Complete-RepairFlatHostUseGate `
+        $lockedPlan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        $lockedRepairPlan = Get-RepairHostPlan -Manifest $Manifest -Plan $lockedPlan -ProjectRoot $ProjectRoot
+        if (-not $lockedRepairPlan.Allowed) {
+            Throw-MaterializerError -Message "Repair Host preflight was blocked: $($lockedRepairPlan.Reason)." -ExitCode 4
+        }
+        Assert-RepairPlannedHostMutationsDoNotConflictWithMcp `
+            -Manifest $Manifest `
+            -Plan $lockedPlan `
+            -RepairPlan $lockedRepairPlan `
+            -ProjectRoot $ProjectRoot `
+            -MarkerPath $MarkerPath
+        Assert-RepairPendingRecoveryDoesNotConflictWithGenerationMcp `
             -Lock $lock `
             -ProjectRoot $ProjectRoot `
             -PayloadRoot $Manifest.Root
-        Assert-RepairPendingRecoveryDoesNotConflictWithGenerationMcp `
+        $repairOwnerGate = Complete-RepairFlatHostUseGate `
             -Lock $lock `
             -ProjectRoot $ProjectRoot `
             -PayloadRoot $Manifest.Root
         Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerAction "repair"
         Invoke-TestRepairAfterMarkerHandshake
         $postMarkerGenerationWatchers = @()
+        $postMarkerGenerationMcps = @()
+        $postMarkerFlatMcps = @()
         Assert-RepairOwnerGateStable `
             -Lock $lock `
             -ProjectRoot $ProjectRoot `
             -PayloadRoot $Manifest.Root `
             -ExpectedGenerationWatchers @($repairOwnerGate.RetainedGenerationWatchers) `
-            -RetainedGenerationWatchers ([ref]$postMarkerGenerationWatchers)
+            -RetainedGenerationWatchers ([ref]$postMarkerGenerationWatchers) `
+            -RetainedGenerationMcps ([ref]$postMarkerGenerationMcps) `
+            -RetainedFlatMcps ([ref]$postMarkerFlatMcps)
         $repairOwnerGate.RetainedGenerationWatchers = @($postMarkerGenerationWatchers)
+        $repairOwnerGate.RetainedGenerationMcps = @($postMarkerGenerationMcps)
+        $repairOwnerGate.RetainedFlatMcps = @($postMarkerFlatMcps)
         # Re-read both the journal targets and generation leases after the
         # active marker closes new Host-use acquisition.
         Assert-RepairPendingRecoveryDoesNotConflictWithGenerationMcp `
@@ -6038,17 +7809,30 @@ function Invoke-Repair {
         if (-not $repairPlan.Allowed) {
             Throw-MaterializerError -Message "Repair Host preflight was blocked: $($repairPlan.Reason)." -ExitCode 4
         }
+        Assert-RepairPlannedHostMutationsDoNotConflictWithMcp `
+            -Manifest $Manifest `
+            -Plan $plan `
+            -RepairPlan $repairPlan `
+            -ProjectRoot $ProjectRoot `
+            -MarkerPath $MarkerPath
         $retainedGenerationWatchers = @()
+        $retainedGenerationMcps = @()
+        $retainedFlatMcps = @()
         Assert-RepairOwnerGateStable `
             -Lock $lock `
             -ProjectRoot $ProjectRoot `
             -PayloadRoot $Manifest.Root `
             -ExpectedGenerationWatchers @($repairOwnerGate.RetainedGenerationWatchers) `
-            -RetainedGenerationWatchers ([ref]$retainedGenerationWatchers)
+            -RetainedGenerationWatchers ([ref]$retainedGenerationWatchers) `
+            -RetainedGenerationMcps ([ref]$retainedGenerationMcps) `
+            -RetainedFlatMcps ([ref]$retainedFlatMcps)
         $repairOwnerGate.RetainedGenerationWatchers = @($retainedGenerationWatchers)
+        $repairOwnerGate.RetainedGenerationMcps = @($retainedGenerationMcps)
+        $repairOwnerGate.RetainedFlatMcps = @($retainedFlatMcps)
         Write-Host "[PHASE PREFLIGHT] OK - Package-owned recovery and project MCP registration passed validation."
 
         $repairPhase = "HOST_RUNTIME"
+        Set-MaterializerCommandPhase -Phase $repairPhase
         $quarantineRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath ($script:HostQuarantineRelativePath + "/repair-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))-$([guid]::NewGuid().ToString('N').Substring(0,8))") -Label "repair quarantine"
         foreach ($item in $repairPlan.QuarantinePaths) {
             $null = Move-RepairPathToQuarantine `
@@ -6137,6 +7921,7 @@ function Invoke-Repair {
                 if (-not [string]::Equals((Get-FileSha256 -Path $entry.TargetPath), $entry.DesiredSha256, [StringComparison]::OrdinalIgnoreCase)) {
                     throw "Repair Host publication hash mismatch: $($entry.Target)"
                 }
+                Add-MaterializerMutationScope -Scope "host_runtime"
                 Invoke-TestFaultAfterMutation
             }
         }
@@ -6155,45 +7940,154 @@ function Invoke-Repair {
         Write-Host "[PHASE HOST_RUNTIME] REPAIRED - current and rollback pointers select validated immutable generations."
 
         $repairPhase = "WATCHER"
+        Set-MaterializerCommandPhase -Phase $repairPhase
         $retainedPreviousWatchers = @($repairOwnerGate.RetainedGenerationWatchers | Where-Object {
             -not [string]::Equals([string]$_.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal)
         })
         if ($TestFailWatcherHandoff) { throw "Injected POC non-terminating watcher verification failure." }
-        if ($retainedPreviousWatchers.Count -gt 0) {
-            foreach ($watcher in $retainedPreviousWatchers) {
+        if ($repairOwnerGate.LegacyWatcherStopped) {
+            Write-Host "[PHASE WATCHER] STOPPED - authenticated Package-owned legacy watcher will restart after Host and MCP verification."
+        } elseif ($repairOwnerGate.RetainedGenerationWatchers.Count -gt 0) {
+            foreach ($watcher in $repairOwnerGate.RetainedGenerationWatchers) {
                 Write-Host "[PHASE WATCHER] RETAINED - generation $($watcher.GenerationId) watcher PID $($watcher.ProcessId) remains pinned to its immutable Host closure."
             }
         } else {
-            Write-Host "[PHASE WATCHER] PRESERVED - Repair did not start, stop, restart, or replace watcher processes."
+            Write-Host "[PHASE WATCHER] PENDING - no authenticated watcher is active; Repair will ensure the current Package-owned watcher after registration verification."
         }
 
         $repairPhase = "PRESERVATION"
+        Set-MaterializerCommandPhase -Phase $repairPhase
         Assert-RepairPreservationSnapshot -Snapshot $preservationSnapshot
         Write-Host "[PHASE PRESERVATION] PRESERVED - Provider, runtime config, index, adapter, and user policy bytes are unchanged."
 
         $repairPhase = "MCP_REGISTRATION"
+        Set-MaterializerCommandPhase -Phase $repairPhase
         $latestRetainedGenerationWatchers = @()
+        $latestRetainedGenerationMcps = @()
+        $latestRetainedFlatMcps = @()
         Assert-RepairOwnerGateStable `
             -Lock $lock `
             -ProjectRoot $ProjectRoot `
             -PayloadRoot $Manifest.Root `
             -ExpectedGenerationWatchers @($repairOwnerGate.RetainedGenerationWatchers) `
-            -RetainedGenerationWatchers ([ref]$latestRetainedGenerationWatchers)
+            -RetainedGenerationWatchers ([ref]$latestRetainedGenerationWatchers) `
+            -RetainedGenerationMcps ([ref]$latestRetainedGenerationMcps) `
+            -RetainedFlatMcps ([ref]$latestRetainedFlatMcps)
         $repairOwnerGate.RetainedGenerationWatchers = @($latestRetainedGenerationWatchers)
+        $repairOwnerGate.RetainedGenerationMcps = @($latestRetainedGenerationMcps)
+        $repairOwnerGate.RetainedFlatMcps = @($latestRetainedFlatMcps)
         $retainedPreviousWatchers = @($latestRetainedGenerationWatchers | Where-Object {
             -not [string]::Equals([string]$_.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal)
         })
         if ($TestFailRepairMcpRegistration) { throw "Injected POC MCP registration repair failure." }
         $null = Publish-RepairMcpConfig -Plan $mcpPlan -ProjectRoot $ProjectRoot -Lock $lock
-        $verifiedMcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+        $verifiedMcpPlan = Get-RepairMcpConfigPlan @mcpPlanParameters
         if (-not $verifiedMcpPlan.Current) { throw "Project MCP registration verification failed." }
         $repairPhase = "VERIFY"
-        $null = Ensure-MaterializerUpgradeStateCurrent -Lock $lock -ProjectRoot $ProjectRoot -Message "Repair CodeDB verified generation $($Manifest.GenerationId) and project MCP registration without changing MCP or watcher processes."
+        Set-MaterializerCommandPhase -Phase $repairPhase
+        $verificationMessage = if ($repairOwnerGate.LegacyWatcherStopped) {
+            "Repair CodeDB verified generation $($Manifest.GenerationId) and project MCP registration before restarting the authenticated Package-owned watcher."
+        } else {
+            "Repair CodeDB verified generation $($Manifest.GenerationId) and project MCP registration without changing MCP or watcher processes."
+        }
         Write-Host "[PHASE VERIFY] OK - Host generation and project MCP registration are current; existing clients retain their leased immutable generations."
-        Write-Host "[RESULT] REPAIRED"
-        Write-Host "[NEXT] Start a new Codex session so it reads the repaired project MCP configuration."
+        $shouldEnsureCurrentWatcher = $repairOwnerGate.LegacyWatcherStopped -or
+            ($latestRetainedGenerationWatchers.Count -eq 0 -and
+             $latestRetainedGenerationMcps.Count -eq 0 -and
+             $latestRetainedFlatMcps.Count -eq 0)
+        if ($shouldEnsureCurrentWatcher) {
+            $repairPhase = "WATCHER"
+            Set-MaterializerCommandPhase -Phase $repairPhase
+            if ($lock.ActiveMarkerPublished -and (Test-Path -LiteralPath $lock.ActiveMarkerPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $lock.ActiveMarkerPath -Force
+                $lock.ActiveMarkerPublished = $false
+            }
+            Exit-MaterializerWatchManagementLocks -Lock $lock
+            Invoke-UpgradeWatcherEnsure `
+                -WatchManagerPath $current.WatchManagerPath `
+                -ProjectRoot $ProjectRoot `
+                -Label "repaired generation" `
+                -WithoutMaterializerHandoff
+            if (-not $PocFixture) {
+                $lock.ProviderRuntimeRoots = @(Get-MaterializerProviderRuntimeRoots -ProjectRoot $ProjectRoot)
+                Enter-MaterializerWatchManagementLocks -Lock $lock -ProjectRoot $ProjectRoot
+                $validatedRestartedWatchers = @()
+                Assert-NoLiveLegacyWatcherState `
+                    -Lock $lock `
+                    -ProjectRoot $ProjectRoot `
+                    -PayloadRoot $PayloadRoot `
+                    -AllowGenerationOwnedWatcher `
+                    -RetainedGenerationWatchers ([ref]$validatedRestartedWatchers)
+                $currentRestartedWatchers = @($validatedRestartedWatchers | Where-Object {
+                    [string]::Equals([string]$_.GenerationId, $current.GenerationId, [StringComparison]::Ordinal)
+                })
+                if ($currentRestartedWatchers.Count -ne 1) {
+                    throw "Authenticated Package-owned watcher restart did not produce exactly one validated current-generation owner."
+                }
+            }
+            if ($repairOwnerGate.LegacyWatcherStopped) {
+                Write-Host "[PHASE WATCHER] RESTARTED - authenticated Package-owned watcher now uses generation $($current.GenerationId)."
+            } elseif ($PocFixture) {
+                Write-Host "[PHASE WATCHER] FIXTURE - process start is suppressed in fixture mode and covered by the production-path integration test."
+            } else {
+                Write-Host "[PHASE WATCHER] STARTED - current Package-owned watcher now uses generation $($current.GenerationId)."
+            }
+        } elseif ($latestRetainedGenerationWatchers.Count -eq 0) {
+            Write-Host "[PHASE WATCHER] PRESERVED - active MCP owners retain their immutable closure; Repair did not stop or replace their processes."
+        }
+        $repairPhase = "MCP_AVAILABLE"
+        Set-MaterializerCommandPhase -Phase $repairPhase
+        Open-McpAvailabilityProbeWindow -Lock $lock -ProjectRoot $ProjectRoot
+        $availability = Invoke-McpAvailabilityProbe -Manifest $Manifest -ProjectRoot $ProjectRoot -Lock $lock
+        if (-not $availability.Current) {
+            throw "Package-owned MCP handshake did not reach MCP_AVAILABLE."
+        }
+        $cleanup = Invoke-AutomaticGenerationCleanup `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -Lock $lock `
+            -Plan $lockedPlan
+        $cleanupState = [string]$cleanup.CleanupState
+        $null = Ensure-MaterializerUpgradeStateCurrent `
+            -Lock $lock `
+            -ProjectRoot $ProjectRoot `
+            -Message $verificationMessage `
+            -CleanupState $cleanupState
+        $postCleanupPlan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        Write-ProductLayerStatus `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -Plan $postCleanupPlan `
+            -CleanupState $cleanupState
+        if ($null -ne $ResultCleanupState) { $ResultCleanupState.Value = $cleanupState }
+        Write-Host "[CLEANUP_STATE] $cleanupState"
+        if (-not $InstallMode) {
+            Set-MaterializerCommandPhase -Phase "COMPLETE"
+            Set-MaterializerCommandOutcome `
+                -Outcome "REPAIRED" `
+                -ReasonCode "REPAIR_COMPLETE" `
+                -CleanupState $cleanupState `
+                -NextAction "Start a new Codex task so it reads the repaired project MCP configuration."
+            Write-Host "[RESULT] REPAIRED"
+            Write-Host "[PRODUCT_STATE] READY"
+            Write-Host "[NEXT] Start a new Codex session so it reads the repaired project MCP configuration."
+        }
     } catch {
         $originalError = $_.Exception
+        Set-MaterializerCommandPhase -Phase $repairPhase
+        if ($hostCommitted -or $repairResidualMutation) {
+            Set-MaterializerCommandOutcome `
+                -Outcome "PARTIALLY_REPAIRED" `
+                -ReasonCode "REPAIR_PARTIAL" `
+                -CleanupState "PENDING" `
+                -NextAction "Review the reported Repair phase, then use Fix CodeDB once after the boundary is resolved."
+        } else {
+            Set-MaterializerCommandOutcome `
+                -Outcome "BLOCKED" `
+                -ReasonCode "REPAIR_BLOCKED" `
+                -CleanupState "COMPLETE" `
+                -NextAction "Resolve the reported ownership or configuration boundary, then use Fix CodeDB once."
+        }
         if (-not $hostCommitted -and $null -ne $hostTransactionRoot -and $null -ne $hostEntries -and $hostEntries.Count -gt 0) {
             $rollbackErrors = @(Restore-Transaction -Entries $hostEntries.ToArray() -TransactionRoot $hostTransactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
             if ($rollbackErrors.Count -gt 0) {
@@ -6228,6 +8122,17 @@ function Invoke-Repair {
             Write-Host "[NEXT] Resolve the reported verification-state boundary, then click Repair CodeDB again."
             Throw-MaterializerError -Message $originalError.Message -ExitCode 8
         }
+        if ($hostCommitted -and [string]::Equals($repairPhase, "MCP_AVAILABLE", [StringComparison]::Ordinal)) {
+            Write-Host "[PHASE MCP_AVAILABLE] BLOCKED - $($originalError.Message)"
+            Write-Host "[RESULT] PARTIALLY_REPAIRED"
+            Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
+            if ($InstallMode) {
+                Write-Host "[NEXT] Install remains incomplete and will be retried by the Package; no external process was stopped."
+            } else {
+                Write-Host "[NEXT] CodeDB will retry automatically; use Fix CodeDB only if Needs attention remains."
+            }
+            Throw-MaterializerError -Message $originalError.Message -ExitCode 8
+        }
         if ($repairResidualMutation) {
             Write-Host "[PHASE $repairPhase] BLOCKED - $($originalError.Message)"
             Write-Host "[RESULT] PARTIALLY_REPAIRED"
@@ -6244,7 +8149,9 @@ function Invoke-Repair {
         if ($null -ne $hostTransactionRoot -and -not $keepTransaction -and (Test-Path -LiteralPath $hostTransactionRoot)) {
             Remove-Item -LiteralPath $hostTransactionRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Exit-MaterializerLock -Lock $lock
+        if ($ownsLock) {
+            Exit-MaterializerLock -Lock $lock
+        }
     }
 }
 
@@ -6593,6 +8500,343 @@ function Save-LastKnownGoodPointer {
     return $current
 }
 
+function Get-ValidatedPlanRetiredGenerationForCleanup {
+    param(
+        [Parameter(Mandatory = $true)][string]$GenerationId,
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)]$LastKnownGood,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if (-not [string]::Equals([string]$LastKnownGood.GenerationId, $GenerationId, [StringComparison]::Ordinal)) {
+        return $null
+    }
+    $generationPrefix = "AIWork/.runtime/codedb/host/generations/$GenerationId/"
+    $retiredItems = @($Plan.Retired | Where-Object {
+        $_.Target.StartsWith($generationPrefix, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($retiredItems.Count -eq 0 -or $retiredItems.Count -ne @($LastKnownGood.ManagedFiles).Count) {
+        return $null
+    }
+
+    $retiredMap = @{}
+    foreach ($item in $retiredItems) {
+        $target = Assert-TransactionTargetRelativePath -Path ([string]$item.Target)
+        if (-not [string]::Equals([string]$item.Status, "Retirable", [StringComparison]::Ordinal) -or
+            [string]$item.PreviousSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            -not (Test-Path -LiteralPath $item.TargetPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $item.TargetPath), [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        $retiredMap[[System.IO.Path]::GetFullPath([string]$item.TargetPath)] = [string]$item.PreviousSha256
+    }
+    foreach ($managedFile in @($LastKnownGood.ManagedFiles)) {
+        $path = [System.IO.Path]::GetFullPath([string]$managedFile.Path)
+        if (-not $retiredMap.ContainsKey($path) -or
+            -not [string]::Equals([string]$retiredMap[$path], [string]$managedFile.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+    }
+    return $LastKnownGood
+}
+
+function Get-ValidatedLegacyFlatRetirement {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$MarkerPath
+    )
+
+    $marker = Read-InstalledMarker -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $marker) { return $null }
+    $transition = Get-ReviewedBootstrapTransition -Manifest $Manifest -Marker $marker
+    if ($null -eq $transition) {
+        throw "Legacy flat payload is not a reviewed bootstrap-transition source."
+    }
+
+    $wrapperTarget = "$($script:TargetPrefix)wrapper/codedb-project-wrapper.mjs"
+    if (-not $Manifest.TargetMap.ContainsKey($wrapperTarget) -or -not $marker.Map.ContainsKey($wrapperTarget)) {
+        throw "Legacy flat retirement has no reviewed stable-wrapper identity."
+    }
+    $expectedWrapperHash = ([string]$Manifest.TargetMap[$wrapperTarget].Sha256).ToLowerInvariant()
+    $retiredFiles = New-Object System.Collections.Generic.List[object]
+    foreach ($file in @($marker.Files | Sort-Object Target)) {
+        if (-not $file.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Legacy flat retirement target escapes the reviewed Host root: $($file.Target)"
+        }
+        Assert-NoReparsePoint -Path $file.TargetPath -Root $ProjectRoot -Label "legacy flat retirement target"
+        if (-not (Test-Path -LiteralPath $file.TargetPath -PathType Leaf)) {
+            throw "Legacy flat retirement target is missing: $($file.Target)"
+        }
+        if ([string]::Equals($file.Target, $wrapperTarget, [StringComparison]::OrdinalIgnoreCase)) {
+            if (-not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), $expectedWrapperHash, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Stable instance wrapper no longer matches the Package-owned activation identity."
+            }
+            continue
+        }
+        if (-not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), $file.InstalledSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Legacy flat retirement target drifted after activation: $($file.Target)"
+        }
+        $retiredFiles.Add($file) | Out-Null
+    }
+    return [pscustomobject]@{
+        Marker = $marker
+        MarkerPath = $MarkerPath
+        Transition = $transition
+        Files = $retiredFiles.ToArray()
+        StableWrapperTarget = $wrapperTarget
+    }
+}
+
+function Invoke-AutomaticGenerationCleanup {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Lock,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    # Close the old wrapper lease window before inventory. A v0.2.4 wrapper
+    # rejects action=remove, while the selected instance uses disjoint leases.
+    Initialize-MaterializerUpgradeGate -Lock $Lock -ProjectRoot $ProjectRoot -MarkerAction "remove"
+
+    $leaseRoot = Join-Path $Lock.Root $script:HostUseLeaseDirectoryName
+    $flatReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($flatReport.Invalid.Count -gt 0 -or $generationReport.Invalid.Count -gt 0) {
+        Write-Warning "Automatic retirement found invalid ownership evidence and will retry without mutating the legacy closure."
+        return [pscustomobject]@{ CleanupState = "PENDING"; LiveFlatOwners = @($flatReport.LiveDetails); LiveHistoricalGenerationIds = @() }
+    }
+    foreach ($lease in $flatReport.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Add-MaterializerMutationScope -Scope "host_runtime"
+        Write-Host "[RECOVERED] Removed proved-stale $($lease.Owner) flat Host-use lease for PID $($lease.ProcessId)."
+    }
+    foreach ($lease in $generationReport.Stale) {
+        Remove-Item -LiteralPath $lease.Path -Force
+        Add-MaterializerMutationScope -Scope "host_runtime"
+        Write-Host "[RECOVERED] Removed proved-stale generation $($lease.GenerationId) $($lease.Owner) lease for PID $($lease.ProcessId)."
+    }
+
+    $flatReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+    $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+    if ($flatReport.Invalid.Count -gt 0 -or $generationReport.Invalid.Count -gt 0) {
+        Write-Warning "Automatic retirement ownership changed while stale evidence was reclaimed."
+        return [pscustomobject]@{ CleanupState = "PENDING"; LiveFlatOwners = @($flatReport.LiveDetails); LiveHistoricalGenerationIds = @() }
+    }
+
+    $liveHistoricalIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($owner in $generationReport.LiveDetails) {
+        if (-not [string]::Equals([string]$owner.GenerationId, [string]$Manifest.GenerationId, [StringComparison]::Ordinal)) {
+            $null = $liveHistoricalIds.Add([string]$owner.GenerationId)
+        }
+        Write-Host "[RETAINED] generation $($owner.GenerationId) $($owner.Owner) PID $($owner.ProcessId) keeps the legacy Host selection and every historical generation."
+    }
+    foreach ($owner in $flatReport.LiveDetails) {
+        Write-Host "[RETAINED] $($owner.Owner) PID $($owner.ProcessId) keeps the flat Host closure and every historical generation."
+    }
+    if ($flatReport.Live.Count -gt 0 -or $generationReport.Live.Count -gt 0) {
+        Write-Host "[DRAINING] Historical CodeDB execution closures remain active; cleanup will retry automatically after their leases drain."
+        return [pscustomobject]@{
+            CleanupState = "PENDING"
+            LiveFlatOwners = @($flatReport.LiveDetails)
+            LiveHistoricalGenerationIds = @($liveHistoricalIds | Sort-Object)
+        }
+    }
+
+    # Legacy coordinator state without a live lease is unknown retirement
+    # evidence. It may delay cleanup, but it never blocks the selected instance.
+    $Lock.ProviderRuntimeRoots = @(Get-MaterializerProviderRuntimeRoots -ProjectRoot $ProjectRoot)
+    Enter-MaterializerWatchManagementLocks -Lock $Lock -ProjectRoot $ProjectRoot
+    Assert-NoLiveLegacyWatcherState `
+        -Lock $Lock `
+        -ProjectRoot $ProjectRoot `
+        -PayloadRoot $Manifest.Root `
+        -AllowGenerationOwnedWatcher
+
+    $markerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:MarkerRelativePath -Label "legacy retirement marker"
+    $installedMarker = Read-InstalledMarker -MarkerPath $markerPath -ProjectRoot $ProjectRoot
+    $currentFlatPayload = $false
+    if ($null -ne $installedMarker -and $installedMarker.SchemaVersion -eq $script:MarkerSchemaVersion) {
+        $currentFlatPayload = (Get-InstalledPayloadVersionPolicy -Manifest $Manifest -Marker $installedMarker).PayloadIdentityMatches
+    }
+    $legacyRetirement = if ($currentFlatPayload) {
+        $null
+    } else {
+        Get-ValidatedLegacyFlatRetirement -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $markerPath
+    }
+    if ($null -eq $legacyRetirement -and -not $currentFlatPayload) {
+        $legacyResidue = @($Manifest.Files | Where-Object {
+            $_.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            -not [string]::Equals($_.Target, "$($script:TargetPrefix)wrapper/codedb-project-wrapper.mjs", [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath (ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $_.Target -Label "legacy flat residue"))
+        } | Select-Object -First 1)
+        if ($legacyResidue.Count -gt 0) {
+            throw "Legacy flat files remain without a reviewed retirement marker: $($legacyResidue[0].Target)"
+        }
+    }
+
+    $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "automatic cleanup current generation pointer"
+    $current = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+    if ($null -eq $current) { throw "Automatic retirement cannot validate host/current.json." }
+    $currentIsPackageGeneration = [string]::Equals([string]$current.GenerationId, [string]$Manifest.GenerationId, [StringComparison]::Ordinal)
+    if ($currentIsPackageGeneration) {
+        Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $current.GenerationRoot -ProjectRoot $ProjectRoot -SkipSyntaxValidation
+    } else {
+        if ($null -eq $legacyRetirement -or
+            -not [string]::Equals([string]$current.GenerationId, [string]$legacyRetirement.Transition.SourceGenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$current.PackageVersion, [string]$legacyRetirement.Transition.SourcePackageVersion, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$current.PayloadVersion, [string]$legacyRetirement.Transition.SourcePayloadVersion, [StringComparison]::Ordinal) -or
+            $current.PayloadSequence -ne $legacyRetirement.Transition.SourcePayloadSequence -or
+            $current.BootstrapProtocol -ne $legacyRetirement.Transition.SourceBootstrapProtocol) {
+            throw "Legacy host/current.json does not match the reviewed bootstrap-transition identity."
+        }
+    }
+
+    $lastKnownGoodPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:LastKnownGoodPointerRelativePath -Label "automatic cleanup last-known-good pointer"
+    $lastKnownGood = $null
+    if (Test-Path -LiteralPath $lastKnownGoodPath) {
+        if (-not (Test-Path -LiteralPath $lastKnownGoodPath -PathType Leaf)) { throw "Automatic retirement last-known-good pointer is not a regular file." }
+        $lastKnownGood = Get-ValidatedInstalledGenerationPointer -PointerPath $lastKnownGoodPath -ProjectRoot $ProjectRoot
+        if ($null -eq $lastKnownGood) { throw "Automatic retirement cannot validate last-known-good.json." }
+    }
+
+    $generationsRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/.runtime/codedb/host/generations" -Label "installed generations root"
+    $validatedHistorical = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    if (Test-Path -LiteralPath $generationsRoot) {
+        if (-not (Test-Path -LiteralPath $generationsRoot -PathType Container)) { throw "Installed generations root is not a directory." }
+        Assert-NoReparsePoint -Path $generationsRoot -Root $ProjectRoot -Label "installed generations root"
+        foreach ($directory in @(Get-ChildItem -LiteralPath $generationsRoot -Force)) {
+            if (-not $directory.PSIsContainer -or $directory.Name -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw "Automatic retirement found an unknown generation entry: $($directory.FullName)" }
+            Assert-NoReparsePoint -Path $directory.FullName -Root $generationsRoot -Label "installed generation"
+            if ([string]::Equals($directory.Name, [string]$Manifest.GenerationId, [StringComparison]::Ordinal)) { continue }
+            $historicalPrefix = "AIWork/.runtime/codedb/host/generations/$($directory.Name)/"
+            $reviewed = @($Manifest.RetiredTargets | Where-Object { $_.StartsWith($historicalPrefix, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+            if (-not $reviewed) {
+                Write-Host "[PRESERVED] Unowned generation-like directory is outside the Package cleanup allowlist: $($directory.FullName)"
+                continue
+            }
+            $validatedGeneration = Get-ValidatedPackageOwnedInstalledGeneration -GenerationId $directory.Name -ProjectRoot $ProjectRoot -PayloadRoot $Manifest.Root
+            if ($null -eq $validatedGeneration -and $null -ne $lastKnownGood) {
+                $validatedGeneration = Get-ValidatedPlanRetiredGenerationForCleanup -GenerationId $directory.Name -Plan $Plan -LastKnownGood $lastKnownGood -ProjectRoot $ProjectRoot
+            }
+            if ($null -eq $validatedGeneration) { throw "Automatic retirement cannot prove Package ownership for historical generation $($directory.Name)." }
+            $validatedHistorical.Add($directory.Name, $validatedGeneration)
+        }
+    }
+
+    if (-not $Manifest.TargetMap.ContainsKey($script:CurrentPointerRelativePath)) { throw "Package payload has no current generation pointer identity." }
+    $packagePointerSource = [string]$Manifest.TargetMap[$script:CurrentPointerRelativePath].SourcePath
+    $packagePointerText = [System.IO.File]::ReadAllText($packagePointerSource, [System.Text.UTF8Encoding]::new($false, $true))
+    $packagePointerHash = Get-FileSha256 -Path $packagePointerSource
+
+    $transactionRoot = $null
+    $entries = $null
+    $keepTransaction = $false
+    $removedGenerationPaths = New-Object System.Collections.Generic.List[string]
+    $removedFlatPaths = New-Object System.Collections.Generic.List[string]
+    try {
+        $transactionRoot = Join-Path $Lock.Root ($script:TransactionPrefix + [guid]::NewGuid().ToString("N").Substring(0, 12))
+        $stageRoot = Join-Path $transactionRoot "stage"
+        $backupRoot = Join-Path $transactionRoot "backup"
+        New-Item -ItemType Directory -Force -Path $stageRoot, $backupRoot | Out-Null
+        $entries = New-Object System.Collections.Generic.List[object]
+
+        if (-not (Test-Path -LiteralPath $lastKnownGoodPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $lastKnownGoodPath), $packagePointerHash, [StringComparison]::OrdinalIgnoreCase)) {
+            $lastKnownGoodStagePath = Join-Path $stageRoot "last-known-good-generation.pointer"
+            Write-DurableUtf8File -Path $lastKnownGoodStagePath -Content $packagePointerText
+            $entries.Add((New-TransactionEntry -Target $script:LastKnownGoodPointerRelativePath -TargetPath $lastKnownGoodPath -Mutation "Write" -DesiredSha256 $packagePointerHash -StagePath $lastKnownGoodStagePath -BackupRoot $backupRoot -Index $entries.Count)) | Out-Null
+        }
+        if (-not $currentIsPackageGeneration -or
+            -not [string]::Equals((Get-FileSha256 -Path $currentPointerPath), $packagePointerHash, [StringComparison]::OrdinalIgnoreCase)) {
+            $currentStagePath = Join-Path $stageRoot "current-generation.pointer"
+            Write-DurableUtf8File -Path $currentStagePath -Content $packagePointerText
+            $entries.Add((New-TransactionEntry -Target $script:CurrentPointerRelativePath -TargetPath $currentPointerPath -Mutation "Write" -DesiredSha256 $packagePointerHash -StagePath $currentStagePath -BackupRoot $backupRoot -Index $entries.Count)) | Out-Null
+        }
+
+        foreach ($generationId in @($validatedHistorical.Keys | Sort-Object)) {
+            foreach ($managedFile in @($validatedHistorical[$generationId].ManagedFiles | Sort-Object Path)) {
+                $targetPath = [System.IO.Path]::GetFullPath([string]$managedFile.Path)
+                $relativePath = $targetPath.Substring([System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Length + 1).Replace('\', '/')
+                $relativePath = Assert-TransactionTargetRelativePath -Path $relativePath
+                $entries.Add((New-TransactionEntry -Target $relativePath -TargetPath $targetPath -Mutation "Delete" -BackupRoot $backupRoot -Index $entries.Count)) | Out-Null
+                $removedGenerationPaths.Add($targetPath) | Out-Null
+            }
+        }
+        if ($null -ne $legacyRetirement) {
+            foreach ($file in @($legacyRetirement.Files | Sort-Object Target)) {
+                $entries.Add((New-TransactionEntry -Target $file.Target -TargetPath $file.TargetPath -Mutation "Delete" -BackupRoot $backupRoot -Index $entries.Count)) | Out-Null
+                $removedFlatPaths.Add([string]$file.TargetPath) | Out-Null
+            }
+            $entries.Add((New-TransactionEntry -Target $script:MarkerRelativePath -TargetPath $legacyRetirement.MarkerPath -Mutation "Delete" -BackupRoot $backupRoot -Index $entries.Count)) | Out-Null
+            $removedFlatPaths.Add([string]$legacyRetirement.MarkerPath) | Out-Null
+        }
+
+        if ($entries.Count -gt 0) {
+            $finalFlatReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+            $finalGenerationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+            if ($finalFlatReport.Invalid.Count -gt 0 -or $finalGenerationReport.Invalid.Count -gt 0 -or
+                $finalFlatReport.Live.Count -gt 0 -or $finalGenerationReport.Live.Count -gt 0) {
+                throw "Automatic retirement ownership changed before transaction publication."
+            }
+            Assert-NoLiveLegacyWatcherState -Lock $Lock -ProjectRoot $ProjectRoot -PayloadRoot $Manifest.Root -AllowGenerationOwnedWatcher
+            Write-TransactionJournal -Operation "Remove" -TransactionRoot $transactionRoot -Entries $entries.ToArray() -Manifest $Manifest
+            foreach ($entry in $entries) {
+                $entryFlatReport = Get-MaterializerHostUseLeaseReport -LeaseRoot $leaseRoot -ProjectRoot $ProjectRoot
+                $entryGenerationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+                if ($entryFlatReport.Invalid.Count -gt 0 -or $entryGenerationReport.Invalid.Count -gt 0 -or
+                    $entryFlatReport.Live.Count -gt 0 -or $entryGenerationReport.Live.Count -gt 0) {
+                    throw "Automatic retirement ownership changed before mutating $($entry.Target)."
+                }
+                Assert-TransactionEntryBeforeMutation -Entry $entry
+                if ([string]::Equals([string]$entry.Mutation, "Write", [StringComparison]::Ordinal)) {
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $entry.TargetPath) | Out-Null
+                    Publish-TransactionFile -StagePath $entry.StagePath -TargetPath $entry.TargetPath
+                    if (-not [string]::Equals((Get-FileSha256 -Path $entry.TargetPath), [string]$entry.DesiredSha256, [StringComparison]::OrdinalIgnoreCase)) { throw "Automatic retirement pointer publication failed: $($entry.Target)" }
+                } else {
+                    Remove-Item -LiteralPath $entry.TargetPath -Force
+                    if (Test-Path -LiteralPath $entry.TargetPath) { throw "Automatic retirement target remained after deletion: $($entry.Target)" }
+                }
+                Add-MaterializerMutationScope -Scope "host_runtime"
+                Invoke-TestFaultAfterMutation
+            }
+        }
+
+        if ($removedGenerationPaths.Count -gt 0) {
+            $hostRuntimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/.runtime/codedb/host" -Label "host generation runtime"
+            Remove-EmptyManagedParents -Paths $removedGenerationPaths.ToArray() -TargetRoot $hostRuntimeRoot
+        }
+        if ($removedFlatPaths.Count -gt 0) {
+            $flatRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:TargetPrefix.TrimEnd('/') -Label "legacy flat Host root"
+            Remove-EmptyManagedParents -Paths $removedFlatPaths.ToArray() -TargetRoot $flatRoot
+        }
+    } catch {
+        $originalError = $_.Exception
+        $rollbackErrors = @()
+        if ($null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
+            $targetRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork" -Label "automatic retirement target root"
+            $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $targetRoot -ProjectRoot $ProjectRoot)
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            $keepTransaction = $true
+            Throw-MaterializerError -Message "Automatic retirement failed and rollback was incomplete. $($rollbackErrors -join '; ') Transaction: $transactionRoot" -ExitCode 7
+        }
+        throw $originalError
+    } finally {
+        if ($null -ne $transactionRoot -and -not $keepTransaction -and (Test-Path -LiteralPath $transactionRoot)) {
+            Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($currentFlatPayload) {
+        Write-Host "[CLEANUP] Retired immutable generation closures are reclaimed; the current diagnostic flat payload remains installed."
+    } else {
+        Write-Host "[CLEANUP] Retired flat and immutable generation closures are reclaimed; host/current now selects the Package generation."
+    }
+    return [pscustomobject]@{ CleanupState = "COMPLETE"; LiveFlatOwners = @(); LiveHistoricalGenerationIds = @() }
+}
+
 function Resolve-RollbackWatcherManager {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -6656,7 +8900,9 @@ function Get-LegacyWatchManagerPath {
 function Invoke-UpgradeWatcherEnsure {
     param(
         [AllowNull()][string]$WatchManagerPath,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$WithoutMaterializerHandoff
     )
 
     if ($PocFixture) {
@@ -6672,7 +8918,23 @@ function Invoke-UpgradeWatcherEnsure {
         throw "$Label watch manager is missing: $WatchManagerPath"
     }
     Write-Host "[SWITCHING] Reconciling $Label watcher ownership."
-    & $WatchManagerPath -Action Ensure -MaterializerHandoff
+    $previousUnityRoot = $env:RICE_CODEDB_UNITY_ROOT
+    Push-Location -LiteralPath $ProjectRoot
+    try {
+        $env:RICE_CODEDB_UNITY_ROOT = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        if ($WithoutMaterializerHandoff) {
+            & $WatchManagerPath -Action Ensure
+        } else {
+            & $WatchManagerPath -Action Ensure -MaterializerHandoff
+        }
+    } finally {
+        if ($null -eq $previousUnityRoot) {
+            Remove-Item Env:RICE_CODEDB_UNITY_ROOT -ErrorAction SilentlyContinue
+        } else {
+            $env:RICE_CODEDB_UNITY_ROOT = $previousUnityRoot
+        }
+        Pop-Location
+    }
 }
 
 function Invoke-Sync {
@@ -6688,6 +8950,7 @@ function Invoke-Sync {
     if ($AutomaticUpgrade -and $OwnedLegacyRedeploy) {
         throw "AutomaticUpgrade and OwnedLegacyRedeploy are mutually exclusive."
     }
+    Set-MaterializerCommandPhase -Phase "PREFLIGHT"
 
     $lock = $null
     $transactionRoot = $null
@@ -6697,9 +8960,15 @@ function Invoke-Sync {
     $previousWatcherManagerSha256 = $null
     $watcherHandoffAttempted = $false
     $upgradeMutationStarted = $false
+    $automaticHostCommitted = $false
+    $automaticMcpPlan = $null
     $legacyWatcherStopped = $false
+    $automaticCleanupState = "COMPLETE"
 
     if ($AutomaticUpgrade) {
+        # Stable invalid or ambiguous TOML must block before any automatic Host
+        # or materializer-control mutation.
+        $automaticMcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
         $runtimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label "materializer runtime"
         $hasPendingTransaction = $false
         if (Test-Path -LiteralPath $runtimeRoot) {
@@ -6730,6 +8999,7 @@ function Invoke-Sync {
 
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
+        Set-MaterializerCommandPhase -Phase "HOST_RUNTIME"
         if ($AutomaticUpgrade) {
             Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
             $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot
@@ -6761,12 +9031,48 @@ function Invoke-Sync {
             }
         }
         $plan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        if ($AutomaticUpgrade) {
+            $automaticMcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+        }
         Write-MaterializationPlan -Plan $plan
         if ($plan.HasConflict) {
             Throw-MaterializerError -Message "Payload sync was rejected because one or more targets conflict." -ExitCode 3
         }
         if ($plan.IsCurrent) {
             Write-Host "[OK] Host payload is already current; no files were written."
+            if ($AutomaticUpgrade) {
+                $automaticHostCommitted = $true
+                Set-MaterializerCommandPhase -Phase "MCP_AVAILABLE"
+                Complete-AutomaticMcpConvergence `
+                    -Manifest $Manifest `
+                    -ProjectRoot $ProjectRoot `
+                    -Lock $lock `
+                    -McpPlan $automaticMcpPlan
+                $cleanup = Invoke-AutomaticGenerationCleanup `
+                    -Manifest $Manifest `
+                    -ProjectRoot $ProjectRoot `
+                    -Lock $lock `
+                    -Plan $plan
+                $automaticCleanupState = [string]$cleanup.CleanupState
+                $null = Ensure-MaterializerUpgradeStateCurrent `
+                    -Lock $lock `
+                    -ProjectRoot $ProjectRoot `
+                    -Message "Generation $($Manifest.GenerationId), project registration, and Package-owned MCP handshake are current." `
+                    -CleanupState $automaticCleanupState
+                $currentPlan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+                Write-ProductLayerStatus `
+                    -Manifest $Manifest `
+                    -ProjectRoot $ProjectRoot `
+                    -Plan $currentPlan `
+                    -CleanupState $automaticCleanupState
+                Write-Host "[CLEANUP_STATE] $automaticCleanupState"
+            }
+            Set-MaterializerCommandOutcome `
+                -Outcome "CONVERGED" `
+                -ReasonCode "ACTION_COMPLETE" `
+                -CleanupState $(if ($AutomaticUpgrade) { $automaticCleanupState } else { "COMPLETE" }) `
+                -NextAction $(if ($AutomaticUpgrade -and $automaticCleanupState -eq "PENDING") { "No action required; CodeDB will reclaim retired closures after their leases drain." } else { "No action required." })
+            Set-MaterializerCommandPhase -Phase "COMPLETE"
             return
         }
         if ($OwnedLegacyRedeploy) {
@@ -6901,6 +9207,7 @@ function Invoke-Sync {
                     throw "Retired payload target remained after deletion: $($entry.Target)"
                 }
             }
+            Add-MaterializerMutationScope -Scope "host_runtime"
             Invoke-TestFaultAfterMutation
         }
 
@@ -6924,17 +9231,67 @@ function Invoke-Sync {
                 (ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:GenerationTargetPrefix.TrimEnd('/') -Label "selected generation") `
                 "scripts\manage-codedb-project-watch.ps1"
             $watcherHandoffAttempted = $true
-            Invoke-UpgradeWatcherEnsure -WatchManagerPath $newWatcherManager -Label "selected generation"
-            Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "CURRENT" -Message "Generation $($Manifest.GenerationId) is selected and watcher reconciliation succeeded."
+            Invoke-UpgradeWatcherEnsure -WatchManagerPath $newWatcherManager -ProjectRoot $ProjectRoot -Label "selected generation"
+            if (Test-Path -LiteralPath $transactionRoot) {
+                Remove-Item -LiteralPath $transactionRoot -Recurse -Force
+            }
+            $transactionRoot = $null
+            $entries = $null
+            $automaticHostCommitted = $true
+            Set-MaterializerCommandPhase -Phase "MCP_AVAILABLE"
+            Complete-AutomaticMcpConvergence `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -Lock $lock `
+                -McpPlan $automaticMcpPlan `
+                -WatcherAlreadyEnsured
+            $cleanup = Invoke-AutomaticGenerationCleanup `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -Lock $lock `
+                -Plan $plan
+            $automaticCleanupState = [string]$cleanup.CleanupState
+            Publish-MaterializerUpgradeState `
+                -Lock $lock `
+                -ProjectRoot $ProjectRoot `
+                -State "CURRENT" `
+                -Message "Generation $($Manifest.GenerationId), project registration, and Package-owned MCP handshake are current." `
+                -CleanupState $automaticCleanupState
+            $currentPlan = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+            Write-ProductLayerStatus `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -Plan $currentPlan `
+                -CleanupState $automaticCleanupState
+            Write-Host "[CLEANUP_STATE] $automaticCleanupState"
             Write-Host "[OK] Host payload automatically upgraded to version $($Manifest.PayloadVersion)."
         } elseif ($OwnedLegacyRedeploy) {
             Write-Host "[OK] Host payload redeployed to version $($Manifest.PayloadVersion)."
         } else {
             Write-Host "[OK] Host payload synchronized to version $($Manifest.PayloadVersion)."
         }
+        Set-MaterializerCommandOutcome `
+            -Outcome "CONVERGED" `
+            -ReasonCode "ACTION_COMPLETE" `
+            -CleanupState $(if ($AutomaticUpgrade) { $automaticCleanupState } else { "COMPLETE" }) `
+            -NextAction $(if ($AutomaticUpgrade -and $automaticCleanupState -eq "PENDING") { "No action required; CodeDB will reclaim retired closures after their leases drain." } else { "No action required." })
+        Set-MaterializerCommandPhase -Phase "COMPLETE"
     } catch {
         $originalError = $_.Exception
-        if ($AutomaticUpgrade -and $null -ne $lock -and $upgradeMutationStarted) {
+        if ($AutomaticUpgrade -and $automaticHostCommitted) {
+            Set-MaterializerCommandOutcome `
+                -Outcome "PARTIALLY_REPAIRED" `
+                -ReasonCode "MCP_AVAILABILITY_INCOMPLETE" `
+                -CleanupState "PENDING" `
+                -NextAction "CodeDB will retry availability automatically; use Fix CodeDB only if Needs attention remains."
+        } else {
+            Set-MaterializerCommandOutcome `
+                -Outcome "BLOCKED" `
+                -ReasonCode "CONVERGENCE_BLOCKED" `
+                -CleanupState $(if ($legacyWatcherStopped) { "PENDING" } else { "COMPLETE" }) `
+                -NextAction $(if ($legacyWatcherStopped) { "Use Fix CodeDB once to restart the authenticated watcher and finish Host recovery." } else { "Review the reported convergence boundary, then retry once." })
+        }
+        if ($AutomaticUpgrade -and $null -ne $lock -and $upgradeMutationStarted -and -not $automaticHostCommitted) {
             try {
                 Publish-MaterializerUpgradeState -Lock $lock -ProjectRoot $ProjectRoot -State "ROLLBACK" -Message $originalError.Message
                 Write-Host "[ROLLBACK] Restoring the last known-good host selection."
@@ -6943,10 +9300,10 @@ function Invoke-Sync {
             }
         }
         $rollbackErrors = @()
-        if ($null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
+        if (-not $automaticHostCommitted -and $null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
             $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
         }
-        if ($AutomaticUpgrade -and $watcherHandoffAttempted -and $rollbackErrors.Count -eq 0 -and
+        if ($AutomaticUpgrade -and -not $automaticHostCommitted -and $watcherHandoffAttempted -and $rollbackErrors.Count -eq 0 -and
             -not [string]::IsNullOrWhiteSpace($previousWatcherManager)) {
             try {
                 $null = Resolve-RollbackWatcherManager `
@@ -6990,6 +9347,10 @@ function Invoke-Sync {
             }
             Throw-MaterializerError -Message "Payload redeploy failed after the authenticated legacy watcher stopped; Host payload changes were rolled back. $($originalError.Message)" -ExitCode 6
         }
+        if ($AutomaticUpgrade -and $automaticHostCommitted) {
+            Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
+            Throw-MaterializerError -Message "Automatic convergence installed the current Host but did not reach MCP_AVAILABLE. $($originalError.Message)" -ExitCode 8
+        }
         if ($script:RequestedExitCode -ne 0) {
             throw $originalError
         }
@@ -7002,7 +9363,278 @@ function Invoke-Sync {
     }
 }
 
-function Invoke-Remove {
+function Get-UninstallCleanupState {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    foreach ($relativePath in @($script:MarkerRelativePath, $script:LastKnownGoodPointerRelativePath)) {
+        $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "uninstall cleanup target"
+        if (Test-Path -LiteralPath $path) { return "PENDING" }
+    }
+    foreach ($file in $Manifest.Files) {
+        if (Test-Path -LiteralPath $file.TargetPath) { return "PENDING" }
+    }
+    foreach ($relativePath in $Manifest.RetiredTargets) {
+        $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "retired uninstall cleanup target"
+        if (Test-Path -LiteralPath $path) { return "PENDING" }
+    }
+    return "COMPLETE"
+}
+
+function Invoke-Uninstall {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [switch]$AutomaticCleanup
+    )
+
+    $lock = $null
+    $desiredStateCommitted = $false
+    $retainedFlatMcps = @()
+    $retainedGenerationMcps = @()
+    $watcherCleanupPending = $false
+    $cleanupState = "PENDING"
+    $stateId = $null
+    Set-MaterializerCommandPhase -Phase "PREFLIGHT"
+    try {
+        # Invalid TOML and invalid desired-state evidence remain zero-write failures.
+        $integrationState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+        if ($AutomaticCleanup -and -not $integrationState.Uninstalled) {
+            Throw-MaterializerError -Message "Automatic uninstall cleanup requires a valid UNINSTALLED project integration state." -ExitCode 4
+        }
+        $stateId = if ($integrationState.Uninstalled) {
+            [string]$integrationState.StateId
+        } else {
+            [guid]::NewGuid().ToString('N').ToLowerInvariant()
+        }
+        $mcpPlan = Get-RepairMcpConfigPlan `
+            -ProjectRoot $ProjectRoot `
+            -RemoveManagedKeys `
+            -UninstallStateId $stateId
+        if ($integrationState.Uninstalled -and
+            [string]::Equals([string]$integrationState.CleanupState, "COMPLETE", [StringComparison]::Ordinal) -and
+            $mcpPlan.Current -and
+            [string]::Equals((Get-UninstallCleanupState -Manifest $Manifest -ProjectRoot $ProjectRoot), "COMPLETE", [StringComparison]::Ordinal)) {
+            Write-Host "[PHASE DESIRED_STATE] CURRENT - project integration remains UNINSTALLED."
+            Write-Host "[CLEANUP_STATE] COMPLETE"
+            Write-Host "[RESULT] UNINSTALLED"
+            Write-Host "[NEXT] Use Install CodeDB when this project should be integrated again."
+            Set-MaterializerCommandOutcome `
+                -Outcome "UNINSTALLED" `
+                -ReasonCode "UNINSTALL_COMPLETE" `
+                -CleanupState "COMPLETE" `
+                -NextAction "Use Install CodeDB when this project should be integrated again."
+            Set-MaterializerCommandPhase -Phase "COMPLETE"
+            return
+        }
+        if ($AutomaticCleanup) {
+            Invoke-TestAutomaticCleanupStateCapturedSignal
+        }
+
+        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting:$AutomaticCleanup
+        Set-MaterializerCommandPhase -Phase "DESIRED_STATE"
+        $lockedState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+        if ($AutomaticCleanup) {
+            if (-not $lockedState.Uninstalled -or
+                -not [string]::Equals([string]$lockedState.StateId, $stateId, [StringComparison]::Ordinal) -or
+                -not [string]::Equals([string]$lockedState.CleanupState, "PENDING", [StringComparison]::Ordinal)) {
+                Write-Host "[SKIPPED] Automatic uninstall cleanup became obsolete while waiting for the materializer lock."
+                Set-MaterializerCommandOutcome `
+                    -Outcome "SKIPPED" `
+                    -ReasonCode "DESIRED_STATE_CHANGED" `
+                    -CleanupState "COMPLETE" `
+                    -NextAction "No action required."
+                return
+            }
+            $desiredStateCommitted = $true
+            Write-Host "[PHASE DESIRED_STATE] CURRENT - project integration remains UNINSTALLED."
+        } else {
+            if ($lockedState.Uninstalled -and
+                -not [string]::Equals([string]$lockedState.StateId, $stateId, [StringComparison]::Ordinal)) {
+                throw "Project integration desired state identity changed while Uninstall waited for the materializer lock."
+            }
+            $lockedState = Publish-ProjectIntegrationUninstalledState `
+                -Lock $lock `
+                -ProjectRoot $ProjectRoot `
+                -StateId $stateId
+            $desiredStateCommitted = $true
+            if ([string]::Equals([string]$lockedState.CleanupState, "COMPLETE", [StringComparison]::Ordinal)) {
+                $lockedState = Publish-ProjectIntegrationCleanupState `
+                    -Lock $lock `
+                    -ProjectRoot $ProjectRoot `
+                    -StateId $stateId `
+                    -CleanupState "PENDING"
+            }
+        }
+        $mcpPlan = Get-RepairMcpConfigPlan `
+            -ProjectRoot $ProjectRoot `
+            -RemoveManagedKeys `
+            -UninstallStateId $stateId
+
+        if ($AutomaticCleanup) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $stateId -CleanupState "PENDING"
+        }
+        Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerAction "remove"
+
+        if ($AutomaticCleanup) {
+            $flatReport = Get-MaterializerHostUseLeaseReport `
+                -LeaseRoot (Join-Path $lock.Root $script:HostUseLeaseDirectoryName) `
+                -ProjectRoot $ProjectRoot
+            $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+            if ($flatReport.Invalid.Count -gt 0) {
+                Throw-MaterializerError -Message "Legacy Host-use lease is invalid and requires manual review: $($flatReport.Invalid[0])" -ExitCode 7
+            }
+            if ($generationReport.Invalid.Count -gt 0) {
+                Throw-MaterializerError -Message "Generation lease is invalid and requires manual review: $($generationReport.Invalid[0])" -ExitCode 7
+            }
+            foreach ($stale in $flatReport.Stale) {
+                $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $stateId -CleanupState "PENDING"
+                Remove-Item -LiteralPath $stale.Path -Force
+                Add-MaterializerMutationScope -Scope "leases"
+                Write-Host "[RECOVERED] Removed proved-stale $($stale.Owner) flat Host-use lease for PID $($stale.ProcessId)."
+            }
+            foreach ($stale in $generationReport.Stale) {
+                $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $stateId -CleanupState "PENDING"
+                Remove-Item -LiteralPath $stale.Path -Force
+                Add-MaterializerMutationScope -Scope "leases"
+                Write-Host "[RECOVERED] Removed proved-stale generation $($stale.GenerationId) $($stale.Owner) lease for PID $($stale.ProcessId)."
+            }
+            $flatReport = Get-MaterializerHostUseLeaseReport `
+                -LeaseRoot (Join-Path $lock.Root $script:HostUseLeaseDirectoryName) `
+                -ProjectRoot $ProjectRoot
+            $generationReport = Get-MaterializerGenerationLeaseReport -ProjectRoot $ProjectRoot
+            $watcherCleanupPending = @($flatReport.LiveDetails | Where-Object {
+                [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal)
+            }).Count -gt 0 -or @($generationReport.LiveDetails | Where-Object {
+                [string]::Equals([string]$_.Owner, "watcher", [StringComparison]::Ordinal)
+            }).Count -gt 0
+            $retainedFlatMcps = @(Get-RepairFlatMcpOwners -ProjectRoot $ProjectRoot)
+            $retainedGenerationMcps = @(Get-RepairGenerationMcpOwners `
+                -ProjectRoot $ProjectRoot `
+                -PayloadRoot $Manifest.Root `
+                -GenerationReport $generationReport)
+        } else {
+            $ownerGate = Complete-RepairFlatHostUseGate `
+                -Lock $lock `
+                -ProjectRoot $ProjectRoot `
+                -PayloadRoot $Manifest.Root
+            foreach ($watcher in @($ownerGate.RetainedGenerationWatchers)) {
+                Complete-UninstallGenerationWatcherStop `
+                    -Lock $lock `
+                    -ProjectRoot $ProjectRoot `
+                    -PayloadRoot $Manifest.Root `
+                    -Watcher $watcher
+            }
+            $currentGenerationWatchers = @()
+            $currentGenerationMcps = @()
+            $currentFlatMcps = @()
+            Assert-RepairOwnerGateStable `
+                -Lock $lock `
+                -ProjectRoot $ProjectRoot `
+                -PayloadRoot $Manifest.Root `
+                -ExpectedGenerationWatchers @() `
+                -RetainedGenerationWatchers ([ref]$currentGenerationWatchers) `
+                -RetainedGenerationMcps ([ref]$currentGenerationMcps) `
+                -RetainedFlatMcps ([ref]$currentFlatMcps)
+            if ($currentGenerationWatchers.Count -gt 0) {
+                Throw-MaterializerError -Message "Authenticated watcher ownership remained after Uninstall Stop." -ExitCode 4
+            }
+            $retainedGenerationMcps = @($currentGenerationMcps)
+            $retainedFlatMcps = @($currentFlatMcps)
+        }
+
+        if ($AutomaticCleanup) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $stateId -CleanupState "PENDING"
+        }
+        $latestMcpPlan = Get-RepairMcpConfigPlan `
+            -ProjectRoot $ProjectRoot `
+            -RemoveManagedKeys `
+            -UninstallStateId $stateId
+        Set-MaterializerCommandPhase -Phase "MCP_REGISTRATION"
+        $null = Publish-RepairMcpConfig -Plan $latestMcpPlan -ProjectRoot $ProjectRoot -Lock $lock
+        $verifiedMcpPlan = Get-RepairMcpConfigPlan `
+            -ProjectRoot $ProjectRoot `
+            -RemoveManagedKeys `
+            -UninstallStateId $stateId
+        if (-not $verifiedMcpPlan.Current) {
+            throw "Project MCP registration removal failed verification."
+        }
+
+        Invoke-TestUninstallAfterMcpHandshake
+        $hasRetainedMcp = $retainedFlatMcps.Count -gt 0 -or $retainedGenerationMcps.Count -gt 0
+        if (-not $hasRetainedMcp -and -not $watcherCleanupPending) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $stateId -CleanupState "PENDING"
+            Exit-MaterializerWatchManagementLocks -Lock $lock
+            Invoke-Remove `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -TargetRoot $TargetRoot `
+                -MarkerPath $MarkerPath `
+                -ExistingLock $lock `
+                -RequiredIntegrationStateId $stateId
+        }
+
+        $cleanupState = Get-UninstallCleanupState -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if ($hasRetainedMcp -or $watcherCleanupPending) { $cleanupState = "PENDING" }
+        $null = Publish-ProjectIntegrationCleanupState `
+            -Lock $lock `
+            -ProjectRoot $ProjectRoot `
+            -StateId $stateId `
+            -CleanupState $cleanupState
+    } catch {
+        $originalError = $_.Exception
+        Set-MaterializerCommandOutcome `
+            -Outcome "BLOCKED" `
+            -ReasonCode "UNINSTALL_BLOCKED" `
+            -CleanupState $(if ($desiredStateCommitted) { "PENDING" } else { "COMPLETE" }) `
+            -NextAction $(if ($desiredStateCommitted) { "Resolve the reported boundary; automatic cleanup will continue while the project remains Uninstalled." } else { "Resolve the reported boundary, then retry Uninstall CodeDB once." })
+        Write-Host "[RESULT] BLOCKED"
+        if ($desiredStateCommitted) {
+            Write-Host "[CLEANUP_STATE] PENDING"
+            Write-Host "[NEXT] Resolve the reported ownership or configuration boundary; the UNINSTALLED state remains in force."
+        } else {
+            Write-Host "[NEXT] Resolve the reported desired-state or MCP configuration boundary, then retry Uninstall CodeDB from Project."
+        }
+        if ($script:RequestedExitCode -ne 0) { throw $originalError }
+        Throw-MaterializerError -Message $originalError.Message -ExitCode 4
+    } finally {
+        Exit-MaterializerLock -Lock $lock
+    }
+
+    foreach ($owner in $retainedFlatMcps) {
+        Write-Host "[RETAINED] flat mcp PID $($owner.ProcessId) keeps its exact owned Host closure; the process was not stopped."
+    }
+    foreach ($owner in $retainedGenerationMcps) {
+        Write-Host "[RETAINED] generation $($owner.GenerationId) mcp PID $($owner.ProcessId) keeps its immutable Host closure; the process was not stopped."
+    }
+    if ($watcherCleanupPending) {
+        Write-Host "[RETAINED] Automatic cleanup did not stop a watcher process."
+    }
+    Write-Host "[CLEANUP_STATE] $cleanupState"
+    Write-Host "[RESULT] UNINSTALLED"
+    Set-MaterializerCommandPhase -Phase "COMPLETE"
+    if ($cleanupState -eq "PENDING") {
+        Write-Host "[NEXT] No action is required; retained closures will be cleaned automatically after their owners drain."
+        Set-MaterializerCommandOutcome `
+            -Outcome "UNINSTALLED" `
+            -ReasonCode "UNINSTALL_CLEANUP_PENDING" `
+            -CleanupState "PENDING" `
+            -NextAction "No action is required; retained closures will be cleaned automatically after their owners drain."
+    } else {
+        Write-Host "[NEXT] Use Install CodeDB when this project should be integrated again."
+        Set-MaterializerCommandOutcome `
+            -Outcome "UNINSTALLED" `
+            -ReasonCode "UNINSTALL_COMPLETE" `
+            -CleanupState "COMPLETE" `
+            -NextAction "Use Install CodeDB when this project should be integrated again."
+    }
+}
+
+function Invoke-Install {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -7010,40 +9642,192 @@ function Invoke-Remove {
         [Parameter(Mandatory = $true)][string]$MarkerPath
     )
 
+    $integrationState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+    if (-not $integrationState.Uninstalled) {
+        Throw-MaterializerError -Message "Install CodeDB requires a valid UNINSTALLED project integration state." -ExitCode 4
+    }
+
+    $cleanupState = "COMPLETE"
     $lock = $null
+    Set-MaterializerCommandPhase -Phase "PREFLIGHT"
+    try {
+        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting
+        $lockedState = Assert-ProjectIntegrationStateMatch `
+            -ProjectRoot $ProjectRoot `
+            -StateId $integrationState.StateId
+        Invoke-Repair `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -TargetRoot $TargetRoot `
+            -MarkerPath $MarkerPath `
+            -InstallMode `
+            -ResultCleanupState ([ref]$cleanupState) `
+            -ExistingLock $lock `
+            -InstallStateId $lockedState.StateId
+
+        Invoke-TestInstallAfterRepairHandshake
+        $verifiedHost = Get-MaterializationPlan -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        if (-not $verifiedHost.IsCurrent) {
+            throw "Install CodeDB final Host verification did not reach the current state."
+        }
+        $verifiedMcp = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
+        if (-not $verifiedMcp.Current) {
+            throw "Install CodeDB final MCP registration verification failed."
+        }
+        $verifiedAvailability = Get-McpAvailabilityStatus -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if (-not $verifiedAvailability.Current) {
+            throw "Install CodeDB final Package-owned MCP handshake verification failed."
+        }
+        $null = Assert-ProjectIntegrationStateMatch `
+            -ProjectRoot $ProjectRoot `
+            -StateId $lockedState.StateId
+        $null = Clear-ProjectIntegrationUninstalledState `
+            -Lock $lock `
+            -ProjectRoot $ProjectRoot `
+            -StateId $lockedState.StateId
+        if ((Get-ProjectIntegrationState -ProjectRoot $ProjectRoot).Present) {
+            throw "Install CodeDB final desired-state verification failed."
+        }
+    } finally {
+        Exit-MaterializerLock -Lock $lock
+    }
+    Write-Host "[CLEANUP_STATE] $cleanupState"
+    Write-Host "[RESULT] INSTALLED"
+    Write-Host "[PRODUCT_STATE] READY"
+    Write-Host "[NEXT] Start a new Codex session so it reads the installed project MCP configuration."
+    Set-MaterializerCommandPhase -Phase "COMPLETE"
+    Set-MaterializerCommandOutcome `
+        -Outcome "INSTALLED" `
+        -ReasonCode "INSTALL_COMPLETE" `
+        -CleanupState $cleanupState `
+        -NextAction "Start a new Codex task so it reads the installed project MCP configuration."
+}
+
+function Get-MarkerlessInstanceClosureFiles {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $files = New-Object System.Collections.Generic.List[object]
+    foreach ($file in $Manifest.Files) {
+        if (-not (Test-Path -LiteralPath $file.TargetPath)) { continue }
+        Assert-NoReparsePoint -Path $file.TargetPath -Root $ProjectRoot -Label "markerless instance closure target"
+        if (-not (Test-Path -LiteralPath $file.TargetPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), [string]$file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Markerless instance closure target is not the exact Package-owned file: $($file.Target)"
+        }
+        $files.Add([pscustomobject]@{
+            Target = $file.Target
+            TargetPath = $file.TargetPath
+            InstalledSha256 = $file.Sha256
+        })
+    }
+    return $files.ToArray()
+}
+
+function Invoke-Remove {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [AllowNull()]$ExistingLock,
+        [AllowNull()][string]$RequiredIntegrationStateId,
+        [switch]$AllowMarkerlessInstanceClosure
+    )
+
+    $lock = $ExistingLock
+    $ownsLock = $null -eq $ExistingLock
     $transactionRoot = $null
     $keepTransaction = $false
     $entries = $null
+    Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     # Reject an older Package before acquiring owner-management locks or
     # publishing recovery state. Marker, current, and rollback identities are
     # independent deletion authorities and each must stay within this manifest.
     $null = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
     Assert-RemovalPendingTransactionUpperBoundBeforeLock -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+        $null = Assert-ProjectIntegrationStateMatch `
+            -ProjectRoot $ProjectRoot `
+            -StateId $RequiredIntegrationStateId `
+            -CleanupState "PENDING"
+    }
     try {
-        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
-        if ($lock.LockFileExistedBefore) {
+        if ($ownsLock) {
+            $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
+        }
+        Set-MaterializerCommandPhase -Phase "HOST_RUNTIME"
+        if ($ownsLock -and $lock.LockFileExistedBefore) {
             $lock.PreserveLockFile = $true
         }
         Invoke-TestRemoveAfterLockHandshake
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch `
+                -ProjectRoot $ProjectRoot `
+                -StateId $RequiredIntegrationStateId `
+                -CleanupState "PENDING"
+        }
         # Re-check every live identity and every journal rollback pre-image
         # before active state, recovery, lease reclamation, or Host mutation.
-        $null = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        $markerBeforeGate = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
         Assert-RemovalPendingTransactionUpperBound -Manifest $Manifest -Lock $lock -ProjectRoot $ProjectRoot
+        if ($null -eq $markerBeforeGate -and $AllowMarkerlessInstanceClosure) {
+            $null = @(Get-MarkerlessInstanceClosureFiles -Manifest $Manifest -ProjectRoot $ProjectRoot)
+        }
         $lock.PreserveLockFile = $false
-        Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+        }
+        Initialize-MaterializerUpgradeGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerAction "remove"
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+        }
         $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -AutomaticOnly
-        $null = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
+        $markerBeforeGate = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
         Assert-RemovalPendingTransactionUpperBound -Manifest $Manifest -Lock $lock -ProjectRoot $ProjectRoot
-        Complete-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
+        if ($null -eq $markerBeforeGate -and $AllowMarkerlessInstanceClosure) {
+            $null = @(Get-MarkerlessInstanceClosureFiles -Manifest $Manifest -ProjectRoot $ProjectRoot)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+        }
+        if ($null -eq $markerBeforeGate -and $AllowMarkerlessInstanceClosure) {
+            $lock.ProviderRuntimeRoots = @(Get-MaterializerProviderRuntimeRoots -ProjectRoot $ProjectRoot)
+            Enter-MaterializerWatchManagementLocks -Lock $lock -ProjectRoot $ProjectRoot
+            Assert-NoLiveHostUseLeases -Lock $lock -ProjectRoot $ProjectRoot
+            Assert-NoLiveLegacyWatcherState -Lock $lock -ProjectRoot $ProjectRoot
+        } else {
+            Complete-MaterializerHostUseGate -Lock $lock -ProjectRoot $ProjectRoot -MarkerPath $MarkerPath
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+        }
         $null = Invoke-PendingTransactionRecovery -Lock $lock -ProjectRoot $ProjectRoot -TargetRoot $TargetRoot -SkipAutomaticUpgrade
         $marker = Assert-RemovalIdentityUpperBound -Manifest $Manifest -MarkerPath $MarkerPath -ProjectRoot $ProjectRoot
-        if ($null -eq $marker) {
+        if ($null -eq $marker -and -not $AllowMarkerlessInstanceClosure) {
             Write-Host "[OK] No managed host payload is installed."
+            Set-MaterializerCommandOutcome `
+                -Outcome "REMOVED" `
+                -ReasonCode "REMOVE_COMPLETE" `
+                -CleanupState "COMPLETE" `
+                -NextAction "No action required."
+            Set-MaterializerCommandPhase -Phase "COMPLETE"
             return
         }
 
+        $managedRemovalFiles = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $marker) {
+            foreach ($item in $marker.Files) { $managedRemovalFiles.Add($item) }
+        } else {
+            foreach ($file in @(Get-MarkerlessInstanceClosureFiles -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+                $managedRemovalFiles.Add($file)
+            }
+        }
+
         $conflicts = New-Object System.Collections.Generic.List[string]
-        foreach ($item in $marker.Files) {
+        foreach ($item in $managedRemovalFiles) {
             $isTrustedTarget = @($Manifest.Files | Where-Object { [string]::Equals($_.Target, $item.Target, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1 -or
                 $Manifest.RetiredTargetMap.ContainsKey($item.Target)
             if (-not $isTrustedTarget) {
@@ -7063,7 +9847,7 @@ function Invoke-Remove {
 
         $extraRemovalTargets = New-Object System.Collections.Generic.List[object]
         $removalTargetMap = @{}
-        foreach ($item in $marker.Files) {
+        foreach ($item in $managedRemovalFiles) {
             $removalTargetMap[$item.Target] = $true
         }
         $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "selected generation pointer"
@@ -7077,8 +9861,10 @@ function Invoke-Remove {
                     $removalTargetMap[$relativePath] = $true
                 }
             }
-            $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:CurrentPointerRelativePath; TargetPath = $currentPointerPath })
-            $removalTargetMap[$script:CurrentPointerRelativePath] = $true
+            if (-not $removalTargetMap.ContainsKey($script:CurrentPointerRelativePath)) {
+                $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:CurrentPointerRelativePath; TargetPath = $currentPointerPath })
+                $removalTargetMap[$script:CurrentPointerRelativePath] = $true
+            }
         }
         $candidateGenerationRoot = ConvertTo-AbsoluteChildPath `
             -Root $ProjectRoot `
@@ -7112,8 +9898,10 @@ function Invoke-Remove {
                     $removalTargetMap[$relativePath] = $true
                 }
             }
-            $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:LastKnownGoodPointerRelativePath; TargetPath = $lastKnownGoodPath })
-            $removalTargetMap[$script:LastKnownGoodPointerRelativePath] = $true
+            if (-not $removalTargetMap.ContainsKey($script:LastKnownGoodPointerRelativePath)) {
+                $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:LastKnownGoodPointerRelativePath; TargetPath = $lastKnownGoodPath })
+                $removalTargetMap[$script:LastKnownGoodPointerRelativePath] = $true
+            }
         }
         $upgradeStatePath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:UpgradeStateRelativePath -Label "materializer upgrade state"
         if (Test-Path -LiteralPath $upgradeStatePath) {
@@ -7121,12 +9909,18 @@ function Invoke-Remove {
             $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:UpgradeStateRelativePath; TargetPath = $upgradeStatePath })
             $removalTargetMap[$script:UpgradeStateRelativePath] = $true
         }
+        $mcpAvailabilityPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpAvailabilityRelativePath -Label "MCP availability state"
+        if (Test-Path -LiteralPath $mcpAvailabilityPath) {
+            $null = Assert-McpAvailabilityStateArtifact -Path $mcpAvailabilityPath -ProjectRoot $ProjectRoot
+            $extraRemovalTargets.Add([pscustomobject]@{ Target = $script:McpAvailabilityRelativePath; TargetPath = $mcpAvailabilityPath })
+            $removalTargetMap[$script:McpAvailabilityRelativePath] = $true
+        }
 
         $transactionRoot = Join-Path $lock.Root ($script:TransactionPrefix + [guid]::NewGuid().ToString("N").Substring(0, 12))
         $backupRoot = Join-Path $transactionRoot "backup"
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
-        foreach ($item in $marker.Files) {
+        foreach ($item in $managedRemovalFiles) {
             $entries.Add((New-TransactionEntry `
                 -Target $item.Target `
                 -TargetPath $item.TargetPath `
@@ -7142,32 +9936,41 @@ function Invoke-Remove {
                 -BackupRoot $backupRoot `
                 -Index $entries.Count)) | Out-Null
         }
-        $entries.Add((New-TransactionEntry `
-            -Target $script:MarkerRelativePath `
-            -TargetPath $MarkerPath `
-            -Mutation "Delete" `
-            -BackupRoot $backupRoot `
-            -Index $entries.Count)) | Out-Null
+        if ($null -ne $marker) {
+            $entries.Add((New-TransactionEntry `
+                -Target $script:MarkerRelativePath `
+                -TargetPath $MarkerPath `
+                -Mutation "Delete" `
+                -BackupRoot $backupRoot `
+                -Index $entries.Count)) | Out-Null
+        }
 
         # The durable journal is the recovery commit point; target mutations start after it.
+        if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+            $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+        }
         Write-TransactionJournal -Operation "Remove" -TransactionRoot $transactionRoot -Entries $entries.ToArray() -Manifest $Manifest
         foreach ($entry in $entries) {
+            if (-not [string]::IsNullOrWhiteSpace($RequiredIntegrationStateId)) {
+                $null = Assert-ProjectIntegrationStateMatch -ProjectRoot $ProjectRoot -StateId $RequiredIntegrationStateId -CleanupState "PENDING"
+            }
             Assert-TransactionEntryBeforeMutation -Entry $entry
             Remove-Item -LiteralPath $entry.TargetPath -Force
             if (Test-Path -LiteralPath $entry.TargetPath) {
                 throw "Managed payload target remained after deletion: $($entry.Target)"
             }
             Invoke-TestCrashAfterRemovalMarkerDeletion -Target $entry.Target
+            Add-MaterializerMutationScope -Scope "host_runtime"
             Invoke-TestFaultAfterMutation
         }
-        $flatRemovedPaths = @($marker.Files | Where-Object {
+        $flatRemovedPaths = @($managedRemovalFiles | Where-Object {
             $_.Target.StartsWith("AIWork/codedb/", [StringComparison]::OrdinalIgnoreCase)
         } | ForEach-Object { $_.TargetPath })
         if ($flatRemovedPaths.Count -gt 0) {
             Remove-EmptyManagedParents -Paths $flatRemovedPaths -TargetRoot $TargetRoot
         }
         $hostRuntimeRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/.runtime/codedb/host" -Label "host generation runtime"
-        $runtimeRemovedPaths = @($marker.Files | Where-Object {
+        $runtimeRemovedPaths = @($managedRemovalFiles | Where-Object {
             $_.Target.StartsWith("AIWork/.runtime/codedb/host/", [StringComparison]::OrdinalIgnoreCase)
         } | ForEach-Object { $_.TargetPath }) + @($extraRemovalTargets | Where-Object {
             $_.Target.StartsWith("AIWork/.runtime/codedb/host/", [StringComparison]::OrdinalIgnoreCase)
@@ -7191,8 +9994,19 @@ function Invoke-Remove {
             Remove-Item -LiteralPath $hostRuntimeRoot -Force
         }
         Write-Host "[OK] Managed host payload was removed; unrelated host files were preserved."
+        Set-MaterializerCommandOutcome `
+            -Outcome "REMOVED" `
+            -ReasonCode "REMOVE_COMPLETE" `
+            -CleanupState "COMPLETE" `
+            -NextAction "No action required."
+        Set-MaterializerCommandPhase -Phase "COMPLETE"
     } catch {
         $originalError = $_.Exception
+        Set-MaterializerCommandOutcome `
+            -Outcome "BLOCKED" `
+            -ReasonCode "REMOVE_BLOCKED" `
+            -CleanupState $(if ($script:CommandMutatedScopes.Count -gt 0) { "PENDING" } else { "COMPLETE" }) `
+            -NextAction "Review the reported ownership or rollback boundary before retrying removal."
         if ($null -ne $transactionRoot -and $null -ne $entries -and $entries.Count -gt 0) {
             $rollbackErrors = @(Restore-Transaction -Entries $entries.ToArray() -TransactionRoot $transactionRoot -TargetRoot $TargetRoot -ProjectRoot $ProjectRoot)
             if ($rollbackErrors.Count -gt 0) {
@@ -7208,16 +10022,23 @@ function Invoke-Remove {
         if ($null -ne $transactionRoot -and -not $keepTransaction -and (Test-Path -LiteralPath $transactionRoot)) {
             Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Exit-MaterializerLock -Lock $lock
+        if ($ownsLock) {
+            Exit-MaterializerLock -Lock $lock
+        }
     }
 }
 
+. (Join-Path $PSScriptRoot "codedb-instance-engine.ps1")
+
 try {
-    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "Repair")) {
-        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, or Repair." -ExitCode 4
+    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")) {
+        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, Repair, Reinstall, Uninstall, or Install." -ExitCode 4
     }
     if ($PocFixture -and $ConfirmedProjectMutation) {
         Throw-MaterializerError -Message "Fixture and confirmed project mutation modes are mutually exclusive." -ExitCode 4
+    }
+    if ($TestProcessIdentityUnavailableForPid -gt 0 -and -not $PocFixture) {
+        Throw-MaterializerError -Message "Process identity fault injection requires fixture mode." -ExitCode 4
     }
     $hasRemoveLockAcquiredEvent = -not [string]::IsNullOrWhiteSpace($TestRemoveLockAcquiredEventName)
     $hasRemoveContinueEvent = -not [string]::IsNullOrWhiteSpace($TestRemoveContinueEventName)
@@ -7232,6 +10053,7 @@ try {
     if ($TestCrashBeforeWatcherHandoff) { $requestedTestFaultCount += 1 }
     if ($TestFailRepairMcpRegistration) { $requestedTestFaultCount += 1 }
     if ($TestCrashAfterRemovalMarkerDeletion) { $requestedTestFaultCount += 1 }
+    if ($TestFailInstanceCandidate) { $requestedTestFaultCount += 1 }
     if ($requestedTestFaultCount -gt 1) {
         Throw-MaterializerError -Message "Only one materializer test fault may be requested at a time." -ExitCode 2
     }
@@ -7241,11 +10063,14 @@ try {
     if ($TestCrashBeforeWatcherHandoff -and (-not $PocFixture -or $Action -ne "Upgrade")) {
         Throw-MaterializerError -Message "Pre-handoff crash injection requires a fixture-only Upgrade action." -ExitCode 4
     }
-    if ($TestFailRepairMcpRegistration -and (-not $PocFixture -or $Action -ne "Repair")) {
-        Throw-MaterializerError -Message "MCP registration fault injection requires a fixture-only Repair action." -ExitCode 4
+    if ($TestFailRepairMcpRegistration -and (-not $PocFixture -or $Action -notin @("Repair", "Install"))) {
+        Throw-MaterializerError -Message "MCP registration fault injection requires a fixture-only Repair or Install action." -ExitCode 4
     }
     if ($TestCrashAfterRemovalMarkerDeletion -and (-not $PocFixture -or $Action -ne "Remove")) {
         Throw-MaterializerError -Message "Post-marker Remove crash injection requires a fixture-only Remove action." -ExitCode 4
+    }
+    if ($TestFailInstanceCandidate -and (-not $PocFixture -or $Action -notin @("Upgrade", "Install", "Reinstall"))) {
+        Throw-MaterializerError -Message "Candidate failure injection requires a fixture-only Upgrade, Install, or Reinstall action." -ExitCode 4
     }
     $hasRepairHandshake = -not [string]::IsNullOrWhiteSpace($TestRepairMarkerPublishedEventName) -or
         -not [string]::IsNullOrWhiteSpace($TestRepairContinueEventName)
@@ -7255,9 +10080,29 @@ try {
          [string]::IsNullOrWhiteSpace($TestRepairContinueEventName))) {
         Throw-MaterializerError -Message "Repair marker handshake requires both fixture event names and a fixture-only Repair action." -ExitCode 4
     }
+    $hasUninstallHandshake = -not [string]::IsNullOrWhiteSpace($TestUninstallMcpPublishedEventName) -or
+        -not [string]::IsNullOrWhiteSpace($TestUninstallContinueEventName)
+    if ($hasUninstallHandshake -and
+        (-not $PocFixture -or $Action -notin @("Uninstall", "Upgrade") -or
+         [string]::IsNullOrWhiteSpace($TestUninstallMcpPublishedEventName) -or
+         [string]::IsNullOrWhiteSpace($TestUninstallContinueEventName))) {
+        Throw-MaterializerError -Message "Uninstall MCP handshake requires both fixture event names and a fixture-only Uninstall or automatic cleanup action." -ExitCode 4
+    }
+    $hasInstallHandshake = -not [string]::IsNullOrWhiteSpace($TestInstallRepairCompletedEventName) -or
+        -not [string]::IsNullOrWhiteSpace($TestInstallContinueEventName)
+    if ($hasInstallHandshake -and
+        (-not $PocFixture -or $Action -ne "Install" -or
+         [string]::IsNullOrWhiteSpace($TestInstallRepairCompletedEventName) -or
+         [string]::IsNullOrWhiteSpace($TestInstallContinueEventName))) {
+        Throw-MaterializerError -Message "Install Repair-completed handshake requires both fixture event names and a fixture-only Install action." -ExitCode 4
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TestAutomaticCleanupStateCapturedEventName) -and
+        (-not $PocFixture -or $Action -ne "Upgrade")) {
+        Throw-MaterializerError -Message "Automatic cleanup state-captured signal requires a fixture-only Upgrade action." -ExitCode 4
+    }
     if (($TestFailAfterMutation -gt 0 -or $TestCrashAfterMutation -gt 0) -and
-        (-not $PocFixture -or $Action -notin @("Upgrade", "Redeploy", "Sync", "Remove", "Repair"))) {
-        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Redeploy, Sync, Remove, or Repair action." -ExitCode 4
+        (-not $PocFixture -or $Action -notin @("Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install"))) {
+        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Redeploy, Sync, Remove, Repair, Reinstall, Uninstall, or Install action." -ExitCode 4
     }
 
     $projectRootPath = [System.IO.Path]::GetFullPath($ProjectRoot)
@@ -7272,14 +10117,70 @@ try {
         $PayloadRoot = Join-Path $packageRoot "Payload~"
     }
     $payload = Read-PayloadManifest -Root $PayloadRoot -ProjectRoot $projectRootPath
-    if ($Action -in @("Redeploy", "Sync", "Remove", "Repair")) {
+    if ($Action -in @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")) {
         Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action
     }
     $targetRoot = ConvertTo-AbsoluteChildPath -Root $projectRootPath -RelativePath "AIWork/codedb" -Label "host payload root"
     $markerPath = ConvertTo-AbsoluteChildPath -Root $projectRootPath -RelativePath $script:MarkerRelativePath -Label "installed payload marker"
+    $integrationState = Get-ProjectIntegrationState -ProjectRoot $projectRootPath
+    $instanceDesiredState = Get-InstanceDesiredState -ProjectRoot $projectRootPath
+
+    if ($instanceDesiredState.DesiredState -eq "UNINSTALLED") {
+        switch ($Action) {
+            "DryRun" {
+                Write-Host "[UNINSTALLED] CodeDB project integration is disabled; automatic installation and watcher attachment remain suppressed."
+                Write-Host "[NEXT] Use Install CodeDB when this project should be integrated again."
+                exit 0
+            }
+            "Verify" {
+                Write-Host "[UNINSTALLED] CodeDB project integration is absent by explicit project desired state."
+                exit 0
+            }
+            "Upgrade" {
+                Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -AutomaticCleanup
+                Write-MaterializerCommandResult -ExitCode 0
+                exit 0
+            }
+            "Remove" {
+                Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -AutomaticCleanup
+                Write-MaterializerCommandResult -ExitCode 0
+                exit 0
+            }
+            "Uninstall" {
+                Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath
+                Write-MaterializerCommandResult -ExitCode 0
+                exit 0
+            }
+            "Install" {
+                Invoke-InstanceConvergence -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -ActionName "Install"
+                Write-MaterializerCommandResult -ExitCode 0
+                exit 0
+            }
+            default {
+                Write-Host "[RESULT] BLOCKED"
+                Write-Host "[NEXT] Use Install CodeDB to restore this project's integration."
+                Throw-MaterializerError -Message "$Action cannot reinstall a project whose desired state is UNINSTALLED." -ExitCode 4
+            }
+        }
+    }
+
+    if ($Action -eq "Install") {
+        Throw-MaterializerError -Message "Install CodeDB is available only while project integration is UNINSTALLED." -ExitCode 4
+    }
+
+    if ($Action -eq "DryRun") {
+        $script:MachinePrerequisiteStatus = Get-MaterializerMachinePrerequisiteStatus -Manifest $payload
+        Write-MachinePrerequisiteStatus -Status $script:MachinePrerequisiteStatus
+        if (-not $script:MachinePrerequisiteStatus.Current) {
+            exit 0
+        }
+    } elseif ($Action -notin @("Remove", "Uninstall")) {
+        $null = Assert-MachinePrerequisiteForAction -Manifest $payload -ActionName $Action
+    }
 
     switch ($Action) {
         "DryRun" {
+            if (Write-InstanceProductStatus -Manifest $payload -ProjectRoot $projectRootPath) { exit 0 }
             $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
             Write-MaterializationPlan -Plan $plan
             $upgradeEligibility = Get-AutomaticUpgradeEligibility -Manifest $payload -Plan $plan -ProjectRoot $projectRootPath
@@ -7311,6 +10212,7 @@ try {
                     "payload $([string]$plan.Marker.PayloadVersion)"
                 }
                 Write-Host "[UPGRADE_READY] Owned $installedIdentity can migrate to generation $($payload.GenerationId) while existing leases drain naturally."
+                Write-Host "[UPGRADE_SOURCE] $($upgradeEligibility.Reason)"
                 Write-Host "[STALE] Host payload has a safe automatic generation upgrade."
             } elseif ($redeployEligibility.Eligible) {
                 Write-Host "[REDEPLOY_READY] Owned payload $([string]$plan.Marker.PayloadVersion) can redeploy to generation $($payload.GenerationId) after MCP and watcher owners stop."
@@ -7318,10 +10220,41 @@ try {
             } elseif ($plan.HasConflict) {
                 Write-Host "[STALE] Host payload has conflicts; Sync would be rejected."
             } else {
+                Write-Host "[UPGRADE_BLOCKED] $($upgradeEligibility.Reason)"
                 Write-Host "[STALE] Host payload can be synchronized without overwriting unowned changes."
+            }
+            $cleanupState = Get-PersistedMaterializerCleanupState `
+                -ProjectRoot $projectRootPath `
+                -GenerationId $payload.GenerationId
+            Write-ProductLayerStatus `
+                -Manifest $payload `
+                -ProjectRoot $projectRootPath `
+                -Plan $plan `
+                -CleanupState $cleanupState
+        }
+        "Probe" {
+            $lock = $null
+            try {
+                $lock = Enter-MaterializerLock -ProjectRoot $projectRootPath
+                $availability = Invoke-McpAvailabilityProbe -Manifest $payload -ProjectRoot $projectRootPath -Lock $lock
+                if (-not $availability.Current) {
+                    Throw-MaterializerError -Message "Package-owned MCP availability probe did not reach READY." -ExitCode 5
+                }
+                $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
+                $cleanupState = Get-PersistedMaterializerCleanupState `
+                    -ProjectRoot $projectRootPath `
+                    -GenerationId $payload.GenerationId
+                Write-ProductLayerStatus `
+                    -Manifest $payload `
+                    -ProjectRoot $projectRootPath `
+                    -Plan $plan `
+                    -CleanupState $cleanupState
+            } finally {
+                Exit-MaterializerLock -Lock $lock
             }
         }
         "Verify" {
+            if (Write-InstanceProductStatus -Manifest $payload -ProjectRoot $projectRootPath) { exit 0 }
             $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
             Write-MaterializationPlan -Plan $plan
             if (-not $plan.IsCurrent) {
@@ -7330,7 +10263,10 @@ try {
             Write-Host "[OK] Host payload marker and managed files are current."
         }
         "Upgrade" {
-            Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath -AutomaticUpgrade
+            Invoke-InstanceConvergence -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -ActionName "Upgrade"
+        }
+        "Reinstall" {
+            Invoke-InstanceConvergence -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -ActionName "Reinstall"
         }
         "Redeploy" {
             Invoke-Sync -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath -OwnedLegacyRedeploy
@@ -7344,11 +10280,16 @@ try {
         "Repair" {
             Invoke-Repair -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath
         }
+        "Uninstall" {
+            Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath
+        }
     }
+    Write-MaterializerCommandResult -ExitCode 0
     exit 0
 } catch {
     $exitCode = $script:RequestedExitCode
     if ($exitCode -eq 0) { $exitCode = 1 }
+    Write-MaterializerCommandResult -ExitCode $exitCode -ErrorDetail $_.Exception.Message
     [Console]::Error.WriteLine($_.Exception.Message)
     exit $exitCode
 }

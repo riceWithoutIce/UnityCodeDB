@@ -11,12 +11,16 @@ namespace Rice.AI.Codedb.Editor
     internal enum AICodedbHostPayloadAction
     {
         DryRun,
+        Probe,
         Verify,
         Upgrade,
         Redeploy,
         Repair,
         Sync,
-        Remove
+        Remove,
+        Uninstall,
+        Install,
+        Reinstall
     }
 
     internal static class AICodedbHostPayloadMaterializer
@@ -31,10 +35,31 @@ namespace Rice.AI.Codedb.Editor
 
         internal static Task<AICodedbCommandResult> ReadStatusAsync()
         {
-            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.DryRun, false);
+            return ReadStatusAsync(AICodedbPaths.CaptureExecutionContext());
+        }
+
+        internal static Task<AICodedbCommandResult> ReadStatusAsync(AICodedbEditorExecutionContext context)
+        {
+            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.DryRun, false, context.ProjectRoot);
             return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
+                context,
                 ReadTimeoutMilliseconds,
                 arguments);
+        }
+
+        internal static AICodedbCommandResult ReadStatus(AICodedbEditorExecutionContext context)
+        {
+            return Run(context, AICodedbHostPayloadAction.DryRun, false);
+        }
+
+        internal static Task<AICodedbCommandResult> RunProbeAsync()
+        {
+            return RunAsync(AICodedbHostPayloadAction.Probe, false, ReadTimeoutMilliseconds);
+        }
+
+        internal static AICodedbCommandResult RunProbe(AICodedbEditorExecutionContext context)
+        {
+            return Run(context, AICodedbHostPayloadAction.Probe, false);
         }
 
         internal static AICodedbCommandResult RunDryRun()
@@ -60,6 +85,11 @@ namespace Rice.AI.Codedb.Editor
                 arguments);
         }
 
+        internal static AICodedbCommandResult RunUpgrade(AICodedbEditorExecutionContext context)
+        {
+            return Run(context, AICodedbHostPayloadAction.Upgrade, false);
+        }
+
         internal static AICodedbCommandResult RunRedeploy(bool confirmedProjectMutation)
         {
             return Run(AICodedbHostPayloadAction.Redeploy, confirmedProjectMutation, true);
@@ -68,6 +98,11 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunRepair()
         {
             return Run(AICodedbHostPayloadAction.Repair, true, true);
+        }
+
+        internal static Task<AICodedbCommandResult> RunRepairAsync()
+        {
+            return RunAsync(AICodedbHostPayloadAction.Repair, true, MutationTimeoutMilliseconds);
         }
 
         internal static AICodedbCommandResult RunSync()
@@ -80,16 +115,54 @@ namespace Rice.AI.Codedb.Editor
             return Run(AICodedbHostPayloadAction.Remove, true, true);
         }
 
+        internal static AICodedbCommandResult RunUninstall()
+        {
+            return Run(AICodedbHostPayloadAction.Uninstall, true, true);
+        }
+
+        internal static Task<AICodedbCommandResult> RunUninstallAsync()
+        {
+            return RunAsync(AICodedbHostPayloadAction.Uninstall, true, MutationTimeoutMilliseconds);
+        }
+
+        internal static AICodedbCommandResult RunInstall()
+        {
+            return Run(AICodedbHostPayloadAction.Install, true, true);
+        }
+
+        internal static Task<AICodedbCommandResult> RunInstallAsync()
+        {
+            return RunAsync(AICodedbHostPayloadAction.Install, true, MutationTimeoutMilliseconds);
+        }
+
+        internal static AICodedbCommandResult RunReinstall()
+        {
+            return Run(AICodedbHostPayloadAction.Reinstall, true, true);
+        }
+
+        internal static Task<AICodedbCommandResult> RunReinstallAsync()
+        {
+            return RunAsync(AICodedbHostPayloadAction.Reinstall, true, MutationTimeoutMilliseconds);
+        }
+
         internal static string[] BuildScriptArguments(
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation)
+        {
+            return BuildScriptArguments(action, confirmedProjectMutation, AICodedbPaths.ProjectRoot);
+        }
+
+        internal static string[] BuildScriptArguments(
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            string projectRoot)
         {
             var requiresConfirmation = RequiresConfirmation(action);
             if (requiresConfirmation != confirmedProjectMutation)
                 throw new ArgumentException(
                     requiresConfirmation
-                        ? "Redeploy, Repair, Sync, and Remove require second-level project mutation confirmation."
-                        : "DryRun, Verify, and Upgrade do not accept project mutation confirmation.",
+                         ? "Redeploy, Repair, Sync, Remove, Uninstall, Install, and Reinstall require second-level project mutation confirmation."
+                        : "DryRun, Probe, Verify, and Upgrade do not accept project mutation confirmation.",
                     nameof(confirmedProjectMutation));
 
             var arguments = new List<string>
@@ -97,7 +170,7 @@ namespace Rice.AI.Codedb.Editor
                 "-Action",
                 action.ToString(),
                 "-ProjectRoot",
-                AICodedbPaths.ProjectRoot
+                projectRoot
             };
 
             if (requiresConfirmation)
@@ -111,16 +184,23 @@ namespace Rice.AI.Codedb.Editor
             return action == AICodedbHostPayloadAction.Redeploy
                    || action == AICodedbHostPayloadAction.Repair
                    || action == AICodedbHostPayloadAction.Sync
-                   || action == AICodedbHostPayloadAction.Remove;
+                   || action == AICodedbHostPayloadAction.Remove
+                   || action == AICodedbHostPayloadAction.Uninstall
+                   || action == AICodedbHostPayloadAction.Install
+                   || action == AICodedbHostPayloadAction.Reinstall;
         }
 
         private static bool IsMutation(AICodedbHostPayloadAction action)
         {
             return action == AICodedbHostPayloadAction.Upgrade
+                   || action == AICodedbHostPayloadAction.Probe
                    || action == AICodedbHostPayloadAction.Redeploy
                    || action == AICodedbHostPayloadAction.Repair
                    || action == AICodedbHostPayloadAction.Sync
-                   || action == AICodedbHostPayloadAction.Remove;
+                   || action == AICodedbHostPayloadAction.Remove
+                   || action == AICodedbHostPayloadAction.Uninstall
+                   || action == AICodedbHostPayloadAction.Install
+                   || action == AICodedbHostPayloadAction.Reinstall;
         }
 
         private static AICodedbCommandResult Run(
@@ -128,10 +208,23 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             bool showProgress)
         {
+            return Run(
+                AICodedbPaths.CaptureExecutionContext(),
+                action,
+                confirmedProjectMutation,
+                showProgress);
+        }
+
+        private static AICodedbCommandResult Run(
+            AICodedbEditorExecutionContext context,
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            bool showProgress = false)
+        {
             string[] arguments;
             try
             {
-                arguments = BuildScriptArguments(action, confirmedProjectMutation);
+                arguments = BuildScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
             }
             catch (ArgumentException exception)
             {
@@ -150,6 +243,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
                 return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
+                    context,
                     timeout,
                     arguments);
             }
@@ -158,6 +252,466 @@ namespace Rice.AI.Codedb.Editor
                 if (showProgress)
                     EditorUtility.ClearProgressBar();
             }
+        }
+
+        private static Task<AICodedbCommandResult> RunAsync(
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            int timeoutMilliseconds)
+        {
+            return RunAsync(
+                AICodedbPaths.CaptureExecutionContext(),
+                action,
+                confirmedProjectMutation,
+                timeoutMilliseconds);
+        }
+
+        private static Task<AICodedbCommandResult> RunAsync(
+            AICodedbEditorExecutionContext context,
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            int timeoutMilliseconds)
+        {
+            string[] arguments;
+            try
+            {
+                arguments = BuildScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
+            }
+            catch (ArgumentException exception)
+            {
+                return Task.FromResult(new AICodedbCommandResult(
+                    -1,
+                    string.Empty,
+                    exception.Message,
+                    false));
+            }
+
+            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
+                context,
+                timeoutMilliseconds,
+                arguments);
+        }
+    }
+
+    internal enum AICodedbProductLayerState
+    {
+        Unknown,
+        Pending,
+        Current,
+        Missing,
+        Blocked,
+        Unavailable
+    }
+
+    internal enum AICodedbProductState
+    {
+        Starting,
+        Ready,
+        NeedsAttention,
+        Uninstalled,
+        MissingPrerequisite
+    }
+
+    internal readonly struct AICodedbMaterializerCommandStatus
+    {
+        internal bool Present { get; }
+        internal bool IsValid { get; }
+        internal string Action { get; }
+        internal string Outcome { get; }
+        internal string Phase { get; }
+        internal string ReasonCode { get; }
+        internal string[] MutatedScopes { get; }
+        internal string CleanupState { get; }
+        internal string NextAction { get; }
+        internal int ExitCode { get; }
+        internal string Detail { get; }
+
+        internal AICodedbMaterializerCommandStatus(
+            bool present,
+            bool isValid,
+            string action,
+            string outcome,
+            string phase,
+            string reasonCode,
+            string[] mutatedScopes,
+            string cleanupState,
+            string nextAction,
+            int exitCode,
+            string detail)
+        {
+            Present = present;
+            IsValid = isValid;
+            Action = action ?? string.Empty;
+            Outcome = outcome ?? string.Empty;
+            Phase = phase ?? string.Empty;
+            ReasonCode = reasonCode ?? string.Empty;
+            MutatedScopes = mutatedScopes ?? Array.Empty<string>();
+            CleanupState = cleanupState ?? string.Empty;
+            NextAction = nextAction ?? string.Empty;
+            ExitCode = exitCode;
+            Detail = detail ?? string.Empty;
+        }
+    }
+
+    internal static class AICodedbMaterializerCommandStatusParser
+    {
+        private const string Prefix = "[COMMAND_RESULT]";
+        private const string ManagedBy = "com.rice.ai-codedb";
+        private static readonly Regex IdentifierPattern =
+            new Regex("^[A-Z][A-Z0-9_]{0,63}$", RegexOptions.CultureInvariant);
+        private static readonly Regex ScopePattern =
+            new Regex("^[a-z][a-z0-9_]{0,63}$", RegexOptions.CultureInvariant);
+        private static readonly HashSet<string> Actions = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "UPGRADE", "REDEPLOY", "SYNC", "REMOVE", "REPAIR", "UNINSTALL", "INSTALL", "REINSTALL"
+        };
+        private static readonly HashSet<string> Properties = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "schema_version", "managed_by", "action", "outcome", "phase", "reason_code",
+            "mutated_scopes", "cleanup_state", "next_action", "exit_code", "detail"
+        };
+
+        internal static AICodedbMaterializerCommandStatus Parse(string output)
+        {
+            string json = null;
+            var count = 0;
+            foreach (var line in SplitLines(output))
+            {
+                var trimmed = line.Trim();
+                if (!trimmed.StartsWith(Prefix, StringComparison.Ordinal))
+                    continue;
+                count++;
+                json = trimmed.Substring(Prefix.Length).Trim();
+            }
+            if (count == 0)
+                return default(AICodedbMaterializerCommandStatus);
+            if (count != 1 || string.IsNullOrWhiteSpace(json))
+                return Invalid("Materializer output must contain exactly one non-empty versioned command result.");
+
+            try
+            {
+                var value = AICodedbStrictJson.ParseObject(json, "Materializer command result");
+                if (value.Count != Properties.Count)
+                    throw new InvalidOperationException("Materializer command result properties do not match schema 1.");
+                foreach (var name in value.Keys)
+                {
+                    if (!Properties.Contains(name))
+                        throw new InvalidOperationException("Materializer command result contains an unsupported property: " + name + ".");
+                }
+
+                var action = AICodedbStrictJson.GetRequiredString(value, "action", "Materializer command result");
+                var outcome = AICodedbStrictJson.GetRequiredString(value, "outcome", "Materializer command result");
+                var phase = AICodedbStrictJson.GetRequiredString(value, "phase", "Materializer command result");
+                var reasonCode = AICodedbStrictJson.GetRequiredString(value, "reason_code", "Materializer command result");
+                var scopes = AICodedbStrictJson.GetRequiredStringArray(value, "mutated_scopes", "Materializer command result");
+                var cleanupState = AICodedbStrictJson.GetRequiredString(value, "cleanup_state", "Materializer command result");
+                var nextAction = AICodedbStrictJson.GetRequiredString(value, "next_action", "Materializer command result");
+                var detail = AICodedbStrictJson.GetRequiredString(value, "detail", "Materializer command result");
+                var exitCode = AICodedbStrictJson.GetRequiredInt32(value, "exit_code", "Materializer command result");
+                if (AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "Materializer command result") != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(value, "managed_by", "Materializer command result"), ManagedBy, StringComparison.Ordinal)
+                    || !Actions.Contains(action)
+                    || !IdentifierPattern.IsMatch(outcome)
+                    || !IdentifierPattern.IsMatch(phase)
+                    || !IdentifierPattern.IsMatch(reasonCode)
+                    || (!string.Equals(cleanupState, "COMPLETE", StringComparison.Ordinal)
+                        && !string.Equals(cleanupState, "PENDING", StringComparison.Ordinal))
+                    || string.IsNullOrWhiteSpace(nextAction))
+                {
+                    throw new InvalidOperationException("Materializer command result identity or values are invalid.");
+                }
+                var uniqueScopes = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var scope in scopes)
+                {
+                    if (!ScopePattern.IsMatch(scope) || !uniqueScopes.Add(scope))
+                        throw new InvalidOperationException("Materializer command result contains an invalid or duplicate mutation scope.");
+                }
+
+                return new AICodedbMaterializerCommandStatus(
+                    true,
+                    true,
+                    action,
+                    outcome,
+                    phase,
+                    reasonCode,
+                    scopes,
+                    cleanupState,
+                    nextAction,
+                    exitCode,
+                    detail);
+            }
+            catch (Exception exception)
+            {
+                return Invalid(exception.Message);
+            }
+        }
+
+        private static AICodedbMaterializerCommandStatus Invalid(string detail)
+        {
+            return new AICodedbMaterializerCommandStatus(
+                true,
+                false,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                Array.Empty<string>(),
+                string.Empty,
+                string.Empty,
+                0,
+                detail);
+        }
+
+        private static string[] SplitLines(string text)
+        {
+            return (text ?? string.Empty).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        }
+    }
+
+    internal readonly struct AICodedbProductStatus
+    {
+        internal AICodedbProductState State { get; }
+        internal AICodedbProductLayerState Prerequisite { get; }
+        internal AICodedbProductLayerState Installed { get; }
+        internal AICodedbProductLayerState Configured { get; }
+        internal AICodedbProductLayerState McpAvailable { get; }
+        internal AICodedbMaterializerCommandStatus Command { get; }
+        internal string Detail { get; }
+        internal bool IsReady => State == AICodedbProductState.Ready;
+
+        internal AICodedbProductStatus(
+            AICodedbProductState state,
+            AICodedbProductLayerState installed,
+            AICodedbProductLayerState configured,
+            AICodedbProductLayerState mcpAvailable,
+            string detail,
+            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus))
+            : this(
+                state,
+                AICodedbProductLayerState.Unknown,
+                installed,
+                configured,
+                mcpAvailable,
+                detail,
+                command)
+        {
+        }
+
+        internal AICodedbProductStatus(
+            AICodedbProductState state,
+            AICodedbProductLayerState prerequisite,
+            AICodedbProductLayerState installed,
+            AICodedbProductLayerState configured,
+            AICodedbProductLayerState mcpAvailable,
+            string detail,
+            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus))
+        {
+            State = state;
+            Prerequisite = prerequisite;
+            Installed = installed;
+            Configured = configured;
+            McpAvailable = mcpAvailable;
+            Command = command;
+            Detail = detail ?? string.Empty;
+        }
+    }
+
+    internal static class AICodedbProductStatusBuilder
+    {
+        private const string PrerequisitePrefix = "[PRODUCT_LAYER PREREQUISITE]";
+        private const string InstalledPrefix = "[PRODUCT_LAYER INSTALLED]";
+        private const string ConfiguredPrefix = "[PRODUCT_LAYER CONFIGURED]";
+        private const string McpAvailablePrefix = "[PRODUCT_LAYER MCP_AVAILABLE]";
+        private const string ProductStatePrefix = "[PRODUCT_STATE]";
+
+        internal static AICodedbProductStatus Build(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbCommandResult result)
+        {
+            if (integrationStatus.IsUninstalled)
+            {
+                return new AICodedbProductStatus(
+                    AICodedbProductState.Uninstalled,
+                    AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown,
+                    integrationStatus.Detail);
+            }
+            if (!integrationStatus.IsValid)
+            {
+                return new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    integrationStatus.Detail);
+            }
+            if (result == null)
+                return Starting("CodeDB is checking the project integration in the background.");
+
+            var output = result.StandardOutput ?? string.Empty;
+            var command = AICodedbMaterializerCommandStatusParser.Parse(output);
+            if (command.Present && (!command.IsValid || command.ExitCode != result.ExitCode))
+            {
+                var commandDetail = command.IsValid
+                    ? "Materializer command result exit code does not match the process exit code."
+                    : command.Detail;
+                return new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    commandDetail,
+                    command);
+            }
+            var prerequisite = ParseLayer(output, PrerequisitePrefix);
+            var installed = ParseLayer(output, InstalledPrefix);
+            var configured = ParseLayer(output, ConfiguredPrefix);
+            var mcpAvailable = ParseLayer(output, McpAvailablePrefix);
+            var declaredState = ReadMarkerValue(output, ProductStatePrefix);
+            if (prerequisite == AICodedbProductLayerState.Missing
+                || string.Equals(declaredState, "MISSING_PREREQUISITE", StringComparison.Ordinal))
+            {
+                var prerequisiteDetail = FirstMarkedDetail(output);
+                if (string.IsNullOrWhiteSpace(prerequisiteDetail))
+                    prerequisiteDetail = FirstNonEmptyLine(result.StandardError);
+                return new AICodedbProductStatus(
+                    AICodedbProductState.MissingPrerequisite,
+                    AICodedbProductLayerState.Missing,
+                    installed,
+                    configured,
+                    mcpAvailable,
+                    prerequisiteDetail,
+                    command);
+            }
+
+            var allCurrent = prerequisite == AICodedbProductLayerState.Current
+                             && installed == AICodedbProductLayerState.Current
+                             && configured == AICodedbProductLayerState.Current
+                             && mcpAvailable == AICodedbProductLayerState.Current;
+
+            if (result.Succeeded
+                && allCurrent
+                && string.Equals(declaredState, "READY", StringComparison.Ordinal))
+            {
+                return new AICodedbProductStatus(
+                    AICodedbProductState.Ready,
+                    prerequisite,
+                    installed,
+                    configured,
+                    mcpAvailable,
+                    "The Package-owned Host, project registration, and MCP handshake are current.",
+                    command);
+            }
+
+            var blocked = prerequisite == AICodedbProductLayerState.Blocked
+                          || prerequisite == AICodedbProductLayerState.Unavailable
+                          || installed == AICodedbProductLayerState.Blocked
+                          || configured == AICodedbProductLayerState.Blocked
+                          || mcpAvailable == AICodedbProductLayerState.Blocked
+                          || mcpAvailable == AICodedbProductLayerState.Unavailable;
+            if (!result.Succeeded
+                || result.TimedOut
+                || blocked
+                || string.Equals(declaredState, "NEEDS_ATTENTION", StringComparison.Ordinal))
+            {
+                var detail = FirstNonEmptyLine(result.StandardError);
+                if (string.IsNullOrWhiteSpace(detail))
+                    detail = FirstMarkedDetail(output);
+                if (string.IsNullOrWhiteSpace(detail))
+                    detail = result.GetSummary();
+                if (command.Present && command.IsValid && !string.IsNullOrWhiteSpace(command.NextAction))
+                    detail = detail + " Next: " + command.NextAction;
+                return new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    prerequisite,
+                    installed,
+                    configured,
+                    mcpAvailable,
+                    detail,
+                    command);
+            }
+
+            return new AICodedbProductStatus(
+                AICodedbProductState.Starting,
+                prerequisite,
+                installed,
+                configured,
+                mcpAvailable,
+                "CodeDB is converging the Package-owned Host, registration, and MCP handshake.",
+                command);
+        }
+
+        private static AICodedbProductStatus Starting(string detail)
+        {
+            return new AICodedbProductStatus(
+                AICodedbProductState.Starting,
+                AICodedbProductLayerState.Pending,
+                AICodedbProductLayerState.Pending,
+                AICodedbProductLayerState.Pending,
+                AICodedbProductLayerState.Pending,
+                detail);
+        }
+
+        private static AICodedbProductLayerState ParseLayer(string output, string prefix)
+        {
+            var value = ReadMarkerValue(output, prefix);
+            if (value.StartsWith("CURRENT", StringComparison.Ordinal))
+                return AICodedbProductLayerState.Current;
+            if (value.StartsWith("MISSING", StringComparison.Ordinal))
+                return AICodedbProductLayerState.Missing;
+            if (value.StartsWith("PENDING", StringComparison.Ordinal))
+                return AICodedbProductLayerState.Pending;
+            if (value.StartsWith("BLOCKED", StringComparison.Ordinal))
+                return AICodedbProductLayerState.Blocked;
+            if (value.StartsWith("UNAVAILABLE", StringComparison.Ordinal))
+                return AICodedbProductLayerState.Unavailable;
+            return AICodedbProductLayerState.Unknown;
+        }
+
+        private static string ReadMarkerValue(string output, string prefix)
+        {
+            var value = string.Empty;
+            foreach (var line in SplitLines(output))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+                    value = trimmed.Substring(prefix.Length).Trim();
+            }
+            return value;
+        }
+
+        private static string FirstMarkedDetail(string output)
+        {
+            foreach (var line in SplitLines(output))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith(PrerequisitePrefix, StringComparison.Ordinal)
+                    || trimmed.StartsWith(InstalledPrefix, StringComparison.Ordinal)
+                    || trimmed.StartsWith(ConfiguredPrefix, StringComparison.Ordinal)
+                    || trimmed.StartsWith(McpAvailablePrefix, StringComparison.Ordinal))
+                {
+                    return trimmed;
+                }
+            }
+            return string.Empty;
+        }
+
+        private static string FirstNonEmptyLine(string text)
+        {
+            foreach (var line in SplitLines(text))
+            {
+                var trimmed = line.Trim();
+                if (!string.IsNullOrWhiteSpace(trimmed))
+                    return trimmed;
+            }
+            return string.Empty;
+        }
+
+        private static string[] SplitLines(string text)
+        {
+            return (text ?? string.Empty).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
         }
     }
 
@@ -262,6 +816,24 @@ namespace Rice.AI.Codedb.Editor
             {
                 var detail = FirstNonEmptyLine(error);
                 return Unknown(string.IsNullOrWhiteSpace(detail) ? result.GetSummary() : detail);
+            }
+
+            // The immutable-instance engine reports layered readiness instead
+            // of the historical "[OK] Host payload" marker. Treat only the
+            // complete READY tuple as a current Host result; wrapper startup
+            // or a partial layer must remain non-current.
+            if (Contains(output, "[PRODUCT_STATE] READY")
+                && Contains(output, "[PRODUCT_LAYER INSTALLED] CURRENT")
+                && Contains(output, "[PRODUCT_LAYER CONFIGURED] CURRENT")
+                && Contains(output, "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.Current,
+                    AICodedbStatusState.Ok,
+                    "CURRENT",
+                    "The selected immutable CodeDB instance passed its readiness handshake.",
+                    activeOwners,
+                    legacyMcpSessionCount);
             }
 
             if (Contains(output, "[OK] Host payload is current.")
@@ -479,6 +1051,7 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbHostUpgradePhase Phase { get; }
         internal AICodedbStatusState DisplayState { get; }
         internal string GenerationId { get; }
+        internal AICodedbProjectCleanupState CleanupState { get; }
         internal string Summary { get; }
         internal string Detail { get; }
 
@@ -487,11 +1060,13 @@ namespace Rice.AI.Codedb.Editor
             AICodedbStatusState displayState,
             string generationId,
             string summary,
-            string detail)
+            string detail,
+            AICodedbProjectCleanupState cleanupState = AICodedbProjectCleanupState.Complete)
         {
             Phase = phase;
             DisplayState = displayState;
             GenerationId = generationId ?? string.Empty;
+            CleanupState = cleanupState;
             Summary = summary ?? string.Empty;
             Detail = detail ?? string.Empty;
         }
@@ -602,6 +1177,16 @@ namespace Rice.AI.Codedb.Editor
                 updated_at_utc = AICodedbStrictJson.GetRequiredString(value, "updated_at_utc", "Host upgrade state"),
                 message = AICodedbStrictJson.GetRequiredNullableString(value, "message", "Host upgrade state")
             };
+            var cleanupState = AICodedbProjectCleanupState.Complete;
+            object cleanupStateValue;
+            if (value.TryGetValue("cleanup_state", out cleanupStateValue))
+            {
+                var cleanupStateText = cleanupStateValue as string;
+                if (string.Equals(cleanupStateText, "PENDING", StringComparison.Ordinal))
+                    cleanupState = AICodedbProjectCleanupState.Pending;
+                else if (!string.Equals(cleanupStateText, "COMPLETE", StringComparison.Ordinal))
+                    throw new InvalidOperationException("Host upgrade state has an invalid cleanup_state.");
+            }
             DateTime updatedAt;
             if (document.schema_version != 1
                     || !string.Equals(document.managed_by, ManagedBy, StringComparison.Ordinal)
@@ -635,20 +1220,21 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbStatusState.Inactive,
                     document.generation_id,
                     "Historical " + document.state + " / " + document.generation_id,
-                    "Recorded for a previous target generation; current target is " + expectedGenerationId + ". " + detail);
+                    "Recorded for a previous target generation; current target is " + expectedGenerationId + ". " + detail,
+                    cleanupState);
             }
             switch (document.state)
             {
                 case "INSTALLING":
-                    return Create(AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning, document, detail);
+                    return Create(AICodedbHostUpgradePhase.Installing, AICodedbStatusState.Warning, document, detail, cleanupState);
                 case "SWITCHING":
-                    return Create(AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning, document, detail);
+                    return Create(AICodedbHostUpgradePhase.Switching, AICodedbStatusState.Warning, document, detail, cleanupState);
                 case "ROLLBACK":
-                    return Create(AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error, document, detail);
+                    return Create(AICodedbHostUpgradePhase.Rollback, AICodedbStatusState.Error, document, detail, cleanupState);
                 case "CURRENT":
-                    return Create(AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok, document, detail);
+                    return Create(AICodedbHostUpgradePhase.Current, AICodedbStatusState.Ok, document, detail, cleanupState);
                 case "CHECK_FAILED":
-                    return Create(AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error, document, detail);
+                    return Create(AICodedbHostUpgradePhase.CheckFailed, AICodedbStatusState.Error, document, detail, cleanupState);
                 default:
                     throw new InvalidOperationException("Host upgrade state has an unsupported phase.");
             }
@@ -658,14 +1244,16 @@ namespace Rice.AI.Codedb.Editor
             AICodedbHostUpgradePhase phase,
             AICodedbStatusState displayState,
             HostUpgradeStateDocument document,
-            string detail)
+            string detail,
+            AICodedbProjectCleanupState cleanupState)
         {
             return new AICodedbHostUpgradeStatus(
                 phase,
                 displayState,
                 document.generation_id,
                 document.state + " / " + document.generation_id,
-                detail);
+                detail,
+                cleanupState);
         }
 
         private static AICodedbHostUpgradeStatus Invalid(string detail)

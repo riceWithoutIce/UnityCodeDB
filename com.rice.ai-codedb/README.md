@@ -8,25 +8,27 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The `0.2.5-preview.4` validation prerelease
-candidate targets Unity `2022.3` on Windows and reuses the immutable
-`0.2.5-preview.3` / `poc.30` Host closure; stable remains `0.2.4`.
+and bounded MCP discovery surface. The `0.2.5-preview.5` validation prerelease
+candidate targets Unity `2022.3` on Windows and advances the immutable Host to
+`poc.31` while retaining published historical generations; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.4`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5`.
 Use `#main` only when intentionally validating unreleased development changes.
 
-The `0.2.5-preview.4` Package keeps the published preview.3 Host compatibility
-identity, a tracked stable wrapper, and byte-exact v0.2.2 compatibility files
+The `0.2.5-preview.5` Package keeps a tracked stable wrapper and byte-exact
+published compatibility files
 under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
 `AIWork/.runtime/codedb/host/generations/`. An atomic `current.json` selects the
 active generation. Generated provider binaries, configs, indexes, logs,
 watcher state, generation leases, and rollback evidence remain under ignored
-`AIWork/.runtime/`. The external `killop/codedb-mcp` provider and Node.js are
-prerequisites and are not bundled.
+`AIWork/.runtime/`. Node.js `22.x` or `24.x` and the reviewed external
+`killop/codedb-mcp` `0.5.0` Provider under
+`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` are prerequisites and are not
+bundled or copied into the project.
 
-`Payload~`, `Tools~`, and `Tests~` contain a 43-target host-payload
+`Payload~`, `Tools~`, and `Tests~` contain a 45-target host-payload
 materialization POC. Its canonical payload is intentionally limited to the
 shared PowerShell helper, runtime preparation and TOML template, the
 project-neutral watch coordinator, watch-config generator and watch manager,
@@ -37,8 +39,9 @@ template plus project-neutral provider guidance, verification, refresh, and
 controlled index-clear entries, provider and Shader/HLSL probes, the read-only
 freshness check, owner-selective refresh-if-stale, MCP registration draft
 emission, and project-config validation. The tool defaults to
-read-only `DryRun`. `Repair`, `Sync`, and `Remove` require the Manager's
-second-level project mutation confirmation. `-PocFixture` retains the fixed
+read-only `DryRun`. `Repair`, `Redeploy`, `Sync`, `Remove`, `Uninstall`, and
+`Install` require the Manager's second-level project mutation confirmation.
+`-PocFixture` retains the fixed
 run-id, fixture-marker, and reparse-point constraints used only by the test
 suite. Production actions do not accept version-control metadata or an
 authorization document. They reject unowned or drifted files and use a
@@ -86,7 +89,9 @@ with unrelated TOML content and line endings, and Repair creates a recoverable
 backup before rewriting an existing config. Invalid TOML, duplicate or
 incompatible target declarations, target array tables, managed-key namespace
 conflicts, path escapes, unknown Host content, and managed drift fail closed.
-Results are `REPAIRED`, `PARTIALLY_REPAIRED`, or `BLOCKED`; a repaired
+Every mutating action also emits one versioned command result with outcome,
+phase, reason code, actual broad mutation scopes, cleanup state, and one next
+action. Results are `REPAIRED`, `PARTIALLY_REPAIRED`, or `BLOCKED`; a repaired
 registration applies to new client sessions and does not claim hot reload.
 Retaining a valid non-conflicting MCP generation is still `REPAIRED` and does
 not require the user to wait for drain or click Repair again.
@@ -186,6 +191,32 @@ child-only MCP target descendants, custom direct keys, a sanitized third-party
 tool-policy fixture, byte-exact backup and unrelated-content preservation,
 idempotency, and zero-write namespace-conflict refusals. Real local Unity
 Repair and resumed third-party Package-only acceptance remain separate gates.
+The `0.2.5-preview.5` recovery matrix adds schema-1 lease process-start
+classification for absent, live, PID-reused, identity-unavailable, and invalid
+MCP/watcher owners. Repair reclaims only proved-stale leases, never terminates
+external MCP clients, and retains a live client's immutable closure while a
+disjoint current generation serves future sessions. It also adds confirmed,
+idempotent project Uninstall and Install workflows: `UNINSTALLED` suppresses
+automatic lifecycle reconciliation, logical uninstall may complete with
+automatic cleanup pending, and a persisted cleanup terminal state prevents
+repeated PowerShell cleanup. Uninstall preserves the complete target MCP
+namespace as state-bound inert comments; Install restores those bytes and the
+four managed launch keys atomically with the desired-state transition. Unrelated
+MCP configuration, Provider, indexes, adapters, custom runtime settings, policy,
+and business files remain preserved.
+The product state is reduced through `INSTALLED`, `CONFIGURED`, and
+`MCP_AVAILABLE` before `READY`. Automatic convergence, confirmed `Fix CodeDB`,
+and Install launch the current Package-owned wrapper from the Unity project
+working directory and require MCP initialize, the exact bounded `tools/list`, a
+usable project status from `codedb_status`, and a successful bounded
+`codedb_text_search`. The ordinary Manager shows only `Starting`, `Ready`,
+`Needs attention`, `Uninstalled`, or `Missing prerequisite`, with at most one contextual action;
+technical Host and process controls remain diagnostics. Lifecycle convergence
+and Manager actions are asynchronous and defer during compilation, Package
+update, and Play transitions.
+The Package-owned probe does not prove that a new Codex Desktop task injected
+the project tools. Real local Unity UI/Play validation, new-task tool exposure,
+and third-party Package-only acceptance remain separate gates.
 An earlier representative third-party project passed no-click upgrade,
 same-transport Editor restart,
 manual lifecycle controls, Domain Reload, Play Mode, normal-permission queries,

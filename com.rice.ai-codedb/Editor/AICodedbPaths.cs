@@ -5,6 +5,51 @@ using UnityEngine;
 
 namespace Rice.AI.Codedb.Editor
 {
+    internal readonly struct AICodedbEditorExecutionContext
+    {
+        internal RuntimePlatform Platform { get; }
+        internal string ProjectRoot { get; }
+        internal string PackageRoot { get; }
+        internal string ProjectDisplayName { get; }
+        internal string ProviderSlug { get; }
+
+        internal AICodedbEditorExecutionContext(
+            RuntimePlatform platform,
+            string projectRoot,
+            string packageRoot,
+            string projectDisplayName)
+        {
+            Platform = platform;
+            ProjectRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
+            PackageRoot = AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/', '\\');
+            ProjectDisplayName = string.IsNullOrWhiteSpace(projectDisplayName)
+                ? "UnityProject"
+                : projectDisplayName;
+            ProviderSlug = "codedb-" + AICodedbProjectSettings.CreateSlug(ProjectDisplayName);
+        }
+
+        internal string RuntimeRelativePath => "AIWork/.runtime/codedb/" + ProviderSlug;
+        internal string InstanceDesiredStateRelativePath => AICodedbProjectSettings.InstanceDesiredStateRelativePath;
+        internal string InstanceCurrentRelativePath => AICodedbProjectSettings.InstanceCurrentRelativePath;
+        internal string MachineProviderExecutablePath => AICodedbPaths.GetMachineProviderExecutablePath();
+        internal string ProviderConfigRelativePath => RuntimeRelativePath + "/config/codedb-mcp.toml";
+        internal string WatchCoordinatorRuntimeRelativePath => RuntimeRelativePath + "/watch/coordinator";
+        internal string WatchLifecycleRelativePath => RuntimeRelativePath + "/watch/lifecycle";
+        internal string WatchDesiredStateRelativePath => WatchLifecycleRelativePath + "/desired-state.json";
+        internal string WatchEditorLeasesRelativePath => WatchLifecycleRelativePath + "/editor-leases";
+        internal string IndexRelativePath => RuntimeRelativePath + "/index";
+        internal string IndexManifestRelativePath => IndexRelativePath + "/manifest.json";
+        internal string TextAdapterRelativePath => RuntimeRelativePath + "/adapter/text-index";
+        internal string TextAdapterManifestRelativePath => TextAdapterRelativePath + "/manifest.json";
+
+        internal string GetProjectPath(string relativePath)
+        {
+            return string.IsNullOrWhiteSpace(relativePath)
+                ? ProjectRoot
+                : AICodedbPaths.NormalizePath(Path.Combine(ProjectRoot, relativePath));
+        }
+    }
+
     internal static class AICodedbPaths
     {
         internal static string ProjectRoot => NormalizePath(Path.Combine(Application.dataPath, ".."));
@@ -15,9 +60,13 @@ namespace Rice.AI.Codedb.Editor
         internal static string HostUpdatePolicyPath => GetProjectPath(AICodedbProjectSettings.HostUpdatePolicyRelativePath);
         internal static string HostPayloadMaterializerRuntimePath => GetProjectPath(AICodedbProjectSettings.HostPayloadMaterializerRuntimeRelativePath);
         internal static string HostPayloadUpgradeStatePath => GetProjectPath(AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
+        internal static string ProjectIntegrationStatePath => GetProjectPath(AICodedbProjectSettings.ProjectIntegrationStateRelativePath);
+        internal static string InstanceDesiredStatePath => GetProjectPath(AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+        internal static string InstanceCurrentPath => GetProjectPath(AICodedbProjectSettings.InstanceCurrentRelativePath);
+        internal static string McpAvailabilityStatePath => GetProjectPath(AICodedbProjectSettings.McpAvailabilityStateRelativePath);
         internal static string HostPayloadMaterializerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
         internal static string RuntimePath => GetProjectPath(AICodedbProjectSettings.RuntimeRelativePath);
-        internal static string ProviderExecutablePath => GetProjectPath(AICodedbProjectSettings.ProviderExecutableRelativePath);
+        internal static string ProviderExecutablePath => GetMachineProviderExecutablePath();
         internal static string ProviderConfigPath => GetProjectPath(AICodedbProjectSettings.ProviderConfigRelativePath);
         internal static string WatchConfigPath => GetProjectPath(AICodedbProjectSettings.WatchConfigRelativePath);
         internal static string WatchCoordinatorRuntimePath => GetProjectPath(AICodedbProjectSettings.WatchCoordinatorRuntimeRelativePath);
@@ -50,6 +99,17 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbHostGenerationSelection HostGeneration => AICodedbHostGenerationStore.Resolve(ProjectRoot);
 
+        internal static AICodedbEditorExecutionContext CaptureExecutionContext()
+        {
+            var projectRoot = ProjectRoot;
+            var projectName = new DirectoryInfo(projectRoot).Name;
+            return new AICodedbEditorExecutionContext(
+                Application.platform,
+                projectRoot,
+                PackageRootPath,
+                projectName);
+        }
+
         /// <summary>
         /// Converts a Unity-project-relative path into a normalized absolute path.
         /// </summary>
@@ -60,6 +120,24 @@ namespace Rice.AI.Codedb.Editor
                 return ProjectRoot;
 
             return NormalizePath(Path.Combine(ProjectRoot, relativePath));
+        }
+
+        internal static string GetMachineProviderExecutablePath()
+        {
+            var localAppData = Environment.GetEnvironmentVariable(
+                "LOCALAPPDATA",
+                EnvironmentVariableTarget.Process);
+            if (string.IsNullOrWhiteSpace(localAppData))
+                localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
+                return string.Empty;
+            return NormalizePath(Path.Combine(
+                localAppData,
+                "Rice",
+                "CodeDB",
+                "providers",
+                AICodedbProjectSettings.MachineProviderVersion,
+                "codebase-mcp.exe"));
         }
 
         private static string GetHostPath(string generationRelativePath, string legacyRelativePath)
