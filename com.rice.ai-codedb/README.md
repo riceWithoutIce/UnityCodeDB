@@ -24,9 +24,21 @@ implementation generations under ignored
 active generation. Generated provider binaries, configs, indexes, logs,
 watcher state, generation leases, and rollback evidence remain under ignored
 `AIWork/.runtime/`. Node.js `22.x` or `24.x` and the reviewed external
-`killop/codedb-mcp` `0.5.0` Provider under
-`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` are prerequisites and are not
-bundled or copied into the project.
+`killop/codedb-mcp` `0.5.0` Provider are prerequisites and are not bundled or
+copied into the project. The selected byte-exact baseline is commit
+`28e3912d5cd67ff3499734984f3e3d626a204796`, with Rice distribution identity
+`0.5.0-28e3912` and machine path
+`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912`. The preserved
+`poc.31`/`poc.32` generations may still use their historical Provider identity;
+they are not rewritten in place. A dedicated migration must publish a new
+generation before this baseline becomes active. The preview.5 development descriptor lets
+the Manager's `Configure Dependencies` action retrieve the executable from the
+exact upstream commit and verify its Package-pinned SHA-256 before installing
+it into the machine-scoped directory. This is a development-only integration
+path; it does not replace the pending license review or signed Rice Release
+required for publication. See
+`Documentation~/provider-installation-contract.md` for the exact source and
+verification boundary.
 
 `Payload~`, `Tools~`, and `Tests~` contain a 46-target host-payload
 materialization POC. Its canonical payload is intentionally limited to the
@@ -206,7 +218,9 @@ CodeDB`, and Install launch the current Package-owned wrapper from the Unity pro
 working directory and require MCP initialize, the exact bounded `tools/list`, a
 usable project status from `codedb_status`, and a successful bounded
 `codedb_text_search`. The ordinary Manager shows only `Starting`, `Ready`,
-`Needs attention`, `Uninstalled`, or `Missing prerequisite`, with at most one contextual action;
+`Needs attention`, `Uninstalled`, or `Missing prerequisite`, with at most one
+contextual primary action. A secondary `Configure Dependencies` utility remains
+available for an explicit retry or reinstall of the pinned machine Provider;
 technical Host and process controls remain diagnostics. Lifecycle convergence
 and Manager actions are asynchronous and defer during compilation, Package
 update, and Play transitions.

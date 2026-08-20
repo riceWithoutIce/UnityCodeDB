@@ -49,10 +49,11 @@ the Package launches its current wrapper from the project working directory and
 requires MCP initialize, the bounded tool list, usable `codedb_status`, and a
 bounded `codedb_text_search`.
 This Package-owned probe supports but does not replace the real new Codex
-Desktop task acceptance. It advances the Package-owned immutable Host to
-`poc.32`, requires Node.js `22.x` or `24.x`, and validates the reviewed Provider
-`0.5.0` manifest, protocol, Package range, and executable hash from
-`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0` before project mutation.
+Desktop task acceptance. The preserved preview.5 snapshot advances the
+Package-owned immutable Host to `poc.32` and retains its historical Provider
+identity. The next frozen baseline is the byte-exact `28e3912` artifact and
+the versioned machine identity `0.5.0-28e3912`; it is not substituted into
+`poc.32` in place. See the Provider contract for the migration boundary.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -66,8 +67,11 @@ marked passed; they remain in the
 - Windows Editor
 - Windows PowerShell 5.1
 - Node.js `22.x` or `24.x`
-- External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0` with its
-  schema-1 manifest under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0`
+- External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0`; the selected
+  baseline is commit `28e3912d5cd67ff3499734984f3e3d626a204796`, distributed
+  under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912` after the
+  dedicated migration. The older `poc.31`/`poc.32` machine identity is not
+  rewritten or mixed with this directory.
 
 The package does not bundle or redistribute the external provider.
 
@@ -92,10 +96,13 @@ validation of unpublished development changes.
 
 Open `Tools/Rice AI/Codedb/Manager` when status or recovery is needed; initial
 convergence does not require opening it. The ordinary surface shows only
-`Starting`, `Ready`, `Needs attention`, or `Uninstalled`, and at most one
-contextual action: `Reinstall CodeDB` for recovery or `Install CodeDB` after an
-intentional Uninstall. `Uninstall CodeDB from Project` is available from a
-separately confirmed secondary menu. The Manager also provides five focused
+`Starting`, `Ready`, `Needs attention`, `Uninstalled`, or `Missing prerequisite`,
+and at most one contextual primary action: `Reinstall CodeDB` for recovery, `Install
+CodeDB` after an intentional Uninstall, or `Configure Dependencies` when the
+machine Provider is the missing dependency. `Uninstall CodeDB from Project` is
+available from a separately confirmed secondary menu. A secondary `Configure
+Dependencies` utility remains available on Overview and Setup for an explicit
+retry or reinstall of the pinned machine Provider. The Manager also provides five focused
 views for diagnostics:
 
 - Overview: package, runtime, index, MCP, and watcher health.
@@ -103,6 +110,10 @@ views for diagnostics:
 - Index: provider and Shader/HLSL refresh, probes, and watcher lifecycle.
 - MCP: project registration guidance and validation.
 - Policy: the active read-only and project-ownership boundaries.
+
+The fixed Provider source, Rice Release trust gates, machine installation path,
+and fail-closed behavior are documented in the
+[Provider installation contract](provider-installation-contract.md).
 
 ## Project Layout
 
