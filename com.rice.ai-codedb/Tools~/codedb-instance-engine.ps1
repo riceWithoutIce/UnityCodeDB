@@ -14,6 +14,7 @@ $script:InstanceAvailabilityRelativePath = "logs/mcp-availability.json"
 $script:InstanceRetiringFileName = "retiring.json"
 $script:InstanceLeaseDirectoryName = "leases"
 $script:InstanceAllowedDirectories = @("config", "index", "adapter", "watch", "leases", "logs", "tmp")
+$script:InstanceOptionalDirectories = @("leases")
 
 function ConvertTo-InstanceJsonText {
     param([Parameter(Mandatory = $true)]$Value)
@@ -194,7 +195,7 @@ function New-InstanceManifestDocument {
     $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
     $workerTarget = $script:GenerationTargetPrefix + $script:InstanceWorkerRelativePath
     if (-not $Manifest.TargetMap.ContainsKey($generationManifestTarget) -or -not $Manifest.TargetMap.ContainsKey($workerTarget)) {
-        throw "Package payload is missing the poc.32 generation manifest or instance worker."
+        throw "Package payload is missing the $($Manifest.GenerationId) generation manifest or instance worker."
     }
     return [ordered]@{
         schema_version = $script:InstanceSchemaVersion
@@ -241,14 +242,34 @@ function New-InstanceCandidateEditorLease {
     }
     $leaseRoot = Join-Path $InstanceRoot "watch\lifecycle\editor-leases"
     New-Item -ItemType Directory -Force -Path $leaseRoot | Out-Null
-    $sessionId = "candidate-$InstanceId"
+    $handoff = $script:EditorLeaseHandoff
+    if ($null -ne $handoff) {
+        $handoffIdentity = Get-MaterializerProcessIdentity -ProcessId $handoff.ProcessId
+        if (-not $handoffIdentity.Alive -or
+            $null -eq $handoffIdentity.StartTicks -or
+            -not [string]::Equals(
+                [string]$handoffIdentity.StartTicks,
+                [string]$handoff.ProcessStartTicks,
+                [StringComparison]::Ordinal)) {
+            Throw-MaterializerError `
+                -Message "Candidate verification cannot establish the handed-off Unity Editor process identity." `
+                -ExitCode 4
+        }
+        $sessionId = [string]$handoff.SessionId
+        $editorPid = [int]$handoff.ProcessId
+        $editorStartTicks = [string]$handoff.ProcessStartTicks
+    } else {
+        $sessionId = "candidate-$InstanceId"
+        $editorPid = $PID
+        $editorStartTicks = [string]$processIdentity.StartTicks
+    }
     $createdAt = [DateTime]::UtcNow.ToString("o")
     $lease = [ordered]@{
         schema_version = 1
         managed_by = $script:ManagedBy
         session_id = $sessionId
-        editor_pid = $PID
-        process_start_ticks = [string]$processIdentity.StartTicks
+        editor_pid = $editorPid
+        process_start_ticks = $editorStartTicks
         project_root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
         project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
         created_at_utc = $createdAt
@@ -1153,6 +1174,11 @@ function Get-ValidatedRetiredInstance {
     }
     foreach ($name in $script:InstanceAllowedDirectories) {
         $directoryPath = Join-Path $InstanceRoot $name
+        if ($script:InstanceOptionalDirectories -contains $name -and -not (Test-Path -LiteralPath $directoryPath)) {
+            # A released instance lease removes its empty lease directory. Its
+            # absence is equivalent to an empty, validated lease root.
+            continue
+        }
         if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) {
             throw "Retired instance is missing its owned directory: $name"
         }
@@ -1242,13 +1268,13 @@ function Get-InstanceLeaseEvidence {
                 $created -le $heartbeat -and
                 $heartbeat -le $now.AddMinutes(5)
             if (-not $valid) { throw "invalid instance lease evidence" }
-            $pid = Get-RequiredJsonInt32 -Object $lease -Name "pid" -Label "instance lease"
-            $identity = Get-MaterializerProcessIdentity -ProcessId $pid
+            $leasePid = Get-RequiredJsonInt32 -Object $lease -Name "pid" -Label "instance lease"
+            $identity = Get-MaterializerProcessIdentity -ProcessId $leasePid
             $identityMatches = Test-MaterializerGenerationProcessIdentity -ProcessIdentity $identity -LeaseIdentity (Get-RequiredJsonString -Object $lease -Name "process_start_identity" -Label "instance lease")
             if ($identity.Alive -and ($null -eq $identityMatches -or $identityMatches)) {
-                $live.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $pid })
+                $live.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $leasePid })
             } else {
-                $stale.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $pid })
+                $stale.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $leasePid })
             }
         } catch {
             $invalid.Add($item.FullName)
@@ -1289,12 +1315,12 @@ function Get-InstanceEditorLeaseEvidence {
                 -not [string]::Equals((Get-RequiredJsonString -Object $lease -Name "project_identity" -Label "instance Editor lease"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal)) {
                 throw "invalid editor lease evidence"
             }
-            $pid = Get-RequiredJsonInt32 -Object $lease -Name "editor_pid" -Label "instance Editor lease"
-            $identity = Get-MaterializerProcessIdentity -ProcessId $pid
+            $editorLeasePid = Get-RequiredJsonInt32 -Object $lease -Name "editor_pid" -Label "instance Editor lease"
+            $identity = Get-MaterializerProcessIdentity -ProcessId $editorLeasePid
             if ($identity.Alive -and ($null -eq $identity.StartTicks -or [string]::Equals($identity.StartTicks, (Get-RequiredJsonString -Object $lease -Name "process_start_ticks" -Label "instance Editor lease"), [StringComparison]::Ordinal))) {
-                $live.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $pid })
+                $live.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $editorLeasePid })
             } else {
-                $stale.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $pid })
+                $stale.Add([pscustomobject]@{ Path = $item.FullName; ProcessId = $editorLeasePid })
             }
         } catch {
             $invalid.Add($item.FullName)
@@ -1338,14 +1364,14 @@ function Get-InstanceCoordinatorEvidence {
                 if ($value -gt 0) { $pids.Add($value) }
             }
         }
-        foreach ($pid in @($pids | Select-Object -Unique)) {
-            $identity = Get-MaterializerProcessIdentity -ProcessId $pid
+        foreach ($observedPid in @($pids | Select-Object -Unique)) {
+            $identity = Get-MaterializerProcessIdentity -ProcessId $observedPid
             if (-not $identity.Alive) { continue }
-            if ($pid -ne $coordinatorPid) {
-                return [pscustomobject]@{ State = "LIVE"; Path = $Evidence.CoordinatorStatePath; ProcessId = $pid; Document = $state }
+            if ($observedPid -ne $coordinatorPid) {
+                return [pscustomobject]@{ State = "LIVE"; Path = $Evidence.CoordinatorStatePath; ProcessId = $observedPid; Document = $state }
             }
             if ($null -eq $identity.StartUnixMilliseconds -or [int64]$identity.StartUnixMilliseconds -le $started.ToUnixTimeMilliseconds() + 2000) {
-                return [pscustomobject]@{ State = "LIVE"; Path = $Evidence.CoordinatorStatePath; ProcessId = $pid; Document = $state }
+                return [pscustomobject]@{ State = "LIVE"; Path = $Evidence.CoordinatorStatePath; ProcessId = $observedPid; Document = $state }
             }
         }
         return [pscustomobject]@{ State = "STALE"; Path = $Evidence.CoordinatorStatePath; Document = $state }
@@ -1664,8 +1690,15 @@ function Get-InstanceCurrentReadiness {
         [switch]$LiveProbe
     )
 
+    # Keep registration ownership separate from runtime availability. The
+    # current instance can remain selected and correctly registered while a
+    # coordinator/availability read is briefly unavailable during Play-mode
+    # resume, watcher restart, or an atomic evidence refresh. Collapsing that
+    # read failure into Configured=false makes the lifecycle choose Deploy and
+    # causes the Manager to offer Reinstall for a still-owned instance.
+    $configured = $false
     try {
-        $configured = (Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot).Current
+        $configured = [bool](Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot).Current
         if (-not $configured) {
             return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $false; McpAvailable = $false; Reason = "Project MCP registration is missing or stale." }
         }
@@ -1683,7 +1716,28 @@ function Get-InstanceCurrentReadiness {
         }
         return [pscustomobject]@{ Ready = $true; Installed = $true; Configured = $true; McpAvailable = $true; Reason = "Selected instance registration, coordinator, status, and bounded query are current." }
     } catch {
-        return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $false; McpAvailable = $false; Reason = $_.Exception.Message }
+        $reason = $_.Exception.Message
+        if (-not $configured) {
+            # A file can be observed between the atomic replace and the next
+            # read. Re-read the registration once before classifying it as
+            # genuinely missing; a persistent parse/ownership failure still
+            # remains fail-closed.
+            try {
+                $configured = [bool](Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot).Current
+            } catch {
+                $configured = $false
+            }
+        }
+        if ($configured) {
+            return [pscustomobject]@{
+                Ready = $false
+                Installed = $true
+                Configured = $true
+                McpAvailable = $false
+                Reason = "Selected instance availability could not be verified: $reason"
+            }
+        }
+        return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $false; McpAvailable = $false; Reason = $reason }
     }
 }
 
@@ -2018,7 +2072,9 @@ function Invoke-InstanceUninstall {
 function Write-InstanceProductStatus {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$LiveProbe,
+        [switch]$RequireReady
     )
 
     $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
@@ -2045,11 +2101,15 @@ function Write-InstanceProductStatus {
     $current = $null
     try { $current = Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot -AllowMissing }
     catch {
+        $detail = $_.Exception.Message
         Write-Host "[PRODUCT_LAYER INSTALLED] BLOCKED"
         Write-Host "[PRODUCT_LAYER CONFIGURED] BLOCKED"
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"
         Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
-        Write-Host "[INSTANCE] INVALID - $($_.Exception.Message)"
+        Write-Host "[INSTANCE] INVALID - $detail"
+        if ($RequireReady) {
+            Throw-MaterializerError -Message "Current instance availability probe is blocked: $detail" -ExitCode 5
+        }
         return $true
     }
     if ($null -eq $current) {
@@ -2058,9 +2118,16 @@ function Write-InstanceProductStatus {
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"
         Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
         Write-Host "[INSTANCE] NONE"
+        if ($RequireReady) {
+            Throw-MaterializerError -Message "Current instance availability probe requires a selected Package-owned instance." -ExitCode 5
+        }
         return $true
     }
-    $readiness = Get-InstanceCurrentReadiness -Manifest $Manifest -ProjectRoot $ProjectRoot -CurrentInstance $current
+    $readiness = Get-InstanceCurrentReadiness `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -CurrentInstance $current `
+        -LiveProbe:$LiveProbe
     if ($readiness.Configured) {
         Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
         Write-Host "[PRODUCT_LAYER CONFIGURED] CURRENT"
@@ -2085,5 +2152,8 @@ function Write-InstanceProductStatus {
         $cleanupState = "PENDING"
     }
     Write-Host "[CLEANUP_STATE] $cleanupState"
+    if ($RequireReady -and -not $readiness.Ready) {
+        Throw-MaterializerError -Message "Current instance availability probe did not reach Ready: $($readiness.Reason)" -ExitCode 5
+    }
     return $true
 }

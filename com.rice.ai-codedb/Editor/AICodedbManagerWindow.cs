@@ -47,7 +47,12 @@ namespace Rice.AI.Codedb.Editor
         private const float HeaderContentHeight = 40f;
         private const float HeaderControlsMinWidth = 174f;
         private const float HeaderPackageVersionHeight = 16f;
+        private const float UserActionStatusHeight = 48f;
+        private const float UserActionStatusGap = 4f;
         private const double TransientStatusRefreshSeconds = 5d;
+        private const double ReadySnapshotCacheSeconds = 120d;
+        private const double TransientStatusRetrySeconds = 1.5d;
+        private const int MaximumTransientStatusRetries = 3;
         internal const string ReinstallCodeDBConfirmationTitle = "Reinstall CodeDB";
         internal const string ReinstallCodeDBConfirmationMessage =
             "Reinstall CodeDB integration for this Unity project?\n\n"
@@ -76,6 +81,10 @@ namespace Rice.AI.Codedb.Editor
             + AICodedbActionGridView.Gap
             + AICodedbActionGridView.ButtonWidth;
 
+        private static AICodedbStatusSnapshot _lastKnownReadySnapshot;
+        private static string _lastKnownReadyProjectRoot = string.Empty;
+        private static DateTime _lastKnownReadyAtUtc;
+
         private static string ActivitySidebarWidthPrefsKey =>
             "Rice.AI.Codedb.Manager.ActivitySidebarWidth." + AICodedbProjectSettings.ProjectSlug;
 
@@ -95,7 +104,14 @@ namespace Rice.AI.Codedb.Editor
         private bool _hostStatusRefreshInFlight;
         private bool _watcherStatusRefreshInFlight;
         private bool _userActionInFlight;
+        private double _nextUserActionRepaintAt;
+        private AICodedbUserActionStatus _userActionStatus;
         private double _nextHostStatusRefreshAt;
+        private bool _transientStatusRefreshPending;
+        private int _transientStatusRefreshAttempts;
+        private double _nextTransientStatusRefreshAt;
+        private int _playModeStatusGeneration;
+        private bool _playModeRestoreScheduled;
         private int _selectedTab;
         private bool _showOverviewDetails;
         private bool _showProviderGuidance;
@@ -135,11 +151,16 @@ namespace Rice.AI.Codedb.Editor
                 ActivitySidebarWidthPrefsKey,
                 AICodedbManagerLayout.ActivityDefaultWidth);
             _activityPanel = new AICodedbActivityPanel();
+            _userActionStatus = new AICodedbUserActionStatus();
             _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
             _watcherStatusLoaded = false;
             EditorApplication.update -= ObserveTransientHostStatus;
             EditorApplication.update += ObserveTransientHostStatus;
+            EditorApplication.playModeStateChanged -= OnManagerPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnManagerPlayModeStateChanged;
             RefreshStatus();
+            if (IsPlayModeDisplaySuspended())
+                SchedulePlayModeRestore();
             _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + 1d;
             BeginStatusRefresh();
         }
@@ -147,13 +168,22 @@ namespace Rice.AI.Codedb.Editor
         private void OnDisable()
         {
             EditorApplication.update -= ObserveTransientHostStatus;
+            EditorApplication.playModeStateChanged -= OnManagerPlayModeStateChanged;
             if (_watcherRefreshScheduled)
                 EditorApplication.delayCall -= RefreshWatcherStatusDelayed;
             _watcherRefreshScheduled = false;
+            if (_playModeRestoreScheduled)
+                EditorApplication.delayCall -= RestorePlayModeAfterReload;
+            _playModeRestoreScheduled = false;
         }
 
         private void OnGUI()
         {
+            // Domain Reload can recreate the IMGUI window before the
+            // play-mode callback has published its SessionState handoff. The
+            // restore is display-only and makes every repaint self-healing.
+            if (IsPlayModeDisplaySuspended())
+                RestoreReadySnapshotForPlayMode();
             if (_statusSnapshot == null)
                 RefreshStatus();
 
@@ -163,10 +193,22 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawBodyLayout()
         {
+            var userActionPresentation = GetUserActionPresentation();
+            if (userActionPresentation.IsVisible)
+            {
+                DrawUserActionStatus(userActionPresentation);
+                EditorGUILayout.Space(UserActionStatusGap);
+            }
+
             var panelHorizontalMargin = Mathf.Max(0f, EditorStyles.helpBox.margin.horizontal);
             var bodyHeight = Mathf.Max(
                 0f,
-                position.height - AICodedbManagerStyles.HeaderHeight - BodyVerticalSpacing);
+                position.height
+                - AICodedbManagerStyles.HeaderHeight
+                - BodyVerticalSpacing
+                - (userActionPresentation.IsVisible
+                    ? UserActionStatusHeight + UserActionStatusGap
+                    : 0f));
             var layout = AICodedbManagerLayout.Resolve(
                 position.width,
                 bodyHeight,
@@ -195,27 +237,70 @@ namespace Rice.AI.Codedb.Editor
         private void RefreshStatus()
         {
             if (_statusSnapshot != null)
+            {
+                if (IsPlayModeDisplaySuspended()
+                    && _statusSnapshot.ProductStatus.State != AICodedbProductState.Ready)
+                {
+                    RestoreReadySnapshotForPlayMode();
+                }
                 return;
-            _statusSnapshot = AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName);
+            }
+
+            _statusSnapshot = IsPlayModeDisplaySuspended()
+                ? TryGetStatusSnapshotForPlayMode()
+                : TryGetCachedReadySnapshot(_executionContext.ProjectRoot);
+            _statusSnapshot = _statusSnapshot
+                ?? AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName);
+            // A cached Ready snapshot is still a verified observation. Record
+            // it before Play can trigger a domain reload, even when the
+            // lifecycle worker's most recent result is still Starting.
+            CacheReadySnapshot(_executionContext.ProjectRoot, _statusSnapshot);
             ApplyDisclosurePolicy(true);
         }
 
         private void RefreshStatus(AICodedbCommandResult hostPayloadResult)
         {
+            if (IsPlayModeDisplaySuspended())
+            {
+                RestoreReadySnapshotForPlayMode();
+                _transientStatusRefreshPending = true;
+                return;
+            }
             var initializeDisclosures = _statusSnapshot == null;
             _statusSnapshot = AICodedbStatusSnapshot.Refresh(hostPayloadResult);
-            ApplyDisclosurePolicy(initializeDisclosures);
+            ApplyStatusSnapshot(_statusSnapshot, true, initializeDisclosures);
         }
 
         private void ObserveTransientHostStatus()
         {
+            if (_userActionInFlight)
+            {
+                if (EditorApplication.timeSinceStartup >= _nextUserActionRepaintAt)
+                {
+                    _nextUserActionRepaintAt = EditorApplication.timeSinceStartup + 0.25d;
+                    Repaint();
+                }
+                return;
+            }
+
+            if (_transientStatusRefreshPending
+                && EditorApplication.timeSinceStartup >= _nextTransientStatusRefreshAt
+                && !EditorApplication.isCompiling
+                && !EditorApplication.isUpdating
+                && !IsPlayModeDisplaySuspended())
+            {
+                _transientStatusRefreshPending = false;
+                BeginStatusRefresh(true);
+                return;
+            }
+
             if (_statusSnapshot == null || _hostStatusRefreshInFlight)
                 return;
             if (_statusSnapshot.IsProjectUninstalled)
                 return;
             if (EditorApplication.isCompiling
                 || EditorApplication.isUpdating
-                || EditorApplication.isPlayingOrWillChangePlaymode)
+                || IsPlayModeDisplaySuspended())
                 return;
 
             var suppressed = AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
@@ -242,13 +327,86 @@ namespace Rice.AI.Codedb.Editor
             if (_hostStatusRefreshInFlight)
                 return;
             _hostStatusRefreshInFlight = true;
+            var playModeStatusGeneration = _playModeStatusGeneration;
             try
             {
                 var result = await AICodedbHostPayloadMaterializer.ReadStatusAsync(_executionContext);
                 var snapshot = await AICodedbStatusSnapshot.RefreshAsync(_executionContext, result);
-                if (this == null)
+                if (this == null || _userActionInFlight)
                     return;
-                ApplyStatusSnapshot(snapshot);
+
+                if (!ShouldApplyStatusRefreshResult(
+                        playModeStatusGeneration,
+                        _playModeStatusGeneration,
+                        IsPlayModeDisplaySuspended()))
+                {
+                    if (IsPlayModeDisplaySuspended())
+                        RestoreReadySnapshotForPlayMode();
+                    else
+                    {
+                        _transientStatusRefreshPending = true;
+                        _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
+                    }
+                    return;
+                }
+
+                var previousState = _statusSnapshot == null
+                    ? AICodedbProductState.Starting
+                    : _statusSnapshot.ProductStatus.State;
+                var convergencePlan = AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    snapshot.CurrentInstanceStatus.Present,
+                    snapshot.CurrentInstanceStatus.IsCurrent,
+                    snapshot.ProductStatus);
+                if (ShouldPreserveReadyDuringTransientRefresh(
+                        previousState,
+                        convergencePlan,
+                        AICodedbEditorLifecycle.HasVerifiedReadyForCurrentPackage(),
+                        AICodedbEditorLifecycle.IsReconcileInFlight,
+                        _transientStatusRefreshAttempts,
+                        MaximumTransientStatusRetries))
+                {
+                    _transientStatusRefreshAttempts++;
+                    _transientStatusRefreshPending = true;
+                    _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
+                    return;
+                }
+
+                if (ShouldKeepRecoverableAvailabilityStarting(
+                        previousState,
+                        convergencePlan,
+                        AICodedbEditorLifecycle.IsReconcileInFlight,
+                        _transientStatusRefreshAttempts,
+                        MaximumTransientStatusRetries))
+                {
+                    // A previous failed probe can have already painted
+                    // Needs attention/Reinstall before the lifecycle worker
+                    // has had a chance to restart the current instance. Once
+                    // the immutable instance is verified and only MCP
+                    // availability is missing, expose the honest transient
+                    // state instead of leaving the stale recovery action on
+                    // screen during the bounded retry window.
+                    if (ShouldPresentRecoverableAvailabilityAsStarting(
+                            previousState,
+                            convergencePlan,
+                            AICodedbEditorLifecycle.IsReconcileInFlight,
+                            _transientStatusRefreshAttempts,
+                            MaximumTransientStatusRetries))
+                    {
+                        ApplyStatusSnapshot(
+                            AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName),
+                            false,
+                            false);
+                        Repaint();
+                    }
+                    _transientStatusRefreshAttempts++;
+                    _transientStatusRefreshPending = true;
+                    _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
+                    return;
+                }
+
+                _transientStatusRefreshAttempts = 0;
+                _transientStatusRefreshPending = false;
+                ApplyStatusSnapshot(snapshot, true, false);
                 Repaint();
             }
             catch (Exception exception)
@@ -264,32 +422,308 @@ namespace Rice.AI.Codedb.Editor
 
         private void ApplyStatusSnapshot(AICodedbStatusSnapshot snapshot)
         {
+            ApplyStatusSnapshot(snapshot, true, _statusSnapshot == null);
+        }
+
+        private void ApplyStatusSnapshot(
+            AICodedbStatusSnapshot snapshot,
+            bool invalidateReadyCache,
+            bool initializeDisclosures)
+        {
             if (snapshot == null)
                 return;
-            var initializeDisclosures = _statusSnapshot == null;
             _statusSnapshot = snapshot;
+            CacheReadySnapshot(_executionContext.ProjectRoot, snapshot);
+            if (invalidateReadyCache && snapshot.ProductStatus.State != AICodedbProductState.Ready)
+                InvalidateReadySnapshot(_executionContext.ProjectRoot);
+            if (_userActionStatus != null)
+                _userActionStatus.UpdateProductState(snapshot.ProductStatus.State);
             ApplyDisclosurePolicy(initializeDisclosures);
         }
 
         private async Task RefreshStatusAsync(AICodedbCommandResult hostPayloadResult)
         {
+            var playModeStatusGeneration = _playModeStatusGeneration;
             var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
                 _executionContext,
                 hostPayloadResult);
-            if (this != null)
-                ApplyStatusSnapshot(snapshot);
+            if (this == null)
+                return;
+            if (!ShouldApplyStatusRefreshResult(
+                    playModeStatusGeneration,
+                    _playModeStatusGeneration,
+                    IsPlayModeDisplaySuspended()))
+            {
+                if (IsPlayModeDisplaySuspended())
+                    RestoreReadySnapshotForPlayMode();
+                else
+                {
+                    _transientStatusRefreshPending = true;
+                    _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
+                }
+                return;
+            }
+            ApplyStatusSnapshot(snapshot, true, false);
         }
 
-        private void BeginStatusRefresh()
+        private void BeginStatusRefresh(bool force = false)
         {
+            if (IsPlayModeDisplaySuspended())
+            {
+                RestoreReadySnapshotForPlayMode();
+                return;
+            }
             if (_hostStatusRefreshInFlight
                 || EditorApplication.isCompiling
                 || EditorApplication.isUpdating
-                || EditorApplication.isPlayingOrWillChangePlaymode)
+                || IsPlayModeDisplaySuspended())
+            {
+                return;
+            }
+            if (!force
+                && _statusSnapshot != null
+                && _statusSnapshot.ProductStatus.State == AICodedbProductState.Ready)
             {
                 return;
             }
             RefreshTransientHostStatusAsync();
+        }
+
+        private void OnManagerPlayModeStateChanged(PlayModeStateChange state)
+        {
+            _playModeStatusGeneration++;
+            if (state == PlayModeStateChange.ExitingEditMode && _statusSnapshot != null)
+                AICodedbEditorLifecycle.RecordProductStateForPlayMode(_statusSnapshot.ProductStatus.State);
+            if (state != PlayModeStateChange.EnteredEditMode)
+            {
+                RestoreReadySnapshotForPlayMode();
+                if (state == PlayModeStateChange.EnteredPlayMode)
+                    SchedulePlayModeRestore();
+                Repaint();
+                return;
+            }
+
+            if (state == PlayModeStateChange.EnteredEditMode)
+            {
+                _transientStatusRefreshAttempts = 0;
+                _transientStatusRefreshPending = true;
+                _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
+                Repaint();
+            }
+        }
+
+        private AICodedbStatusSnapshot TryGetStatusSnapshotForPlayMode()
+        {
+            AICodedbProductState state;
+            if (!AICodedbEditorLifecycle.TryGetProductStateForPlayMode(out state))
+                return null;
+
+            switch (state)
+            {
+                case AICodedbProductState.Ready:
+                    return TryGetCachedReadySnapshot(_executionContext.ProjectRoot)
+                           ?? AICodedbStatusSnapshot.CreateCachedReady(_executionContext.ProjectDisplayName);
+                case AICodedbProductState.MissingPrerequisite:
+                    return AICodedbStatusSnapshot.CreateCachedMissingPrerequisite(
+                        _executionContext.ProjectDisplayName);
+                default:
+                    return null;
+            }
+        }
+
+        private bool RestoreReadySnapshotForPlayMode()
+        {
+            if (_statusSnapshot != null
+                && (_statusSnapshot.ProductStatus.State == AICodedbProductState.Ready
+                    || _statusSnapshot.ProductStatus.State == AICodedbProductState.MissingPrerequisite))
+            {
+                return true;
+            }
+
+            if (!IsPlayModeDisplaySuspended())
+            {
+                return false;
+            }
+
+            AICodedbProductState capturedState;
+            var hasCapturedState = AICodedbEditorLifecycle.TryGetProductStateForPlayMode(
+                out capturedState);
+            if (hasCapturedState
+                && (capturedState == AICodedbProductState.NeedsAttention
+                    || capturedState == AICodedbProductState.Uninstalled))
+            {
+                return false;
+            }
+
+            // Keep an in-domain verified snapshot usable even if the lifecycle
+            // callback has not published its SessionState handoff yet.
+            var snapshot = hasCapturedState
+                ? TryGetStatusSnapshotForPlayMode()
+                : null;
+            snapshot = snapshot ?? TryGetCachedReadySnapshot(_executionContext.ProjectRoot);
+            if (snapshot == null)
+                return false;
+
+            if (snapshot.ProductStatus.State != AICodedbProductState.Ready
+                && snapshot.ProductStatus.State != AICodedbProductState.MissingPrerequisite)
+                return false;
+
+            _statusSnapshot = snapshot;
+            CacheReadySnapshot(_executionContext.ProjectRoot, snapshot);
+            if (_userActionStatus != null)
+                _userActionStatus.UpdateProductState(snapshot.ProductStatus.State);
+            ApplyDisclosurePolicy(false);
+            return true;
+        }
+
+        internal static bool ShouldRestoreReadyForPlayMode(
+            bool isPlayingOrWillChangePlaymode,
+            AICodedbProductState currentState,
+            bool canUsePersistedReadyState)
+        {
+            return isPlayingOrWillChangePlaymode
+                   && currentState != AICodedbProductState.Ready
+                   && canUsePersistedReadyState;
+        }
+
+        internal static bool IsPlayModeDisplaySuspended(
+            bool editorPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return editorPlayingOrWillChangePlaymode || applicationPlaying;
+        }
+
+        private static bool IsPlayModeDisplaySuspended()
+        {
+            return IsPlayModeDisplaySuspended(
+                EditorApplication.isPlayingOrWillChangePlaymode,
+                Application.isPlaying);
+        }
+
+        private void SchedulePlayModeRestore()
+        {
+            if (_playModeRestoreScheduled)
+                return;
+            _playModeRestoreScheduled = true;
+            EditorApplication.delayCall += RestorePlayModeAfterReload;
+        }
+
+        private void RestorePlayModeAfterReload()
+        {
+            _playModeRestoreScheduled = false;
+            if (this == null || !IsPlayModeDisplaySuspended())
+                return;
+            if (RestoreReadySnapshotForPlayMode())
+            {
+                _playModeStatusGeneration++;
+                Repaint();
+            }
+        }
+
+        internal static bool ShouldApplyStatusRefreshResult(
+            int requestGeneration,
+            int currentGeneration,
+            bool isPlayingOrWillChangePlaymode)
+        {
+            return requestGeneration == currentGeneration
+                   && !isPlayingOrWillChangePlaymode;
+        }
+
+        private static AICodedbStatusSnapshot TryGetCachedReadySnapshot(string projectRoot)
+        {
+            if (_lastKnownReadySnapshot == null
+                || _lastKnownReadySnapshot.ProductStatus.State != AICodedbProductState.Ready
+                || string.IsNullOrWhiteSpace(projectRoot)
+                || !string.Equals(
+                    AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\'),
+                    _lastKnownReadyProjectRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || DateTime.UtcNow - _lastKnownReadyAtUtc > TimeSpan.FromSeconds(ReadySnapshotCacheSeconds))
+            {
+                return null;
+            }
+
+            return _lastKnownReadySnapshot;
+        }
+
+        private static void CacheReadySnapshot(string projectRoot, AICodedbStatusSnapshot snapshot)
+        {
+            if (snapshot == null || snapshot.ProductStatus.State != AICodedbProductState.Ready)
+                return;
+
+            _lastKnownReadySnapshot = snapshot;
+            _lastKnownReadyProjectRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
+            _lastKnownReadyAtUtc = DateTime.UtcNow;
+            AICodedbEditorLifecycle.RecordVerifiedReadyForCurrentPackage();
+        }
+
+        private static void InvalidateReadySnapshot(string projectRoot)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot)
+                || string.Equals(
+                    AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\'),
+                    _lastKnownReadyProjectRoot,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                _lastKnownReadySnapshot = null;
+                _lastKnownReadyProjectRoot = string.Empty;
+                _lastKnownReadyAtUtc = default(DateTime);
+            }
+        }
+
+        internal static bool ShouldPreserveReadyDuringTransientRefresh(
+            AICodedbProductState previousState,
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan convergencePlan,
+            bool hasVerifiedReadyForCurrentPackage,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            var hasStableReadyState = previousState == AICodedbProductState.Ready
+                                      || (previousState == AICodedbProductState.Starting
+                                          && hasVerifiedReadyForCurrentPackage);
+            return hasStableReadyState
+                   && convergencePlan == AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability
+                   && (reconcileInFlight || attempt < maximumAttempts);
+        }
+
+        /// <summary>
+        /// Keeps a valid current instance in Starting while its MCP availability
+        /// recovery pass is still running. A bounded retry window prevents a
+        /// persistent failure from being hidden as an indefinitely healthy state.
+        /// </summary>
+        internal static bool ShouldKeepRecoverableAvailabilityStarting(
+            AICodedbProductState previousState,
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan convergencePlan,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            if (convergencePlan != AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability)
+                return false;
+            if (previousState == AICodedbProductState.MissingPrerequisite
+                || previousState == AICodedbProductState.Uninstalled)
+            {
+                return false;
+            }
+
+            return reconcileInFlight || attempt < maximumAttempts;
+        }
+
+        internal static bool ShouldPresentRecoverableAvailabilityAsStarting(
+            AICodedbProductState previousState,
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan convergencePlan,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            return previousState == AICodedbProductState.NeedsAttention
+                   && ShouldKeepRecoverableAvailabilityStarting(
+                       previousState,
+                       convergencePlan,
+                       reconcileInFlight,
+                       attempt,
+                       maximumAttempts);
         }
 
         internal static bool ShouldAutoObserveHostStatus(
@@ -374,7 +808,7 @@ namespace Rice.AI.Codedb.Editor
         private void RefreshAllStatus()
         {
             RefreshStatus();
-            BeginStatusRefresh();
+            BeginStatusRefresh(true);
             if (_selectedTab == (int)AICodedbManagerTab.Index)
                 ScheduleWatcherStatusRefresh();
         }
@@ -570,7 +1004,7 @@ namespace Rice.AI.Codedb.Editor
                         "CodeDB is uninstalled from this project",
                         "The Package remains available, while automatic installation and watcher attachment are disabled.",
                         AICodedbStatusState.Inactive,
-                        "Install CodeDB",
+                        _userActionInFlight ? GetUserActionPresentation().ButtonLabel : "Install CodeDB",
                         _userActionInFlight ? null : (Action)RunInstallCodeDBWithConfirmation);
                 }
                 GUILayout.Space(ContentHorizontalPadding);
@@ -602,7 +1036,12 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawOverviewTab()
         {
-            AICodedbSectionView.DrawPageHeader("Overview", "项目状态与建议操作", string.Empty, null);
+            AICodedbSectionView.DrawPageHeader(
+                "Overview",
+                "项目状态与建议操作",
+                string.Empty,
+                null,
+                false);
             var reinstallAvailable = IsReinstallCodeDBAvailable(
                 _statusSnapshot.HostGenerationSelection.State,
                 _statusSnapshot.HostPayloadStatus.State,
@@ -611,6 +1050,9 @@ namespace Rice.AI.Codedb.Editor
                 _statusSnapshot.ProductStatus.State,
                 reinstallAvailable,
                 _userActionInFlight)
+                    || ResolveProviderInstallAction(
+                        _statusSnapshot.ProductStatus,
+                        _userActionInFlight)
                     ? (Action)RunPrimaryAction
                     : null;
             AICodedbSectionView.DrawBanner(
@@ -622,8 +1064,8 @@ namespace Rice.AI.Codedb.Editor
 
             _showOverviewDetails = AICodedbSectionView.DrawDisclosure(
                 _showOverviewDetails,
-                "Technical details",
-                "Paths, manifests, versions",
+                "Diagnostics",
+                "Optional technical details",
                 DrawOverviewTechnicalDetails);
         }
 
@@ -632,19 +1074,12 @@ namespace Rice.AI.Codedb.Editor
             DrawDetailsPanel(() =>
             {
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostPayload);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.CurrentInstance);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostGeneration);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostLastKnownGood);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpgrade);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostUpdatePolicy);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderExecutable);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderConfig);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeConfigTemplate);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeDirectory);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.RuntimeBoundary);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.IndexManifest);
-                AICodedbDetailRowView.DrawStatus(_statusSnapshot.TextAdapterManifest);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProjectMcpConfig);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.McpAvailability);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.Cleanup);
             });
         }
 
@@ -659,15 +1094,20 @@ namespace Rice.AI.Codedb.Editor
             AICodedbSectionView.DrawStatusGroup("Environment", string.Empty, null, () =>
             {
                 var providerState = _statusSnapshot.GetProviderState();
+                var offerConfigureDependencies = ShouldOfferConfigureDependencies(_statusSnapshot.ProductStatus);
                 AICodedbSectionView.DrawStatusRow(
                     "Provider",
                     "External executable",
                     providerState,
                     GetStateLabel(providerState, "Ready"),
-                    providerState == AICodedbStatusState.Ok ? "Open" : "Guidance",
-                    providerState == AICodedbStatusState.Ok
-                        ? (Action)AICodedbActions.OpenProviderFolder
-                        : GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance)));
+                    offerConfigureDependencies
+                        ? GetConfigureDependenciesLabel()
+                        : providerState == AICodedbStatusState.Ok ? "Open" : "Guidance",
+                    offerConfigureDependencies
+                        ? GetConfigureDependenciesAction()
+                        : providerState == AICodedbStatusState.Ok
+                            ? (Action)AICodedbActions.OpenProviderFolder
+                            : GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance)));
 
                 var runtimeState = _statusSnapshot.GetRuntimeState();
                 AICodedbSectionView.DrawStatusRow(
@@ -683,7 +1123,9 @@ namespace Rice.AI.Codedb.Editor
                 var configState = _statusSnapshot.GetConfigState();
                 AICodedbSectionView.DrawStatusRow(
                     "Configuration",
-                    "Provider config and runtime template",
+                    _statusSnapshot.CurrentInstanceStatus.IsCurrent
+                        ? "Active project runtime config"
+                        : "Provider config and runtime template",
                     configState,
                     GetStateLabel(configState, "Current"),
                     "Regenerate",
@@ -694,10 +1136,7 @@ namespace Rice.AI.Codedb.Editor
                 _showProviderGuidance,
                 "Provider guidance",
                 "Install or update",
-                () => DrawActionGrid(
-                    AICodedbActionButton.Create("Show guidance", GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance))),
-                    AICodedbActionButton.Create("Open provider", AICodedbActions.OpenProviderFolder),
-                    AICodedbActionButton.Create("Open config", AICodedbActions.OpenConfigFolder)));
+                DrawProviderGuidanceActions);
 
             _showAdvancedHostFiles = AICodedbSectionView.DrawDisclosure(
                 _showAdvancedHostFiles,
@@ -705,6 +1144,42 @@ namespace Rice.AI.Codedb.Editor
                 GetHostPayloadSummary(),
                 DrawAdvancedHostFiles);
 
+        }
+
+        private void DrawProviderGuidanceActions()
+        {
+            if (ShouldOfferConfigureDependencies(_statusSnapshot.ProductStatus))
+            {
+                DrawActionGrid(
+                    AICodedbActionButton.Create(GetConfigureDependenciesLabel(), GetConfigureDependenciesAction()),
+                    AICodedbActionButton.Create("Show guidance", GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance))),
+                    AICodedbActionButton.Create("Open provider", AICodedbActions.OpenProviderFolder),
+                    AICodedbActionButton.Create("Open config", AICodedbActions.OpenConfigFolder));
+                return;
+            }
+
+            DrawActionGrid(
+                AICodedbActionButton.Create("Show guidance", GetHostAction(() => RunAction("Provider Guidance", AICodedbActions.RunProviderGuidance))),
+                AICodedbActionButton.Create("Open provider", AICodedbActions.OpenProviderFolder),
+                AICodedbActionButton.Create("Open config", AICodedbActions.OpenConfigFolder));
+        }
+
+        private Action GetConfigureDependenciesAction()
+        {
+            return CanConfigureDependencies(_userActionInFlight)
+                ? (Action)(() => RunUserActionAsync(
+                    "Configure CodeDB Dependencies",
+                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine)))
+                : null;
+        }
+
+        private string GetConfigureDependenciesLabel()
+        {
+            var presentation = GetUserActionPresentation();
+            return presentation.IsRunning
+                   && GetUserActionStatus().Title.IndexOf("Dependencies", StringComparison.OrdinalIgnoreCase) >= 0
+                ? presentation.ButtonLabel
+                : "Configure Dependencies";
         }
 
         private void DrawAdvancedHostFiles()
@@ -920,13 +1395,11 @@ namespace Rice.AI.Codedb.Editor
             EditorGUILayout.Space(6f);
             DrawDetailsPanel(() =>
             {
-                AICodedbDetailRowView.DrawValue("Index", "Relative path", AICodedbProjectSettings.IndexRelativePath);
+                AICodedbDetailRowView.DrawValue("Index", "Relative path", _statusSnapshot.IndexRootRelativePath);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.IndexManifest);
-                AICodedbDetailRowView.DrawValue("Shader adapter", "Relative path", AICodedbProjectSettings.TextAdapterRelativePath);
+                AICodedbDetailRowView.DrawValue("Shader adapter", "Relative path", _statusSnapshot.TextAdapterRootRelativePath);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.TextAdapterManifest);
-                AICodedbDetailRowView.DrawValue("Watcher", "Watch config", AICodedbProjectSettings.WatchConfigRelativePath);
-                AICodedbDetailRowView.DrawValue("Watcher", "Opt-in marker", AICodedbProjectSettings.WatchEnabledMarkerRelativePath);
-                AICodedbDetailRowView.DrawValue("Watcher", "Coordinator", AICodedbProjectSettings.WatchCoordinatorRuntimeRelativePath);
+                AICodedbDetailRowView.DrawValue("Watcher", "Runtime", _statusSnapshot.WatchRootRelativePath);
             });
         }
 
@@ -1189,8 +1662,10 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetPrimaryActionLabel()
         {
-            if (_statusSnapshot == null || _userActionInFlight)
+            if (_statusSnapshot == null)
                 return string.Empty;
+            if (_userActionInFlight)
+                return GetUserActionPresentation().ButtonLabel;
             switch (_statusSnapshot.ProductStatus.State)
             {
                 case AICodedbProductState.Uninstalled:
@@ -1198,7 +1673,9 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductState.NeedsAttention:
                     return "Reinstall CodeDB";
                 case AICodedbProductState.MissingPrerequisite:
-                    return string.Empty;
+                    return IsProviderInstallAvailable(_statusSnapshot.ProductStatus)
+                        ? "Configure Dependencies"
+                        : string.Empty;
                 default:
                     return string.Empty;
             }
@@ -1206,6 +1683,15 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunPrimaryAction()
         {
+            if (_statusSnapshot != null
+                && IsProviderInstallAvailable(_statusSnapshot.ProductStatus))
+            {
+                RunUserActionAsync(
+                    "Configure CodeDB Dependencies",
+                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine));
+                return;
+            }
+
             if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
                 RunInstallCodeDBWithConfirmation();
             else
@@ -1304,6 +1790,43 @@ namespace Rice.AI.Codedb.Editor
             if (productState == AICodedbProductState.Uninstalled)
                 return true;
             return productState == AICodedbProductState.NeedsAttention && reinstallAvailable;
+        }
+
+        internal static bool ResolveProviderInstallAction(
+            AICodedbProductStatus productStatus,
+            bool actionInFlight)
+        {
+            return !actionInFlight && IsProviderInstallAvailable(productStatus);
+        }
+
+        internal static bool ShouldShowPersistentDependencyAction(AICodedbProductStatus productStatus)
+        {
+            return productStatus.State == AICodedbProductState.NeedsAttention;
+        }
+
+        internal static bool ShouldOfferConfigureDependencies(AICodedbProductStatus productStatus)
+        {
+            return ShouldShowPersistentDependencyAction(productStatus)
+                   || IsProviderInstallAvailable(productStatus);
+        }
+
+        internal static bool CanConfigureDependencies(bool actionInFlight)
+        {
+            return !actionInFlight;
+        }
+
+        internal static bool IsProviderInstallAvailable(AICodedbProductStatus productStatus)
+        {
+            if (productStatus.State != AICodedbProductState.MissingPrerequisite)
+                return false;
+
+            var reasonCode = productStatus.Command.ReasonCode ?? string.Empty;
+            if (reasonCode.StartsWith("PROVIDER_", StringComparison.Ordinal))
+                return true;
+
+            var detail = productStatus.Detail ?? string.Empty;
+            return detail.IndexOf("Provider", StringComparison.OrdinalIgnoreCase) >= 0
+                   && detail.IndexOf("Node.js", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         private void CopyMcpSnippet()
@@ -1459,6 +1982,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunAction(string title, Func<AICodedbCommandResult> action)
         {
+            if (_userActionInFlight || action == null)
+                return;
+
             _lastResultTitle = title;
             _lastResult = action();
             if (AICodedbWatcherStatusBuilder.IsWatcherActivity(title, _lastResult.StandardOutput))
@@ -1474,55 +2000,145 @@ namespace Rice.AI.Codedb.Editor
             Repaint();
         }
 
-        private async void RunUserActionAsync(
+        private void RunUserActionAsync(
             string title,
             Func<Task<AICodedbCommandResult>> action)
+        {
+            if (action == null)
+                return;
+
+            RunUserActionAsync(title, progressLine => action());
+        }
+
+        private async void RunUserActionAsync(
+            string title,
+            Func<Action<string>, Task<AICodedbCommandResult>> action)
         {
             if (_userActionInFlight || action == null)
                 return;
 
+            InvalidateReadySnapshot(_executionContext.ProjectRoot);
+            _transientStatusRefreshAttempts = 0;
+            _transientStatusRefreshPending = false;
             _userActionInFlight = true;
+            _nextUserActionRepaintAt = EditorApplication.timeSinceStartup;
+            var actionStatus = GetUserActionStatus();
+            actionStatus.Start(title, EditorApplication.timeSinceStartup);
             _lastResultTitle = title;
-            _lastResult = null;
+            GetActivityPanel().ResetForRunningAction();
+            ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
             RefreshStatus();
             Repaint();
+            AICodedbCommandResult result;
             try
             {
-                _lastResult = await action();
+                result = await action(line => { actionStatus.UpdateProgressLine(line); });
             }
             catch (Exception exception)
             {
-                _lastResult = new AICodedbCommandResult(
+                result = new AICodedbCommandResult(
                     -1,
                     string.Empty,
                     exception.Message,
                     false);
             }
-            finally
-            {
-                _userActionInFlight = false;
-            }
-
             if (this == null)
                 return;
+            _lastResult = result;
             GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
-            await RefreshStatusAsync(_lastResult);
+            var statusRefreshSucceeded = true;
+            if (title.IndexOf("Dependencies", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                actionStatus.SetProgress(6, 6, "Rechecking CodeDB readiness");
+                Repaint();
+            }
+            try
+            {
+                await RefreshStatusAsync(_lastResult);
+            }
+            catch (Exception exception)
+            {
+                statusRefreshSucceeded = false;
+                Debug.LogWarning("CodeDB Manager status refresh after action failed: " + exception.Message);
+            }
+
+            actionStatus.Complete(
+                _lastResult,
+                _statusSnapshot == null ? AICodedbProductState.Starting : _statusSnapshot.ProductStatus.State,
+                statusRefreshSucceeded,
+                EditorApplication.timeSinceStartup);
+            _userActionInFlight = false;
+            ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
             AICodedbEditorLifecycle.RequestReconcile();
             Repaint();
         }
 
         private void DrawActivityPanel(AICodedbManagerLayoutMetrics layout)
         {
-            if (GetActivityPanel().Draw(_lastResult, _lastResultTitle, layout))
+            if (GetActivityPanel().Draw(
+                    _lastResult,
+                    _lastResultTitle,
+                    GetUserActionPresentation(),
+                    layout))
             {
                 _lastResult = null;
                 _lastResultTitle = string.Empty;
+                GetUserActionStatus().Clear();
             }
         }
 
         private AICodedbActivityPanel GetActivityPanel()
         {
             return _activityPanel ?? (_activityPanel = new AICodedbActivityPanel());
+        }
+
+        private AICodedbUserActionStatus GetUserActionStatus()
+        {
+            return _userActionStatus ?? (_userActionStatus = new AICodedbUserActionStatus());
+        }
+
+        private AICodedbUserActionPresentation GetUserActionPresentation()
+        {
+            return GetUserActionStatus().BuildPresentation(EditorApplication.timeSinceStartup);
+        }
+
+        private void DrawUserActionStatus(AICodedbUserActionPresentation presentation)
+        {
+            using (new EditorGUILayout.HorizontalScope(
+                       EditorStyles.helpBox,
+                       GUILayout.Height(UserActionStatusHeight),
+                       GUILayout.ExpandWidth(true)))
+            {
+                GUILayout.Label(
+                    "\u25cf",
+                    AICodedbManagerStyles.GetStateDotStyle(presentation.State),
+                    GUILayout.Width(AICodedbManagerStyles.StatusDotWidth),
+                    GUILayout.Height(28f));
+                using (new EditorGUILayout.VerticalScope())
+                {
+                    EditorGUILayout.LabelField(
+                        GetUserActionStatus().Title,
+                        AICodedbManagerStyles.RowTitle,
+                        GUILayout.Height(18f));
+                    EditorGUILayout.LabelField(
+                        presentation.Detail,
+                        AICodedbManagerStyles.RowDescription,
+                        GUILayout.Height(18f));
+                }
+
+                GUILayout.FlexibleSpace();
+                using (new EditorGUILayout.VerticalScope(GUILayout.Width(220f)))
+                {
+                    EditorGUILayout.LabelField(presentation.StatusLabel, EditorStyles.boldLabel);
+                    EditorGUILayout.LabelField(presentation.ElapsedText, AICodedbManagerStyles.DisclosureSummary);
+                }
+            }
+        }
+
+        private void ShowUserActionNotification(AICodedbUserActionPresentation presentation)
+        {
+            if (!string.IsNullOrWhiteSpace(presentation.NotificationText))
+                ShowNotification(new GUIContent(presentation.NotificationText));
         }
 
         private void ScheduleWatcherStatusRefresh()
@@ -1546,7 +2162,7 @@ namespace Rice.AI.Codedb.Editor
             if (_watcherStatusRefreshInFlight
                 || EditorApplication.isCompiling
                 || EditorApplication.isUpdating
-                || EditorApplication.isPlayingOrWillChangePlaymode)
+                || IsPlayModeDisplaySuspended())
             {
                 return;
             }
@@ -1586,33 +2202,12 @@ namespace Rice.AI.Codedb.Editor
                 _showRestrictedCapabilities = false;
                 _showPolicyDetails = false;
             }
-
-            if (_statusSnapshot.GetProviderState() != AICodedbStatusState.Ok)
-                _showProviderGuidance = true;
-            if (AICodedbStatusSnapshot.GetHostManagementState(
-                    _statusSnapshot.HostPayload.State,
-                    _statusSnapshot.HostGeneration.State,
-                    _statusSnapshot.HostUpgrade.State,
-                    _statusSnapshot.HostUpdatePolicy.State) != AICodedbStatusState.Ok)
-                _showAdvancedHostFiles = true;
-            if (_statusSnapshot.GetIndexState() != AICodedbStatusState.Ok
-                || _statusSnapshot.GetTextAdapterState() != AICodedbStatusState.Ok)
-            {
-                _showIndexDiagnostics = true;
-            }
-            if (_statusSnapshot.GetMcpState() != AICodedbStatusState.Ok)
-                _showMcpSnippet = true;
-            if (_statusSnapshot.GetPolicyState() != AICodedbStatusState.Ok)
-                _showPolicyDetails = true;
         }
 
         private void ApplyWatcherDisclosurePolicy()
         {
-            if (_watcherStatus.DisplayState == AICodedbStatusState.Warning
-                || _watcherStatus.DisplayState == AICodedbStatusState.Error)
-            {
-                _showIndexDiagnostics = true;
-            }
+            // Diagnostics remain opt-in for ordinary users; watcher details are
+            // still available by expanding the Index diagnostics disclosure.
         }
 
         private AICodedbStatusState GetWatcherDisplayState()
@@ -1653,7 +2248,8 @@ namespace Rice.AI.Codedb.Editor
 
         private Action GetHostAction(Action action)
         {
-            return CanUseHostCommands(_statusSnapshot.HostGenerationSelection.State)
+            return !_userActionInFlight
+                   && CanUseHostCommands(_statusSnapshot.HostGenerationSelection.State)
                 ? action
                 : null;
         }

@@ -65,6 +65,8 @@ namespace Rice.AI.Codedb.Editor
         internal static string InstanceCurrentPath => GetProjectPath(AICodedbProjectSettings.InstanceCurrentRelativePath);
         internal static string McpAvailabilityStatePath => GetProjectPath(AICodedbProjectSettings.McpAvailabilityStateRelativePath);
         internal static string HostPayloadMaterializerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
+        internal static string ProviderInstallerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath));
+        internal static string ProviderDistributionManifestPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.ProviderDistributionManifestPackageRelativePath));
         internal static string RuntimePath => GetProjectPath(AICodedbProjectSettings.RuntimeRelativePath);
         internal static string ProviderExecutablePath => GetMachineProviderExecutablePath();
         internal static string ProviderConfigPath => GetProjectPath(AICodedbProjectSettings.ProviderConfigRelativePath);

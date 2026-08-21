@@ -1,11 +1,10 @@
 # CodeDB Provider Installation Contract
 
 Status: frozen development-baseline decision for v0.2.5-preview.5 (2026-08-20).
-The Package includes a strict, Package-owned installer entry point. The current
-working snapshot may still contain an older Provider generation; this document
-defines the identity that the next Provider migration must use. The development
-installer remains separate from release approval: a production descriptor still
-requires the Rice artifact, license, hash, and signing review below.
+The Package includes a strict, Package-owned installer entry point and activates
+this identity through immutable generation `poc.33`. The development installer
+remains separate from release approval: a production descriptor still requires
+the Rice artifact, license, hash, and signing review below.
 
 ## Decision
 
@@ -31,8 +30,8 @@ automatic update of this contract.
 
 ## Frozen Historical Development Baseline (2026-08-20)
 
-The development baseline used by the original UnityCodeDB/Balance integration
-is the exact upstream artifact at:
+The development baseline used by the original UnityCodeDB integration is the
+exact upstream artifact at:
 
 ```text
 Upstream commit:   28e3912d5cd67ff3499734984f3e3d626a204796
@@ -44,8 +43,8 @@ Required tools:    codedb_search, codedb_text_search, codedb_find
 ```
 
 This is a byte-level historical decision, not a guess based on the Provider
-version string. The same SHA-256 was found in the historical Balance runtime,
-and its coordinator/watch logs record successful `provider_ready`,
+version string. The same SHA-256 was found in a historical runtime, and its
+coordinator/watch logs record successful `provider_ready`,
 `codedb_search`, `codedb_text_search`, and `codedb_find` calls. The UnityCodeDB
 wrapper and coordinator contract in the original `6a15987` package also
 requires that search tool surface.
@@ -56,11 +55,11 @@ different graph-first protocol surface. Its Windows artifact is
 not provide the required search tools. It must not be silently substituted for
 the frozen development baseline.
 
-The checked-in preview.5 development descriptor and the preserved `poc.31` /
-`poc.32` payloads still describe that older `13de004` snapshot until the
-dedicated migration is landed. This document freezes the target identity for
-that migration; it does not claim that the current installer has already
-downloaded or activated `28e3912`.
+The checked-in preview.5 development descriptor and active `poc.33` payload use
+the frozen `28e3912` identity. The preserved `poc.31`/`poc.32` payloads continue
+to describe the older `13de004` snapshot as immutable historical state. The
+installer only activates `28e3912` after downloading and verifying the exact
+Package-pinned executable bytes.
 
 ### No-Drift Rules
 
@@ -74,11 +73,10 @@ downloaded or activated `28e3912`.
 4. Published immutable generations are never rewritten to change Provider
    identity. A migration must publish a new generation and preserve older
    generation bytes and leases.
-5. The existing preview.5 `poc.31`/`poc.32` snapshots and their `13de004`
-   references remain historical immutable state until the dedicated migration
-   is implemented. The migration must publish a new generation (starting at
-   `poc.33`) and use the `0.5.0-28e3912` machine directory; it must not rewrite
-   or replace an older generation in place.
+5. The preview.5 `poc.31`/`poc.32` snapshots and their `13de004` references
+   remain immutable historical state. Active generation `poc.33` uses the
+   `0.5.0-28e3912` machine directory; no older generation is rewritten or
+   replaced in place.
 
 ## Distribution Boundary
 

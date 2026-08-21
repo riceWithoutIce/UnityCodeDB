@@ -8,6 +8,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ProjectRoot,
 
+    [AllowEmptyString()]
+    [string]$EditorSessionId = "",
+
+    [ValidateRange(0, 2147483647)]
+    [int]$EditorProcessId = 0,
+
+    [AllowEmptyString()]
+    [string]$EditorProcessStartTicks = "",
+
     [string]$PayloadRoot,
 
     [switch]$PocFixture,
@@ -68,7 +77,7 @@ $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:MarkerSchemaVersion = 2
 $script:TargetPrefix = "AIWork/codedb/"
-$script:GenerationId = "poc.32"
+$script:GenerationId = "poc.33"
 $script:BootstrapProtocol = 1
 $script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
 $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
@@ -112,6 +121,7 @@ $script:CommandReasonCode = ""
 $script:CommandCleanupState = ""
 $script:CommandNextAction = ""
 $script:CommandMutatedScopes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:EditorLeaseHandoff = $null
 $script:AllowedTargetPaths = @{}
 $script:AllowedGenerationRelativePaths = @{}
 foreach ($allowedTarget in @(
@@ -1543,7 +1553,7 @@ function Get-MaterializerMachinePrerequisiteStatus {
             NextAction = "Reinstall this CodeDB Package, then let Unity recheck automatically."
             NodePath = ""
             NodeVersion = ""
-            ProviderVersion = "0.5.0"
+            ProviderVersion = "0.5.0-28e3912"
             ProviderRoot = ""
             ProviderManifestPath = ""
             ProviderExecutablePath = ""
@@ -2612,6 +2622,48 @@ function Get-MaterializerProcessIdentity {
         # Cross-elevation process metadata may be unavailable. A visible PID is
         # still treated as live, but it cannot prove an identity mismatch.
         return [pscustomobject]@{ Alive = $true; StartTicks = $null; StartUnixMilliseconds = $null }
+    }
+}
+
+function Set-EditorLeaseHandoff {
+    param(
+        [AllowEmptyString()][string]$SessionId,
+        [int]$ProcessId,
+        [AllowEmptyString()][string]$ProcessStartTicks
+    )
+
+    $hasSessionId = -not [string]::IsNullOrWhiteSpace($SessionId)
+    $hasProcessId = $ProcessId -gt 0
+    $hasProcessStartTicks = -not [string]::IsNullOrWhiteSpace($ProcessStartTicks)
+    if (-not ($hasSessionId -or $hasProcessId -or $hasProcessStartTicks)) {
+        $script:EditorLeaseHandoff = $null
+        return
+    }
+    if (-not ($hasSessionId -and $hasProcessId -and $hasProcessStartTicks)) {
+        Throw-MaterializerError `
+            -Message "Editor lease handoff requires session id, process id, and process start ticks together." `
+            -ExitCode 4
+    }
+    if ($SessionId -cnotmatch '^[A-Za-z0-9._-]{1,128}$') {
+        Throw-MaterializerError -Message "Editor lease handoff session id is invalid." -ExitCode 4
+    }
+    if ($ProcessStartTicks -cnotmatch '^[0-9]+$') {
+        Throw-MaterializerError -Message "Editor lease handoff process start ticks are invalid." -ExitCode 4
+    }
+
+    $identity = Get-MaterializerProcessIdentity -ProcessId $ProcessId
+    if (-not $identity.Alive -or
+        $null -eq $identity.StartTicks -or
+        -not [string]::Equals(
+            [string]$identity.StartTicks,
+            $ProcessStartTicks,
+            [StringComparison]::Ordinal)) {
+        Throw-MaterializerError -Message "Editor lease handoff process identity is no longer valid." -ExitCode 4
+    }
+    $script:EditorLeaseHandoff = [pscustomobject]@{
+        SessionId = $SessionId
+        ProcessId = $ProcessId
+        ProcessStartTicks = $ProcessStartTicks
     }
 }
 
@@ -10111,6 +10163,10 @@ try {
     }
     Assert-NoReparsePoint -Path $projectRootPath -Root $projectRootPath -Label "project root"
     Assert-UnityProjectRoot -Root $projectRootPath
+    Set-EditorLeaseHandoff `
+        -SessionId $EditorSessionId `
+        -ProcessId $EditorProcessId `
+        -ProcessStartTicks $EditorProcessStartTicks
 
     if ([string]::IsNullOrWhiteSpace($PayloadRoot)) {
         $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -10236,19 +10292,35 @@ try {
             $lock = $null
             try {
                 $lock = Enter-MaterializerLock -ProjectRoot $projectRootPath
-                $availability = Invoke-McpAvailabilityProbe -Manifest $payload -ProjectRoot $projectRootPath -Lock $lock
-                if (-not $availability.Current) {
-                    Throw-MaterializerError -Message "Package-owned MCP availability probe did not reach READY." -ExitCode 5
+                # An activated immutable instance owns its own runtime and
+                # availability evidence. Probe that closure in place instead
+                # of routing through the legacy flat Host probe, which would
+                # report a healthy instance as "current Host runtime" missing.
+                $currentInstancePath = Get-InstanceProjectPath `
+                    -ProjectRoot $projectRootPath `
+                    -RelativePath $script:InstanceCurrentRelativePath `
+                    -Label "current instance selection"
+                if (Test-Path -LiteralPath $currentInstancePath) {
+                    Write-InstanceProductStatus `
+                        -Manifest $payload `
+                        -ProjectRoot $projectRootPath `
+                        -LiveProbe `
+                        -RequireReady
+                } else {
+                    $availability = Invoke-McpAvailabilityProbe -Manifest $payload -ProjectRoot $projectRootPath -Lock $lock
+                    if (-not $availability.Current) {
+                        Throw-MaterializerError -Message "Package-owned MCP availability probe did not reach READY." -ExitCode 5
+                    }
+                    $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
+                    $cleanupState = Get-PersistedMaterializerCleanupState `
+                        -ProjectRoot $projectRootPath `
+                        -GenerationId $payload.GenerationId
+                    Write-ProductLayerStatus `
+                        -Manifest $payload `
+                        -ProjectRoot $projectRootPath `
+                        -Plan $plan `
+                        -CleanupState $cleanupState
                 }
-                $plan = Get-MaterializationPlan -Manifest $payload -MarkerPath $markerPath -ProjectRoot $projectRootPath
-                $cleanupState = Get-PersistedMaterializerCleanupState `
-                    -ProjectRoot $projectRootPath `
-                    -GenerationId $payload.GenerationId
-                Write-ProductLayerStatus `
-                    -Manifest $payload `
-                    -ProjectRoot $projectRootPath `
-                    -Plan $plan `
-                    -CleanupState $cleanupState
             } finally {
                 Exit-MaterializerLock -Lock $lock
             }

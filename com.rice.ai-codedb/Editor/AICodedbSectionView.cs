@@ -7,9 +7,13 @@ namespace Rice.AI.Codedb.Editor
     internal static class AICodedbSectionView
     {
         private const float StatusValueWidth = 112f;
-        private const float RowActionWidth = AICodedbActionGridView.ButtonWidth;
 
-        internal static void DrawPageHeader(string title, string subtitle, string primaryActionLabel, Action primaryAction)
+        internal static void DrawPageHeader(
+            string title,
+            string subtitle,
+            string actionLabel,
+            Action action,
+            bool emphasizeAction = true)
         {
             using (new EditorGUILayout.HorizontalScope(GUILayout.Height(AICodedbManagerStyles.PageHeaderHeight)))
             {
@@ -20,8 +24,8 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 GUILayout.FlexibleSpace();
-                if (!string.IsNullOrWhiteSpace(primaryActionLabel))
-                    DrawCommandButton(primaryActionLabel, primaryAction, true);
+                if (!string.IsNullOrWhiteSpace(actionLabel))
+                    DrawCommandButton(actionLabel, action, emphasizeAction);
             }
 
             EditorGUILayout.Space(AICodedbManagerStyles.SectionGap);
@@ -107,7 +111,7 @@ namespace Rice.AI.Codedb.Editor
                 if (!string.IsNullOrWhiteSpace(actionLabel))
                 {
                     GUILayout.Space(AICodedbActionGridView.Gap);
-                    using (new EditorGUILayout.VerticalScope(GUILayout.Width(RowActionWidth)))
+                    using (new EditorGUILayout.VerticalScope(GUILayout.Width(AICodedbActionGridView.GetButtonWidth(actionLabel))))
                     {
                         GUILayout.Space(9f);
                         DrawCommandButton(actionLabel, action, false);
@@ -181,7 +185,7 @@ namespace Rice.AI.Codedb.Editor
                 clicked = GUILayout.Button(
                     label,
                     GUI.skin.button,
-                    GUILayout.Width(AICodedbActionGridView.ButtonWidth),
+                    GUILayout.Width(AICodedbActionGridView.GetButtonWidth(label)),
                     GUILayout.Height(AICodedbActionGridView.ButtonHeight));
             }
 

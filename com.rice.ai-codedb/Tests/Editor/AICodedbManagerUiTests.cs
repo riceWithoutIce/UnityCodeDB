@@ -32,6 +32,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbProjectSettings.ProjectIntegrationStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/integration-state.json"));
             Assert.That(AICodedbProjectSettings.McpAvailabilityStateRelativePath, Is.EqualTo("AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"));
             Assert.That(AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath, Is.EqualTo("Tools~/materialize-codedb-host-payload.ps1"));
+            Assert.That(AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath, Is.EqualTo("Tools~/install-codedb-provider.ps1"));
+            Assert.That(AICodedbProjectSettings.ProviderDistributionManifestPackageRelativePath, Is.EqualTo("Tools~/codedb-provider-distribution.json"));
         }
 
         [Test]
@@ -50,6 +52,16 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
                     packageInfo.resolvedPath,
                     AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath))));
+            Assert.That(
+                AICodedbPaths.ProviderInstallerScriptPath,
+                Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
+                    packageInfo.resolvedPath,
+                    AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath))));
+            Assert.That(
+                AICodedbPaths.ProviderDistributionManifestPath,
+                Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
+                    packageInfo.resolvedPath,
+                    AICodedbProjectSettings.ProviderDistributionManifestPackageRelativePath))));
         }
 
         [Test]
@@ -241,6 +253,318 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.Command.ReasonCode, Is.EqualTo("PROVIDER_MISSING"));
             Assert.That(status.Command.MutatedScopes, Is.Empty);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+        }
+
+        [Test]
+        public void MissingProviderPrerequisite_OffersOnlyConfigureDependenciesAction()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    4,
+                    "[PRODUCT_LAYER PREREQUISITE] MISSING - Provider missing.\n" +
+                    "[PRODUCT_STATE] MISSING_PREREQUISITE\n" +
+                    "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"BLOCKED\",\"phase\":\"PREFLIGHT\",\"reason_code\":\"PROVIDER_MISSING\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Configure Dependencies\",\"exit_code\":4,\"detail\":\"Provider missing.\"}",
+                    "Provider missing.",
+                    false));
+
+            Assert.That(AICodedbManagerWindow.IsProviderInstallAvailable(status), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolveProviderInstallAction(status, false), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolveProviderInstallAction(status, true), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+        }
+
+        [Test]
+        public void VerifiedProvider_KeepsSecondaryConfigureDependenciesActionAvailable()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    8,
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT - Node.js v24.14.1 and CodeDB Provider 0.5.0-28e3912 are verified.\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE - query failed\n" +
+                    "[PRODUCT_STATE] NEEDS_ATTENTION\n",
+                    "query failed",
+                    false));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(AICodedbManagerWindow.IsProviderInstallAvailable(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.True);
+            Assert.That(AICodedbManagerWindow.CanConfigureDependencies(false), Is.True);
+            Assert.That(AICodedbManagerWindow.CanConfigureDependencies(true), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.True);
+        }
+
+        [Test]
+        public void ReadyProvider_DoesNotKeepConfigureDependenciesOnOverview()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                Result(
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n" +
+                    "[PRODUCT_STATE] READY\n"));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+            Assert.That(
+                AICodedbStatusSnapshot.CreateOverallDescription(status),
+                Is.EqualTo("CodeDB is ready for this project. New Codex tasks can use project status and search tools."));
+        }
+
+        [Test]
+        public void NeedsAttentionDescription_HidesMaterializerInternalsAndGivesOneAction()
+        {
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE - internal pipe and lease detail");
+
+            var description = AICodedbStatusSnapshot.CreateOverallDescription(status);
+
+            Assert.That(description, Is.EqualTo(
+                "CodeDB could not finish setup for this project. Use Reinstall CodeDB to try again."));
+            Assert.That(description, Does.Not.Contain("PRODUCT_LAYER"));
+            Assert.That(description, Does.Not.Contain("pipe"));
+        }
+
+        [Test]
+        public void MissingProviderDescription_HidesRawPrerequisiteEvidence()
+        {
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.MissingPrerequisite,
+                AICodedbProductLayerState.Missing,
+                AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Unknown,
+                "[PRODUCT_LAYER PREREQUISITE] MISSING - provider-manifest.json hash mismatch");
+
+            var description = AICodedbStatusSnapshot.CreateOverallDescription(status);
+
+            Assert.That(description, Is.EqualTo(
+                "CodeDB dependencies are not configured. Use Configure Dependencies to continue."));
+            Assert.That(description, Does.Not.Contain("manifest"));
+            Assert.That(description, Does.Not.Contain("hash"));
+        }
+
+        [Test]
+        public void MissingNodePrerequisite_DoesNotOfferProviderInstallAction()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    4,
+                    "[PRODUCT_LAYER PREREQUISITE] MISSING - Node.js missing.\n" +
+                    "[PRODUCT_STATE] MISSING_PREREQUISITE\n" +
+                    "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"BLOCKED\",\"phase\":\"PREFLIGHT\",\"reason_code\":\"NODE_MISSING\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Install Node.js\",\"exit_code\":4,\"detail\":\"Node.js missing.\"}",
+                    "Node.js missing.",
+                    false));
+
+            Assert.That(AICodedbManagerWindow.IsProviderInstallAvailable(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolveProviderInstallAction(status, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+        }
+
+        [Test]
+        public void StartingState_DoesNotExposeDependencyMutationWhileChecking()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                Installed,
+                new AICodedbCommandResult(
+                    0,
+                    "[PRODUCT_LAYER PREREQUISITE] PENDING\n" +
+                    "[PRODUCT_STATE] STARTING\n",
+                    string.Empty,
+                    false));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Starting));
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.False);
+        }
+
+        [TestCase(AICodedbProductState.Ready, true, false, 0, 3, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Starting, true, false, 2, 3, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Starting, true, false, 3, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Starting, false, false, 0, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Starting, true, true, 3, 3, ExpectedResult = true)]
+        public bool TransientRefreshRetention_DoesNotReplaceStableStateImmediately(
+            AICodedbProductState previousState,
+            bool hasVerifiedReady,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            return AICodedbManagerWindow.ShouldPreserveReadyDuringTransientRefresh(
+                previousState,
+                AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability,
+                hasVerifiedReady,
+                reconcileInFlight,
+                attempt,
+                maximumAttempts);
+        }
+
+        [TestCase(AICodedbProductState.Starting, false, 0, 3, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, true, 3, 3, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, false, 3, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, true, 0, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, true, 0, 3, ExpectedResult = false)]
+        public bool RecoverableAvailability_DoesNotImmediatelyExposeReinstall(
+            AICodedbProductState previousState,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            return AICodedbManagerWindow.ShouldKeepRecoverableAvailabilityStarting(
+                previousState,
+                AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability,
+                reconcileInFlight,
+                attempt,
+                maximumAttempts);
+        }
+
+        [TestCase(AICodedbProductState.NeedsAttention, true, 0, 3, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Starting, true, 0, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, true, 0, 3, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, true, 0, 3, ExpectedResult = false)]
+        public bool RecoverableAvailability_ReplacesStaleReinstallWithStartingOnly(
+            AICodedbProductState previousState,
+            bool reconcileInFlight,
+            int attempt,
+            int maximumAttempts)
+        {
+            return AICodedbManagerWindow.ShouldPresentRecoverableAvailabilityAsStarting(
+                previousState,
+                AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability,
+                reconcileInFlight,
+                attempt,
+                maximumAttempts);
+        }
+
+        [Test]
+        public void StructuralAvailabilityFailure_IsNotPresentedAsStarting()
+        {
+            Assert.That(
+                AICodedbManagerWindow.ShouldKeepRecoverableAvailabilityStarting(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked,
+                    true,
+                    0,
+                    3),
+                Is.False);
+        }
+
+        [Test]
+        public void StructuralRefreshFailure_IsNotRetainedAsATransientAvailabilityLoss()
+        {
+            Assert.That(
+                AICodedbManagerWindow.ShouldPreserveReadyDuringTransientRefresh(
+                    AICodedbProductState.Starting,
+                    AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked,
+                    true,
+                    false,
+                    0,
+                    3),
+                Is.False);
+        }
+
+        [TestCase(true, AICodedbProductState.Starting, true, ExpectedResult = true)]
+        [TestCase(true, AICodedbProductState.NeedsAttention, true, ExpectedResult = true)]
+        [TestCase(true, AICodedbProductState.Ready, true, ExpectedResult = false)]
+        [TestCase(false, AICodedbProductState.Starting, true, ExpectedResult = false)]
+        [TestCase(true, AICodedbProductState.MissingPrerequisite, false, ExpectedResult = false)]
+        [TestCase(true, AICodedbProductState.Uninstalled, false, ExpectedResult = false)]
+        public bool PlayModeReadyRestore_RequiresVerifiedPersistedReadyState(
+            bool isPlayingOrWillChangePlaymode,
+            AICodedbProductState currentState,
+            bool canUsePersistedReadyState)
+        {
+            return AICodedbManagerWindow.ShouldRestoreReadyForPlayMode(
+                isPlayingOrWillChangePlaymode,
+                currentState,
+                canUsePersistedReadyState);
+        }
+
+        [TestCase(0, 0, false, ExpectedResult = true)]
+        [TestCase(0, 1, false, ExpectedResult = false)]
+        [TestCase(0, 0, true, ExpectedResult = false)]
+        public bool PlayModeStatusRefresh_DiscardsStaleOrSuspendedResults(
+            int requestGeneration,
+            int currentGeneration,
+            bool isPlayingOrWillChangePlaymode)
+        {
+            return AICodedbManagerWindow.ShouldApplyStatusRefreshResult(
+                requestGeneration,
+                currentGeneration,
+                isPlayingOrWillChangePlaymode);
+        }
+
+        [TestCase(false, false, ExpectedResult = false)]
+        [TestCase(true, false, ExpectedResult = true)]
+        [TestCase(false, true, ExpectedResult = true)]
+        [TestCase(true, true, ExpectedResult = true)]
+        public bool PlayModeDisplaySuspension_UsesEitherUnitySignal(
+            bool editorPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return AICodedbManagerWindow.IsPlayModeDisplaySuspended(
+                editorPlayingOrWillChangePlaymode,
+                applicationPlaying);
+        }
+
+        [Test]
+        public void CachedReadySnapshot_IsDisplayOnlyAndKeepsReadySemantics()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateCachedReady("FixtureProject");
+
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.Ready));
+            Assert.That(snapshot.ProductStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(snapshot.HostPayloadStatus.State, Is.EqualTo(AICodedbHostPayloadState.Current));
+            Assert.That(snapshot.HostGenerationSelection.State, Is.EqualTo(AICodedbHostGenerationState.Current));
+            Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Ready"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("before Play mode"));
+        }
+
+        [Test]
+        public void CachedMissingPrerequisiteSnapshot_KeepsExplicitUserStateDuringPlay()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateCachedMissingPrerequisite("FixtureProject");
+
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.MissingPrerequisite));
+            Assert.That(snapshot.ProductStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Missing));
+            Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Missing prerequisite"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("Configure Dependencies"));
+        }
+
+        [Test]
+        public void UninstalledState_KeepsInstallAsTheOnlyProjectAction()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Uninstalled,
+                    AICodedbProjectCleanupState.Complete,
+                    string.Empty,
+                    "uninstalled"),
+                new AICodedbCommandResult(
+                    0,
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n" +
+                    "[PRODUCT_STATE] UNINSTALLED\n",
+                    string.Empty,
+                    false));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.Uninstalled));
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, false, false), Is.True);
         }
 
         private static AICodedbCommandResult Result(string output)
@@ -602,6 +926,139 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             Assert.That(AICodedbActivityPanel.ResolveOutputViewportHeight(activityHeight), Is.EqualTo(expected));
         }
+
+        [Test]
+        public void UserActionStatus_ShowsRunningActionAndElapsedTime()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Configure CodeDB Dependencies", 10d);
+
+            var presentation = status.BuildPresentation(13.25d);
+
+            Assert.That(presentation.IsVisible, Is.True);
+            Assert.That(presentation.IsRunning, Is.True);
+            Assert.That(presentation.StatusLabel, Is.EqualTo("In progress"));
+            Assert.That(presentation.Detail, Does.Contain("Configure CodeDB Dependencies is running"));
+            Assert.That(presentation.ElapsedText, Is.EqualTo("3.3 s"));
+            Assert.That(presentation.ButtonLabel, Is.EqualTo("Configuring..."));
+        }
+
+        [Test]
+        public void UserActionStatus_RepeatedViewRendersDoNotResetRunningAction()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Configure CodeDB Dependencies", 10d);
+
+            var beforeViewChange = status.BuildPresentation(11d);
+            var afterViewChange = status.BuildPresentation(12d);
+
+            Assert.That(status.Phase, Is.EqualTo(AICodedbUserActionPhase.Running));
+            Assert.That(status.Title, Is.EqualTo("Configure CodeDB Dependencies"));
+            Assert.That(beforeViewChange.StatusLabel, Is.EqualTo(afterViewChange.StatusLabel));
+            Assert.That(afterViewChange.ElapsedText, Is.EqualTo("2.0 s"));
+        }
+
+        [Test]
+        public void UserActionStatus_TracksProviderStageProgressAcrossRenders()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Configure CodeDB Dependencies", 10d);
+
+            Assert.That(status.UpdateProgressLine("[PROVIDER_STAGE] 2/6 Downloading the Provider package and signature"), Is.True);
+            var presentation = status.BuildPresentation(11d);
+
+            Assert.That(presentation.HasProgress, Is.True);
+            Assert.That(presentation.ProgressValue, Is.EqualTo(1f / 3f).Within(0.0001f));
+            Assert.That(presentation.ProgressLabel, Is.EqualTo("Stage 2 of 6: Downloading the Provider package and signature"));
+            Assert.That(presentation.Detail, Is.EqualTo(presentation.ProgressLabel));
+            Assert.That(status.UpdateProgressLine("[PROVIDER_STAGE] invalid"), Is.False);
+            Assert.That(status.BuildPresentation(12d).ProgressLabel, Is.EqualTo(presentation.ProgressLabel));
+        }
+
+        [Test]
+        public void UserActionStatus_DistinguishesCompletedCommandFromNeedsAttentionProduct()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Configure CodeDB Dependencies", 10d);
+            status.Complete(
+                new AICodedbCommandResult(0, string.Empty, string.Empty, false, 1250),
+                AICodedbProductState.NeedsAttention,
+                true,
+                11.25d);
+
+            var presentation = status.BuildPresentation(11.25d);
+
+            Assert.That(presentation.IsRunning, Is.False);
+            Assert.That(presentation.State, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(presentation.StatusLabel, Is.EqualTo("Completed - needs attention"));
+            Assert.That(presentation.Detail, Does.Contain("still needs attention"));
+            Assert.That(presentation.NotificationText, Does.Contain("still needs attention"));
+
+            status.UpdateProductState(AICodedbProductState.Ready);
+            var converged = status.BuildPresentation(12d);
+            Assert.That(converged.State, Is.EqualTo(AICodedbStatusState.Ok));
+            Assert.That(converged.StatusLabel, Is.EqualTo("Completed"));
+            Assert.That(converged.Detail, Does.Contain("CodeDB is ready"));
+        }
+
+        [Test]
+        public void UserActionStatus_FailedActionRetainsFailureAndClearHidesIt()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Install CodeDB", 4d);
+            status.Complete(
+                new AICodedbCommandResult(7, string.Empty, "provider unavailable", false),
+                AICodedbProductState.NeedsAttention,
+                true,
+                5d);
+
+            var failed = status.BuildPresentation(5d);
+            Assert.That(failed.State, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(failed.StatusLabel, Is.EqualTo("Failed"));
+            Assert.That(failed.Detail, Is.EqualTo("provider unavailable"));
+
+            status.Clear();
+            var cleared = status.BuildPresentation(6d);
+            Assert.That(cleared.IsVisible, Is.False);
+        }
+
+        [Test]
+        public void UserFacingReinstallActivity_HidesGenerationAndExitDetails()
+        {
+            var summary = AICodedbActivitySummaryBuilder.Build(
+                "Reinstall CodeDB",
+                new AICodedbCommandResult(
+                    0,
+                    "[INSTALLING] Published immutable generation poc.33.\n" +
+                    "[PRODUCT_STATE] READY\n" +
+                    "[COMMAND_RESULT] {\"schema_version\":1}",
+                    string.Empty,
+                    false,
+                    11140));
+
+            Assert.That(summary.State, Is.EqualTo(AICodedbStatusState.Ok));
+            Assert.That(summary.StatusLabel, Is.EqualTo("Ready"));
+            Assert.That(summary.Detail, Is.EqualTo("CodeDB is ready for this project."));
+            Assert.That(summary.Detail, Does.Not.Contain("poc.33"));
+            Assert.That(summary.Detail, Does.Not.Contain("COMMAND_RESULT"));
+        }
+
+        [Test]
+        public void UserFacingActivity_ReducesNeedsAttentionToOneNextStep()
+        {
+            var summary = AICodedbActivitySummaryBuilder.Build(
+                "Reinstall CodeDB",
+                new AICodedbCommandResult(
+                    0,
+                    "[PRODUCT_STATE] NEEDS_ATTENTION\n[COMMAND_RESULT] {\"detail\":\"internal\"}",
+                    string.Empty,
+                    false));
+
+            Assert.That(summary.State, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(summary.StatusLabel, Is.EqualTo("Needs attention"));
+            Assert.That(summary.Detail, Is.EqualTo(
+                "CodeDB needs attention. Use Reinstall CodeDB to try again."));
+        }
     }
 
     internal sealed class AICodedbHostPayloadStatusBuilderTests
@@ -880,6 +1337,45 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.Detail, Is.EqualTo("Installed payload marker is invalid."));
         }
 
+        [Test]
+        public void Build_MapsLayeredNeedsAttentionInsteadOfUnrecognizedResult()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                true,
+                Result(
+                    "[PRODUCT_LAYER INSTALLED] CURRENT\n" +
+                    "[PRODUCT_LAYER CONFIGURED] CURRENT\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE\n" +
+                    "[PRODUCT_STATE] NEEDS_ATTENTION\n" +
+                    "[DETAIL] Selected instance coordinator is not operational.\n" +
+                    "[INSTANCE] fixture-instance\n" +
+                    "[CLEANUP_STATE] PENDING"));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.Blocked));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(status.Summary, Is.EqualTo("NEEDS_ATTENTION"));
+            Assert.That(status.Detail, Is.EqualTo("[DETAIL] Selected instance coordinator is not operational."));
+        }
+
+        [Test]
+        public void Build_MapsLayeredMissingPrerequisiteClearly()
+        {
+            var status = AICodedbHostPayloadStatusBuilder.Build(
+                false,
+                Result(
+                    "[PRODUCT_LAYER PREREQUISITE] MISSING\n" +
+                    "[PRODUCT_LAYER INSTALLED] MISSING\n" +
+                    "[PRODUCT_LAYER CONFIGURED] MISSING\n" +
+                    "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE\n" +
+                    "[PRODUCT_STATE] MISSING_PREREQUISITE\n" +
+                    "[PREREQUISITE] CodeDB Provider is missing."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbHostPayloadState.SetupRequired));
+            Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Warning));
+            Assert.That(status.Summary, Is.EqualTo("MISSING_PREREQUISITE"));
+            Assert.That(status.Detail, Is.EqualTo("[PREREQUISITE] CodeDB Provider is missing."));
+        }
+
         private static AICodedbCommandResult Result(string output)
         {
             return new AICodedbCommandResult(0, output, string.Empty, false, 10);
@@ -927,6 +1423,103 @@ namespace Rice.AI.Codedb.Editor.Tests
             }
             finally
             {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageProviderInstallerAuthorization_AcceptsExactExternalLocalPackageScript()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                Directory.CreateDirectory(Path.Combine(packageRoot, "Tools~"));
+                var scriptPath = Path.Combine(packageRoot, AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath);
+                File.WriteAllText(scriptPath, "Write-Output 'fixture'", Encoding.UTF8);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageProviderInstallerScriptPath(
+                    packageRoot,
+                    scriptPath,
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.True, error);
+                Assert.That(authorizedPath, Is.EqualTo(AICodedbPaths.NormalizePath(scriptPath)));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageProviderInstallerAuthorization_RejectsOtherExternalScript()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                Directory.CreateDirectory(Path.Combine(packageRoot, "Tools~"));
+                var installerPath = Path.Combine(packageRoot, AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath);
+                var otherPath = Path.Combine(packageRoot, "Tools~", "other-provider.ps1");
+                File.WriteAllText(installerPath, "Write-Output 'fixture'", Encoding.UTF8);
+                File.WriteAllText(otherPath, "throw 'must not run'", Encoding.UTF8);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageProviderInstallerScriptPath(
+                    packageRoot,
+                    otherPath,
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.False);
+                Assert.That(authorizedPath, Is.Empty);
+                Assert.That(error, Does.Contain("other than the resolved CodeDB Package Provider installer"));
+            }
+            finally
+            {
+                DeleteFixtureDirectory(fixtureRoot);
+            }
+        }
+
+        [Test]
+        public void PackageProviderInstallerAuthorization_RejectsReparseToolsDirectory()
+        {
+            var fixtureRoot = CreateExternalPackageFixture();
+            var toolsJunction = string.Empty;
+            try
+            {
+                var packageRoot = Path.Combine(fixtureRoot, "com.rice.ai-codedb");
+                var externalToolsRoot = Path.Combine(fixtureRoot, "external-tools");
+                Directory.CreateDirectory(packageRoot);
+                Directory.CreateDirectory(externalToolsRoot);
+                File.WriteAllText(
+                    Path.Combine(externalToolsRoot, "install-codedb-provider.ps1"),
+                    "Write-Output 'must not run'",
+                    Encoding.UTF8);
+                toolsJunction = Path.Combine(packageRoot, "Tools~");
+                CreateDirectoryJunction(toolsJunction, externalToolsRoot);
+                string authorizedPath;
+                string error;
+
+                var authorized = AICodedbProcessRunner.TryValidateResolvedPackageProviderInstallerScriptPath(
+                    packageRoot,
+                    Path.Combine(toolsJunction, "install-codedb-provider.ps1"),
+                    out authorizedPath,
+                    out error);
+
+                Assert.That(authorized, Is.False);
+                Assert.That(authorizedPath, Is.Empty);
+                Assert.That(error, Does.Contain("through a reparse point"));
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(toolsJunction) && Directory.Exists(toolsJunction))
+                    Directory.Delete(toolsJunction);
                 DeleteFixtureDirectory(fixtureRoot);
             }
         }
@@ -1586,7 +2179,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(ran, Is.EqualTo(confirmed));
             Assert.That(actionCount, Is.EqualTo(confirmed ? 1 : 0));
             Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationTitle, Is.EqualTo("Install CodeDB"));
-            Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationMessage, Does.Contain("clear the UNINSTALLED project state"));
+            Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationMessage, Does.Contain("fresh project-local instance"));
+            Assert.That(AICodedbManagerWindow.InstallCodeDBConfirmationMessage, Does.Contain("atomically publish INSTALLED"));
         }
 
         [TestCase("Enable")]
@@ -1599,6 +2193,19 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(
                 AICodedbActions.BuildWatcherScriptArguments(action),
                 Is.EqualTo(new[] { "-Action", action }));
+        }
+
+        [TestCase("Enable", true)]
+        [TestCase("Disable", false)]
+        [TestCase("Start", true)]
+        [TestCase("Status", false)]
+        [TestCase("Stop", true)]
+        [TestCase("Restart", true)]
+        public void WatcherActionLeaseBoundary_IsExplicit(string action, bool requiresLease)
+        {
+            Assert.That(
+                AICodedbActions.WatcherActionRequiresEditorLease(action),
+                Is.EqualTo(requiresLease));
         }
 
         [Test]
@@ -1770,6 +2377,28 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     internal sealed class AICodedbActionGridViewTests
     {
+        [Test]
+        public void ResolveButtonWidth_ExpandsForLongContent()
+        {
+            Assert.That(
+                AICodedbActionGridView.ResolveButtonWidth(150f),
+                Is.EqualTo(166f));
+        }
+
+        [Test]
+        public void ResolveButtonWidth_PreservesMinimumForShortContent()
+        {
+            Assert.That(
+                AICodedbActionGridView.ResolveButtonWidth(40f),
+                Is.EqualTo(AICodedbActionGridView.ButtonWidth));
+        }
+
+        [Test]
+        public void ResolveColumns_AccountsForExpandedButtonWidth()
+        {
+            Assert.That(AICodedbActionGridView.ResolveColumns(392f, 3, 3, 160f), Is.EqualTo(2));
+        }
+
         [TestCase(656f, 5, 5, 5)]
         [TestCase(655f, 5, 5, 3)]
         [TestCase(392f, 3, 3, 3)]

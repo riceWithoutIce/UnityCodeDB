@@ -79,10 +79,11 @@ namespace Rice.AI.Codedb.Editor
 
         internal static Task<AICodedbCommandResult> RunUpgradeAsync()
         {
-            var arguments = BuildScriptArguments(AICodedbHostPayloadAction.Upgrade, false);
-            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
-                MutationTimeoutMilliseconds,
-                arguments);
+            return RunAsync(
+                AICodedbPaths.CaptureExecutionContext(),
+                AICodedbHostPayloadAction.Upgrade,
+                false,
+                MutationTimeoutMilliseconds);
         }
 
         internal static AICodedbCommandResult RunUpgrade(AICodedbEditorExecutionContext context)
@@ -203,6 +204,36 @@ namespace Rice.AI.Codedb.Editor
                    || action == AICodedbHostPayloadAction.Reinstall;
         }
 
+        private static bool RequiresCandidateLeaseHandoff(AICodedbHostPayloadAction action)
+        {
+            return action == AICodedbHostPayloadAction.Upgrade
+                   || action == AICodedbHostPayloadAction.Install
+                   || action == AICodedbHostPayloadAction.Reinstall;
+        }
+
+        private static string[] BuildRuntimeScriptArguments(
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            string projectRoot)
+        {
+            var arguments = new List<string>(
+                BuildScriptArguments(action, confirmedProjectMutation, projectRoot));
+            if (RequiresCandidateLeaseHandoff(action)
+                && AICodedbEditorLifecycle.TryGetCurrentEditorLeaseIdentity(
+                    out var sessionId,
+                    out var processId,
+                    out var processStartTicks))
+            {
+                arguments.Add("-EditorSessionId");
+                arguments.Add(sessionId);
+                arguments.Add("-EditorProcessId");
+                arguments.Add(processId.ToString(CultureInfo.InvariantCulture));
+                arguments.Add("-EditorProcessStartTicks");
+                arguments.Add(processStartTicks);
+            }
+            return arguments.ToArray();
+        }
+
         private static AICodedbCommandResult Run(
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation,
@@ -224,7 +255,7 @@ namespace Rice.AI.Codedb.Editor
             string[] arguments;
             try
             {
-                arguments = BuildScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
+                arguments = BuildRuntimeScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
             }
             catch (ArgumentException exception)
             {
@@ -275,7 +306,7 @@ namespace Rice.AI.Codedb.Editor
             string[] arguments;
             try
             {
-                arguments = BuildScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
+                arguments = BuildRuntimeScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
             }
             catch (ArgumentException exception)
             {
@@ -684,6 +715,18 @@ namespace Rice.AI.Codedb.Editor
 
         private static string FirstMarkedDetail(string output)
         {
+            // Product-layer markers describe state, not the user-facing
+            // reason. Prefer the explicit prerequisite/detail lines and only
+            // fall back to a layer marker when an older producer omitted them.
+            foreach (var line in SplitLines(output))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("[PREREQUISITE]", StringComparison.Ordinal)
+                    || trimmed.StartsWith("[DETAIL]", StringComparison.Ordinal))
+                {
+                    return trimmed;
+                }
+            }
             foreach (var line in SplitLines(output))
             {
                 var trimmed = line.Trim();
@@ -886,6 +929,46 @@ namespace Rice.AI.Codedb.Editor
                     activeOwners,
                     legacyMcpSessionCount,
                     true);
+            }
+
+            if (Contains(output, "[PRODUCT_STATE] MISSING_PREREQUISITE"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.SetupRequired,
+                    AICodedbStatusState.Warning,
+                    "MISSING_PREREQUISITE",
+                    FirstMatchingLine(output, "[PREREQUISITE]", "[DETAIL]", "[PRODUCT_STATE] MISSING_PREREQUISITE"),
+                    activeOwners,
+                    legacyMcpSessionCount,
+                    canRedeploy);
+            }
+
+            // The immutable-instance status path reports a structured product
+            // state even when a coordinator is temporarily unavailable. Keep
+            // that state and its diagnostic visible instead of falling through
+            // to the misleading "unrecognized result" status.
+            if (Contains(output, "[PRODUCT_STATE] NEEDS_ATTENTION"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.Blocked,
+                    AICodedbStatusState.Error,
+                    "NEEDS_ATTENTION",
+                    FirstMatchingLine(output, "[DETAIL]", "[PRODUCT_STATE] NEEDS_ATTENTION"),
+                    activeOwners,
+                    legacyMcpSessionCount,
+                    canRedeploy);
+            }
+
+            if (Contains(output, "[PRODUCT_STATE] STARTING"))
+            {
+                return new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.Unknown,
+                    AICodedbStatusState.Warning,
+                    "STARTING",
+                    FirstMatchingLine(output, "[DETAIL]", "[PRODUCT_STATE] STARTING"),
+                    activeOwners,
+                    legacyMcpSessionCount,
+                    canRedeploy);
             }
 
             if (Contains(output, "[STALE] Host payload can be synchronized"))

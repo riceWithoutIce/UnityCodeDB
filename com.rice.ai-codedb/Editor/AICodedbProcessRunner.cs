@@ -145,7 +145,8 @@ namespace Rice.AI.Codedb.Editor
         private enum PowerShellScriptPathPolicy
         {
             ProjectLocal,
-            ResolvedPackageMaterializer
+            ResolvedPackageMaterializer,
+            ResolvedPackageProviderInstaller
         }
 
         /// <summary>
@@ -188,6 +189,28 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Runs a project-local script with the validated immutable instance
+        /// root supplied to generation-aware scripts through their normal
+        /// runtime environment contract.
+        /// </summary>
+        internal static AICodedbCommandResult RunPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            string instanceRoot,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                null,
+                instanceRoot,
+                scriptArguments);
+        }
+
+        /// <summary>
         /// Runs only the materializer script owned by the CodeDB Package resolved for this assembly.
         /// </summary>
         /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
@@ -218,6 +241,22 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Runs only the Package-owned Provider installer resolved for this assembly.
+        /// </summary>
+        internal static AICodedbCommandResult RunResolvedPackageProviderInstallerPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageProviderInstaller,
+                scriptArguments);
+        }
+
+        /// <summary>
         /// Runs a project-local PowerShell script on a worker thread so Editor initialization stays responsive.
         /// </summary>
         /// <param name="scriptPath">Absolute path to a script under the Unity project root.</param>
@@ -228,7 +267,7 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             params string[] scriptArguments)
         {
-            return RunPowerShellScriptAsync(
+            return RunPowerShellScriptAsyncCore(
                 AICodedbPaths.CaptureExecutionContext(),
                 scriptPath,
                 timeoutMilliseconds,
@@ -242,7 +281,7 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             params string[] scriptArguments)
         {
-            return RunPowerShellScriptAsync(
+            return RunPowerShellScriptAsyncCore(
                 context,
                 scriptPath,
                 timeoutMilliseconds,
@@ -259,7 +298,7 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             params string[] scriptArguments)
         {
-            return RunPowerShellScriptAsync(
+            return RunPowerShellScriptAsyncCore(
                 AICodedbPaths.CaptureExecutionContext(),
                 string.Empty,
                 timeoutMilliseconds,
@@ -272,11 +311,50 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             params string[] scriptArguments)
         {
-            return RunPowerShellScriptAsync(
+            return RunPowerShellScriptAsyncCore(
                 context,
                 string.Empty,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
+        }
+
+        /// <summary>
+        /// Runs the Package-owned Provider installer on a worker thread.
+        /// </summary>
+        internal static Task<AICodedbCommandResult> RunResolvedPackageProviderInstallerPowerShellScriptAsync(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsyncCore(
+                context,
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageProviderInstaller,
+                scriptArguments);
+        }
+
+        /// <summary>
+        /// Runs the Package-owned Provider installer and forwards trusted stdout
+        /// stage lines while the process is still running.
+        /// </summary>
+        /// <param name="context">Captured Editor execution context.</param>
+        /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
+        /// <param name="outputLine">Callback invoked from the process output reader thread.</param>
+        /// <param name="scriptArguments">Optional arguments passed to the installer.</param>
+        internal static Task<AICodedbCommandResult> RunResolvedPackageProviderInstallerPowerShellScriptAsync(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            Action<string> outputLine,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsyncCore(
+                context,
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageProviderInstaller,
+                outputLine,
                 scriptArguments);
         }
 
@@ -285,6 +363,25 @@ namespace Rice.AI.Codedb.Editor
             string scriptPath,
             int timeoutMilliseconds,
             PowerShellScriptPathPolicy pathPolicy,
+            string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
+                scriptPath,
+                timeoutMilliseconds,
+                pathPolicy,
+                null,
+                null,
+                scriptArguments);
+        }
+
+        private static AICodedbCommandResult RunPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            PowerShellScriptPathPolicy pathPolicy,
+            Action<string> outputLine,
+            string instanceRoot,
             string[] scriptArguments)
         {
             if (context.Platform != RuntimePlatform.WindowsEditor)
@@ -306,15 +403,33 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return RunProcess(
-                BuildPowerShellStartInfo(context, normalizedScriptPath, scriptArguments),
-                timeoutMilliseconds);
+                BuildPowerShellStartInfo(context, normalizedScriptPath, instanceRoot, scriptArguments),
+                timeoutMilliseconds,
+                outputLine);
         }
 
-        private static Task<AICodedbCommandResult> RunPowerShellScriptAsync(
+        private static Task<AICodedbCommandResult> RunPowerShellScriptAsyncCore(
             AICodedbEditorExecutionContext context,
             string scriptPath,
             int timeoutMilliseconds,
             PowerShellScriptPathPolicy pathPolicy,
+            string[] scriptArguments)
+        {
+            return RunPowerShellScriptAsyncCore(
+                context,
+                scriptPath,
+                timeoutMilliseconds,
+                pathPolicy,
+                null,
+                scriptArguments);
+        }
+
+        private static Task<AICodedbCommandResult> RunPowerShellScriptAsyncCore(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            PowerShellScriptPathPolicy pathPolicy,
+            Action<string> outputLine,
             string[] scriptArguments)
         {
             if (context.Platform != RuntimePlatform.WindowsEditor)
@@ -329,6 +444,8 @@ namespace Rice.AI.Codedb.Editor
                 scriptPath,
                 effectiveTimeout,
                 pathPolicy,
+                outputLine,
+                null,
                 scriptArguments));
         }
 
@@ -362,6 +479,19 @@ namespace Rice.AI.Codedb.Editor
                     return TryValidateResolvedPackageMaterializerScriptPath(
                         resolvedPackageRoot,
                         materializerPath,
+                        out normalizedScriptPath,
+                        out error);
+                }
+
+                if (pathPolicy == PowerShellScriptPathPolicy.ResolvedPackageProviderInstaller)
+                {
+                    var resolvedPackageRoot = context.PackageRoot;
+                    var installerPath = AICodedbPaths.NormalizePath(Path.Combine(
+                        resolvedPackageRoot,
+                        AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath));
+                    return TryValidateResolvedPackageProviderInstallerScriptPath(
+                        resolvedPackageRoot,
+                        installerPath,
                         out normalizedScriptPath,
                         out error);
                 }
@@ -456,6 +586,119 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        /// <summary>
+        /// Validates the one Package-owned Provider installer that may execute outside the project.
+        /// </summary>
+        internal static bool TryValidateResolvedPackageProviderInstallerScriptPath(
+            string resolvedPackageRoot,
+            string scriptPath,
+            out string normalizedScriptPath,
+            out string error)
+        {
+            return TryValidateResolvedPackageOwnedScriptPath(
+                resolvedPackageRoot,
+                scriptPath,
+                AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath,
+                "CodeDB Package Provider installer",
+                out normalizedScriptPath,
+                out error);
+        }
+
+        private static bool TryValidateResolvedPackageOwnedScriptPath(
+            string resolvedPackageRoot,
+            string scriptPath,
+            string packageRelativePath,
+            string displayName,
+            out string normalizedScriptPath,
+            out string error)
+        {
+            normalizedScriptPath = string.Empty;
+            error = string.Empty;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(resolvedPackageRoot)
+                    || !Path.IsPathRooted(resolvedPackageRoot))
+                {
+                    error = "Resolved CodeDB Package root must be an absolute path.";
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(scriptPath) || !Path.IsPathRooted(scriptPath))
+                {
+                    error = "Resolved CodeDB Package script path must be absolute.";
+                    return false;
+                }
+
+                var normalizedPackageRoot = AICodedbPaths.NormalizePath(resolvedPackageRoot).TrimEnd('/', '\\');
+                var requestedScriptPath = AICodedbPaths.NormalizePath(scriptPath);
+                var expectedScriptPath = AICodedbPaths.NormalizePath(Path.Combine(
+                    normalizedPackageRoot,
+                    packageRelativePath));
+                var packagePrefix = normalizedPackageRoot + "/";
+
+                if (!expectedScriptPath.StartsWith(packagePrefix, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(requestedScriptPath, expectedScriptPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "Refusing to run a script other than the resolved " + displayName + ": " + requestedScriptPath;
+                    return false;
+                }
+
+                if (!Directory.Exists(normalizedPackageRoot))
+                {
+                    error = "Resolved CodeDB Package root was not found: " + normalizedPackageRoot;
+                    return false;
+                }
+
+                if (!TryValidatePackageOwnedScriptPathNodes(
+                        normalizedPackageRoot,
+                        packageRelativePath,
+                        displayName,
+                        out error))
+                    return false;
+
+                normalizedScriptPath = expectedScriptPath;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Refusing to run the resolved " + displayName + " because its path could not be validated: "
+                        + exception.Message;
+                return false;
+            }
+        }
+
+        private static bool TryValidatePackageOwnedScriptPathNodes(
+            string normalizedPackageRoot,
+            string packageRelativePath,
+            string displayName,
+            out string error)
+        {
+            error = string.Empty;
+            var current = normalizedPackageRoot;
+            var relativeSegments = packageRelativePath
+                .Replace('\\', '/')
+                .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (!TryValidatePathNode(current, true, out error))
+            {
+                error = "Resolved " + displayName + " path validation failed: " + error;
+                return false;
+            }
+
+            for (var index = 0; index < relativeSegments.Length; index++)
+            {
+                current = AICodedbPaths.NormalizePath(Path.Combine(current, relativeSegments[index]));
+                var expectDirectory = index < relativeSegments.Length - 1;
+                if (TryValidatePathNode(current, expectDirectory, out error))
+                    continue;
+                error = "Resolved " + displayName + " path validation failed: " + error;
+                return false;
+            }
+
+            return true;
+        }
+
         private static bool TryValidatePackageMaterializerPathNodes(
             string normalizedPackageRoot,
             out string error)
@@ -505,6 +748,7 @@ namespace Rice.AI.Codedb.Editor
         private static ProcessStartInfo BuildPowerShellStartInfo(
             AICodedbEditorExecutionContext context,
             string normalizedScriptPath,
+            string instanceRoot,
             string[] scriptArguments)
         {
             var startInfo = new ProcessStartInfo
@@ -520,6 +764,8 @@ namespace Rice.AI.Codedb.Editor
                 StandardErrorEncoding = Encoding.UTF8
             };
             startInfo.EnvironmentVariables["RICE_CODEDB_UNITY_ROOT"] = context.ProjectRoot;
+            if (!string.IsNullOrWhiteSpace(instanceRoot))
+                startInfo.EnvironmentVariables["RICE_CODEDB_INSTANCE_ROOT"] = instanceRoot;
             return startInfo;
         }
 
@@ -582,7 +828,10 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         /// <param name="startInfo">Process start information.</param>
         /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds.</param>
-        private static AICodedbCommandResult RunProcess(ProcessStartInfo startInfo, int timeoutMilliseconds)
+        private static AICodedbCommandResult RunProcess(
+            ProcessStartInfo startInfo,
+            int timeoutMilliseconds,
+            Action<string> outputLine = null)
         {
             var output = new StringBuilder();
             var error = new StringBuilder();
@@ -607,6 +856,7 @@ namespace Rice.AI.Codedb.Editor
 
                         lock (outputLock)
                             output.AppendLine(args.Data);
+                        NotifyOutputLine(outputLine, args.Data);
                     };
                     process.ErrorDataReceived += (sender, args) =>
                     {
@@ -645,6 +895,25 @@ namespace Rice.AI.Codedb.Editor
                     errorText = errorText.TrimEnd() + Environment.NewLine;
 
                 return new AICodedbCommandResult(-1, GetCapturedText(output, outputLock), errorText + exception.Message, false, GetElapsedMilliseconds(stopwatch));
+            }
+        }
+
+        /// <summary>
+        /// Forwards a process output line without allowing UI progress handling
+        /// to affect process lifetime or output capture.
+        /// </summary>
+        private static void NotifyOutputLine(Action<string> outputLine, string line)
+        {
+            if (outputLine == null || line == null)
+                return;
+
+            try
+            {
+                outputLine(line);
+            }
+            catch
+            {
+                // Progress observers are advisory and must never fail a command.
             }
         }
 

@@ -62,7 +62,7 @@ $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
 $expectedUpmPackageVersion = "0.2.5-preview.5"
 $expectedHostCompatibilityPackageVersion = "0.2.5-preview.5"
-$expectedGenerationId = "poc.32"
+$expectedGenerationId = "poc.33"
 
 $expectedTopLevel = @(
     ".gitattributes",
@@ -132,6 +132,9 @@ foreach ($file in $textFiles) {
             'codedb-balance',
             '',
             [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($isReviewedDefectEvidence) {
+            $remainingContent = [regex]::Replace($remainingContent, "Balance runtime", "")
+        }
         if (-not $isReviewedDefectEvidence -or
             $evidenceMatches.Count -ne 4 -or
             $remainingContent -match '(?i)\bbalance\b') {
@@ -238,13 +241,13 @@ Assert-Equal `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
 Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 32 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 33 -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
 $bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
-Assert-Equal -Actual $bootstrapTransitions.Count -Expected 1 -Label "Reviewed bootstrap transition count"
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 2 -Label "Reviewed bootstrap transition count"
 $v024Transition = $bootstrapTransitions[0]
 Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
 Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
@@ -257,6 +260,15 @@ Assert-Equal -Actual ([int]$v024Transition.source_host_use_gate_version) -Expect
 Assert-Equal -Actual ([int]$v024Transition.source_generation_lease_version) -Expected 2 -Label "Reviewed bootstrap transition generation lease"
 Assert-Equal -Actual ([int]$v024Transition.source_flat_file_count) -Expected 21 -Label "Reviewed bootstrap transition flat file count"
 Assert-Equal -Actual ([string]$v024Transition.source_flat_closure_sha256) -Expected "d6d64725fbc15066ea6062cb8d8de46ff1eb0133d13ff9906c1a5231da6a484c" -Label "Reviewed bootstrap transition closure"
+$preview5Transition = $bootstrapTransitions[1]
+Assert-Equal -Actual ([string]$preview5Transition.source_tag) -Expected "v0.2.5-preview.5" -Label "Reviewed preview.5 bootstrap transition tag"
+Assert-Equal -Actual ([string]$preview5Transition.source_package_version) -Expected "0.2.5-preview.5" -Label "Reviewed preview.5 bootstrap transition Package"
+Assert-Equal -Actual ([string]$preview5Transition.source_payload_version) -Expected "poc.32" -Label "Reviewed preview.5 bootstrap transition payload"
+Assert-Equal -Actual ([int]$preview5Transition.source_payload_sequence) -Expected 32 -Label "Reviewed preview.5 bootstrap transition sequence"
+Assert-Equal -Actual ([string]$preview5Transition.source_generation_id) -Expected "poc.32" -Label "Reviewed preview.5 bootstrap transition generation"
+Assert-Equal -Actual ([int]$preview5Transition.source_marker_schema_version) -Expected 2 -Label "Reviewed preview.5 bootstrap transition marker schema"
+Assert-Equal -Actual ([int]$preview5Transition.source_flat_file_count) -Expected 22 -Label "Reviewed preview.5 bootstrap transition flat file count"
+Assert-Equal -Actual ([string]$preview5Transition.source_flat_closure_sha256) -Expected "10f61a75a04a484b431ccb2a94f79ae61cfbb0f81da2b306990a26c8fb8250e1" -Label "Reviewed preview.5 bootstrap transition closure"
 
 $flatTargetPrefix = "AIWork/codedb/"
 $generationSourcePrefix = "Generations/$expectedGenerationId/"
@@ -308,16 +320,26 @@ Assert-Equal -Actual $flatSources.Count -Expected 22 -Label "Flat payload target
 Assert-Equal -Actual $generationSources.Count -Expected 23 -Label "Generation payload target count"
 Assert-Equal -Actual $currentPointerSources.Count -Expected 1 -Label "Current pointer target count"
 
-$retiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
-$retiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $retiredGenerationSourceRoot -Recurse -File | ForEach-Object {
-    Get-RelativePath -Root $retiredGenerationSourceRoot -Path $_.FullName
+$legacyRetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
+$legacyRetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $legacyRetiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $legacyRetiredGenerationSourceRoot -Path $_.FullName
 } | Sort-Object)
-Assert-Equal -Actual $retiredGenerationRelativePaths.Count -Expected 21 -Label "Retired generation compatibility closure"
-$expectedRetiredTargets = @(foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
-    foreach ($generationSuffix in $retiredGenerationRelativePaths) {
-        "AIWork/.runtime/codedb/host/generations/$retiredGenerationId/$generationSuffix"
+Assert-Equal -Actual $legacyRetiredGenerationRelativePaths.Count -Expected 21 -Label "Legacy retired generation compatibility closure"
+$poc32RetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.32"
+$poc32RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc32RetiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $poc32RetiredGenerationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual $poc32RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.32 retired generation closure"
+$expectedRetiredTargets = @(
+    foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
+        foreach ($generationSuffix in $legacyRetiredGenerationRelativePaths) {
+            "AIWork/.runtime/codedb/host/generations/$retiredGenerationId/$generationSuffix"
+        }
     }
-}) | Sort-Object
+    foreach ($generationSuffix in $poc32RetiredGenerationRelativePaths) {
+        "AIWork/.runtime/codedb/host/generations/poc.32/$generationSuffix"
+    }
+) | Sort-Object
 $actualRetiredTargets = New-Object System.Collections.Generic.List[string]
 $seenRetiredTargets = @{}
 foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
@@ -328,7 +350,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 189 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 212 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -360,7 +382,7 @@ Assert-Equal -Actual @($generationManifest.files).Count -Expected 22 -Label "Gen
 $generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
 $generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
 Assert-Equal `
-    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.32";$').Count) `
+    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.33";$').Count) `
     -Expected 1 `
     -Label "Generation lease identity closure"
 
@@ -428,6 +450,7 @@ foreach ($requiredRule in @(
     "Payload~/**/*.json text eol=lf",
     "Tools~/**/*.ps1 text eol=lf",
     "Tools~/**/*.mjs text eol=lf",
+    "Tools~/**/*.json text eol=lf",
     "Tests~/**/*.ps1 text eol=lf",
     "Tests~/**/*.toml text eol=lf"
 )) {
@@ -446,6 +469,41 @@ $legacyStopClientPath = Join-Path $packageRoot "Tools~\stop-codedb-legacy-watche
 Assert-True -Condition (Test-Path -LiteralPath $legacyStopClientPath -PathType Leaf) -Message "Package-owned legacy watcher Stop client is missing."
 $mcpAvailabilityProbePath = Join-Path $packageRoot "Tools~\probe-codedb-mcp-availability.mjs"
 Assert-True -Condition (Test-Path -LiteralPath $mcpAvailabilityProbePath -PathType Leaf) -Message "Package-owned MCP availability probe is missing."
+$providerInstallerPath = Join-Path $packageRoot "Tools~\install-codedb-provider.ps1"
+Assert-True -Condition (Test-Path -LiteralPath $providerInstallerPath -PathType Leaf) -Message "Package-owned Provider installer is missing."
+$providerDistributionManifestPath = Join-Path $packageRoot "Tools~\codedb-provider-distribution.json"
+Assert-True -Condition (Test-Path -LiteralPath $providerDistributionManifestPath -PathType Leaf) -Message "Provider distribution descriptor is missing."
+$providerInstallerSource = [System.IO.File]::ReadAllText($providerInstallerPath)
+foreach ($requiredProviderInstallerBoundary in @(
+    "distribution_state",
+    "Get-ValidatedDistributionMode",
+    "New-DevelopmentProviderCandidate",
+    "Assert-DetachedSignature",
+    "Expand-ValidatedProviderArchive",
+    "Install-ProviderCandidate",
+    "Assert-TestModeIsolation",
+    "TestMode",
+    "PROVIDER_DISTRIBUTION_UNAVAILABLE"
+)) {
+    Assert-True `
+        -Condition ($providerInstallerSource.IndexOf($requiredProviderInstallerBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Provider installer is missing boundary: $requiredProviderInstallerBoundary"
+}
+$providerDistributionManifestSource = [System.IO.File]::ReadAllText($providerDistributionManifestPath)
+foreach ($requiredDistributionField in @(
+    '"provider_id": "killop/codedb-mcp"',
+    '"version": "0.5.0-28e3912"',
+    '"commit": "28e3912d5cd67ff3499734984f3e3d626a204796"',
+    '"distribution_state": "DEVELOPMENT_UPSTREAM"',
+    '"release_base_url": "https://raw.githubusercontent.com/killop/codedb-mcp/28e3912d5cd67ff3499734984f3e3d626a204796/skills/codedb-mcp/assets"',
+    '"archive_name": "codebase-mcp.exe"',
+    '"executable_sha256": "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7"',
+    '"license_status": "PENDING"'
+)) {
+    Assert-True `
+        -Condition ($providerDistributionManifestSource.IndexOf($requiredDistributionField, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Provider distribution descriptor is missing field: $requiredDistributionField"
+}
 $mcpAvailabilityProbeSource = [System.IO.File]::ReadAllText($mcpAvailabilityProbePath)
 foreach ($requiredProbeBoundary in @(
     '"Lifecycle reason: READY"',
@@ -515,9 +573,13 @@ $missingPrerequisiteHeartbeatIndex = $editorUpdateFunction.Groups["body"].Value.
     "_lastProductState == AICodedbProductState.MissingPrerequisite",
     [StringComparison]::Ordinal)
 $heartbeatLeaseIndex = $editorUpdateFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal)
+$lastHeartbeatLeaseIndex = $editorUpdateFunction.Groups["body"].Value.LastIndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal)
 Assert-True `
-    -Condition ($missingPrerequisiteHeartbeatIndex -ge 0 -and $heartbeatLeaseIndex -gt $missingPrerequisiteHeartbeatIndex) `
+    -Condition ($missingPrerequisiteHeartbeatIndex -ge 0 -and $lastHeartbeatLeaseIndex -gt $missingPrerequisiteHeartbeatIndex) `
     -Message "Editor heartbeat must return through the read-only prerequisite recheck before lease refresh."
+Assert-True `
+    -Condition ($heartbeatLeaseIndex -ge 0 -and $heartbeatLeaseIndex -lt $missingPrerequisiteHeartbeatIndex) `
+    -Message "Editor heartbeat must keep the lease alive while Play-mode maintenance is suspended."
 foreach ($forbiddenMainThreadCall in @(
     "PublishLease(",
     "RefreshEditorLeaseForIntegrationState(",

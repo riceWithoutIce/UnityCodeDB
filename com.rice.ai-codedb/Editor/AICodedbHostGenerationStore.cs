@@ -59,7 +59,13 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbHostGenerationSelection Resolve(string projectRoot)
         {
+            return Resolve(projectRoot, AICodedbPaths.PackageRootPath);
+        }
+
+        internal static AICodedbHostGenerationSelection Resolve(string projectRoot, string packageRoot)
+        {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var normalizedPackageRoot = AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/');
             var currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot);
             if (currentInstance.Present)
             {
@@ -75,7 +81,10 @@ namespace Rice.AI.Codedb.Editor
                         string.Empty,
                         currentInstance.Detail);
                 }
-                return ResolveSelectedInstanceGeneration(normalizedRoot, currentInstance.GenerationRoot);
+                return ResolveSelectedInstanceGeneration(
+                    normalizedRoot,
+                    normalizedPackageRoot,
+                    currentInstance.GenerationRoot);
             }
 
             var currentPath = AICodedbPaths.NormalizePath(Path.Combine(
@@ -83,13 +92,14 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbProjectSettings.HostCurrentPointerRelativePath));
 
             if (File.Exists(currentPath))
-                return ResolveCurrent(normalizedRoot, currentPath);
+                return ResolveCurrent(normalizedRoot, normalizedPackageRoot, currentPath);
 
             return ResolveLegacy(normalizedRoot);
         }
 
         private static AICodedbHostGenerationSelection ResolveSelectedInstanceGeneration(
             string projectRoot,
+            string packageRoot,
             string generationRoot)
         {
             try
@@ -106,7 +116,6 @@ namespace Rice.AI.Codedb.Editor
                     throw new InvalidOperationException("Selected instance generation targets an unexpected directory.");
                 }
 
-                var packageRoot = AICodedbPaths.PackageRootPath.TrimEnd('/');
                 var packagePointerPath = CombineInside(packageRoot, "Payload~/host-current.json", "Package Current pointer");
                 var installedManifestPath = CombineInside(generationRoot, "generation-manifest.json", "selected instance generation manifest");
                 AssertNoReparsePoints(projectRoot, generationRoot, "selected instance generation");
@@ -124,7 +133,11 @@ namespace Rice.AI.Codedb.Editor
                 }
                 var installedManifest = ReadGenerationManifest(installedManifestPath, "selected instance generation manifest");
                 ValidateGenerationManifest(packagePointer, installedManifest, generationRoot);
-                ValidatePackageOwnedCurrentGeneration(packagePointer, installedManifestPath, generationRoot);
+                ValidatePackageOwnedCurrentGeneration(
+                    packagePointer,
+                    installedManifestPath,
+                    generationRoot,
+                    packageRoot);
                 return new AICodedbHostGenerationSelection(
                     AICodedbHostGenerationState.Current,
                     packagePointer.generation_id,
@@ -171,6 +184,14 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbHostGenerationSelection ResolvePointer(string projectRoot, string pointerPath)
         {
+            return ResolvePointer(projectRoot, pointerPath, AICodedbPaths.PackageRootPath);
+        }
+
+        internal static AICodedbHostGenerationSelection ResolvePointer(
+            string projectRoot,
+            string pointerPath,
+            string packageRoot)
+        {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
             var normalizedPointerPath = AICodedbPaths.NormalizePath(pointerPath);
             if (!File.Exists(normalizedPointerPath))
@@ -185,10 +206,16 @@ namespace Rice.AI.Codedb.Editor
                     string.Empty,
                     "Generation pointer is not installed.");
             }
-            return ResolveCurrent(normalizedRoot, normalizedPointerPath);
+            return ResolveCurrent(
+                normalizedRoot,
+                AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/'),
+                normalizedPointerPath);
         }
 
-        private static AICodedbHostGenerationSelection ResolveCurrent(string projectRoot, string currentPath)
+        private static AICodedbHostGenerationSelection ResolveCurrent(
+            string projectRoot,
+            string packageRoot,
+            string currentPath)
         {
             try
             {
@@ -216,12 +243,12 @@ namespace Rice.AI.Codedb.Editor
                 ValidateGenerationManifest(pointer, manifest, generationRoot);
                 var state = ClassifyValidatedPointer(pointer);
                 if (state == AICodedbHostGenerationState.Current)
-                    ValidatePackageOwnedCurrentGeneration(pointer, manifestPath, generationRoot);
+                    ValidatePackageOwnedCurrentGeneration(pointer, manifestPath, generationRoot, packageRoot);
                 var detail = state == AICodedbHostGenerationState.Previous
-                    ? "Validated compatible previous generation selected by " + AICodedbPaths.ToProjectRelativeDisplayPath(currentPath) + ". Use Reinstall CodeDB before running Host commands."
+                    ? "Validated compatible previous generation selected by " + ToProjectRelativeDisplayPath(projectRoot, currentPath) + ". Use Reinstall CodeDB before running Host commands."
                     : state == AICodedbHostGenerationState.DowngradeReviewRequired
                         ? "Validated generation " + pointer.generation_id + " is newer than the loaded Package and requires downgrade review. Host commands and automatic mutation are disabled."
-                        : AICodedbPaths.ToProjectRelativeDisplayPath(currentPath);
+                        : ToProjectRelativeDisplayPath(projectRoot, currentPath);
                 return new AICodedbHostGenerationSelection(
                     state,
                     pointer.generation_id,
@@ -356,7 +383,7 @@ namespace Rice.AI.Codedb.Editor
                     0,
                     legacyRoot,
                     "Validated legacy flat Host. Use Reinstall CodeDB before running Host commands. Marker: "
-                    + AICodedbPaths.ToProjectRelativeDisplayPath(markerPath));
+                    + ToProjectRelativeDisplayPath(projectRoot, markerPath));
             }
             catch (Exception exception)
             {
@@ -408,9 +435,9 @@ namespace Rice.AI.Codedb.Editor
         private static void ValidatePackageOwnedCurrentGeneration(
             CurrentPointerDocument installedPointer,
             string installedManifestPath,
-            string installedGenerationRoot)
+            string installedGenerationRoot,
+            string packageRoot)
         {
-            var packageRoot = AICodedbPaths.PackageRootPath.TrimEnd('/');
             if (string.IsNullOrWhiteSpace(packageRoot) || !Directory.Exists(packageRoot))
                 throw new InvalidOperationException("Resolved Package root is unavailable for Current generation authentication.");
             AssertNoReparsePoints(packageRoot, packageRoot, "resolved Package root");
@@ -616,6 +643,16 @@ namespace Rice.AI.Codedb.Editor
             if (!combined.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException(label + " escapes its root.");
             return combined;
+        }
+
+        private static string ToProjectRelativeDisplayPath(string projectRoot, string path)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var normalizedPath = AICodedbPaths.NormalizePath(path);
+            var prefix = normalizedRoot + "/";
+            return normalizedPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? normalizedPath.Substring(prefix.Length)
+                : normalizedPath;
         }
 
         private static string NormalizeRelativePath(string path, string label)

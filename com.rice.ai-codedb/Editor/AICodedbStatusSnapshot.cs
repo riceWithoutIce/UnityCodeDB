@@ -13,6 +13,9 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbProjectIntegrationStatus ProjectIntegrationStatus { get; }
         internal AICodedbProductStatus ProductStatus { get; }
         internal bool IsProjectUninstalled => ProjectIntegrationStatus.IsUninstalled;
+        internal AICodedbCurrentInstanceStatus CurrentInstanceStatus { get; }
+        internal AICodedbStatusItem CurrentInstance { get; }
+        internal AICodedbStatusItem Cleanup { get; }
         internal AICodedbHostPayloadStatus HostPayloadStatus { get; }
         internal AICodedbStatusItem HostPayload { get; }
         internal AICodedbStatusItem HostGeneration { get; }
@@ -34,6 +37,10 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbStatusItem McpAvailability { get; }
         internal AICodedbStatusItem RuntimeBoundary { get; }
         internal AICodedbStatusItem ToolProfile { get; }
+        internal string RuntimeRootRelativePath { get; }
+        internal string IndexRootRelativePath { get; }
+        internal string TextAdapterRootRelativePath { get; }
+        internal string WatchRootRelativePath { get; }
 
         /// <summary>
         /// Captures the current read-only codedb setup status.
@@ -44,8 +51,15 @@ namespace Rice.AI.Codedb.Editor
         {
             _context = context;
             ProjectIntegrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            CurrentInstanceStatus = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+            RuntimeRootRelativePath = CurrentInstanceStatus.IsCurrent
+                ? CurrentInstanceStatus.InstanceRelativePath
+                : context.RuntimeRelativePath;
+            IndexRootRelativePath = RuntimeRootRelativePath + "/index";
+            TextAdapterRootRelativePath = RuntimeRootRelativePath + "/adapter/text-index";
+            WatchRootRelativePath = RuntimeRootRelativePath + "/watch";
             var hostPayloadMarkerExists = File.Exists(context.GetProjectPath(AICodedbProjectSettings.HostPayloadMarkerRelativePath));
-            HostGenerationSelection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot);
+            HostGenerationSelection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot, context.PackageRoot);
             HostPayloadStatus = AICodedbHostPayloadStatusBuilder.Build(
                 hostPayloadMarkerExists,
                 hostPayloadResult,
@@ -53,6 +67,8 @@ namespace Rice.AI.Codedb.Editor
                     ? HostGenerationSelection.GenerationId
                     : string.Empty);
             ProductStatus = AICodedbProductStatusBuilder.Build(ProjectIntegrationStatus, hostPayloadResult);
+            CurrentInstance = CreateCurrentInstanceStatus(CurrentInstanceStatus);
+            Cleanup = CreateCleanupStatus(ProjectIntegrationStatus, ProductStatus.State);
             HostPayload = HostPayloadStatus.ToStatusItem();
             HostUpdatePolicyValue = AICodedbHostUpdatePolicyStore.Read(context.ProjectRoot);
             HostGeneration = CreateHostGenerationStatus(HostGenerationSelection);
@@ -63,19 +79,21 @@ namespace Rice.AI.Codedb.Editor
             HostUpgrade = HostUpgradeStatus.ToStatusItem(hostPayloadMarkerExists);
             HostUpdatePolicy = CreateHostUpdatePolicyStatus(HostUpdatePolicyValue);
             ProviderExecutable = CreateAbsoluteFileStatus("Machine Provider executable", context.MachineProviderExecutablePath);
-            ProviderConfig = CreateProviderConfigStatus();
+            ProviderConfig = CreateProviderConfigStatus(RuntimeRootRelativePath + "/config/codedb-mcp.toml");
             RuntimeConfigTemplate = CreateAbsoluteFileStatus("Runtime config template", ResolveRuntimeConfigTemplatePath());
-            RuntimeDirectory = CreateDirectoryStatus("Runtime directory", context.RuntimeRelativePath);
-            IndexDirectory = CreateDirectoryStatus("Index directory", context.IndexRelativePath);
-            IndexManifest = CreateFileStatus("Index manifest", context.IndexManifestRelativePath);
-            TextAdapterDirectory = CreateDirectoryStatus("Shader adapter directory", context.TextAdapterRelativePath);
-            TextAdapterManifest = CreateFileStatus("Shader adapter manifest", context.TextAdapterManifestRelativePath);
+            RuntimeDirectory = CreateDirectoryStatus("Runtime directory", RuntimeRootRelativePath);
+            IndexDirectory = CreateDirectoryStatus("Index directory", IndexRootRelativePath);
+            IndexManifest = CreateFileStatus("Index manifest", IndexRootRelativePath + "/manifest.json");
+            TextAdapterDirectory = CreateDirectoryStatus("Shader adapter directory", TextAdapterRootRelativePath);
+            TextAdapterManifest = CreateFileStatus("Shader adapter manifest", TextAdapterRootRelativePath + "/manifest.json");
             ProjectMcpConfig = CreateFileStatus("Project MCP config", AICodedbProjectSettings.ProjectMcpConfigRelativePath);
             McpAvailability = CreateProductLayerStatus(
                 "MCP availability",
                 ProductStatus.McpAvailable,
-                AICodedbProjectSettings.McpAvailabilityStateRelativePath);
-            RuntimeBoundary = CreateRuntimeBoundaryStatus(context.RuntimeRelativePath);
+                CurrentInstanceStatus.IsCurrent
+                    ? RuntimeRootRelativePath + "/logs/mcp-availability.json"
+                    : AICodedbProjectSettings.McpAvailabilityStateRelativePath);
+            RuntimeBoundary = CreateRuntimeBoundaryStatus(RuntimeRootRelativePath);
             ToolProfile = CreateToolProfileStatus();
             OverallState = ResolveOverallState();
             OverallTitle = CreateOverallTitle(ProductStatus.State, context.ProjectDisplayName);
@@ -83,60 +101,154 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private AICodedbStatusSnapshot(string projectDisplayName)
+            : this(projectDisplayName, AICodedbProductState.Starting)
+        {
+        }
+
+        private AICodedbStatusSnapshot(
+            string projectDisplayName,
+            AICodedbProductState displayState)
         {
             _context = default(AICodedbEditorExecutionContext);
+            var productState = displayState;
+            var cachedReady = productState == AICodedbProductState.Ready;
+            var cachedMissingPrerequisite = productState == AICodedbProductState.MissingPrerequisite;
+            var prerequisiteState = cachedReady
+                ? AICodedbProductLayerState.Current
+                : cachedMissingPrerequisite
+                    ? AICodedbProductLayerState.Missing
+                    : AICodedbProductLayerState.Pending;
+            var layerState = cachedReady
+                ? AICodedbProductLayerState.Current
+                : cachedMissingPrerequisite
+                    ? AICodedbProductLayerState.Unknown
+                    : AICodedbProductLayerState.Pending;
+            var detail = cachedReady
+                ? "The last verified Ready result is retained while Play mode is active; live checks resume after Play."
+                : cachedMissingPrerequisite
+                    ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
+                : "Checking project integration in the background.";
+            var runtimeRelativePath = cachedReady
+                ? AICodedbProjectSettings.RuntimeRelativePath
+                : string.Empty;
+            var generationRelativePath = cachedReady
+                ? AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId
+                : string.Empty;
             ProjectIntegrationStatus = new AICodedbProjectIntegrationStatus(
                 AICodedbProjectIntegrationState.Installed,
                 AICodedbProjectCleanupState.None,
                 string.Empty,
-                "Checking project integration in the background.");
+                detail);
             ProductStatus = new AICodedbProductStatus(
-                AICodedbProductState.Starting,
-                AICodedbProductLayerState.Pending,
-                AICodedbProductLayerState.Pending,
-                AICodedbProductLayerState.Pending,
-                "CodeDB is checking the project integration in the background.");
+                productState,
+                prerequisiteState,
+                layerState,
+                layerState,
+                layerState,
+                detail);
+            CurrentInstanceStatus = cachedReady
+                ? new AICodedbCurrentInstanceStatus(
+                    true,
+                    true,
+                    "cached-ready",
+                    AICodedbProjectSettings.InstancesRelativePath + "/cached-ready",
+                    string.Empty,
+                    generationRelativePath,
+                    detail)
+                : default(AICodedbCurrentInstanceStatus);
+            CurrentInstance = cachedReady
+                ? AICodedbStatusItem.Inactive(
+                    "Current instance",
+                    "Last verified",
+                    "Live instance checks resume after Play mode.")
+                : Checking("Current instance");
+            Cleanup = cachedReady
+                ? AICodedbStatusItem.Inactive(
+                    "Background cleanup",
+                    "Not checked",
+                    "Live cleanup checks resume after Play mode.")
+                : Checking("Background cleanup");
+            RuntimeRootRelativePath = runtimeRelativePath;
+            IndexRootRelativePath = cachedReady ? runtimeRelativePath + "/index" : string.Empty;
+            TextAdapterRootRelativePath = cachedReady ? runtimeRelativePath + "/adapter/text-index" : string.Empty;
+            WatchRootRelativePath = cachedReady ? runtimeRelativePath + "/watch" : string.Empty;
             HostPayloadStatus = new AICodedbHostPayloadStatus(
-                AICodedbHostPayloadState.Unknown,
-                AICodedbStatusState.Warning,
-                "Checking",
-                "Host status is loading in the background.");
+                cachedReady ? AICodedbHostPayloadState.Current : AICodedbHostPayloadState.Unknown,
+                cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Warning,
+                cachedReady ? "Last verified" : "Checking",
+                detail);
             HostGenerationSelection = new AICodedbHostGenerationSelection(
-                AICodedbHostGenerationState.Unavailable,
-                string.Empty,
-                string.Empty,
-                string.Empty,
-                0,
-                0,
-                string.Empty,
-                "Host generation status is loading in the background.");
+                cachedReady ? AICodedbHostGenerationState.Current : AICodedbHostGenerationState.Unavailable,
+                cachedReady ? AICodedbProjectSettings.CurrentGenerationId : string.Empty,
+                cachedReady ? AICodedbProjectSettings.CurrentPackageVersion : string.Empty,
+                cachedReady ? AICodedbProjectSettings.CurrentPayloadVersion : string.Empty,
+                cachedReady ? AICodedbProjectSettings.CurrentPayloadSequence : 0,
+                cachedReady ? AICodedbProjectSettings.CurrentBootstrapProtocol : 0,
+                generationRelativePath,
+                detail);
             HostUpgradeStatus = new AICodedbHostUpgradeStatus(
-                AICodedbHostUpgradePhase.Unavailable,
-                AICodedbStatusState.Inactive,
-                string.Empty,
-                "Checking",
-                string.Empty);
-            HostUpdatePolicyValue = new AICodedbHostUpdatePolicy(true, true, true, "Checking");
+                cachedReady ? AICodedbHostUpgradePhase.Current : AICodedbHostUpgradePhase.Unavailable,
+                cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Inactive,
+                cachedReady ? AICodedbProjectSettings.CurrentGenerationId : string.Empty,
+                cachedReady ? "Last verified" : "Checking",
+                detail);
+            HostUpdatePolicyValue = new AICodedbHostUpdatePolicy(true, true, true, detail);
             HostPayload = HostPayloadStatus.ToStatusItem();
-            HostGeneration = Checking("Host generation");
-            HostLastKnownGood = Checking("Last known good");
-            HostUpgrade = Checking("Host upgrade");
-            HostUpdatePolicy = Checking("Automatic host updates");
-            ProviderExecutable = Checking("Provider executable");
-            ProviderConfig = Checking("Provider config");
-            RuntimeConfigTemplate = Checking("Runtime config template");
-            RuntimeDirectory = Checking("Runtime directory");
-            IndexDirectory = Checking("Index directory");
-            IndexManifest = Checking("Index manifest");
-            TextAdapterDirectory = Checking("Shader adapter directory");
-            TextAdapterManifest = Checking("Shader adapter manifest");
-            ProjectMcpConfig = Checking("Project MCP config");
-            McpAvailability = Checking("MCP availability");
-            RuntimeBoundary = Checking("Runtime boundary");
+            HostGeneration = cachedReady
+                ? AICodedbStatusItem.Inactive("Host generation", "Last verified", detail)
+                : Checking("Host generation");
+            HostLastKnownGood = cachedReady
+                ? AICodedbStatusItem.Inactive("Last known good", "Not checked", detail)
+                : Checking("Last known good");
+            HostUpgrade = cachedReady
+                ? AICodedbStatusItem.Inactive("Host upgrade", "Not checked", detail)
+                : Checking("Host upgrade");
+            HostUpdatePolicy = cachedReady
+                ? AICodedbStatusItem.Inactive("Automatic host updates", "Last verified", detail)
+                : Checking("Automatic host updates");
+            ProviderExecutable = cachedReady
+                ? AICodedbStatusItem.Inactive("Provider executable", "Last verified", detail)
+                : Checking("Provider executable");
+            ProviderConfig = cachedReady
+                ? AICodedbStatusItem.Inactive("Provider config", "Last verified", detail)
+                : Checking("Provider config");
+            RuntimeConfigTemplate = cachedReady
+                ? AICodedbStatusItem.Inactive("Runtime config template", "Not checked", detail)
+                : Checking("Runtime config template");
+            RuntimeDirectory = cachedReady
+                ? AICodedbStatusItem.Inactive("Runtime directory", "Last verified", detail)
+                : Checking("Runtime directory");
+            IndexDirectory = cachedReady
+                ? AICodedbStatusItem.Inactive("Index directory", "Not checked", detail)
+                : Checking("Index directory");
+            IndexManifest = cachedReady
+                ? AICodedbStatusItem.Inactive("Index manifest", "Not checked", detail)
+                : Checking("Index manifest");
+            TextAdapterDirectory = cachedReady
+                ? AICodedbStatusItem.Inactive("Shader adapter directory", "Not checked", detail)
+                : Checking("Shader adapter directory");
+            TextAdapterManifest = cachedReady
+                ? AICodedbStatusItem.Inactive("Shader adapter manifest", "Not checked", detail)
+                : Checking("Shader adapter manifest");
+            ProjectMcpConfig = cachedReady
+                ? AICodedbStatusItem.Inactive("Project MCP config", "Last verified", detail)
+                : Checking("Project MCP config");
+            McpAvailability = cachedReady
+                ? AICodedbStatusItem.Inactive("MCP availability", "Last verified", detail)
+                : Checking("MCP availability");
+            RuntimeBoundary = cachedReady
+                ? AICodedbStatusItem.Inactive("Runtime boundary", "Last verified", detail)
+                : Checking("Runtime boundary");
             ToolProfile = AICodedbStatusItem.Ok("Default profile", AICodedbProjectSettings.DefaultToolProfile, "Read-only discovery and source lookup.");
-            OverallState = AICodedbStatusState.Warning;
-            OverallTitle = CreateOverallTitle(AICodedbProductState.Starting, projectDisplayName);
-            OverallDescription = CreateOverallDescription(ProductStatus);
+            OverallState = cachedReady
+                ? AICodedbStatusState.Ok
+                : cachedMissingPrerequisite
+                    ? AICodedbStatusState.Error
+                    : AICodedbStatusState.Warning;
+            OverallTitle = CreateOverallTitle(productState, projectDisplayName);
+            OverallDescription = cachedReady
+                ? "CodeDB was Ready before Play mode. Live checks resume when Play ends."
+                : CreateOverallDescription(ProductStatus);
         }
 
         /// <summary>
@@ -157,6 +269,26 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusSnapshot CreateStarting(string projectDisplayName)
         {
             return new AICodedbStatusSnapshot(projectDisplayName);
+        }
+
+        /// <summary>
+        /// Creates a display-only Ready snapshot from the lifecycle's last
+        /// verified result. It performs no filesystem or process inspection.
+        /// </summary>
+        internal static AICodedbStatusSnapshot CreateCachedReady(string projectDisplayName)
+        {
+            return new AICodedbStatusSnapshot(projectDisplayName, AICodedbProductState.Ready);
+        }
+
+        /// <summary>
+        /// Creates a display-only Missing prerequisite snapshot captured before
+        /// Play mode. It performs no filesystem or process inspection.
+        /// </summary>
+        internal static AICodedbStatusSnapshot CreateCachedMissingPrerequisite(string projectDisplayName)
+        {
+            return new AICodedbStatusSnapshot(
+                projectDisplayName,
+                AICodedbProductState.MissingPrerequisite);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(
@@ -203,7 +335,12 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal AICodedbStatusState GetConfigState()
         {
-            return CombineStates(ProviderConfig.State, RuntimeConfigTemplate.State);
+            // The immutable instance owns the active runtime config. The
+            // package's legacy example template is diagnostic-only once an
+            // instance has been activated.
+            return CurrentInstanceStatus.IsCurrent
+                ? ProviderConfig.State
+                : CombineStates(ProviderConfig.State, RuntimeConfigTemplate.State);
         }
 
         /// <summary>
@@ -342,25 +479,33 @@ namespace Rice.AI.Codedb.Editor
         /// Creates the top-level status description.
         /// </summary>
         /// <param name="state">Overall status state.</param>
-        private static string CreateOverallDescription(AICodedbProductStatus status)
+        internal static string CreateOverallDescription(AICodedbProductStatus status)
         {
             switch (status.State)
             {
                 case AICodedbProductState.Ready:
-                    return "The project-local CodeDB backend passed initialize, tools/list, usable codedb_status, and a bounded text query.";
+                    return "CodeDB is ready for this project. New Codex tasks can use project status and search tools.";
                 case AICodedbProductState.Starting:
-                    return "CodeDB is checking or converging the project integration in the background.";
+                    return "CodeDB is preparing this project in the background. You can keep working in Unity.";
                 case AICodedbProductState.Uninstalled:
-                    return "CodeDB project integration is explicitly uninstalled; the Package remains installed.";
+                    return "CodeDB is not connected to this project. The Unity Package remains installed.";
                 case AICodedbProductState.MissingPrerequisite:
-                    return string.IsNullOrWhiteSpace(status.Detail)
-                        ? "Install the supported Node.js runtime and compatible machine Provider."
-                        : status.Detail;
+                    return CreateMissingPrerequisiteDescription(status);
                 default:
-                    return string.IsNullOrWhiteSpace(status.Detail)
-                        ? "CodeDB could not complete the project-local usable path."
-                        : status.Detail;
+                    return "CodeDB could not finish setup for this project. Use Reinstall CodeDB to try again.";
             }
+        }
+
+        private static string CreateMissingPrerequisiteDescription(AICodedbProductStatus status)
+        {
+            var reasonCode = status.Command.IsValid ? status.Command.ReasonCode : string.Empty;
+            if (reasonCode.IndexOf("NODE", StringComparison.Ordinal) >= 0
+                || status.Detail.IndexOf("Node.js", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "A supported Node.js version is required. Install Node.js, then return to CodeDB Manager.";
+            }
+
+            return "CodeDB dependencies are not configured. Use Configure Dependencies to continue.";
         }
 
         private static AICodedbStatusItem CreateProductLayerStatus(
@@ -417,7 +562,8 @@ namespace Rice.AI.Codedb.Editor
 
             var selection = AICodedbHostGenerationStore.ResolvePointer(
                 _context.ProjectRoot,
-                absolutePath);
+                absolutePath,
+                _context.PackageRoot);
             if (!hostPayloadMarkerExists)
             {
                 return AICodedbStatusItem.Inactive(
@@ -431,6 +577,46 @@ namespace Rice.AI.Codedb.Editor
             if (selection.State == AICodedbHostGenerationState.DowngradeReviewRequired)
                 return AICodedbStatusItem.Warning(label, "Newer " + selection.GenerationId, selection.Detail);
             return AICodedbStatusItem.Ok(label, "Retained " + selection.GenerationId, detail);
+        }
+
+        private static AICodedbStatusItem CreateCurrentInstanceStatus(AICodedbCurrentInstanceStatus status)
+        {
+            if (status.IsCurrent)
+            {
+                return AICodedbStatusItem.Ok(
+                    "Current instance",
+                    AICodedbProjectSettings.CurrentGenerationId,
+                    status.InstanceRelativePath);
+            }
+            if (status.Present)
+                return AICodedbStatusItem.Error("Current instance", "Invalid", status.Detail);
+            return AICodedbStatusItem.Warning("Current instance", "Not selected", status.Detail);
+        }
+
+        private static AICodedbStatusItem CreateCleanupStatus(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbProductState productState)
+        {
+            switch (integrationStatus.CleanupState)
+            {
+                case AICodedbProjectCleanupState.Pending:
+                    return AICodedbStatusItem.Inactive(
+                        "Background cleanup",
+                        "In progress",
+                        productState == AICodedbProductState.Ready
+                            ? "CodeDB is ready. Retired Package-owned instances will be removed after their active leases drain."
+                            : "Retired Package-owned instances will be removed after their active leases drain.");
+                case AICodedbProjectCleanupState.Invalid:
+                    return AICodedbStatusItem.Error(
+                        "Background cleanup",
+                        "Check failed",
+                        integrationStatus.Detail);
+                default:
+                    return AICodedbStatusItem.Inactive(
+                        "Background cleanup",
+                        "Complete",
+                        "No retired Package-owned instance cleanup is pending.");
+            }
         }
 
         private static AICodedbStatusItem CreateHostGenerationStatus(AICodedbHostGenerationSelection selection)
@@ -473,9 +659,8 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbStatusItem.Inactive("Automatic host updates", "Off", policy.Detail);
         }
 
-        private AICodedbStatusItem CreateProviderConfigStatus()
+        private AICodedbStatusItem CreateProviderConfigStatus(string relativePath)
         {
-            var relativePath = _context.ProviderConfigRelativePath;
             var path = _context.GetProjectPath(relativePath);
             if (!File.Exists(path))
                 return BuildProviderConfigStatus(false, string.Empty, relativePath);

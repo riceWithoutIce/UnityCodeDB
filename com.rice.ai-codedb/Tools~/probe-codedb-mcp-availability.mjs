@@ -102,8 +102,8 @@ function assertOwnedWrapper(projectRoot, relativePath, candidateMode) {
   if (path.isAbsolute(normalized) || normalized.includes("\0") || normalized.includes("..")) {
     throw new Error("CodeDB probe wrapper path must be a project-relative path without traversal.");
   }
-  if (candidateMode && normalized !== "AIWork/.runtime/codedb/host/generations/poc.32/wrapper/codedb-project-instance-worker.mjs") {
-    throw new Error("Candidate probe only permits the Package-owned poc.32 instance worker.");
+  if (candidateMode && normalized !== "AIWork/.runtime/codedb/host/generations/poc.33/wrapper/codedb-project-instance-worker.mjs") {
+    throw new Error("Candidate probe only permits the Package-owned poc.33 instance worker.");
   }
   const expectedPath = path.resolve(projectRoot, normalized.replace(/\//g, path.sep));
   const actualPath = fs.realpathSync(expectedPath);

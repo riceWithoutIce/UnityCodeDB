@@ -12,11 +12,11 @@ namespace Rice.AI.Codedb.Editor
         internal const string MenuRoot = "Tools/Rice AI/Codedb/";
         internal const string DefaultToolProfile = "Discover Read";
         internal const string CurrentPackageVersion = "0.2.5-preview.5";
-        internal const string CurrentPayloadVersion = "poc.32";
-        internal const string CurrentGenerationId = "poc.32";
-        internal const int CurrentPayloadSequence = 32;
+        internal const string CurrentPayloadVersion = "poc.33";
+        internal const string CurrentGenerationId = "poc.33";
+        internal const int CurrentPayloadSequence = 33;
         internal const int CurrentBootstrapProtocol = 1;
-        internal const string MachineProviderVersion = "0.5.0";
+        internal const string MachineProviderVersion = "0.5.0-28e3912";
         internal const string LegacyPackageVersion = "0.2.2";
         internal const string LegacyPayloadVersion = "poc.21";
         internal const int LegacyPayloadSequence = 21;
@@ -44,6 +44,8 @@ namespace Rice.AI.Codedb.Editor
         internal static string InstanceCurrentRelativePath => InstanceControlRelativePath + "/current-instance.json";
         internal static string InstancesRelativePath => "AIWork/.runtime/codedb/instances";
         internal static string HostPayloadMaterializerScriptPackageRelativePath => "Tools~/materialize-codedb-host-payload.ps1";
+        internal static string ProviderInstallerScriptPackageRelativePath => "Tools~/install-codedb-provider.ps1";
+        internal static string ProviderDistributionManifestPackageRelativePath => "Tools~/codedb-provider-distribution.json";
         internal static string ProviderConfigRelativePath => RuntimeRelativePath + "/config/codedb-mcp.toml";
         internal static string WatchConfigRelativePath => RuntimeRelativePath + "/config/codedb-mcp.watch.toml";
         internal static string WatchRuntimeRelativePath => RuntimeRelativePath + "/watch";

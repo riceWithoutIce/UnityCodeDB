@@ -55,6 +55,39 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbEditorLifecycle.ShouldRunAutomaticUninstallCleanup(status), Is.False);
         }
 
+        [Test]
+        public void EditorLeaseHeartbeatContinuesDuringReconcileAndPlaySuspension()
+        {
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRefreshEditorLease(true, true, false),
+                Is.True,
+                "A long-running reconcile must not make the interactive Editor lease stale.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRefreshEditorLease(true, false, false),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRefreshEditorLease(false, true, false),
+                Is.False,
+                "Missing prerequisites must continue to suppress lease publication.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRefreshEditorLease(true, true, true),
+                Is.False,
+                "A quitting Editor must not publish a new heartbeat.");
+        }
+
+        [Test]
+        public void LifecycleInitialization_DoesNotRequirePreselectedLeasePath()
+        {
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldInitializeLifecycle(false),
+                Is.True,
+                "The instance lease path is selected by the background reconcile after initialization.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldInitializeLifecycle(true),
+                Is.False,
+                "A quitting editor must not start new lifecycle work.");
+        }
+
         [TestCase("NODE_MISSING")]
         [TestCase("PROVIDER_MISSING")]
         [TestCase("PROVIDER_INVALID")]
@@ -121,7 +154,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Path.GetTempPath(),
                 "Rice-AICodedb-Prerequisite-Lifecycle-Tests",
                 Guid.NewGuid().ToString("N"));
-            var providerRoot = Path.Combine(machineRoot, "Rice", "CodeDB", "providers", "0.5.0");
+            var providerRoot = Path.Combine(machineRoot, "Rice", "CodeDB", "providers", "0.5.0-28e3912");
             var providerManifestPath = Path.Combine(providerRoot, "provider-manifest.json");
             var providerExecutablePath = Path.Combine(providerRoot, "codebase-mcp.exe");
             var windowsRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -1271,6 +1304,163 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Is.True);
         }
 
+        [TestCase(AICodedbProductState.Ready, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Starting, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, ExpectedResult = true)]
+        public bool ShouldReconcileAfterPlayModeResume_OnlyRetriesNonTerminalStates(
+            AICodedbProductState previousProductState)
+        {
+            return AICodedbEditorLifecycle.ShouldReconcileAfterPlayModeResume(previousProductState);
+        }
+
+        [TestCase(AICodedbProductState.Ready, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Starting, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, ExpectedResult = false)]
+        public bool ReadyPlayResume_RequestsAnInPlaceAvailabilityPass(
+            AICodedbProductState previousProductState)
+        {
+            return AICodedbEditorLifecycle.ShouldForceAvailabilityReconcileAfterPlayModeResume(
+                previousProductState);
+        }
+
+        [TestCase(AICodedbProductState.Ready, true, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Ready, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Starting, true, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Starting, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, true, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, true, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, true, ExpectedResult = false)]
+        public bool PersistedReadyDuringPlay_RequiresCurrentPackageFingerprint(
+            AICodedbProductState lastProductState,
+            bool packageFingerprintMatches)
+        {
+            return AICodedbEditorLifecycle.ShouldUsePersistedReadyStateDuringPlay(
+                lastProductState,
+                packageFingerprintMatches);
+        }
+
+        [TestCase(false, false, ExpectedResult = false)]
+        [TestCase(true, false, ExpectedResult = true)]
+        [TestCase(false, true, ExpectedResult = true)]
+        [TestCase(true, true, ExpectedResult = true)]
+        public bool PlayModeMaintenanceSuspension_UsesEitherUnitySignal(
+            bool editorPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return AICodedbEditorLifecycle.IsPlayModeMaintenanceSuspended(
+                editorPlayingOrWillChangePlaymode,
+                applicationPlaying);
+        }
+
+        [Test]
+        public void ReadyCurrentInstance_WithPendingCleanup_DoesNotRunFullConvergence()
+        {
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true,
+                    true,
+                    AICodedbProductState.Ready,
+                    AICodedbProjectCleanupState.Pending),
+                Is.False,
+                "Retired cleanup must not redeploy an otherwise Ready current instance.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true,
+                    true,
+                    AICodedbProductState.Ready,
+                    AICodedbProjectCleanupState.Complete),
+                Is.False);
+        }
+
+        [Test]
+        public void MissingOrUnavailableCurrentInstance_StillRunsFullConvergence()
+        {
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    false,
+                    false,
+                    AICodedbProductState.Starting,
+                    AICodedbProjectCleanupState.Pending),
+                Is.True,
+                "A missing current instance must still converge.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true,
+                    true,
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProjectCleanupState.Pending),
+                Is.True,
+                "A non-Ready current instance must still converge.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true,
+                    false,
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProjectCleanupState.Pending),
+                Is.False,
+                "An invalid selected instance remains fail-closed instead of being replaced automatically.");
+        }
+
+        [Test]
+        public void CurrentInstanceAvailabilityLoss_RecoversInPlaceInsteadOfDeployingReplacement()
+        {
+            var unavailable = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Installed,
+                    AICodedbProjectCleanupState.Complete,
+                    string.Empty,
+                    "installed"),
+                new AICodedbCommandResult(
+                    1,
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n"
+                    + "[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                    + "[PRODUCT_LAYER CONFIGURED] CURRENT\n"
+                    + "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE\n"
+                    + "[PRODUCT_STATE] NEEDS_ATTENTION\n",
+                    "Selected instance coordinator is not operational.",
+                    false));
+
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    true,
+                    true,
+                    unavailable),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability));
+
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    false,
+                    false,
+                    unavailable),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Deploy));
+        }
+
+        [Test]
+        public void CurrentInstanceMcpEvidenceBlocked_DoesNotTriggerReplacementDeployment()
+        {
+            var blocked = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Installed,
+                    AICodedbProjectCleanupState.Complete,
+                    string.Empty,
+                    "installed"),
+                new AICodedbCommandResult(
+                    4,
+                    "[PRODUCT_LAYER PREREQUISITE] CURRENT\n"
+                    + "[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                    + "[PRODUCT_LAYER CONFIGURED] CURRENT\n"
+                    + "[PRODUCT_LAYER MCP_AVAILABLE] BLOCKED\n"
+                    + "[PRODUCT_STATE] NEEDS_ATTENTION\n",
+                    "MCP evidence is invalid.",
+                    false));
+
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(true, true, blocked),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
+        }
+
         [Test]
         public void CanEnsureHostGeneration_KeepsLegacyRuntimeIndependentFromUpgradePolicy()
         {
@@ -1729,8 +1919,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             var manifest = "{"
                            + "\"schema_version\":1,"
                            + "\"provider_id\":\"killop/codedb-mcp\","
-                           + "\"version\":\"0.5.0\","
-                           + "\"commit\":\"13de004783d21de631c4c85bf4803a4866de55e4\","
+                           + "\"version\":\"0.5.0-28e3912\","
+                           + "\"commit\":\"28e3912d5cd67ff3499734984f3e3d626a204796\","
                            + "\"executable\":\"codebase-mcp.exe\","
                            + "\"sha256\":\"" + sha256 + "\","
                            + "\"protocol\":\"codedb-cli-v1\","

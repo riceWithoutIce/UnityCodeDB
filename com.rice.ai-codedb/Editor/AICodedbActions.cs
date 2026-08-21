@@ -10,14 +10,16 @@ namespace Rice.AI.Codedb.Editor
     {
         private const int RefreshIndexTimeoutMilliseconds = 600000;
         private const int BuildTextAdapterTimeoutMilliseconds = 300000;
+        private const int ProviderInstallTimeoutMilliseconds = 180000;
 
         /// <summary>
         /// Opens the ignored project-local codedb runtime folder.
         /// </summary>
         internal static void OpenRuntimeFolder()
         {
-            Directory.CreateDirectory(AICodedbPaths.RuntimePath);
-            EditorUtility.RevealInFinder(AICodedbPaths.RuntimePath);
+            var runtimePath = ResolveRuntimeFolderPath(AICodedbPaths.ProjectRoot);
+            Directory.CreateDirectory(runtimePath);
+            EditorUtility.RevealInFinder(runtimePath);
         }
 
         /// <summary>
@@ -30,7 +32,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 EditorUtility.DisplayDialog(
                     "CodeDB Provider",
-                    "The reviewed machine Provider folder is not present. Install the supported Provider under %LOCALAPPDATA%\\Rice\\CodeDB\\providers\\0.5.0, then let Unity recheck automatically.",
+                    "The machine Provider is not present. Use Configure Dependencies to install the fixed 0.5.0-28e3912 Provider, then let Unity recheck automatically.",
                     "OK");
                 return;
             }
@@ -42,12 +44,24 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static void OpenConfigFolder()
         {
-            var configFolder = Path.GetDirectoryName(AICodedbPaths.ProviderConfigPath);
+            var configFolder = Path.Combine(
+                ResolveRuntimeFolderPath(AICodedbPaths.ProjectRoot),
+                "config");
             if (string.IsNullOrWhiteSpace(configFolder))
                 configFolder = AICodedbPaths.RuntimePath;
 
             Directory.CreateDirectory(configFolder);
             EditorUtility.RevealInFinder(configFolder);
+        }
+
+        internal static string ResolveRuntimeFolderPath(string projectRoot)
+        {
+            var currentInstance = AICodedbCurrentInstanceStore.Read(projectRoot);
+            return currentInstance.IsCurrent
+                ? currentInstance.InstanceRoot
+                : AICodedbPaths.NormalizePath(Path.Combine(
+                    projectRoot,
+                    AICodedbProjectSettings.RuntimeRelativePath));
         }
 
         /// <summary>
@@ -216,6 +230,86 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Configures the fixed machine Provider without touching the Unity project.
+        /// </summary>
+        internal static AICodedbCommandResult RunInstallProvider()
+        {
+            var result = RunProviderInstaller(AICodedbPaths.CaptureExecutionContext(), true);
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunInstallProviderAsync()
+        {
+            return await RunInstallProviderAsync(null);
+        }
+
+        internal static async Task<AICodedbCommandResult> RunInstallProviderAsync(Action<string> outputLine)
+        {
+            var context = AICodedbPaths.CaptureExecutionContext();
+            var result = await RunProviderInstallerAsync(context, outputLine);
+            AICodedbEditorLifecycle.RequestReconcile();
+            return result;
+        }
+
+        private static AICodedbCommandResult RunProviderInstaller(
+            AICodedbEditorExecutionContext context,
+            bool showProgress)
+        {
+            if (context.Platform != RuntimePlatform.WindowsEditor)
+            {
+                return new AICodedbCommandResult(
+                    4,
+                    string.Empty,
+                    "The fixed machine Provider installer is supported only in the Windows Editor.",
+                    false);
+            }
+
+            if (showProgress)
+                EditorUtility.DisplayProgressBar(AICodedbProjectSettings.DisplayName, "Configuring CodeDB dependencies", 0.5f);
+            try
+            {
+                return AICodedbProcessRunner.RunResolvedPackageProviderInstallerPowerShellScript(
+                    context,
+                    ProviderInstallTimeoutMilliseconds,
+                    "-PackageVersion",
+                    AICodedbProjectSettings.CurrentPackageVersion);
+            }
+            finally
+            {
+                if (showProgress)
+                    EditorUtility.ClearProgressBar();
+            }
+        }
+
+        private static Task<AICodedbCommandResult> RunProviderInstallerAsync(
+            AICodedbEditorExecutionContext context)
+        {
+            return RunProviderInstallerAsync(context, null);
+        }
+
+        private static Task<AICodedbCommandResult> RunProviderInstallerAsync(
+            AICodedbEditorExecutionContext context,
+            Action<string> outputLine)
+        {
+            if (context.Platform != RuntimePlatform.WindowsEditor)
+            {
+                return Task.FromResult(new AICodedbCommandResult(
+                    4,
+                    string.Empty,
+                    "The fixed machine Provider installer is supported only in the Windows Editor.",
+                    false));
+            }
+
+            return AICodedbProcessRunner.RunResolvedPackageProviderInstallerPowerShellScriptAsync(
+                context,
+                ProviderInstallTimeoutMilliseconds,
+                outputLine,
+                "-PackageVersion",
+                AICodedbProjectSettings.CurrentPackageVersion);
+        }
+
+        /// <summary>
         /// Runs the project-local codedb index refresh script and returns the captured result.
         /// </summary>
         internal static AICodedbCommandResult RunRefreshIndex()
@@ -292,7 +386,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunEnableWatcher()
         {
-            return RunScript("Codedb Enable Watcher", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Enable"));
+            return RunWatcherAction("Codedb Enable Watcher", "Enable", RefreshIndexTimeoutMilliseconds);
         }
 
         /// <summary>
@@ -300,7 +394,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunDisableWatcher()
         {
-            return RunScript("Codedb Disable Watcher", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Disable"));
+            return RunWatcherAction("Codedb Disable Watcher", "Disable", 0);
         }
 
         /// <summary>
@@ -308,7 +402,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunStartWatcher()
         {
-            return RunScript("Codedb Start Now", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Start"));
+            return RunWatcherAction("Codedb Start Now", "Start", RefreshIndexTimeoutMilliseconds);
         }
 
         /// <summary>
@@ -333,7 +427,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunWatcherStatus()
         {
-            return RunScript("Codedb Watcher Status", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Status"));
+            return RunWatcherAction("Codedb Watcher Status", "Status", 0);
         }
 
         internal static Task<AICodedbCommandResult> RunWatcherStatusAsync()
@@ -347,7 +441,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunStopWatcher()
         {
-            return RunScript("Codedb Stop Now", AICodedbPaths.WatchManageScriptPath, 0, BuildWatcherScriptArguments("Stop"));
+            return RunWatcherAction("Codedb Stop Now", "Stop", 0);
         }
 
         /// <summary>
@@ -355,7 +449,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunRestartWatcher()
         {
-            return RunScript("Codedb Restart", AICodedbPaths.WatchManageScriptPath, RefreshIndexTimeoutMilliseconds, BuildWatcherScriptArguments("Restart"));
+            return RunWatcherAction("Codedb Restart", "Restart", RefreshIndexTimeoutMilliseconds);
         }
 
         internal static string[] BuildWatcherScriptArguments(string action)
@@ -380,7 +474,7 @@ namespace Rice.AI.Codedb.Editor
             string action,
             int timeoutMilliseconds)
         {
-            var selection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot);
+            var selection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot, context.PackageRoot);
             var scriptPath = selection.IsUsable
                 ? AICodedbPaths.NormalizePath(Path.Combine(
                     selection.RootPath,
@@ -389,11 +483,73 @@ namespace Rice.AI.Codedb.Editor
             var readinessFailure = GetHostCommandReadinessFailure(selection, scriptPath);
             if (readinessFailure != null)
                 return readinessFailure;
+
+            // Generation scripts resolve their provider/watch state from the
+            // selected immutable instance. Without this environment binding
+            // an Editor restart silently falls back to the retired flat path.
+            var instanceRoot = string.Empty;
+            if (selection.State == AICodedbHostGenerationState.Current)
+            {
+                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+                if (!currentInstance.IsCurrent)
+                {
+                    return new AICodedbCommandResult(
+                        4,
+                        string.Empty,
+                        "The selected CodeDB instance is not ready for watcher operations: "
+                        + currentInstance.Detail,
+                        false);
+                }
+                instanceRoot = currentInstance.InstanceRoot;
+            }
+
             return AICodedbProcessRunner.RunPowerShellScript(
                 context,
                 scriptPath,
                 timeoutMilliseconds,
+                instanceRoot,
                 BuildWatcherScriptArguments(action));
+        }
+
+        private static AICodedbCommandResult RunWatcherAction(
+            string title,
+            string action,
+            int timeoutMilliseconds)
+        {
+            var context = AICodedbPaths.CaptureExecutionContext();
+            if (WatcherActionRequiresEditorLease(action))
+            {
+                string leaseDetail;
+                if (!AICodedbEditorLifecycle.TryPrepareCurrentEditorLease(context, out leaseDetail))
+                {
+                    return new AICodedbCommandResult(
+                        4,
+                        string.Empty,
+                        leaseDetail,
+                        false);
+                }
+            }
+
+            EditorUtility.DisplayProgressBar(
+                AICodedbProjectSettings.DisplayName,
+                $"Running {title}",
+                0.5f);
+            try
+            {
+                return RunWatcherScript(context, action, timeoutMilliseconds);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+        }
+
+        internal static bool WatcherActionRequiresEditorLease(string action)
+        {
+            return string.Equals(action, "Enable", StringComparison.Ordinal)
+                   || string.Equals(action, "Start", StringComparison.Ordinal)
+                   || string.Equals(action, "Stop", StringComparison.Ordinal)
+                   || string.Equals(action, "Restart", StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -529,8 +685,9 @@ namespace Rice.AI.Codedb.Editor
         /// <param name="scriptArguments">Optional arguments passed to the script.</param>
         private static AICodedbCommandResult RunScript(string title, string scriptPath, int timeoutMilliseconds, params string[] scriptArguments)
         {
+            var context = AICodedbPaths.CaptureExecutionContext();
             var readinessFailure = GetHostCommandReadinessFailure(
-                AICodedbPaths.HostGeneration,
+                AICodedbHostGenerationStore.Resolve(context.ProjectRoot, context.PackageRoot),
                 scriptPath);
             if (readinessFailure != null)
                 return readinessFailure;

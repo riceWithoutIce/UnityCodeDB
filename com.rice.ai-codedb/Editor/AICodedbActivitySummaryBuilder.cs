@@ -20,6 +20,9 @@ namespace Rice.AI.Codedb.Editor
                     Array.Empty<string>());
             }
 
+            if (IsUserFacingProjectAction(actionTitle))
+                return BuildUserFacingProjectSummary(actionTitle, result);
+
             if (IsHostUpgradeActivity(actionTitle, result.StandardOutput))
                 return BuildHostUpgradeSummary(actionTitle, result);
 
@@ -46,6 +49,102 @@ namespace Rice.AI.Codedb.Editor
                 result.GetElapsedText(),
                 itemsTitle,
                 items);
+        }
+
+        private static bool IsUserFacingProjectAction(string actionTitle)
+        {
+            return string.Equals(actionTitle, "Install CodeDB", StringComparison.Ordinal)
+                   || string.Equals(actionTitle, "Reinstall CodeDB", StringComparison.Ordinal)
+                   || string.Equals(actionTitle, "Uninstall CodeDB", StringComparison.Ordinal)
+                   || string.Equals(actionTitle, "Configure CodeDB Dependencies", StringComparison.Ordinal);
+        }
+
+        private static AICodedbActivitySummary BuildUserFacingProjectSummary(
+            string actionTitle,
+            AICodedbCommandResult result)
+        {
+            if (!result.Succeeded || result.TimedOut)
+            {
+                return new AICodedbActivitySummary(
+                    AICodedbStatusState.Error,
+                    result.TimedOut ? "Timed out" : "Needs attention",
+                    actionTitle,
+                    "The action did not complete. Expand Output details for diagnostic information.",
+                    result.GetElapsedText(),
+                    "Items",
+                    Array.Empty<string>());
+            }
+
+            string statusLabel;
+            string detail;
+            if (string.Equals(actionTitle, "Uninstall CodeDB", StringComparison.Ordinal))
+            {
+                statusLabel = "Uninstalled";
+                detail = "CodeDB is no longer connected to this project.";
+            }
+            else if (ContainsProductState(result.StandardOutput, "READY"))
+            {
+                statusLabel = "Ready";
+                detail = "CodeDB is ready for this project.";
+            }
+            else if (ContainsProductState(result.StandardOutput, "MISSING_PREREQUISITE"))
+            {
+                return new AICodedbActivitySummary(
+                    AICodedbStatusState.Warning,
+                    "Needs prerequisite",
+                    actionTitle,
+                    "A required dependency is still missing. Use Configure Dependencies to continue.",
+                    result.GetElapsedText(),
+                    "Items",
+                    Array.Empty<string>());
+            }
+            else if (ContainsProductState(result.StandardOutput, "NEEDS_ATTENTION"))
+            {
+                return new AICodedbActivitySummary(
+                    AICodedbStatusState.Warning,
+                    "Needs attention",
+                    actionTitle,
+                    "CodeDB needs attention. Use Reinstall CodeDB to try again.",
+                    result.GetElapsedText(),
+                    "Items",
+                    Array.Empty<string>());
+            }
+            else if (string.Equals(actionTitle, "Configure CodeDB Dependencies", StringComparison.Ordinal))
+            {
+                statusLabel = "Completed";
+                detail = "Dependency configuration completed. CodeDB Manager is rechecking project readiness.";
+            }
+            else
+            {
+                statusLabel = "Completed";
+                detail = "The action completed. CodeDB Manager is rechecking project readiness.";
+            }
+
+            return new AICodedbActivitySummary(
+                AICodedbStatusState.Ok,
+                statusLabel,
+                actionTitle,
+                detail,
+                result.GetElapsedText(),
+                "Items",
+                Array.Empty<string>());
+        }
+
+        private static bool ContainsProductState(string output, string state)
+        {
+            if (string.IsNullOrWhiteSpace(output))
+                return false;
+            foreach (var line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.Equals(
+                        line.Trim(),
+                        "[PRODUCT_STATE] " + state,
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static bool IsHostUpgradeActivity(string actionTitle, string output)

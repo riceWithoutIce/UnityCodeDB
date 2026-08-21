@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "managed_by": "com.rice.ai-codedb",
+  "distribution_state": "DEVELOPMENT_UPSTREAM",
+  "provider_id": "killop/codedb-mcp",
+  "version": "0.5.0-28e3912",
+  "commit": "28e3912d5cd67ff3499734984f3e3d626a204796",
+  "protocol": "codedb-cli-v1",
+  "source": "https://github.com/killop/codedb-mcp",
+  "supported_package_min_inclusive": "0.2.5-preview.5",
+  "supported_package_max_exclusive": "0.2.6",
+  "release_base_url": "https://raw.githubusercontent.com/killop/codedb-mcp/28e3912d5cd67ff3499734984f3e3d626a204796/skills/codedb-mcp/assets",
+  "archive_name": "codebase-mcp.exe",
+  "archive_sha256": "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7",
+  "signature_name": "",
+  "signature_encoding": "",
+  "signature_sha256": "",
+  "signature_algorithm": "",
+  "signature_public_key_xml": "",
+  "executable_sha256": "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7",
+  "license_status": "PENDING"
+}

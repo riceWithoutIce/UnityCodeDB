@@ -47,9 +47,11 @@
   terminal `COMPLETE` state, and cannot delete a successfully installed Host.
   Repeated Uninstall, automatic cleanup, crash/retry, and Install are covered as
   idempotent and deterministic concurrent transitions.
-- Advanced the unpublished candidate to immutable generation `poc.32` while
-  retaining published `poc.30` and earlier closures for lease drain, rollback,
-  and reviewed upgrade coverage.
+- Advanced the unpublished candidate to immutable generation `poc.33` with the
+  reviewed Provider distribution `0.5.0-28e3912` at upstream commit
+  `28e3912d5cd67ff3499734984f3e3d626a204796`. Preserved `poc.31`/`poc.32` and
+  earlier closures remain byte-immutable for lease drain, rollback, and
+  reviewed upgrade coverage.
   The Package-owned probe does not replace the still-required new Codex Desktop
   task and standalone third-party Package-only acceptance.
 

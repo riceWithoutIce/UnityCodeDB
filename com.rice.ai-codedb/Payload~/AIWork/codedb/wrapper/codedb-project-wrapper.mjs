@@ -7,7 +7,7 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 
 const MANAGED_BY = "com.rice.ai-codedb";
-const EXPECTED_GENERATION = "poc.32";
+const EXPECTED_GENERATION = "poc.33";
 const EXPECTED_WORKER_RELATIVE_PATH = "wrapper/codedb-project-instance-worker.mjs";
 const MAX_CONTROL_BYTES = 64 * 1024;
 const MAX_INSTANCE_BYTES = 128 * 1024;

@@ -50,10 +50,10 @@ requires MCP initialize, the bounded tool list, usable `codedb_status`, and a
 bounded `codedb_text_search`.
 This Package-owned probe supports but does not replace the real new Codex
 Desktop task acceptance. The preserved preview.5 snapshot advances the
-Package-owned immutable Host to `poc.32` and retains its historical Provider
-identity. The next frozen baseline is the byte-exact `28e3912` artifact and
-the versioned machine identity `0.5.0-28e3912`; it is not substituted into
-`poc.32` in place. See the Provider contract for the migration boundary.
+Package-owned immutable Host to `poc.33` and activates the byte-exact `28e3912`
+artifact under the versioned machine identity `0.5.0-28e3912`. The preserved
+`poc.31`/`poc.32` generations retain their historical Provider identity and are
+not rewritten in place. See the Provider contract for the identity boundary.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -69,8 +69,8 @@ marked passed; they remain in the
 - Node.js `22.x` or `24.x`
 - External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0`; the selected
   baseline is commit `28e3912d5cd67ff3499734984f3e3d626a204796`, distributed
-  under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912` after the
-  dedicated migration. The older `poc.31`/`poc.32` machine identity is not
+  under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912` for active
+  generation `poc.33`. The older `poc.31`/`poc.32` machine identity is not
   rewritten or mixed with this directory.
 
 The package does not bundle or redistribute the external provider.
