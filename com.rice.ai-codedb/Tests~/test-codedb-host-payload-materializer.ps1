@@ -7349,7 +7349,7 @@ try {
         -Arguments "`"$materializedWrapper`" --root `"$wrongUnityRoot`"" `
         -WorkingDirectory $hostRoot
     Assert-True -Condition ($wrongRootAssertion.ExitCode -ne 0) -Message "Wrapper accepted another valid Unity project as its root assertion."
-    Assert-True -Condition ($wrongRootAssertion.Text -like "*--root must match wrapper-owned Unity root*") -Message "Wrong Unity root did not report the wrapper ownership mismatch."
+    Assert-True -Condition ($wrongRootAssertion.Text -like "*--root must match the wrapper-owned Unity project*") -Message "Wrong Unity root did not report the wrapper ownership mismatch."
     Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $wrongUnityRoot "AIWork"))) -Message "Wrong Unity root created AIWork before ownership validation."
     Write-Host "[OK] Wrapper root authority rejected outer and wrong-project roots without runtime writes."
 
@@ -7593,79 +7593,105 @@ try {
     }
     Assert-True -Condition (Wait-ForGenerationLease -Owner "mcp" -ProcessId $wrapperProcessId -Present $false) -Message "Normally closed MCP wrapper left a generation lease."
 
-    $handoffGenerationId = "$generationId-handoff"
-    $installedGenerationRoot = Split-Path -Parent $installedGenerationManifest
-    $installedGenerationsRoot = Split-Path -Parent $installedGenerationRoot
-    $hostRuntimeRoot = Split-Path -Parent $installedGenerationsRoot
-    $hostLeaseRoot = Join-Path $hostRuntimeRoot "leases"
-    $handoffGenerationRoot = Join-Path $installedGenerationsRoot $handoffGenerationId
-    $handoffPointerPath = Join-Path $runRoot "handoff-current.json"
-    $handoffHookPath = Join-Path $runRoot "fixture-wrapper-generation-handoff.cjs"
-    $handoffLeaseLogPath = Join-Path $runRoot "fixture-wrapper-generation-handoff.log"
-    $originalCurrentPointerText = Get-Content -LiteralPath $currentPointerPath -Raw
+    # Immutable-instance handoff is session-scoped: an already-running wrapper
+    # keeps its instance manifest, while a newly started wrapper resolves the
+    # atomically selected current-instance.json.
+    $instanceSelectionPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $originalInstanceSelectionBytes = [System.IO.File]::ReadAllBytes($instanceSelectionPath)
+    $handoffInstanceId = [guid]::NewGuid().ToString("N")
+    $handoffInstanceRelativePath = "AIWork/.runtime/codedb/instances/$handoffInstanceId"
+    $handoffInstanceRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $handoffInstanceRelativePath
+    $oldInstanceManifestHash = Get-FileHash -LiteralPath (Join-Path $wrapperInstance.Root "instance.json") -Algorithm SHA256
+    $handoffWrapperProcess = $null
+    $handoffWrapperStarted = $false
     try {
-        Copy-Item -LiteralPath $installedGenerationRoot -Destination $handoffGenerationRoot -Recurse
-        $handoffManifestPath = Join-Path $handoffGenerationRoot "generation-manifest.json"
+        Copy-Item -LiteralPath $wrapperInstance.Root -Destination $handoffInstanceRoot -Recurse
+        foreach ($volatileRelativePath in @("leases", "watch/lifecycle/editor-leases")) {
+            $volatilePath = Join-Path $handoffInstanceRoot ($volatileRelativePath.Replace('/', '\'))
+            if (Test-Path -LiteralPath $volatilePath) {
+                Remove-Item -LiteralPath $volatilePath -Recurse -Force
+            }
+        }
+
+        $handoffManifestPath = Join-Path $handoffInstanceRoot "instance.json"
         $handoffManifest = Get-Content -LiteralPath $handoffManifestPath -Raw | ConvertFrom-Json
-        $handoffManifest.generation_id = $handoffGenerationId
-        $handoffManifest.payload_version = $handoffGenerationId
-        $handoffManifest.payload_sequence = 28
-        Write-Utf8File -Path $handoffManifestPath -Content (($handoffManifest | ConvertTo-Json -Depth 8) + "`n")
+        $handoffManifest.instance_id = $handoffInstanceId
+        $handoffManifest.instance_relative_path = $handoffInstanceRelativePath
+        Write-Utf8File -Path $handoffManifestPath -Content (($handoffManifest | ConvertTo-Json -Depth 16) + "`n")
+        $handoffManifestHash = (Get-FileHash -LiteralPath $handoffManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-        $handoffPointer = $originalCurrentPointerText | ConvertFrom-Json
-        $handoffPointer.generation_id = $handoffGenerationId
-        $handoffPointer.payload_version = $handoffGenerationId
-        $handoffPointer.payload_sequence = 28
-        $handoffPointer.generation_relative_path = "AIWork/.runtime/codedb/host/generations/$handoffGenerationId"
-        $handoffPointer.generation_manifest_sha256 = (Get-FileHash -LiteralPath $handoffManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        Write-Utf8File -Path $handoffPointerPath -Content (($handoffPointer | ConvertTo-Json -Depth 8) + "`n")
+        $handoffSelection = ([System.Text.UTF8Encoding]::new($false, $true).GetString($originalInstanceSelectionBytes)) | ConvertFrom-Json
+        $handoffSelection.instance_id = $handoffInstanceId
+        $handoffSelection.instance_relative_path = $handoffInstanceRelativePath
+        $handoffSelection.instance_manifest_sha256 = $handoffManifestHash
 
-        Write-Utf8File -Path $handoffHookPath -Content @'
-const fs = require("node:fs");
-const originalRenameSync = fs.renameSync.bind(fs);
-let switched = false;
-fs.renameSync = (source, target) => {
-  const result = originalRenameSync(source, target);
-  const normalized = String(target ?? "").replace(/\\/g, "/");
-  if (/\/host\/leases\/[^/]+\/mcp-[0-9]+-[0-9a-f]{32}\.json$/i.test(normalized)) {
-    fs.appendFileSync(process.env.CODEDB_TEST_HANDOFF_LEASE_LOG, `${normalized}\n`, "utf8");
-    if (!switched && normalized.includes(`/host/leases/${process.env.CODEDB_TEST_HANDOFF_OLD_GENERATION}/`)) {
-      switched = true;
-      fs.copyFileSync(
-        process.env.CODEDB_TEST_HANDOFF_REPLACEMENT_POINTER,
-        process.env.CODEDB_TEST_HANDOFF_CURRENT_POINTER);
-    }
-  }
-  return result;
-};
-'@
+        $handoffStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $handoffStartInfo.FileName = $nodePath
+        $handoffStartInfo.Arguments = "`"$materializedWrapper`" --root `"$hostRoot`""
+        $handoffStartInfo.WorkingDirectory = $hostRoot
+        $handoffStartInfo.UseShellExecute = $false
+        $handoffStartInfo.CreateNoWindow = $true
+        $handoffStartInfo.RedirectStandardInput = $true
+        $handoffStartInfo.RedirectStandardOutput = $true
+        $handoffStartInfo.RedirectStandardError = $true
+        $handoffWrapperProcess = [System.Diagnostics.Process]::new()
+        $handoffWrapperProcess.StartInfo = $handoffStartInfo
+        $null = $handoffWrapperProcess.Start()
+        $handoffWrapperStarted = $true
+        $handoffWrapperStderrTask = $handoffWrapperProcess.StandardError.ReadToEndAsync()
+        $null = Invoke-WrapperRpc -Process $handoffWrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 21
+            method = "initialize"
+            params = [ordered]@{ protocolVersion = "2024-11-05" }
+        })
+        Assert-True -Condition (@(Get-ChildItem -LiteralPath (Join-Path $wrapperInstance.Root "leases") -Force -File -ErrorAction SilentlyContinue).Count -gt 0) -Message "Running wrapper did not publish its immutable instance lease."
 
-        $handoffStatus = Invoke-WrapperToolProbe `
+        # Switch the selection while the old session is still running. It must
+        # continue to report the old instance and never follow this pointer.
+        Write-Utf8File -Path $instanceSelectionPath -Content (($handoffSelection | ConvertTo-Json -Depth 16) + "`n")
+        $oldSessionStatusRpc = Invoke-WrapperRpc -Process $handoffWrapperProcess -Request ([ordered]@{
+            jsonrpc = "2.0"
+            id = 22
+            method = "tools/call"
+            params = [ordered]@{ name = "codedb_status"; arguments = [ordered]@{} }
+        })
+        $oldSessionStatus = [string]$oldSessionStatusRpc.result.content[0].text
+        $newFixtureProviderName = "codedb-fixture-$($handoffInstanceId.Substring(0, 8))"
+        Assert-True -Condition ($oldSessionStatus.Contains($fixtureProviderName)) -Message "Running wrapper did not retain its original immutable instance after current-instance switched."
+        Assert-True -Condition (-not $oldSessionStatus.Contains($newFixtureProviderName)) -Message "Running wrapper followed a newly selected instance during an active session."
+        Assert-Equal -Actual (Get-FileHash -LiteralPath (Join-Path $wrapperInstance.Root "instance.json") -Algorithm SHA256).Hash -Expected $oldInstanceManifestHash.Hash -Message "Running wrapper changed the old instance manifest."
+
+        $handoffWrapperProcess.StandardInput.Close()
+        if (-not $handoffWrapperProcess.WaitForExit(10000)) {
+            $handoffWrapperProcess.Kill()
+            $handoffWrapperProcess.WaitForExit()
+        }
+        $handoffWrapperError = $handoffWrapperStderrTask.Result.Trim()
+        if ($handoffWrapperProcess.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($handoffWrapperError)) {
+            throw "Old immutable-instance wrapper exited with code $($handoffWrapperProcess.ExitCode).`n$handoffWrapperError"
+        }
+        $handoffWrapperStarted = $false
+        $newSessionStatus = Invoke-WrapperToolProbe `
             -WrapperPath $materializedWrapper `
             -Root $hostRoot `
             -ToolName "codedb_status" `
-            -Arguments ([ordered]@{}) `
-            -EnvironmentVariables @{
-                NODE_OPTIONS = "--require=$handoffHookPath"
-                CODEDB_TEST_HANDOFF_CURRENT_POINTER = $currentPointerPath
-                CODEDB_TEST_HANDOFF_REPLACEMENT_POINTER = $handoffPointerPath
-                CODEDB_TEST_HANDOFF_LEASE_LOG = $handoffLeaseLogPath
-                CODEDB_TEST_HANDOFF_OLD_GENERATION = $generationId
-            }
-        Assert-True -Condition ($handoffStatus.Contains("Selected generation: $handoffGenerationId")) -Message "Wrapper request did not retry on the newly selected generation."
-        $handoffLeasePublications = @(Get-Content -LiteralPath $handoffLeaseLogPath)
-        Assert-True -Condition ($handoffLeasePublications.Count -ge 2) -Message "Pointer switch did not cause a second request-lease publication."
-        Assert-True -Condition ($handoffLeasePublications[0].Contains("/host/leases/$generationId/")) -Message "First handoff lease did not pin the old generation."
-        Assert-True -Condition ($handoffLeasePublications[1].Contains("/host/leases/$handoffGenerationId/")) -Message "Retried handoff lease did not pin the new generation."
-        Assert-Equal -Actual @(Get-ChildItem -LiteralPath (Join-Path $hostLeaseRoot $generationId) -File -Filter "mcp-*.json" -ErrorAction SilentlyContinue).Count -Expected 0 -Message "Generation handoff left an old request lease."
-        Assert-Equal -Actual @(Get-ChildItem -LiteralPath (Join-Path $hostLeaseRoot $handoffGenerationId) -File -Filter "mcp-*.json" -ErrorAction SilentlyContinue).Count -Expected 0 -Message "Generation handoff left a new request lease."
-        Write-Host "[OK] Wrapper re-read current pointer identity after lease publication and retried on the selected generation."
+            -Arguments ([ordered]@{})
+        Assert-True -Condition ($newSessionStatus.Contains($newFixtureProviderName)) -Message "New wrapper session did not resolve the newly selected immutable instance."
+        Assert-True -Condition (-not $newSessionStatus.Contains($fixtureProviderName)) -Message "New wrapper session retained the previous immutable instance."
+        Write-Host "[OK] Immutable-instance handoff retained the old running session and selected the new instance for a new wrapper session."
     } finally {
-        Write-Utf8File -Path $currentPointerPath -Content $originalCurrentPointerText
-        Remove-Item -LiteralPath $handoffGenerationRoot -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $handoffPointerPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $handoffHookPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $handoffLeaseLogPath -Force -ErrorAction SilentlyContinue
+        if ($handoffWrapperStarted -and $null -ne $handoffWrapperProcess -and -not $handoffWrapperProcess.HasExited) {
+            $handoffWrapperProcess.Kill()
+            $handoffWrapperProcess.WaitForExit()
+        }
+        if ($null -ne $handoffWrapperProcess) {
+            $handoffWrapperProcess.Dispose()
+        }
+        [System.IO.File]::WriteAllBytes($instanceSelectionPath, $originalInstanceSelectionBytes)
+        if (Test-Path -LiteralPath $handoffInstanceRoot) {
+            Remove-Item -LiteralPath $handoffInstanceRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     $staleGenerationProcessId = 2147483000
@@ -8649,7 +8675,7 @@ syncBuiltinESMExports();
     }
     Assert-Result -Result $projectVerifyResult -ExitCode 0 -Label "Materialized project verification"
     foreach ($expectedVerificationOutput in @(
-        "Provider executable and runtime config are present and use Unity-root-relative paths.",
+        "Machine Provider identity/hash and project-local runtime config are valid.",
         "Generated .codedbignore matches the AIWork template.",
         "AIWork/.runtime/codedb stays inside the Unity project.",
         "Host project CodeDB structure verification passed."
@@ -8881,44 +8907,51 @@ syncBuiltinESMExports();
         -Label "Final freshness check"
     Write-Host "[OK] Adapter UNKNOWN rebuilt only the Shader/HLSL adapter lane and returned both owners to fresh."
 
-    $beforeMcpGuidance = Get-FileSnapshot -Root $hostRoot
-    $mcpDraftResult = Invoke-PowerShellAction -Action {
-        & $materializedMcpDraft
-    }
-    Assert-Result -Result $mcpDraftResult -ExitCode 0 -Label "Materialized MCP registration draft"
-    foreach ($expected in @(
-        "codedb-fixture MCP registration draft",
-        "Status: review draft only; no MCP client configuration was written.",
-        "- Target file: .codex/config.toml",
-        "[mcp_servers.codedb-fixture]",
-        'command = "node"',
-        'cwd = "."',
-        'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
-        '"registrationPolicy"',
-        '"manual-review-only"'
-    )) {
-        Assert-True -Condition ($mcpDraftResult.Text.Contains($expected)) -Message "MCP registration draft is missing '$expected'."
-    }
-    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeMcpGuidance -Message "MCP registration draft changed host files."
-
-    $mcpValidationResult = Invoke-PowerShellAction -Action {
-        & $materializedMcpValidator
-    }
-    Assert-Result -Result $mcpValidationResult -ExitCode 0 -Label "Materialized MCP project config validation"
-    foreach ($expected in @(
-        "OK: MCP working directory matches expected project-level value.",
-        "OK: Project config uses the package-neutral wrapper MCP command shape.",
-        "OK: Shader/HLSL text adapter manifest is present for wrapper routing.",
-        "OK: .codex/config.toml uses relative paths only.",
-        "[OK] Project-level MCP config validation passed."
-    )) {
-        Assert-True -Condition ($mcpValidationResult.Text.Contains($expected)) -Message "MCP project config validation is missing '$expected'."
-    }
-
     $fixtureMcpConfigPath = Join-Path $hostRoot ".codex\config.toml"
-    $validMcpConfig = Get-Content -LiteralPath $fixtureMcpConfigPath -Raw
-    $validMcpConfigLastWriteTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($fixtureMcpConfigPath)
+    $stableMcpConfigBytes = [System.IO.File]::ReadAllBytes($fixtureMcpConfigPath)
+    $stableMcpConfigLastWriteTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($fixtureMcpConfigPath)
+    $stableMcpConfig = [System.Text.UTF8Encoding]::new($false, $true).GetString($stableMcpConfigBytes)
+    $instanceMcpConfig = $stableMcpConfig.Replace(
+        "[mcp_servers.codedb-fixture]",
+        "[mcp_servers.$fixtureProviderName]")
+    Write-Utf8File -Path $fixtureMcpConfigPath -Content $instanceMcpConfig
     try {
+        $beforeMcpGuidance = Get-FileSnapshot -Root $hostRoot
+        $mcpDraftResult = Invoke-PowerShellAction -Action {
+            & $materializedMcpDraft
+        }
+        Assert-Result -Result $mcpDraftResult -ExitCode 0 -Label "Materialized MCP registration draft"
+        foreach ($expected in @(
+            "$fixtureProviderName MCP registration draft",
+            "Status: review draft only; no MCP client configuration was written.",
+            "- Target file: .codex/config.toml",
+            "[mcp_servers.$fixtureProviderName]",
+            'command = "node"',
+            'cwd = "."',
+            'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
+            '"registrationPolicy"',
+            '"manual-review-only"'
+        )) {
+            Assert-True -Condition ($mcpDraftResult.Text.Contains($expected)) -Message "MCP registration draft is missing '$expected'."
+        }
+        Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeMcpGuidance -Message "MCP registration draft changed host files."
+
+        $mcpValidationResult = Invoke-PowerShellAction -Action {
+            & $materializedMcpValidator
+        }
+        Assert-Result -Result $mcpValidationResult -ExitCode 0 -Label "Materialized MCP project config validation"
+        foreach ($expected in @(
+            "OK: MCP working directory matches expected project-level value.",
+            "OK: Project config uses the package-neutral wrapper MCP command shape.",
+            "OK: Shader/HLSL text adapter manifest is present for wrapper routing.",
+            "OK: .codex/config.toml uses relative paths only.",
+            "[OK] Project-level MCP config validation passed."
+        )) {
+            Assert-True -Condition ($mcpValidationResult.Text.Contains($expected)) -Message "MCP project config validation is missing '$expected'."
+        }
+
+        $validMcpConfig = Get-Content -LiteralPath $fixtureMcpConfigPath -Raw
+        $validMcpConfigLastWriteTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($fixtureMcpConfigPath)
         $missingCwdConfig = $validMcpConfig -replace '(?m)^\s*cwd\s*=\s*"\."\s*\r?\n', ''
         Write-Utf8File -Path $fixtureMcpConfigPath -Content $missingCwdConfig
         $missingCwdValidation = Invoke-PowerShellAction -Action {
@@ -8941,10 +8974,10 @@ syncBuiltinESMExports();
 
         Write-Utf8File -Path $fixtureMcpConfigPath -Content @"
 # config sentinel
-[mcp_servers.codedb-fixture]
-command = "AIWork/.runtime/codedb/codedb-fixture/bin/codebase-mcp.exe"
+[mcp_servers.$fixtureProviderName]
+command = "$($fixtureMachineProvider.ExecutablePath)"
 cwd = "."
-args = ["mcp", "--root", ".", "--config", "AIWork/.runtime/codedb/codedb-fixture/config/codedb-mcp.toml", "--no-watch"]
+args = ["mcp", "--root", ".", "--config", "$fixtureRuntimeRelativePath/config/codedb-mcp.toml", "--no-watch"]
 startup_timeout_sec = 120
 "@
         $directProviderValidation = Invoke-PowerShellAction -Action {
@@ -8954,12 +8987,14 @@ startup_timeout_sec = 120
         Assert-True `
             -Condition ($directProviderValidation.Text.Contains("FAIL: Direct Provider registration is not accepted for formal project MCP configuration. Use the project wrapper.")) `
             -Message "MCP validator accepted the direct Provider transition shape."
-    } finally {
         Write-Utf8File -Path $fixtureMcpConfigPath -Content $validMcpConfig
         [System.IO.File]::SetLastWriteTimeUtc($fixtureMcpConfigPath, $validMcpConfigLastWriteTimeUtc)
+        Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeMcpGuidance -Message "MCP project config validation changed host files."
+        Write-Host "[OK] Materialized MCP draft enforced cwd and wrapper-only registration without mutating host configuration."
+    } finally {
+        [System.IO.File]::WriteAllBytes($fixtureMcpConfigPath, $stableMcpConfigBytes)
+        [System.IO.File]::SetLastWriteTimeUtc($fixtureMcpConfigPath, $stableMcpConfigLastWriteTimeUtc)
     }
-    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeMcpGuidance -Message "MCP project config validation changed host files."
-    Write-Host "[OK] Materialized MCP draft enforced cwd and wrapper-only registration without mutating host configuration."
 
     $verify = Invoke-Materializer -Action "Verify" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $verify -ExitCode 0 -Label "Current Verify"
@@ -9003,7 +9038,7 @@ startup_timeout_sec = 120
     $beforeExplicitProbe = Get-FileSnapshot -Root $hostRoot
     $explicitProbe = Invoke-Materializer -Action "Probe" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $explicitProbe -ExitCode 0 -Label "Explicit Package-owned MCP availability probe"
-    Assert-True -Condition ($explicitProbe.Text.Contains("[PHASE MCP_AVAILABLE] READY")) -Message "Explicit availability probe did not complete initialize, tools/list, usable status, and bounded query."
+    Assert-True -Condition ($explicitProbe.Text.Contains("[PRODUCT_LAYER MCP_AVAILABLE] CURRENT")) -Message "Explicit availability probe did not report the current MCP availability layer."
     Assert-True -Condition ($explicitProbe.Text.Contains("[PRODUCT_STATE] READY")) -Message "Explicit availability probe did not reduce the verified layers to READY."
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeExplicitProbe -Message "Repeated current availability probe changed project bytes."
     $repairSnapshot = Get-FileSnapshot -Root $hostRoot

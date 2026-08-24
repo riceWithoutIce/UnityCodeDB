@@ -24,6 +24,9 @@ namespace Rice.AI.Codedb.Editor
         internal const int MaximumCurrentInstanceAvailabilityRecoveryAttempts = 3;
 
         private const double ReconcileRetrySeconds = 30d;
+        private const double InitialReconcileDelaySeconds = 1.5d;
+        private const int MaximumInitializationRetries = 5;
+        private const int InitializationRetryDeferralFrames = 30;
         private const string ManagedBy = "com.rice.ai-codedb";
         private const string SessionIdKey = "Rice.AICodedb.EditorLifecycle.SessionId";
         private const string SessionCreatedAtKey = "Rice.AICodedb.EditorLifecycle.CreatedAtUtc";
@@ -55,6 +58,11 @@ namespace Rice.AI.Codedb.Editor
         private static readonly AICodedbEditorBackgroundScheduler BackgroundScheduler =
             new AICodedbEditorBackgroundScheduler();
         private static bool _initialized;
+        private static bool _initializationQueued;
+        private static int _initializationDeferralFrames = 2;
+        private static int _initializationRetryCount;
+        private static bool _initialReconcileQueued;
+        private static double _initialReconcileNotBefore;
         private static volatile bool _quitting;
 
         static AICodedbEditorLifecycle()
@@ -64,6 +72,56 @@ namespace Rice.AI.Codedb.Editor
 
             try
             {
+                // Do not touch Package Manager, the project filesystem, or a
+                // Process object from an InitializeOnLoad constructor. Unity
+                // invokes this constructor while the managed domain is being
+                // rebuilt; those calls can wait on UPM/IPC and leave the Editor
+                // stuck in "Reloading Domain" before the first frame is drawn.
+                QueueDeferredInitialization();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"CodeDB Editor lifecycle initialization was skipped: {exception.Message}");
+            }
+        }
+
+        private static void QueueDeferredInitialization()
+        {
+            if (_initializationQueued || _quitting)
+                return;
+
+            _initializationQueued = true;
+            EditorApplication.delayCall += Initialize;
+        }
+
+        private static void Initialize()
+        {
+            _initializationQueued = false;
+            if (!ShouldInitializeLifecycle(_quitting))
+                return;
+
+            // Give Unity a couple of idle editor frames to finish package and
+            // script bookkeeping. If the user enters Play immediately, keep
+            // deferring instead of starting any CodeDB work in that transition.
+            if (_initializationDeferralFrames > 0
+                || ShouldDeferLifecycleInitialization(
+                    EditorApplication.isCompiling,
+                    EditorApplication.isUpdating,
+                    EditorApplication.isPlayingOrWillChangePlaymode,
+                    Application.isPlaying))
+            {
+                if (_initializationDeferralFrames > 0)
+                    _initializationDeferralFrames--;
+                QueueDeferredInitialization();
+                return;
+            }
+
+            try
+            {
+                // All potentially blocking setup is now outside domain reload
+                // and outside a Play transition. The immutable-instance engine
+                // still owns the runtime lease location; no legacy lease is
+                // created before a validated instance is selected.
                 _projectRoot = ValidateProjectRoot(AICodedbPaths.ProjectRoot);
                 _executionContext = AICodedbPaths.CaptureExecutionContext();
                 _projectIdentity = CreateProjectIdentity(_projectRoot);
@@ -71,8 +129,6 @@ namespace Rice.AI.Codedb.Editor
                 _packageFingerprintChanged = ReadAndRecordPackageFingerprint(_projectIdentity);
                 _sessionId = GetOrCreateSessionValue(SessionIdKey, () => Guid.NewGuid().ToString("N"));
                 _sessionCreatedAtUtc = GetOrCreateSessionValue(SessionCreatedAtKey, () => DateTime.UtcNow.ToString("o"));
-                // The immutable-instance engine owns the runtime lease location.
-                // Do not create a legacy lease before a validated instance is selected.
                 _leasePath = string.Empty;
 
                 using (var process = Process.GetCurrentProcess())
@@ -87,25 +143,61 @@ namespace Rice.AI.Codedb.Editor
                 EditorApplication.quitting += OnEditorQuitting;
                 EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
                 EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
-                EditorApplication.delayCall += Initialize;
+
+                _initialized = true;
+                BackgroundScheduler.SetMaintenanceSuspended(IsPlayModeMaintenanceSuspended());
+                _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
+                _initializationRetryCount = 0;
+                _initialReconcileNotBefore =
+                    EditorApplication.timeSinceStartup + InitialReconcileDelaySeconds;
+                // The first pass must classify prerequisites and the selected
+                // instance before any lease can be published, but it must not
+                // compete with an immediate Play transition. Later reload and
+                // resume paths use the persisted Ready short-circuit.
+                QueueInitialReconcile();
             }
             catch (Exception exception)
             {
-                Debug.LogWarning($"CodeDB Editor lifecycle initialization was skipped: {exception.Message}");
+                _initialized = false;
+                // Package Manager can still be settling after a reload. Retry
+                // on a later editor callback without doing work in the reload
+                // callback itself.
+                Debug.LogWarning($"CodeDB Editor lifecycle initialization was deferred: {exception.Message}");
+                if (++_initializationRetryCount <= MaximumInitializationRetries)
+                {
+                    _initializationDeferralFrames = InitializationRetryDeferralFrames;
+                    QueueDeferredInitialization();
+                }
             }
         }
 
-        private static void Initialize()
+        private static void QueueInitialReconcile()
         {
-            if (!ShouldInitializeLifecycle(_quitting))
+            if (_initialReconcileQueued || _quitting)
                 return;
 
-            _initialized = true;
-            BackgroundScheduler.SetMaintenanceSuspended(IsPlayModeMaintenanceSuspended());
-            _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-            // The first pass must always classify prerequisites and the
-            // selected instance before any lease can be published. Later
-            // reload/resume paths use the persisted Ready short-circuit.
+            _initialReconcileQueued = true;
+            EditorApplication.delayCall += TryStartInitialReconcile;
+        }
+
+        private static void TryStartInitialReconcile()
+        {
+            _initialReconcileQueued = false;
+            if (!_initialized || _quitting)
+                return;
+
+            if (EditorApplication.timeSinceStartup < _initialReconcileNotBefore
+                || ShouldDeferReconcile(
+                    EditorApplication.isCompiling,
+                    EditorApplication.isUpdating,
+                    IsPlayModeMaintenanceSuspended()))
+            {
+                QueueInitialReconcile();
+                return;
+            }
+
+            // Run on the background scheduler; this callback only starts the
+            // worker and never performs project, hash, lease, or process I/O.
             BeginReconcile(true);
         }
 
@@ -137,6 +229,18 @@ namespace Rice.AI.Codedb.Editor
             // Ready; a reload must not start a replacement/upgrade loop for an
             // already usable immutable instance.
             EditorApplication.delayCall += RequestReconcileIfNeeded;
+        }
+
+        internal static bool ShouldDeferLifecycleInitialization(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return isCompiling
+                   || isUpdating
+                   || isPlayingOrWillChangePlaymode
+                   || applicationPlaying;
         }
 
         private static void OnEditorUpdate()

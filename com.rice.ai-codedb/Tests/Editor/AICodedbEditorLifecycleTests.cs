@@ -88,6 +88,24 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "A quitting editor must not start new lifecycle work.");
         }
 
+        [TestCase(false, false, false, false, ExpectedResult = false)]
+        [TestCase(true, false, false, false, ExpectedResult = true)]
+        [TestCase(false, true, false, false, ExpectedResult = true)]
+        [TestCase(false, false, true, false, ExpectedResult = true)]
+        [TestCase(false, false, false, true, ExpectedResult = true)]
+        public bool LifecycleInitialization_DefersDuringUnityTransition(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return AICodedbEditorLifecycle.ShouldDeferLifecycleInitialization(
+                isCompiling,
+                isUpdating,
+                isPlayingOrWillChangePlaymode,
+                applicationPlaying);
+        }
+
         [TestCase("NODE_MISSING")]
         [TestCase("PROVIDER_MISSING")]
         [TestCase("PROVIDER_INVALID")]

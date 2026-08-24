@@ -545,14 +545,36 @@ Assert-True `
     -Condition ($repairFunction.Groups["body"].Value.IndexOf("Complete-OwnedLegacyRedeployHostUseGate", [StringComparison]::Ordinal) -lt 0) `
     -Message "Repair must never use the Redeploy-only gate that can stop a recognized legacy watcher."
 $editorLifecycleSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbEditorLifecycle.cs"))
+$initializeOnLoadConstructor = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)static\s+AICodedbEditorLifecycle\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+void\s+QueueDeferredInitialization')
+Assert-True -Condition $initializeOnLoadConstructor.Success -Message "Package boundary could not isolate the InitializeOnLoad constructor."
+Assert-True `
+    -Condition ($initializeOnLoadConstructor.Groups["body"].Value.IndexOf("QueueDeferredInitialization()", [StringComparison]::Ordinal) -ge 0) `
+    -Message "InitializeOnLoad must only queue deferred lifecycle initialization."
+foreach ($forbiddenReloadCall in @(
+    "PackageInfo.FindForAssembly(",
+    "AICodedbPaths.CaptureExecutionContext(",
+    "ValidateProjectRoot(",
+    "CreateProjectIdentity(",
+    "ReadPersistedProductState(",
+    "ReadAndRecordPackageFingerprint(",
+    "Process.GetCurrentProcess(",
+    "SessionState."
+)) {
+    Assert-True `
+        -Condition ($initializeOnLoadConstructor.Groups["body"].Value.IndexOf($forbiddenReloadCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "InitializeOnLoad constructor still performs blocking setup: $forbiddenReloadCall"
+}
 $initializeFunction = [regex]::Match(
     $editorLifecycleSource,
-    '(?s)private\s+static\s+void\s+Initialize\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*\[DidReloadScripts\]')
+    '(?s)private\s+static\s+void\s+Initialize\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+void\s+QueueInitialReconcile')
 Assert-True -Condition $initializeFunction.Success -Message "Package boundary could not isolate Editor lifecycle Initialize."
 Assert-True `
-    -Condition ($initializeFunction.Groups["body"].Value.IndexOf("BeginReconcile(true)", [StringComparison]::Ordinal) -ge 0 -and
+    -Condition ($initializeFunction.Groups["body"].Value.IndexOf("QueueInitialReconcile()", [StringComparison]::Ordinal) -ge 0 -and
+        $initializeFunction.Groups["body"].Value.IndexOf("BeginReconcile(true)", [StringComparison]::Ordinal) -lt 0 -and
         $initializeFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal) -lt 0) `
-    -Message "Editor cold start must reconcile prerequisites before it can queue a lease refresh."
+    -Message "Editor cold start must queue delayed background reconciliation before it can queue a lease refresh."
 foreach ($forbiddenMainThreadCall in @(
     "PublishLease(",
     "RefreshEditorLeaseForIntegrationState(",
