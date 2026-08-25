@@ -93,7 +93,10 @@ namespace Rice.AI.Codedb.Editor
         private static string GetUnityProjectName()
         {
             var projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
-            var projectName = new DirectoryInfo(projectRoot).Name;
+            // Project settings are also read while a background status
+            // snapshot is assembled. Derive the display name from the path so
+            // this helper does not perform directory metadata I/O.
+            var projectName = Path.GetFileName(projectRoot.TrimEnd('/', '\\'));
             return string.IsNullOrWhiteSpace(projectName) ? "UnityProject" : projectName;
         }
 

@@ -547,6 +547,31 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CachedUninstalledSnapshot_PreservesInstallStateWithoutLiveScan()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject",
+                AICodedbProductState.Uninstalled);
+
+            Assert.That(snapshot.IsProjectUninstalled, Is.True);
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.Uninstalled));
+            Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Inactive));
+            Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Uninstalled"));
+        }
+
+        [Test]
+        public void CachedNeedsAttentionSnapshotDoesNotClaimReady()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject",
+                AICodedbProductState.NeedsAttention);
+
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(snapshot.ProductStatus.IsReady, Is.False);
+            Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Error));
+        }
+
+        [Test]
         public void UninstalledState_KeepsInstallAsTheOnlyProjectAction()
         {
             var status = AICodedbProductStatusBuilder.Build(

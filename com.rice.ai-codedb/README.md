@@ -16,6 +16,21 @@ Install the validation prerelease from the repository subfolder with
 `https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5`.
 Use `#main` only when intentionally validating unreleased development changes.
 
+## Version Support
+
+The published `v0.2.x` tags are historical, immutable artifacts. This project
+does not backport lifecycle, Domain Reload, Play-transition, or other runtime
+fixes to the `v0.2.x` line, and there is no planned `v0.2.4.x` hotfix line.
+Compatibility checks for those versions are limited to read-only inspection
+and bounded query observation; old behavior is not represented as repaired or
+currently supported.
+
+`v0.3.0` is the only active development and remediation line. Main-thread
+runtime isolation, cold-start/Play responsiveness, and lifecycle fixes are
+validated against a fixed v0.3 package artifact before release. The historical
+v0.2 artifacts remain available for read-only compatibility investigation and
+are not silently upgraded by this policy.
+
 The `0.2.5-preview.5` Package keeps a tracked stable wrapper and byte-exact
 published compatibility files
 under `AIWork/codedb/`, then materializes immutable

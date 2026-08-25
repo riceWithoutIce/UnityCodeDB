@@ -60,6 +60,21 @@ Unity with a NotElevated MCP client were explicitly deferred without being
 marked passed; they remain in the
 [v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
+The first active runtime-isolation slice is documented in the
+[v0.3.0 P1-A Supervisor request queue](v0.3.0-p1-supervisor-queue.md).
+
+## Version Support Policy
+
+Published `v0.2.x` artifacts remain immutable historical versions. They are
+not receiving lifecycle, Domain Reload, or Play-transition fixes, and no
+`v0.2.4.x` hotfix line is planned. Compatibility work for that line is limited
+to read-only inspection and bounded query observation; it is not a promise of
+corrected runtime behavior.
+
+`v0.3.0` is the single active development line for runtime isolation and
+lifecycle remediation. Its release evidence must come from a fixed artifact
+and fresh cold-start, Play, and Domain Reload validation. Results observed from
+an old `v0.2.x` artifact remain historical context only.
 
 ## Supported Environment
 

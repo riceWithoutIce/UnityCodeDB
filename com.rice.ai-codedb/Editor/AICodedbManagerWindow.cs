@@ -102,6 +102,7 @@ namespace Rice.AI.Codedb.Editor
         private bool _watcherStatusLoaded;
         private bool _watcherRefreshScheduled;
         private bool _hostStatusRefreshInFlight;
+        private long _cachedLifecycleStatusRevision = -1;
         private bool _watcherStatusRefreshInFlight;
         private bool _userActionInFlight;
         private double _nextUserActionRepaintAt;
@@ -249,6 +250,18 @@ namespace Rice.AI.Codedb.Editor
             _statusSnapshot = IsPlayModeDisplaySuspended()
                 ? TryGetStatusSnapshotForPlayMode()
                 : TryGetCachedReadySnapshot(_executionContext.ProjectRoot);
+            if (_statusSnapshot == null && !IsPlayModeDisplaySuspended())
+            {
+                AICodedbProductState persistedState;
+                if (AICodedbEditorLifecycle.TryGetPersistedProductState(
+                        _executionContext.ProjectRoot,
+                        out persistedState))
+                {
+                    _statusSnapshot = AICodedbStatusSnapshot.CreateCachedState(
+                        _executionContext.ProjectDisplayName,
+                        persistedState);
+                }
+            }
             _statusSnapshot = _statusSnapshot
                 ?? AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName);
             // A cached Ready snapshot is still a verified observation. Record
@@ -283,6 +296,12 @@ namespace Rice.AI.Codedb.Editor
                 return;
             }
 
+            // Lifecycle owns the background materializer pass. Consume its
+            // cached result when it changes instead of launching a new status
+            // process whenever the Manager is opened or repainted.
+            if (TryApplyCachedLifecycleStatus())
+                return;
+
             if (_transientStatusRefreshPending
                 && EditorApplication.timeSinceStartup >= _nextTransientStatusRefreshAt
                 && !EditorApplication.isCompiling
@@ -290,7 +309,14 @@ namespace Rice.AI.Codedb.Editor
                 && !IsPlayModeDisplaySuspended())
             {
                 _transientStatusRefreshPending = false;
-                BeginStatusRefresh(true);
+                // Play-mode resume is owned by the lifecycle worker. Do not
+                // launch a second materializer from the Manager's update
+                // callback; that duplicates backend startup and can race the
+                // worker's post-Play recovery. The request only schedules the
+                // existing background pass, whose cached result is consumed
+                // above on a later editor frame.
+                AICodedbEditorLifecycle.RequestBackgroundStatusObservation();
+                TryApplyCachedLifecycleStatus();
                 return;
             }
 
@@ -319,7 +345,7 @@ namespace Rice.AI.Codedb.Editor
                 return;
 
             _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRefreshSeconds;
-            RefreshTransientHostStatusAsync();
+            AICodedbEditorLifecycle.RequestBackgroundStatusObservation();
         }
 
         private async void RefreshTransientHostStatusAsync()
@@ -360,7 +386,8 @@ namespace Rice.AI.Codedb.Editor
                 if (ShouldPreserveReadyDuringTransientRefresh(
                         previousState,
                         convergencePlan,
-                        AICodedbEditorLifecycle.HasVerifiedReadyForCurrentPackage(),
+                        AICodedbEditorLifecycle.HasVerifiedReadyForCurrentPackage(
+                            _executionContext.ProjectRoot),
                         AICodedbEditorLifecycle.IsReconcileInFlight,
                         _transientStatusRefreshAttempts,
                         MaximumTransientStatusRetries))
@@ -482,18 +509,103 @@ namespace Rice.AI.Codedb.Editor
             }
             if (!force
                 && _statusSnapshot != null
-                && _statusSnapshot.ProductStatus.State == AICodedbProductState.Ready)
+                && (_statusSnapshot.ProductStatus.State == AICodedbProductState.Ready
+                    || _statusSnapshot.ProductStatus.State == AICodedbProductState.MissingPrerequisite
+                    || _statusSnapshot.ProductStatus.State == AICodedbProductState.Uninstalled))
             {
                 return;
             }
+
+            if (!force)
+            {
+                TryApplyCachedLifecycleStatus();
+                return;
+            }
+
+            // Once lifecycle initialization has completed, an explicit
+            // Manager refresh joins the same query-first queue as automatic
+            // observations. This prevents the view from launching a second
+            // materializer beside a reconcile/reconnect pass. The legacy
+            // async fallback remains only for the short pre-initialization
+            // window where no lifecycle worker exists yet.
+            if (AICodedbEditorLifecycle.IsLifecycleInitialized)
+            {
+                _transientStatusRefreshPending = true;
+                _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
+                AICodedbEditorLifecycle.RequestBackgroundStatusObservation(true);
+                TryApplyCachedLifecycleStatus();
+                return;
+            }
+
             RefreshTransientHostStatusAsync();
+        }
+
+        private bool TryApplyCachedLifecycleStatus()
+        {
+            if (_hostStatusRefreshInFlight
+                || IsPlayModeDisplaySuspended()
+                || string.IsNullOrWhiteSpace(_executionContext.ProjectRoot))
+                return false;
+
+            AICodedbCommandResult cachedResult;
+            long revision;
+            if (!AICodedbEditorLifecycle.TryGetCachedHostStatusResult(
+                    out cachedResult,
+                    out revision)
+                || cachedResult == null
+                || revision <= _cachedLifecycleStatusRevision)
+                return false;
+
+            _cachedLifecycleStatusRevision = revision;
+            ApplyCachedLifecycleStatusAsync(cachedResult);
+            return true;
+        }
+
+        private async void ApplyCachedLifecycleStatusAsync(
+            AICodedbCommandResult cachedResult)
+        {
+            if (_hostStatusRefreshInFlight || cachedResult == null)
+                return;
+
+            _hostStatusRefreshInFlight = true;
+            var playModeStatusGeneration = _playModeStatusGeneration;
+            try
+            {
+                var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
+                    _executionContext,
+                    cachedResult);
+                if (this == null
+                    || !ShouldApplyStatusRefreshResult(
+                        playModeStatusGeneration,
+                        _playModeStatusGeneration,
+                        IsPlayModeDisplaySuspended()))
+                    return;
+
+                ApplyStatusSnapshot(snapshot, true, false);
+                _transientStatusRefreshPending = false;
+                _transientStatusRefreshAttempts = 0;
+                Repaint();
+            }
+            catch (Exception exception)
+            {
+                if (this != null)
+                    Debug.LogWarning("CodeDB Manager cached status refresh failed: " + exception.Message);
+            }
+            finally
+            {
+                _hostStatusRefreshInFlight = false;
+            }
         }
 
         private void OnManagerPlayModeStateChanged(PlayModeStateChange state)
         {
             _playModeStatusGeneration++;
             if (state == PlayModeStateChange.ExitingEditMode && _statusSnapshot != null)
-                AICodedbEditorLifecycle.RecordProductStateForPlayMode(_statusSnapshot.ProductStatus.State);
+            {
+                AICodedbEditorLifecycle.RecordProductStateForPlayMode(
+                    _executionContext.ProjectRoot,
+                    _statusSnapshot.ProductStatus.State);
+            }
             if (state != PlayModeStateChange.EnteredEditMode)
             {
                 RestoreReadySnapshotForPlayMode();
@@ -505,6 +617,10 @@ namespace Rice.AI.Codedb.Editor
 
             if (state == PlayModeStateChange.EnteredEditMode)
             {
+                // Clear the temporary Play handoff even when the lifecycle
+                // initializer has not yet rebuilt its static project identity.
+                AICodedbEditorLifecycle.ClearProductStateForPlayMode(
+                    _executionContext.ProjectRoot);
                 _transientStatusRefreshAttempts = 0;
                 _transientStatusRefreshPending = true;
                 _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
@@ -515,7 +631,9 @@ namespace Rice.AI.Codedb.Editor
         private AICodedbStatusSnapshot TryGetStatusSnapshotForPlayMode()
         {
             AICodedbProductState state;
-            if (!AICodedbEditorLifecycle.TryGetProductStateForPlayMode(out state))
+            if (!AICodedbEditorLifecycle.TryGetProductStateForPlayMode(
+                    _executionContext.ProjectRoot,
+                    out state))
                 return null;
 
             switch (state)
@@ -547,6 +665,7 @@ namespace Rice.AI.Codedb.Editor
 
             AICodedbProductState capturedState;
             var hasCapturedState = AICodedbEditorLifecycle.TryGetProductStateForPlayMode(
+                _executionContext.ProjectRoot,
                 out capturedState);
             if (hasCapturedState
                 && (capturedState == AICodedbProductState.NeedsAttention
@@ -654,7 +773,7 @@ namespace Rice.AI.Codedb.Editor
             _lastKnownReadySnapshot = snapshot;
             _lastKnownReadyProjectRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
             _lastKnownReadyAtUtc = DateTime.UtcNow;
-            AICodedbEditorLifecycle.RecordVerifiedReadyForCurrentPackage();
+            AICodedbEditorLifecycle.RecordVerifiedReadyForCurrentPackage(projectRoot);
         }
 
         private static void InvalidateReadySnapshot(string projectRoot)

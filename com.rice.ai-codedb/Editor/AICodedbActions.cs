@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -423,6 +424,23 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
+        /// Runs the lifecycle-owned watcher ensure with a bounded timeout and
+        /// cancellation that can be honored before Unity domain reload.
+        /// </summary>
+        internal static AICodedbCommandResult RunEnsureWatcher(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            CancellationToken cancellationToken)
+        {
+            return RunWatcherScript(
+                context,
+                "Ensure",
+                timeoutMilliseconds,
+                cancellationToken,
+                true);
+        }
+
+        /// <summary>
         /// Reads the project-local watch opt-in and coordinator status.
         /// </summary>
         internal static AICodedbCommandResult RunWatcherStatus()
@@ -474,6 +492,21 @@ namespace Rice.AI.Codedb.Editor
             string action,
             int timeoutMilliseconds)
         {
+            return RunWatcherScript(
+                context,
+                action,
+                timeoutMilliseconds,
+                CancellationToken.None,
+                false);
+        }
+
+        private static AICodedbCommandResult RunWatcherScript(
+            AICodedbEditorExecutionContext context,
+            string action,
+            int timeoutMilliseconds,
+            CancellationToken cancellationToken,
+            bool interruptible)
+        {
             var selection = AICodedbHostGenerationStore.Resolve(context.ProjectRoot, context.PackageRoot);
             var scriptPath = selection.IsUsable
                 ? AICodedbPaths.NormalizePath(Path.Combine(
@@ -501,6 +534,17 @@ namespace Rice.AI.Codedb.Editor
                         false);
                 }
                 instanceRoot = currentInstance.InstanceRoot;
+            }
+
+            if (interruptible)
+            {
+                return AICodedbProcessRunner.RunPowerShellScript(
+                    context,
+                    scriptPath,
+                    timeoutMilliseconds,
+                    instanceRoot,
+                    cancellationToken,
+                    BuildWatcherScriptArguments(action));
             }
 
             return AICodedbProcessRunner.RunPowerShellScript(

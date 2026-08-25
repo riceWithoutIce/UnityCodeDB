@@ -12,6 +12,8 @@ namespace Rice.AI.Codedb.Editor
 
         private static Texture2D s_icon;
         private static Texture2D s_tabIcon;
+        private static bool s_packageVersionResolved;
+        private static string s_packageVersion = string.Empty;
 
         internal static Texture2D Icon
         {
@@ -62,19 +64,27 @@ namespace Rice.AI.Codedb.Editor
 
         private static string ResolvePackageVersion()
         {
+            if (s_packageVersionResolved)
+                return s_packageVersion;
+
+            s_packageVersionResolved = true;
             try
             {
                 var packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssembly(
                     typeof(AICodedbBrandAssets).Assembly);
                 if (packageInfo != null && !string.IsNullOrWhiteSpace(packageInfo.version))
-                    return packageInfo.version;
+                {
+                    s_packageVersion = packageInfo.version;
+                    return s_packageVersion;
+                }
             }
             catch
             {
                 // Unity can briefly withhold package metadata during package refresh.
             }
 
-            return AICodedbProjectSettings.CurrentPackageVersion;
+            s_packageVersion = AICodedbProjectSettings.CurrentPackageVersion;
+            return s_packageVersion;
         }
     }
 }

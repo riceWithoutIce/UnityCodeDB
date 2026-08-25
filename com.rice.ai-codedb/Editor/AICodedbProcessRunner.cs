@@ -1,8 +1,10 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.IO;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
@@ -141,6 +143,8 @@ namespace Rice.AI.Codedb.Editor
     {
         private const int DefaultTimeoutMilliseconds = 120000;
         private const int OutputDrainTimeoutMilliseconds = 1000;
+        private static readonly object ActiveProcessLock = new object();
+        private static readonly List<Process> ActiveBackgroundProcesses = new List<Process>();
 
         private enum PowerShellScriptPathPolicy
         {
@@ -207,6 +211,34 @@ namespace Rice.AI.Codedb.Editor
                 PowerShellScriptPathPolicy.ProjectLocal,
                 null,
                 instanceRoot,
+                CancellationToken.None,
+                false,
+                scriptArguments);
+        }
+
+        /// <summary>
+        /// Runs a project watcher command that belongs to an interruptible
+        /// lifecycle maintenance pass. The cancellation token only stops the
+        /// Package-owned PowerShell parent; it never targets its external
+        /// Provider/MCP children.
+        /// </summary>
+        internal static AICodedbCommandResult RunPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            string scriptPath,
+            int timeoutMilliseconds,
+            string instanceRoot,
+            CancellationToken cancellationToken,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
+                scriptPath,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ProjectLocal,
+                null,
+                instanceRoot,
+                cancellationToken,
+                true,
                 scriptArguments);
         }
 
@@ -237,6 +269,24 @@ namespace Rice.AI.Codedb.Editor
                 string.Empty,
                 timeoutMilliseconds,
                 PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                scriptArguments);
+        }
+
+        internal static AICodedbCommandResult RunResolvedPackageMaterializerPowerShellScript(
+            AICodedbEditorExecutionContext context,
+            int timeoutMilliseconds,
+            CancellationToken cancellationToken,
+            params string[] scriptArguments)
+        {
+            return RunPowerShellScript(
+                context,
+                string.Empty,
+                timeoutMilliseconds,
+                PowerShellScriptPathPolicy.ResolvedPackageMaterializer,
+                null,
+                null,
+                cancellationToken,
+                true,
                 scriptArguments);
         }
 
@@ -372,6 +422,8 @@ namespace Rice.AI.Codedb.Editor
                 pathPolicy,
                 null,
                 null,
+                CancellationToken.None,
+                false,
                 scriptArguments);
         }
 
@@ -382,6 +434,8 @@ namespace Rice.AI.Codedb.Editor
             PowerShellScriptPathPolicy pathPolicy,
             Action<string> outputLine,
             string instanceRoot,
+            CancellationToken cancellationToken,
+            bool cancelOnDomainReload,
             string[] scriptArguments)
         {
             if (context.Platform != RuntimePlatform.WindowsEditor)
@@ -405,7 +459,9 @@ namespace Rice.AI.Codedb.Editor
             return RunProcess(
                 BuildPowerShellStartInfo(context, normalizedScriptPath, instanceRoot, scriptArguments),
                 timeoutMilliseconds,
-                outputLine);
+                outputLine,
+                cancellationToken,
+                cancelOnDomainReload);
         }
 
         private static Task<AICodedbCommandResult> RunPowerShellScriptAsyncCore(
@@ -446,7 +502,24 @@ namespace Rice.AI.Codedb.Editor
                 pathPolicy,
                 outputLine,
                 null,
+                CancellationToken.None,
+                true,
                 scriptArguments));
+        }
+
+        /// <summary>
+        /// Cancels Package-owned background process parents before Unity starts
+        /// unloading the managed domain. Child Provider/MCP processes are not
+        /// enumerated or terminated here.
+        /// </summary>
+        internal static void CancelBackgroundProcesses()
+        {
+            Process[] processes;
+            lock (ActiveProcessLock)
+                processes = ActiveBackgroundProcesses.ToArray();
+
+            foreach (var process in processes)
+                TryKillProcess(process);
         }
 
         private static AICodedbCommandResult UnsupportedPlatformResult()
@@ -831,7 +904,9 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbCommandResult RunProcess(
             ProcessStartInfo startInfo,
             int timeoutMilliseconds,
-            Action<string> outputLine = null)
+            Action<string> outputLine = null,
+            CancellationToken cancellationToken = default(CancellationToken),
+            bool cancelOnDomainReload = false)
         {
             var output = new StringBuilder();
             var error = new StringBuilder();
@@ -840,11 +915,13 @@ namespace Rice.AI.Codedb.Editor
             var outputCompleted = new TaskCompletionSource<bool>();
             var errorCompleted = new TaskCompletionSource<bool>();
             var stopwatch = Stopwatch.StartNew();
+            Process activeProcess = null;
 
             try
             {
                 using (var process = new Process())
                 {
+                    activeProcess = process;
                     process.StartInfo = startInfo;
                     process.OutputDataReceived += (sender, args) =>
                     {
@@ -873,14 +950,39 @@ namespace Rice.AI.Codedb.Editor
                     if (!process.Start())
                         return new AICodedbCommandResult(-1, string.Empty, "Failed to start process.", false, GetElapsedMilliseconds(stopwatch));
 
+                    if (cancelOnDomainReload)
+                    {
+                        lock (ActiveProcessLock)
+                            ActiveBackgroundProcesses.Add(process);
+                    }
+
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
 
-                    if (!process.WaitForExit(timeoutMilliseconds))
+                    var deadline = stopwatch.ElapsedMilliseconds + Math.Max(1, timeoutMilliseconds);
+                    while (!process.HasExited)
                     {
-                        TryKillProcess(process);
-                        WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task);
-                        return new AICodedbCommandResult(-1, GetCapturedText(output, outputLock), GetCapturedText(error, errorLock), true, GetElapsedMilliseconds(stopwatch));
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            TryKillProcess(process);
+                            WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task, true);
+                            return new AICodedbCommandResult(
+                                -1,
+                                GetCapturedText(output, outputLock),
+                                "CodeDB background process was cancelled before domain reload.",
+                                true,
+                                GetElapsedMilliseconds(stopwatch));
+                        }
+
+                        var remaining = deadline - stopwatch.ElapsedMilliseconds;
+                        if (remaining <= 0)
+                        {
+                            TryKillProcess(process);
+                            WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task);
+                            return new AICodedbCommandResult(-1, GetCapturedText(output, outputLock), GetCapturedText(error, errorLock), true, GetElapsedMilliseconds(stopwatch));
+                        }
+
+                        process.WaitForExit((int)Math.Min(100, remaining));
                     }
 
                     WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task);
@@ -895,6 +997,14 @@ namespace Rice.AI.Codedb.Editor
                     errorText = errorText.TrimEnd() + Environment.NewLine;
 
                 return new AICodedbCommandResult(-1, GetCapturedText(output, outputLock), errorText + exception.Message, false, GetElapsedMilliseconds(stopwatch));
+            }
+            finally
+            {
+                if (cancelOnDomainReload)
+                {
+                    lock (ActiveProcessLock)
+                        ActiveBackgroundProcesses.RemoveAll(process => object.ReferenceEquals(process, activeProcess));
+                }
             }
         }
 
@@ -920,10 +1030,16 @@ namespace Rice.AI.Codedb.Editor
         /// <summary>
         /// Gives asynchronous stdout and stderr readers a bounded chance to deliver their final lines.
         /// </summary>
-        private static void WaitForOutputDrain(Task outputCompleted, Task errorCompleted)
+        private static void WaitForOutputDrain(
+            Task outputCompleted,
+            Task errorCompleted,
+            bool suppressWarning = false)
         {
             if (!Task.WaitAll(new[] { outputCompleted, errorCompleted }, OutputDrainTimeoutMilliseconds))
-                Debug.LogWarning("Codedb process exited while redirected output remained open; continuing with the output captured so far.");
+            {
+                if (!suppressWarning)
+                    Debug.LogWarning("Codedb process exited while redirected output remained open; continuing with the output captured so far.");
+            }
         }
 
         /// <summary>

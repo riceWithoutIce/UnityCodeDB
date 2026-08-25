@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 
@@ -52,6 +53,18 @@ namespace Rice.AI.Codedb.Editor
             return Run(context, AICodedbHostPayloadAction.DryRun, false);
         }
 
+        internal static AICodedbCommandResult ReadStatus(
+            AICodedbEditorExecutionContext context,
+            CancellationToken cancellationToken)
+        {
+            return Run(
+                context,
+                AICodedbHostPayloadAction.DryRun,
+                false,
+                false,
+                cancellationToken);
+        }
+
         internal static Task<AICodedbCommandResult> RunProbeAsync()
         {
             return RunAsync(AICodedbHostPayloadAction.Probe, false, ReadTimeoutMilliseconds);
@@ -60,6 +73,18 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunProbe(AICodedbEditorExecutionContext context)
         {
             return Run(context, AICodedbHostPayloadAction.Probe, false);
+        }
+
+        internal static AICodedbCommandResult RunProbe(
+            AICodedbEditorExecutionContext context,
+            CancellationToken cancellationToken)
+        {
+            return Run(
+                context,
+                AICodedbHostPayloadAction.Probe,
+                false,
+                false,
+                cancellationToken);
         }
 
         internal static AICodedbCommandResult RunDryRun()
@@ -89,6 +114,18 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunUpgrade(AICodedbEditorExecutionContext context)
         {
             return Run(context, AICodedbHostPayloadAction.Upgrade, false);
+        }
+
+        internal static AICodedbCommandResult RunUpgrade(
+            AICodedbEditorExecutionContext context,
+            CancellationToken cancellationToken)
+        {
+            return Run(
+                context,
+                AICodedbHostPayloadAction.Upgrade,
+                false,
+                false,
+                cancellationToken);
         }
 
         internal static AICodedbCommandResult RunRedeploy(bool confirmedProjectMutation)
@@ -252,6 +289,21 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             bool showProgress = false)
         {
+            return Run(
+                context,
+                action,
+                confirmedProjectMutation,
+                showProgress,
+                CancellationToken.None);
+        }
+
+        private static AICodedbCommandResult Run(
+            AICodedbEditorExecutionContext context,
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            bool showProgress,
+            CancellationToken cancellationToken)
+        {
             string[] arguments;
             try
             {
@@ -273,6 +325,15 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
+                if (cancellationToken != CancellationToken.None)
+                {
+                    return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
+                        context,
+                        timeout,
+                        cancellationToken,
+                        arguments);
+                }
+
                 return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
                     context,
                     timeout,

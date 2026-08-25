@@ -113,20 +113,34 @@ namespace Rice.AI.Codedb.Editor
             var productState = displayState;
             var cachedReady = productState == AICodedbProductState.Ready;
             var cachedMissingPrerequisite = productState == AICodedbProductState.MissingPrerequisite;
+            var cachedUninstalled = productState == AICodedbProductState.Uninstalled;
+            var cachedNeedsAttention = productState == AICodedbProductState.NeedsAttention;
             var prerequisiteState = cachedReady
                 ? AICodedbProductLayerState.Current
                 : cachedMissingPrerequisite
                     ? AICodedbProductLayerState.Missing
+                    : cachedUninstalled
+                        ? AICodedbProductLayerState.Unknown
+                        : cachedNeedsAttention
+                            ? AICodedbProductLayerState.Blocked
                     : AICodedbProductLayerState.Pending;
             var layerState = cachedReady
                 ? AICodedbProductLayerState.Current
                 : cachedMissingPrerequisite
                     ? AICodedbProductLayerState.Unknown
+                    : cachedUninstalled
+                        ? AICodedbProductLayerState.Unknown
+                        : cachedNeedsAttention
+                            ? AICodedbProductLayerState.Blocked
                     : AICodedbProductLayerState.Pending;
             var detail = cachedReady
                 ? "The last verified Ready result is retained while Play mode is active; live checks resume after Play."
                 : cachedMissingPrerequisite
                     ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
+                : cachedUninstalled
+                    ? "CodeDB is uninstalled from this project; live checks resume after installation."
+                : cachedNeedsAttention
+                    ? "The last CodeDB check needs attention; live checks resume in the background."
                 : "Checking project integration in the background.";
             var runtimeRelativePath = cachedReady
                 ? AICodedbProjectSettings.RuntimeRelativePath
@@ -135,8 +149,12 @@ namespace Rice.AI.Codedb.Editor
                 ? AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId
                 : string.Empty;
             ProjectIntegrationStatus = new AICodedbProjectIntegrationStatus(
-                AICodedbProjectIntegrationState.Installed,
-                AICodedbProjectCleanupState.None,
+                cachedUninstalled
+                    ? AICodedbProjectIntegrationState.Uninstalled
+                    : AICodedbProjectIntegrationState.Installed,
+                cachedUninstalled
+                    ? AICodedbProjectCleanupState.Complete
+                    : AICodedbProjectCleanupState.None,
                 string.Empty,
                 detail);
             ProductStatus = new AICodedbProductStatus(
@@ -242,7 +260,11 @@ namespace Rice.AI.Codedb.Editor
             ToolProfile = AICodedbStatusItem.Ok("Default profile", AICodedbProjectSettings.DefaultToolProfile, "Read-only discovery and source lookup.");
             OverallState = cachedReady
                 ? AICodedbStatusState.Ok
+                : cachedUninstalled
+                    ? AICodedbStatusState.Inactive
                 : cachedMissingPrerequisite
+                    ? AICodedbStatusState.Error
+                : cachedNeedsAttention
                     ? AICodedbStatusState.Error
                     : AICodedbStatusState.Warning;
             OverallTitle = CreateOverallTitle(productState, projectDisplayName);
@@ -289,6 +311,18 @@ namespace Rice.AI.Codedb.Editor
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
                 AICodedbProductState.MissingPrerequisite);
+        }
+
+        /// <summary>
+        /// Creates a display-only snapshot from lifecycle SessionState. It is
+        /// used while the background worker is between passes so opening the
+        /// Manager does not trigger a second status process.
+        /// </summary>
+        internal static AICodedbStatusSnapshot CreateCachedState(
+            string projectDisplayName,
+            AICodedbProductState state)
+        {
+            return new AICodedbStatusSnapshot(projectDisplayName, state);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(

@@ -544,7 +544,49 @@ Assert-True -Condition $repairFunction.Success -Message "Package boundary could 
 Assert-True `
     -Condition ($repairFunction.Groups["body"].Value.IndexOf("Complete-OwnedLegacyRedeployHostUseGate", [StringComparison]::Ordinal) -lt 0) `
     -Message "Repair must never use the Redeploy-only gate that can stop a recognized legacy watcher."
+$supervisorBridgePath = Join-Path $packageRoot "Editor\AICodedbSupervisorBridge.cs"
+Assert-True -Condition (Test-Path -LiteralPath $supervisorBridgePath -PathType Leaf) -Message "Package is missing the v0.3 Supervisor Bridge source."
+$supervisorBridgeSource = [System.IO.File]::ReadAllText($supervisorBridgePath)
+Assert-True `
+    -Condition ($supervisorBridgeSource.IndexOf("protocol_version", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("NamedPipeClientStream", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("Task.Run", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("TryGetExpectedWindowsPipeName", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("CurrentGenerationId", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("CORE_READY", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("ReadBoundedLine", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("provider_ready_at_utc", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Supervisor Bridge must use a versioned asynchronous named-pipe boundary."
+foreach ($forbiddenBridgeMainThreadCall in @(
+    "EditorApplication.",
+    "AssetDatabase.",
+    "Process.Start(",
+    "RunPowerShellScript("
+)) {
+    Assert-True `
+        -Condition ($supervisorBridgeSource.IndexOf($forbiddenBridgeMainThreadCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Supervisor Bridge must not own Unity callbacks or synchronous process launch: $forbiddenBridgeMainThreadCall"
+}
+$supervisorQueuePath = Join-Path $packageRoot "Editor\AICodedbSupervisorRequestQueue.cs"
+Assert-True -Condition (Test-Path -LiteralPath $supervisorQueuePath -PathType Leaf) -Message "Package is missing the v0.3 Supervisor request queue source."
+$supervisorQueueSource = [System.IO.File]::ReadAllText($supervisorQueuePath)
+foreach ($requiredQueueBoundary in @(
+    "AICodedbSupervisorRequestKind",
+    "AICodedbSupervisorRequestPriority",
+    "RunContinuationsAsynchronously",
+    "TakeNextEntryLocked",
+    "SetMaintenanceSuspended",
+    "Invalidate"
+)) {
+    Assert-True `
+        -Condition ($supervisorQueueSource.IndexOf($requiredQueueBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Supervisor request queue is missing boundary: $requiredQueueBoundary"
+}
 $editorLifecycleSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbEditorLifecycle.cs"))
+Assert-True `
+    -Condition ($editorLifecycleSource.IndexOf("SupervisorRequestQueue.Enqueue(", [StringComparison]::Ordinal) -ge 0 -and
+        $editorLifecycleSource.IndexOf("SupervisorRequestQueue.Invalidate(", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Editor lifecycle must route reconcile/reconnect work through the Supervisor request queue."
 $initializeOnLoadConstructor = [regex]::Match(
     $editorLifecycleSource,
     '(?s)static\s+AICodedbEditorLifecycle\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+void\s+QueueDeferredInitialization')
@@ -614,12 +656,68 @@ foreach ($forbiddenMainThreadCall in @(
         -Condition ($editorUpdateFunction.Groups["body"].Value.IndexOf($forbiddenMainThreadCall, [StringComparison]::Ordinal) -lt 0) `
         -Message "Editor heartbeat directly invokes main-thread work: $forbiddenMainThreadCall"
 }
+$boundaryCancellationFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+CancelBackgroundMaintenanceForBoundary\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*internal\s+static\s+AICodedbSupervisorSnapshot')
+Assert-True -Condition $boundaryCancellationFunction.Success -Message "Package boundary could not isolate lifecycle boundary cancellation."
+Assert-True `
+    -Condition ($boundaryCancellationFunction.Groups["body"].Value.IndexOf("AICodedbProcessRunner.CancelBackgroundProcesses(", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Play/domain-reload cancellation must not synchronously inspect or kill processes."
+$quittingFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+OnEditorQuitting\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+void\s+OnBeforeAssemblyReload')
+Assert-True -Condition $quittingFunction.Success -Message "Package boundary could not isolate Editor quitting callback."
+Assert-True `
+    -Condition ($quittingFunction.Groups["body"].Value.IndexOf("QueueEditorLeaseDeletion(", [StringComparison]::Ordinal) -ge 0 -and
+        $quittingFunction.Groups["body"].Value.IndexOf("DeleteEditorLease(", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Editor quitting must queue lease deletion instead of performing filesystem I/O inline."
+$schedulerSuspensionFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)internal\s+void\s+SetMaintenanceSuspended\s*\(\s*bool\s+suspended\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+QueueProcessCancellation')
+Assert-True -Condition $schedulerSuspensionFunction.Success -Message "Package boundary could not isolate scheduler suspension."
+Assert-True `
+    -Condition ($schedulerSuspensionFunction.Groups["body"].Value.IndexOf("QueueProcessCancellation(", [StringComparison]::Ordinal) -ge 0 -and
+        $schedulerSuspensionFunction.Groups["body"].Value.IndexOf("AICodedbProcessRunner.CancelBackgroundProcesses(", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Scheduler suspension must defer process cleanup to a worker."
+$playCallbackFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+OnPlayModeStateChanged\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*private\s+static\s+void\s+OnEditorQuitting')
+Assert-True -Condition $playCallbackFunction.Success -Message "Package boundary could not isolate the Play-mode callback."
+foreach ($forbiddenBoundaryIo in @(
+    "AICodedbPaths.CaptureExecutionContext(",
+    "AICodedbHostPayloadMaterializer.",
+    "AICodedbHostGenerationStore.Resolve(",
+    "Process.",
+    "File.",
+    "Directory.",
+    "PackageInfo."
+)) {
+    Assert-True `
+        -Condition ($playCallbackFunction.Groups["body"].Value.IndexOf($forbiddenBoundaryIo, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Play-mode callback still performs synchronous CodeDB work: $forbiddenBoundaryIo"
+}
+$reloadCallbackFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+OnBeforeAssemblyReload\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+async\s+void\s+BeginReconcile')
+Assert-True -Condition $reloadCallbackFunction.Success -Message "Package boundary could not isolate the assembly-reload callback."
+foreach ($forbiddenBoundaryIo in @(
+    "AICodedbHostPayloadMaterializer.",
+    "AICodedbHostGenerationStore.Resolve(",
+    "Process.",
+    "File.",
+    "Directory.",
+    "PackageInfo."
+)) {
+    Assert-True `
+        -Condition ($reloadCallbackFunction.Groups["body"].Value.IndexOf($forbiddenBoundaryIo, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Assembly-reload callback still performs synchronous CodeDB work: $forbiddenBoundaryIo"
+}
 $reconcileWorkerFunction = [regex]::Match(
     $editorLifecycleSource,
     '(?s)private\s+static\s+LifecycleReconcileResult\s+RunReconcileWorker\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static')
 Assert-True -Condition $reconcileWorkerFunction.Success -Message "Package boundary could not isolate Editor lifecycle reconcile worker."
 $readStatusIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
-    "AICodedbHostPayloadMaterializer.ReadStatus(context)",
+    "AICodedbHostPayloadMaterializer.ReadStatus(context",
     [StringComparison]::Ordinal)
 $prerequisiteLeaseGateIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
     "ApplyPrerequisiteGatedLeaseRefresh(",
@@ -627,6 +725,44 @@ $prerequisiteLeaseGateIndex = $reconcileWorkerFunction.Groups["body"].Value.Inde
 Assert-True `
     -Condition ($readStatusIndex -ge 0 -and $prerequisiteLeaseGateIndex -gt $readStatusIndex) `
     -Message "Editor lifecycle must classify machine prerequisites before any lease publication gate."
+$managerSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbManagerWindow.cs"))
+$managerEnableFunction = [regex]::Match(
+    $managerSource,
+    '(?s)private\s+void\s+OnEnable\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+OnDisable')
+Assert-True -Condition $managerEnableFunction.Success -Message "Package boundary could not isolate Manager OnEnable."
+foreach ($forbiddenManagerOpenCall in @(
+    "RefreshTransientHostStatusAsync(",
+    "AICodedbHostPayloadMaterializer.",
+    "RunPowerShellScript(",
+    "BeginStatusRefresh(true)"
+)) {
+    Assert-True `
+        -Condition ($managerEnableFunction.Groups["body"].Value.IndexOf($forbiddenManagerOpenCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Manager opening must not launch synchronous or duplicate CodeDB work: $forbiddenManagerOpenCall"
+}
+$managerBeginRefreshFunction = [regex]::Match(
+    $managerSource,
+    '(?s)private\s+void\s+BeginStatusRefresh\s*\(\s*bool\s+force\s*=\s*false\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+bool\s+TryApplyCachedLifecycleStatus')
+Assert-True -Condition $managerBeginRefreshFunction.Success -Message "Package boundary could not isolate Manager status refresh scheduling."
+Assert-True `
+    -Condition ($managerBeginRefreshFunction.Groups["body"].Value.IndexOf("if (!force)", [StringComparison]::Ordinal) -ge 0 -and
+        $managerBeginRefreshFunction.Groups["body"].Value.IndexOf("RefreshTransientHostStatusAsync()", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Manager status refresh must reserve direct materializer launch for explicit force refresh."
+$managerTransientRefreshFunction = [regex]::Match(
+    $managerSource,
+    '(?s)private\s+void\s+ObserveTransientHostStatus\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+async\s+void\s+RefreshTransientHostStatusAsync')
+Assert-True -Condition $managerTransientRefreshFunction.Success -Message "Package boundary could not isolate Manager transient status observation."
+Assert-True `
+    -Condition ($managerTransientRefreshFunction.Groups["body"].Value.IndexOf("AICodedbEditorLifecycle.RequestBackgroundStatusObservation()", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Play-mode transient refresh must request the Lifecycle worker."
+foreach ($forbiddenTransientRefreshCall in @(
+    "BeginStatusRefresh(true)",
+    "RefreshTransientHostStatusAsync()"
+)) {
+    Assert-True `
+        -Condition ($managerTransientRefreshFunction.Groups["body"].Value.IndexOf($forbiddenTransientRefreshCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Play-mode transient refresh must not launch a second status process: $forbiddenTransientRefreshCall"
+}
 $editorMaterializerSource = Get-Content -LiteralPath (Join-Path $packageRoot "Editor\AICodedbHostPayloadMaterializer.cs") -Raw
 Assert-True `
     -Condition ([regex]::IsMatch($editorMaterializerSource, 'RunRedeploy\s*\(\s*bool\s+confirmedProjectMutation\s*\)')) `

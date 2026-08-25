@@ -52,6 +52,9 @@ namespace Rice.AI.Codedb.Editor
 
     internal static class AICodedbPaths
     {
+        private static readonly object PackageRootLock = new object();
+        private static string _cachedPackageRootPath = string.Empty;
+
         internal static string ProjectRoot => NormalizePath(Path.Combine(Application.dataPath, ".."));
         internal static string PackageRootPath => ResolvePackageRootPath();
         internal static string HostPayloadMarkerPath => GetProjectPath(AICodedbProjectSettings.HostPayloadMarkerRelativePath);
@@ -104,7 +107,11 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbEditorExecutionContext CaptureExecutionContext()
         {
             var projectRoot = ProjectRoot;
-            var projectName = new DirectoryInfo(projectRoot).Name;
+            // Path.GetFileName is intentionally used here instead of
+            // DirectoryInfo. Context capture is also used by Manager startup;
+            // it must not perform a filesystem metadata query on Unity's main
+            // thread.
+            var projectName = Path.GetFileName(projectRoot.TrimEnd('/', '\\'));
             return new AICodedbEditorExecutionContext(
                 Application.platform,
                 projectRoot,
@@ -200,15 +207,25 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         private static string ResolvePackageRootPath()
         {
-            var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
-            if (packageInfo == null
-                || !string.Equals(packageInfo.name, AICodedbProjectSettings.PackageName, StringComparison.Ordinal)
-                || string.IsNullOrWhiteSpace(packageInfo.resolvedPath)
-                || !Path.IsPathRooted(packageInfo.resolvedPath))
-                throw new InvalidOperationException(
-                    "Unity Package Manager did not provide the expected resolved CodeDB Package identity and path.");
+            if (!string.IsNullOrWhiteSpace(_cachedPackageRootPath))
+                return _cachedPackageRootPath;
 
-            return NormalizePath(packageInfo.resolvedPath);
+            lock (PackageRootLock)
+            {
+                if (!string.IsNullOrWhiteSpace(_cachedPackageRootPath))
+                    return _cachedPackageRootPath;
+
+                var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
+                if (packageInfo == null
+                    || !string.Equals(packageInfo.name, AICodedbProjectSettings.PackageName, StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(packageInfo.resolvedPath)
+                    || !Path.IsPathRooted(packageInfo.resolvedPath))
+                    throw new InvalidOperationException(
+                        "Unity Package Manager did not provide the expected resolved CodeDB Package identity and path.");
+
+                _cachedPackageRootPath = NormalizePath(packageInfo.resolvedPath);
+                return _cachedPackageRootPath;
+            }
         }
     }
 }
