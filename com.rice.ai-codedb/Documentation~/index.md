@@ -60,6 +60,8 @@ Unity with a NotElevated MCP client were explicitly deferred without being
 marked passed; they remain in the
 [v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
+The active project-tool availability blocker is frozen in the
+[v0.3.0 P0 project-local Codex MCP discovery task](v0.3.0-p0-codex-client-discovery.md).
 The first active runtime-isolation slice is documented in the
 [v0.3.0 P1-A Supervisor request queue](v0.3.0-p1-supervisor-queue.md).
 
