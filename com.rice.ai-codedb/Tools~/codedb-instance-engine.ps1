@@ -114,9 +114,9 @@ function New-InstanceDesiredStateDocument {
 
 function Get-ValidatedCurrentInstance {
     param(
+        [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [switch]$AllowMissing,
-        [switch]$AllowPreviousGeneration,
         [switch]$LastKnownGood
     )
 
@@ -134,16 +134,14 @@ function Get-ValidatedCurrentInstance {
     $selection = $selectionJson.Document
     $instanceId = Get-RequiredJsonString -Object $selection -Name "instance_id" -Label "current instance selection"
     $instanceRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $selection -Name "instance_relative_path" -Label "current instance selection") -Label "instance selection path"
+    $selectionGenerationId = Get-RequiredJsonString -Object $selection -Name "generation_id" -Label "current instance selection"
     $expectedRelativePath = "$($script:InstancesRelativePath)/$instanceId"
     if ((Get-RequiredJsonInt32 -Object $selection -Name "schema_version" -Label "current instance selection") -ne 1 -or
         -not [string]::Equals((Get-RequiredJsonString -Object $selection -Name "managed_by" -Label "current instance selection"), $script:ManagedBy, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-RequiredJsonString -Object $selection -Name "project_identity" -Label "current instance selection"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
         $instanceId -cnotmatch '^[0-9a-f]{32}$' -or
         -not [string]::Equals($instanceRelativePath, $expectedRelativePath, [StringComparison]::Ordinal) -or
-        ((-not $AllowPreviousGeneration) -and
-         -not [string]::Equals((Get-RequiredJsonString -Object $selection -Name "generation_id" -Label "current instance selection"), $script:GenerationId, [StringComparison]::Ordinal)) -or
-        ($AllowPreviousGeneration -and
-         (Get-RequiredJsonString -Object $selection -Name "generation_id" -Label "current instance selection") -cnotmatch '^[A-Za-z0-9._-]{1,64}$')) {
+        $selectionGenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$') {
         throw "Current CodeDB instance selection identity is invalid."
     }
     $instanceRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $instanceRelativePath -Label "current instance root"
@@ -158,19 +156,19 @@ function Get-ValidatedCurrentInstance {
         -not [string]::Equals((Get-FileSha256 -Path $instanceManifestPath), $expectedManifestHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Current CodeDB instance manifest hash is invalid."
     }
-    $manifest = $instanceJson.Document
-    if ((Get-RequiredJsonInt32 -Object $manifest -Name "schema_version" -Label "current instance manifest") -ne 1 -or
-        -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "managed_by" -Label "current instance manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "project_identity" -Label "current instance manifest"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "instance_id" -Label "current instance manifest"), $instanceId, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "instance_relative_path" -Label "current instance manifest"), $instanceRelativePath, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "state" -Label "current instance manifest"), "READY", [StringComparison]::Ordinal) -or
-        ((-not $AllowPreviousGeneration) -and
-         -not [string]::Equals((Get-RequiredJsonString -Object $manifest -Name "generation_id" -Label "current instance manifest"), $script:GenerationId, [StringComparison]::Ordinal)) -or
-        ($AllowPreviousGeneration -and
-         (Get-RequiredJsonString -Object $manifest -Name "generation_id" -Label "current instance manifest") -cnotmatch '^[A-Za-z0-9._-]{1,64}$')) {
+    $instanceManifestDocument = $instanceJson.Document
+    $manifestGenerationId = Get-RequiredJsonString -Object $instanceManifestDocument -Name "generation_id" -Label "current instance manifest"
+    if ((Get-RequiredJsonInt32 -Object $instanceManifestDocument -Name "schema_version" -Label "current instance manifest") -ne 1 -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $instanceManifestDocument -Name "managed_by" -Label "current instance manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $instanceManifestDocument -Name "project_identity" -Label "current instance manifest"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $instanceManifestDocument -Name "instance_id" -Label "current instance manifest"), $instanceId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $instanceManifestDocument -Name "instance_relative_path" -Label "current instance manifest"), $instanceRelativePath, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $instanceManifestDocument -Name "state" -Label "current instance manifest"), "READY", [StringComparison]::Ordinal) -or
+        $manifestGenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        -not [string]::Equals($selectionGenerationId, $manifestGenerationId, [StringComparison]::Ordinal)) {
         throw "Current CodeDB instance manifest identity is invalid."
     }
+    $generation = Assert-InstanceGenerationClosure -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceManifest $instanceManifestDocument
     return [pscustomobject]@{
         InstanceId = $instanceId
         InstanceRelativePath = $instanceRelativePath
@@ -179,7 +177,9 @@ function Get-ValidatedCurrentInstance {
         ManifestSha256 = $expectedManifestHash
         SelectionPath = $selectionPath
         SelectionText = $selectionJson.Text
-        Manifest = $manifest
+        Manifest = $instanceManifestDocument
+        Generation = $generation
+        GenerationDisposition = $generation.Disposition
     }
 }
 
@@ -938,9 +938,12 @@ function New-InstanceSelectionDocument {
     }
 }
 
-function Get-InstancePreviousSelection {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
-    try { return Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot -AllowMissing -AllowPreviousGeneration }
+function Get-InstanceSelectedInstance {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+    try { return Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing }
     catch { throw "Existing CodeDB instance selection is ambiguous; Reinstall cannot safely replace it: $($_.Exception.Message)" }
 }
 
@@ -964,7 +967,10 @@ function Assert-InstancePreflight {
                 throw "Stable instance wrapper target is not a regular file."
             }
             Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label "stable instance wrapper"
-            $expectedWrapperHash = (Get-InstanceManifestExpectedHash -Manifest $Manifest -Target $wrapperTarget)
+            $previousPackageIdentity = Get-InstanceGenerationPackageIdentity `
+                -Manifest $Manifest `
+                -InstanceManifest $PreviousInstance.Manifest
+            $expectedWrapperHash = [string]$previousPackageIdentity.StableWrapperSha256
             if (-not [string]::Equals((Get-FileSha256 -Path $wrapperPath), $expectedWrapperHash, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Stable instance wrapper target contains unowned or drifted bytes."
             }
@@ -1073,6 +1079,112 @@ function Get-InstanceManifestExpectedHash {
     return $hash.ToLowerInvariant()
 }
 
+function Get-InstanceGenerationPackageIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$InstanceManifest
+    )
+
+    $packageVersion = Get-RequiredJsonString -Object $InstanceManifest -Name "package_version" -Label "retired instance manifest"
+    $payloadVersion = Get-RequiredJsonString -Object $InstanceManifest -Name "payload_version" -Label "retired instance manifest"
+    $payloadSequence = Get-RequiredJsonInt32 -Object $InstanceManifest -Name "payload_sequence" -Label "retired instance manifest"
+    $generationId = Get-RequiredJsonString -Object $InstanceManifest -Name "generation_id" -Label "retired instance manifest"
+    $bootstrapProtocol = Get-RequiredJsonInt32 -Object $InstanceManifest -Name "bootstrap_protocol" -Label "retired instance manifest"
+    $workerRelativePath = ConvertTo-SafeRelativePath `
+        -Path (Get-RequiredJsonString -Object $InstanceManifest -Name "worker_relative_path" -Label "retired instance manifest") `
+        -Label "retired instance worker path"
+    if (-not [string]::Equals($workerRelativePath, $script:InstanceWorkerRelativePath, [StringComparison]::Ordinal)) {
+        throw "Retired instance worker path is not the reviewed Package path."
+    }
+
+    $isCurrent = [string]::Equals($packageVersion, [string]$Manifest.PackageVersion, [StringComparison]::Ordinal) -and
+        [string]::Equals($payloadVersion, [string]$Manifest.PayloadVersion, [StringComparison]::Ordinal) -and
+        $payloadSequence -eq [int]$Manifest.PayloadSequence -and
+        [string]::Equals($generationId, [string]$Manifest.GenerationId, [StringComparison]::Ordinal) -and
+        $bootstrapProtocol -eq [int]$Manifest.BootstrapProtocol
+    if ($isCurrent) {
+        $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
+        return [pscustomobject]@{
+            Current = $true
+            PackageVersion = $packageVersion
+            PayloadVersion = $payloadVersion
+            PayloadSequence = $payloadSequence
+            GenerationId = $generationId
+            BootstrapProtocol = $bootstrapProtocol
+            GenerationManifestSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target ($generationTargetPrefix + "generation-manifest.json")
+            WorkerSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target ($generationTargetPrefix + $workerRelativePath)
+            StableWrapperSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+        }
+    }
+
+    if ($payloadSequence -ge [int]$Manifest.PayloadSequence) {
+        throw "Retired instance reuses or exceeds the current payload sequence with a different identity."
+    }
+    $matches = @($Manifest.BootstrapTransitions | Where-Object {
+        [string]::Equals([string]$_.SourcePackageVersion, $packageVersion, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$_.SourcePayloadVersion, $payloadVersion, [StringComparison]::Ordinal) -and
+        [int]$_.SourcePayloadSequence -eq $payloadSequence -and
+        [string]::Equals([string]$_.SourceGenerationId, $generationId, [StringComparison]::Ordinal) -and
+        [int]$_.SourceBootstrapProtocol -eq $bootstrapProtocol
+    })
+    if ($matches.Count -ne 1) {
+        throw "Retired instance is not an exact Package-declared transition."
+    }
+
+    $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
+    $generationManifestTarget = $generationTargetPrefix + "generation-manifest.json"
+    $workerTarget = $generationTargetPrefix + $workerRelativePath
+    if ($null -eq $Manifest.RetiredTargetMap -or
+        -not $Manifest.RetiredTargetMap.ContainsKey($generationManifestTarget) -or
+        -not $Manifest.RetiredTargetMap.ContainsKey($workerTarget)) {
+        throw "Package payload does not retain the declared previous generation identity."
+    }
+
+    $packageGenerationRoot = ConvertTo-AbsoluteChildPath `
+        -Root $Manifest.Root `
+        -RelativePath "Generations/$generationId" `
+        -Label "Package previous generation"
+    $packageGenerationManifestPath = Join-Path $packageGenerationRoot "generation-manifest.json"
+    $packageWorkerPath = ConvertTo-AbsoluteChildPath `
+        -Root $packageGenerationRoot `
+        -RelativePath $workerRelativePath `
+        -Label "Package previous generation worker"
+    Assert-NoReparsePoint -Path $packageGenerationRoot -Root $Manifest.Root -Label "Package previous generation"
+    Assert-NoReparsePoint -Path $packageGenerationManifestPath -Root $packageGenerationRoot -Label "Package previous generation manifest"
+    Assert-NoReparsePoint -Path $packageWorkerPath -Root $packageGenerationRoot -Label "Package previous generation worker"
+    if (-not (Test-Path -LiteralPath $packageGenerationManifestPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $packageWorkerPath -PathType Leaf)) {
+        throw "Package-preserved previous generation identity is incomplete."
+    }
+
+    return [pscustomobject]@{
+        Current = $false
+        PackageVersion = $packageVersion
+        PayloadVersion = $payloadVersion
+        PayloadSequence = $payloadSequence
+        GenerationId = $generationId
+        BootstrapProtocol = $bootstrapProtocol
+        GenerationManifestSha256 = Get-FileSha256 -Path $packageGenerationManifestPath
+        WorkerSha256 = Get-FileSha256 -Path $packageWorkerPath
+        StableWrapperSha256 = [string]$matches[0].SourceStableWrapperSha256
+    }
+}
+
+function Test-InstanceGenerationIdIsPackageSupported {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$GenerationId
+    )
+
+    $matches = if ([string]::Equals($GenerationId, [string]$Manifest.GenerationId, [StringComparison]::Ordinal)) { 1 } else { 0 }
+    foreach ($transition in @($Manifest.BootstrapTransitions)) {
+        if ([string]::Equals($GenerationId, [string]$transition.SourceGenerationId, [StringComparison]::Ordinal)) {
+            $matches++
+        }
+    }
+    return $matches -eq 1
+}
+
 function Assert-InstanceGenerationClosure {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -1080,10 +1192,8 @@ function Assert-InstanceGenerationClosure {
         [Parameter(Mandatory = $true)]$InstanceManifest
     )
 
-    $generationId = Get-RequiredJsonString -Object $InstanceManifest -Name "generation_id" -Label "retired instance manifest"
-    if (-not [string]::Equals($generationId, $script:GenerationId, [StringComparison]::Ordinal)) {
-        throw "Retired instance points to an unsupported generation: $generationId"
-    }
+    $packageIdentity = Get-InstanceGenerationPackageIdentity -Manifest $Manifest -InstanceManifest $InstanceManifest
+    $generationId = [string]$packageIdentity.GenerationId
     $generationRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $InstanceManifest -Name "generation_relative_path" -Label "retired instance manifest") -Label "retired instance generation path"
     $expectedGenerationRelativePath = "AIWork/.runtime/codedb/host/generations/$generationId"
     if (-not [string]::Equals($generationRelativePath, $expectedGenerationRelativePath, [StringComparison]::Ordinal)) {
@@ -1096,7 +1206,7 @@ function Assert-InstanceGenerationClosure {
     }
     $generationManifestPath = Join-Path $generationRoot "generation-manifest.json"
     Assert-NoReparsePoint -Path $generationManifestPath -Root $generationRoot -Label "retired instance generation manifest"
-    $expectedGenerationHash = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target ($script:GenerationTargetPrefix + "generation-manifest.json")
+    $expectedGenerationHash = [string]$packageIdentity.GenerationManifestSha256
     $recordedGenerationHash = (Get-RequiredJsonString -Object $InstanceManifest -Name "generation_manifest_sha256" -Label "retired instance manifest").ToLowerInvariant()
     if (-not [string]::Equals($recordedGenerationHash, $expectedGenerationHash, [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals((Get-FileSha256 -Path $generationManifestPath), $expectedGenerationHash, [StringComparison]::OrdinalIgnoreCase)) {
@@ -1108,6 +1218,10 @@ function Assert-InstanceGenerationClosure {
     if ((Get-RequiredJsonInt32 -Object $generationDocument -Name "schema_version" -Label "retired instance generation manifest") -ne 1 -or
         -not [string]::Equals((Get-RequiredJsonString -Object $generationDocument -Name "managed_by" -Label "retired instance generation manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-RequiredJsonString -Object $generationDocument -Name "generation_id" -Label "retired instance generation manifest"), $generationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $generationDocument -Name "package_version" -Label "retired instance generation manifest"), [string]$packageIdentity.PackageVersion, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $generationDocument -Name "payload_version" -Label "retired instance generation manifest"), [string]$packageIdentity.PayloadVersion, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonInt32 -Object $generationDocument -Name "payload_sequence" -Label "retired instance generation manifest") -ne [int]$packageIdentity.PayloadSequence -or
+        (Get-RequiredJsonInt32 -Object $generationDocument -Name "bootstrap_protocol" -Label "retired instance generation manifest") -ne [int]$packageIdentity.BootstrapProtocol -or
         $generationFiles.Count -eq 0) {
         throw "Retired instance generation manifest identity is invalid."
     }
@@ -1129,12 +1243,8 @@ function Assert-InstanceGenerationClosure {
     }
     Assert-ImmutableGenerationFilesystemClosure -Root $generationRoot -ExpectedFiles (@("generation-manifest.json") + @($seen.Keys)) -Label "retired immutable generation"
 
-    $workerRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $InstanceManifest -Name "worker_relative_path" -Label "retired instance manifest") -Label "retired instance worker path"
-    if (-not [string]::Equals($workerRelativePath, $script:InstanceWorkerRelativePath, [StringComparison]::Ordinal)) {
-        throw "Retired instance worker path is not the reviewed Package path."
-    }
-    $workerTarget = $script:GenerationTargetPrefix + $workerRelativePath
-    $expectedWorkerHash = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target $workerTarget
+    $workerRelativePath = $script:InstanceWorkerRelativePath
+    $expectedWorkerHash = [string]$packageIdentity.WorkerSha256
     $recordedWorkerHash = (Get-RequiredJsonString -Object $InstanceManifest -Name "worker_sha256" -Label "retired instance manifest").ToLowerInvariant()
     $workerPath = ConvertTo-AbsoluteChildPath -Root $generationRoot -RelativePath $workerRelativePath -Label "retired instance worker"
     Assert-NoReparsePoint -Path $workerPath -Root $generationRoot -Label "retired instance worker"
@@ -1143,7 +1253,12 @@ function Assert-InstanceGenerationClosure {
         -not [string]::Equals((Get-FileSha256 -Path $workerPath), $expectedWorkerHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Retired instance worker is not Package-owned."
     }
-    return [pscustomobject]@{ GenerationRoot = $generationRoot; GenerationId = $generationId; WorkerPath = $workerPath }
+    return [pscustomobject]@{
+        GenerationRoot = $generationRoot
+        GenerationId = $generationId
+        WorkerPath = $workerPath
+        Disposition = if ($packageIdentity.Current) { "CURRENT" } else { "TRUSTED_PREVIOUS" }
+    }
 }
 
 function Get-ValidatedRetiredInstance {
@@ -1257,7 +1372,7 @@ function Get-InstanceLeaseEvidence {
                 [string]::Equals((Get-RequiredJsonString -Object $lease -Name "managed_by" -Label "instance lease"), $script:ManagedBy, [StringComparison]::Ordinal) -and
                 [string]::Equals((Get-RequiredJsonString -Object $lease -Name "owner" -Label "instance lease"), "mcp", [StringComparison]::Ordinal) -and
                 [string]::Equals((Get-RequiredJsonString -Object $lease -Name "instance_id" -Label "instance lease"), $Evidence.InstanceId, [StringComparison]::Ordinal) -and
-                [string]::Equals((Get-RequiredJsonString -Object $lease -Name "generation_id" -Label "instance lease"), $script:GenerationId, [StringComparison]::Ordinal) -and
+                [string]::Equals((Get-RequiredJsonString -Object $lease -Name "generation_id" -Label "instance lease"), [string]$Evidence.Generation.GenerationId, [StringComparison]::Ordinal) -and
                 [string]::Equals($leaseId, [System.IO.Path]::GetFileNameWithoutExtension($item.Name), [StringComparison]::Ordinal) -and
                 (Get-RequiredJsonInt32 -Object $lease -Name "pid" -Label "instance lease") -eq [int]$match.Groups[1].Value -and
                 (Get-RequiredJsonString -Object $lease -Name "process_start_identity" -Label "instance lease") -match '^[0-9]{1,20}$' -and
@@ -1346,7 +1461,7 @@ function Get-InstanceCoordinatorEvidence {
         $startedText = Get-RequiredJsonString -Object $state -Name "started_at_utc" -Label "instance coordinator state"
         [DateTimeOffset]$started = [DateTimeOffset]::MinValue
         if ((Get-RequiredJsonInt32 -Object $state -Name "schema_version" -Label "instance coordinator state") -ne 2 -or
-            -not [string]::Equals((Get-RequiredJsonString -Object $state -Name "generation_id" -Label "instance coordinator state"), $script:GenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals((Get-RequiredJsonString -Object $state -Name "generation_id" -Label "instance coordinator state"), [string]$Evidence.Generation.GenerationId, [StringComparison]::Ordinal) -or
             -not [string]::Equals([System.IO.Path]::GetFullPath((Get-RequiredJsonString -Object $state -Name "root" -Label "instance coordinator state")), [System.IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals($runtimePath, $expectedRuntime, [StringComparison]::OrdinalIgnoreCase) -or
             (Get-RequiredJsonInt32 -Object $state -Name "coordinator_pid" -Label "instance coordinator state") -le 0 -or
@@ -1420,11 +1535,12 @@ function Get-ValidatedInstanceRetirementControls {
         $manifestSha256 = Get-RequiredJsonString -Object $document -Name "instance_manifest_sha256" -Label "retired instance control"
         $createdText = Get-RequiredJsonString -Object $document -Name "created_at_utc" -Label "retired instance control"
         [DateTimeOffset]$created = [DateTimeOffset]::MinValue
+        $controlGenerationId = Get-RequiredJsonString -Object $document -Name "generation_id" -Label "retired instance control"
         if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "retired instance control") -ne 1 -or
             -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label "retired instance control"), $script:ManagedBy, [StringComparison]::Ordinal) -or
             -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "project_identity" -Label "retired instance control"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
             -not [string]::Equals($instanceId, $match.Groups[1].Value, [StringComparison]::Ordinal) -or
-            -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_id" -Label "retired instance control"), [string]$Manifest.GenerationId, [StringComparison]::Ordinal) -or
+            -not (Test-InstanceGenerationIdIsPackageSupported -Manifest $Manifest -GenerationId $controlGenerationId) -or
             $manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
             -not [DateTimeOffset]::TryParse($createdText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$created)) {
             throw "Retired instance control identity is invalid."
@@ -1773,9 +1889,9 @@ function Invoke-InstanceConvergence {
             throw "$ActionName was cancelled because the project became UNINSTALLED while waiting for the lock."
         }
 
-        $previous = Get-InstancePreviousSelection -ProjectRoot $ProjectRoot
+        $previous = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         if ($ActionName -eq "Upgrade" -and $null -ne $previous -and
-            [string]::Equals((Get-RequiredJsonString -Object $previous.Manifest -Name "generation_id" -Label "current instance manifest"), $Manifest.GenerationId, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$previous.GenerationDisposition, "CURRENT", [StringComparison]::Ordinal) -and
             (Get-RequiredJsonInt32 -Object $previous.Manifest -Name "payload_sequence" -Label "current instance manifest") -eq $Manifest.PayloadSequence) {
             $currentReadiness = Get-InstanceCurrentReadiness -Manifest $Manifest -ProjectRoot $ProjectRoot -CurrentInstance $previous -LiveProbe
             if ($currentReadiness.Ready) {
@@ -1839,8 +1955,9 @@ function Invoke-InstanceConvergence {
         }
         Set-MaterializerCommandPhase -Phase "ACTIVATION"
         $verification = {
-            $selected = Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot
-            if (-not [string]::Equals($selected.InstanceId, $candidate.InstanceId, [StringComparison]::Ordinal)) {
+            $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+            if (-not [string]::Equals([string]$selected.GenerationDisposition, "CURRENT", [StringComparison]::Ordinal) -or
+                -not [string]::Equals($selected.InstanceId, $candidate.InstanceId, [StringComparison]::Ordinal)) {
                 throw "Activated current-instance pointer did not select the verified candidate."
             }
             $mcpVerification = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot
@@ -1857,7 +1974,7 @@ function Invoke-InstanceConvergence {
             -OperationRoot $operationRoot `
             -VerifyBeforeCommit $verification
 
-        $selected = Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot
+        $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         $cleanupState = Get-CombinedInstanceCleanupState `
             -ProjectRoot $ProjectRoot `
             -Manifest $Manifest `
@@ -1886,7 +2003,7 @@ function Invoke-InstanceConvergence {
             $current = $null
             $currentKnown = $false
             try {
-                $current = Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot -AllowMissing
+                $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
                 $currentKnown = $true
             } catch {
                 Write-Warning "Candidate cleanup retained the instance because current selection could not be validated: $($_.Exception.Message)"
@@ -1971,7 +2088,7 @@ function Invoke-InstanceUninstall {
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
-        $previous = Get-InstancePreviousSelection -ProjectRoot $ProjectRoot
+        $previous = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($AutomaticCleanup -and
             ($desiredBefore.DesiredState -ne "UNINSTALLED" -or
@@ -2099,7 +2216,7 @@ function Write-InstanceProductStatus {
         return $true
     }
     $current = $null
-    try { $current = Get-ValidatedCurrentInstance -ProjectRoot $ProjectRoot -AllowMissing }
+    try { $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing }
     catch {
         $detail = $_.Exception.Message
         Write-Host "[PRODUCT_LAYER INSTALLED] BLOCKED"
@@ -2120,6 +2237,18 @@ function Write-InstanceProductStatus {
         Write-Host "[INSTANCE] NONE"
         if ($RequireReady) {
             Throw-MaterializerError -Message "Current instance availability probe requires a selected Package-owned instance." -ExitCode 5
+        }
+        return $true
+    }
+    if (-not [string]::Equals([string]$current.GenerationDisposition, "CURRENT", [StringComparison]::Ordinal)) {
+        Write-Host "[PRODUCT_LAYER INSTALLED] MISSING"
+        Write-Host "[PRODUCT_LAYER CONFIGURED] PENDING"
+        Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"
+        Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
+        Write-Host "[INSTANCE] TRUSTED_PREVIOUS - $($current.InstanceId) generation $($current.Generation.GenerationId) is ready for automatic handoff."
+        Write-Host "[CLEANUP_STATE] PENDING"
+        if ($RequireReady) {
+            Throw-MaterializerError -Message "Current instance availability probe requires handoff from the trusted previous generation." -ExitCode 5
         }
         return $true
     }

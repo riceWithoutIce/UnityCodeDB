@@ -57,7 +57,7 @@ $powershellPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.33"
+$generationId = "poc.34"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -97,7 +97,7 @@ function Get-TestPayloadContentIdentitySha256 {
     }
     foreach ($transition in @($Manifest.bootstrap_transitions | Sort-Object source_payload_sequence, source_package_version)) {
         $identityLines.Add(
-            "bootstrap_transition=$($transition.source_marker_schema_version):$($transition.source_package_version):$($transition.source_payload_version):$($transition.source_payload_sequence):$($transition.source_generation_id):$($transition.source_bootstrap_protocol):$($transition.source_host_use_gate_version):$($transition.source_generation_lease_version):$($transition.source_flat_file_count):$($transition.source_flat_closure_sha256)")
+            "bootstrap_transition=$($transition.source_marker_schema_version):$($transition.source_package_version):$($transition.source_payload_version):$($transition.source_payload_sequence):$($transition.source_generation_id):$($transition.source_bootstrap_protocol):$($transition.source_host_use_gate_version):$($transition.source_generation_lease_version):$($transition.source_flat_file_count):$($transition.source_flat_closure_sha256):$($transition.source_stable_wrapper_sha256)")
     }
     foreach ($file in @($Manifest.files | Sort-Object target)) {
         if ([string]::Equals([string]$file.target, $CurrentPointerTarget, [StringComparison]::OrdinalIgnoreCase) -or
@@ -3580,8 +3580,14 @@ import path from "node:path";
 import readline from "node:readline";
 
 const mode = fs.readFileSync(path.join(process.cwd(), "probe-mode.txt"), "utf8").trim();
+const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const tools = ["codedb_context", "codedb_find", "codedb_read", "codedb_search", "codedb_status", "codedb_text_search"]
-  .map((name) => ({ name, description: name, inputSchema: { type: "object" } }));
+  .map((name) => ({
+    name,
+    description: name,
+    ...(mode === "MISSING_ANNOTATIONS" ? {} : { annotations }),
+    inputSchema: { type: "object" }
+  }));
 const statuses = {
   EDITOR_OFFLINE: ["Editor demand: offline", "Automatic refresh: editor_offline", "Lifecycle reason: EDITOR_OFFLINE", "Watch coordinator: stopped"],
   STARTING: ["Editor demand: online", "Automatic refresh: starting", "Lifecycle reason: STARTING", "Watch coordinator: stopped"],
@@ -3614,6 +3620,7 @@ for await (const line of lines) {
     Write-Utf8File -Path $wrapperPath -Content $wrapperSource
 
     $scenarios = @(
+        [pscustomobject]@{ Mode = "MISSING_ANNOTATIONS"; ExitCode = 1; StatusUsable = $false; SearchCallable = $false; Detail = "missing the required read-only MCP annotations" },
         [pscustomobject]@{ Mode = "EDITOR_OFFLINE"; ExitCode = 1; StatusUsable = $false; SearchCallable = $false; Detail = "EDITOR_OFFLINE" },
         [pscustomobject]@{ Mode = "STARTING"; ExitCode = 1; StatusUsable = $false; SearchCallable = $false; Detail = "STARTING" },
         [pscustomobject]@{ Mode = "COORDINATOR_UNREACHABLE"; ExitCode = 1; StatusUsable = $false; SearchCallable = $false; Detail = "COORDINATOR_UNREACHABLE" },
@@ -3637,14 +3644,15 @@ for await (const line of lines) {
         $evidence = $jsonLines[0] | ConvertFrom-Json
         Assert-Equal -Actual ([int]$evidence.schema_version) -Expected 2 -Message "MCP availability probe $($scenario.Mode) schema mismatch."
         Assert-True -Condition ([bool]$evidence.wrapper_initialize_callable) -Message "MCP availability probe $($scenario.Mode) did not distinguish wrapper initialize."
-        Assert-True -Condition ([bool]$evidence.tools_list_callable) -Message "MCP availability probe $($scenario.Mode) did not distinguish tools/list."
-        Assert-True -Condition ([bool]$evidence.codedb_status_callable) -Message "MCP availability probe $($scenario.Mode) did not distinguish codedb_status callability."
+        $expectedToolSchema = $scenario.Mode -ne "MISSING_ANNOTATIONS"
+        Assert-Equal -Actual ([bool]$evidence.tools_list_callable) -Expected $expectedToolSchema -Message "MCP availability probe $($scenario.Mode) tools/list schema mismatch."
+        Assert-Equal -Actual ([bool]$evidence.codedb_status_callable) -Expected $expectedToolSchema -Message "MCP availability probe $($scenario.Mode) codedb_status callability mismatch."
         Assert-Equal -Actual ([bool]$evidence.codedb_status_usable) -Expected $scenario.StatusUsable -Message "MCP availability probe $($scenario.Mode) usable status mismatch."
         Assert-Equal -Actual ([bool]$evidence.codedb_text_search_callable) -Expected $scenario.SearchCallable -Message "MCP availability probe $($scenario.Mode) bounded query mismatch."
         Assert-Equal -Actual ([string]$evidence.availability) -Expected $(if ($scenario.ExitCode -eq 0) { "AVAILABLE" } else { "UNAVAILABLE" }) -Message "MCP availability probe $($scenario.Mode) availability mismatch."
         Assert-True -Condition ([string]$evidence.detail -like "*$($scenario.Detail)*") -Message "MCP availability probe $($scenario.Mode) diagnostic mismatch."
     }
-    Write-Host "[OK] MCP availability distinguishes callable wrapper surface from EDITOR_OFFLINE, STARTING, COORDINATOR_UNREACHABLE, failed query, and usable backend states."
+    Write-Host "[OK] MCP availability requires read-only tool annotations and distinguishes callable wrapper surface from EDITOR_OFFLINE, STARTING, COORDINATOR_UNREACHABLE, failed query, and usable backend states."
 
     $productionInstanceProject = Join-Path $runRoot "production-instance-availability"
     $productionInstanceRoot = $null
@@ -4793,8 +4801,8 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Newer current Remove-boundary setup"
     $newerCurrent = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.34-review" `
-        -PriorPayloadSequence 34 `
+        -PriorGenerationId "poc.35-review" `
+        -PriorPayloadSequence 35 `
         -PriorPackageVersion "0.2.5-preview.6" `
         -Root $repairHostRoot `
         -PreserveManagedState `
@@ -4802,7 +4810,7 @@ function Invoke-RepairAcceptanceScenarios {
     $newerCurrentBefore = Get-FileSnapshot -Root $repairHostRoot
     $newerCurrentRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $newerCurrentRemove -ExitCode 3 -Label "Newer current.json Remove refusal"
-    Assert-True -Condition ($newerCurrentRemove.Text.Contains("current.json selects newer generation poc.34-review")) -Message "Remove did not report the newer current.json boundary."
+    Assert-True -Condition ($newerCurrentRemove.Text.Contains("current.json selects newer generation poc.35-review")) -Message "Remove did not report the newer current.json boundary."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerCurrentBefore -Message "Older Remove changed a newer current generation or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $newerCurrent.GenerationRoot -PathType Container) -Message "Older Remove deleted the newer current generation."
 
@@ -4812,8 +4820,8 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Newer LKG Remove-boundary setup"
     $newerLkg = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.34-review" `
-        -PriorPayloadSequence 34 `
+        -PriorGenerationId "poc.35-review" `
+        -PriorPayloadSequence 35 `
         -PriorPackageVersion "0.2.5-preview.6" `
         -Root $repairHostRoot `
         -PointerRelativePath $lastKnownGoodPointerRelativePath `
@@ -4822,7 +4830,7 @@ function Invoke-RepairAcceptanceScenarios {
     $newerLkgBefore = Get-FileSnapshot -Root $repairHostRoot
     $newerLkgRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $newerLkgRemove -ExitCode 3 -Label "Newer last-known-good Remove refusal"
-    Assert-True -Condition ($newerLkgRemove.Text.Contains("last-known-good.json selects newer generation poc.34-review")) -Message "Remove did not report the newer last-known-good boundary."
+    Assert-True -Condition ($newerLkgRemove.Text.Contains("last-known-good.json selects newer generation poc.35-review")) -Message "Remove did not report the newer last-known-good boundary."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerLkgBefore -Message "Older Remove changed a newer rollback generation or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $newerLkg.GenerationRoot -PathType Container) -Message "Older Remove deleted the newer rollback generation."
 
@@ -4832,8 +4840,8 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Current identity-collision Remove-boundary setup"
     $collidingCurrent = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.33-collision" `
-        -PriorPayloadSequence 33 `
+        -PriorGenerationId "poc.34-collision" `
+        -PriorPayloadSequence 34 `
         -PriorPackageVersion "0.2.5-preview.5-collision" `
         -Root $repairHostRoot `
         -PreserveManagedState `
@@ -4841,7 +4849,7 @@ function Invoke-RepairAcceptanceScenarios {
     $collidingCurrentBefore = Get-FileSnapshot -Root $repairHostRoot
     $collidingCurrentRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $collidingCurrentRemove -ExitCode 3 -Label "Current identity-collision Remove refusal"
-    Assert-True -Condition ($collidingCurrentRemove.Text.Contains("SequenceCollision: current.json selects a different generation identity at sequence 33")) -Message "Remove did not report the current.json identity collision."
+    Assert-True -Condition ($collidingCurrentRemove.Text.Contains("SequenceCollision: current.json selects a different generation identity at sequence 34")) -Message "Remove did not report the current.json identity collision."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $collidingCurrentBefore -Message "Remove changed a same-sequence current identity collision or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $collidingCurrent.GenerationRoot -PathType Container) -Message "Remove deleted the same-sequence current identity collision."
 
@@ -4851,8 +4859,8 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "LKG identity-collision Remove-boundary setup"
     $collidingLkg = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.33-collision" `
-        -PriorPayloadSequence 33 `
+        -PriorGenerationId "poc.34-collision" `
+        -PriorPayloadSequence 34 `
         -PriorPackageVersion "0.2.5-preview.5-collision" `
         -Root $repairHostRoot `
         -PointerRelativePath $lastKnownGoodPointerRelativePath `
@@ -4861,7 +4869,7 @@ function Invoke-RepairAcceptanceScenarios {
     $collidingLkgBefore = Get-FileSnapshot -Root $repairHostRoot
     $collidingLkgRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $collidingLkgRemove -ExitCode 3 -Label "LKG identity-collision Remove refusal"
-    Assert-True -Condition ($collidingLkgRemove.Text.Contains("SequenceCollision: last-known-good.json selects a different generation identity at sequence 33")) -Message "Remove did not report the last-known-good identity collision."
+    Assert-True -Condition ($collidingLkgRemove.Text.Contains("SequenceCollision: last-known-good.json selects a different generation identity at sequence 34")) -Message "Remove did not report the last-known-good identity collision."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $collidingLkgBefore -Message "Remove changed a same-sequence rollback identity collision or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $collidingLkg.GenerationRoot -PathType Container) -Message "Remove deleted the same-sequence rollback identity collision."
     Write-Host "[OK] Marker, current.json, and last-known-good.json enforce independent Remove version and identity upper bounds."
@@ -4869,8 +4877,8 @@ function Invoke-RepairAcceptanceScenarios {
     $newerRemovalPayloadRoot = New-CanonicalIdentityPayload `
         -Root (Join-Path $syntheticRoot "remove-newer") `
         -PackageVersion "0.2.5-preview.6" `
-        -PayloadVersion "poc.34-review" `
-        -PayloadSequence 34
+        -PayloadVersion "poc.35-review" `
+        -PayloadSequence 35
     Reset-RepairFixture
     Assert-Result `
         -Result (Invoke-Materializer -Action "Sync" -PayloadRoot $newerRemovalPayloadRoot -TargetProjectRoot $repairHostRoot) `
@@ -4890,7 +4898,7 @@ function Invoke-RepairAcceptanceScenarios {
     $newerJournalPath = Join-Path $newerRemovalTransactions[0].FullName "transaction.json"
     $newerJournal = Get-Content -LiteralPath $newerJournalPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $newerJournal.schema_version -Expected 2 -Message "Newer Remove journal did not record schema 2 provenance."
-    Assert-Equal -Actual $newerJournal.payload_sequence -Expected 34 -Message "Newer Remove journal payload sequence mismatch."
+    Assert-Equal -Actual $newerJournal.payload_sequence -Expected 35 -Message "Newer Remove journal payload sequence mismatch."
     Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $repairHostRoot -RelativePath $markerRelativePath))) -Message "Newer Remove crash occurred before marker deletion."
     $newerJournalBefore = Get-FileSnapshot -Root $repairHostRoot
     $olderAgainstNewerJournal = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
@@ -4899,8 +4907,8 @@ function Invoke-RepairAcceptanceScenarios {
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerJournalBefore -Message "Older Remove changed bytes or control state before rejecting a newer journal."
 
     $newerJournal.package_version = "0.2.5-preview.5-collision"
-    $newerJournal.payload_version = "poc.33-collision"
-    $newerJournal.payload_sequence = 33
+    $newerJournal.payload_version = "poc.34-collision"
+    $newerJournal.payload_sequence = 34
     $newerJournal.payload_content_sha256 = "1" * 64
     Write-Utf8File -Path $newerJournalPath -Content (($newerJournal | ConvertTo-Json -Depth 8) + "`n")
     $collisionJournalBefore = Get-FileSnapshot -Root $repairHostRoot
@@ -4951,8 +4959,8 @@ function Invoke-RepairAcceptanceScenarios {
             -ContinueEventName $continueEventName
         Assert-True -Condition $readyEvent.WaitOne(10000) -Message "Remove lock-race fixture did not acquire its lock."
         $newerRacePointer = Install-PriorGenerationFixture `
-            -PriorGenerationId "poc.34-lock-race" `
-            -PriorPayloadSequence 34 `
+            -PriorGenerationId "poc.35-lock-race" `
+            -PriorPayloadSequence 35 `
             -PriorPackageVersion "0.2.5-preview.6" `
             -Root $repairHostRoot `
             -PreserveManagedState `
@@ -4962,7 +4970,7 @@ function Invoke-RepairAcceptanceScenarios {
         $lockRaceRemove = Complete-MaterializerInvocation -Invocation $lockRaceInvocation
         $lockRaceInvocation = $null
         Assert-Result -Result $lockRaceRemove -ExitCode 3 -Label "Remove lock-race newer pointer refusal"
-        Assert-True -Condition ($lockRaceRemove.Text.Contains("current.json selects newer generation poc.34-lock-race")) -Message "Lock-race Remove did not report the concurrently inserted newer pointer."
+        Assert-True -Condition ($lockRaceRemove.Text.Contains("current.json selects newer generation poc.35-lock-race")) -Message "Lock-race Remove did not report the concurrently inserted newer pointer."
         Assert-Equal `
             -Actual (Get-FileSnapshotExcept -Root $repairHostRoot -ExcludedRelativePaths @($lockRelativePath)) `
             -Expected $lockRaceBefore `
@@ -6705,6 +6713,145 @@ function Assert-TestStableInstanceWrapper {
     Assert-Equal -Actual (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash -Message "Stable instance wrapper does not match the Package activation identity."
 }
 
+function Install-TrustedPreviousInstanceFixture {
+    $previousGenerationId = "poc.33"
+    $previousPackageVersion = "0.2.5-preview.5"
+    $previousPayloadVersion = "poc.33"
+    $previousPayloadSequence = 33
+    $previousStableWrapperRevision = "d1313efa"
+    $previousStableWrapperSha256 = "740fc4114d5a0e41d20a6f49f8178a61a68243b6646fbc02dc06ddfbf0432791"
+    if (Test-Path -LiteralPath $hostRoot) {
+        Remove-Item -LiteralPath $hostRoot -Recurse -Force
+    }
+    New-TestHost -Root $hostRoot
+
+    $packageGenerationRoot = Join-Path $canonicalPayloadRoot "Generations\$previousGenerationId"
+    $generationRelativePath = "AIWork/.runtime/codedb/host/generations/$previousGenerationId"
+    $generationRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $generationRelativePath
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $generationRoot) | Out-Null
+    Copy-Item -LiteralPath $packageGenerationRoot -Destination $generationRoot -Recurse -Force
+    $generationManifestPath = Join-Path $generationRoot "generation-manifest.json"
+    $generationManifestSha256 = (Get-FileHash -LiteralPath $generationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workerRelativePath = "wrapper/codedb-project-instance-worker.mjs"
+    $workerSha256 = (Get-FileHash -LiteralPath (Join-Path $generationRoot $workerRelativePath) -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $hostPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
+    $hostPointer = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        package_version = $previousPackageVersion
+        payload_version = $previousPayloadVersion
+        payload_sequence = $previousPayloadSequence
+        generation_id = $previousGenerationId
+        generation_relative_path = $generationRelativePath
+        generation_manifest_sha256 = $generationManifestSha256
+        bootstrap_protocol = 1
+    }
+    Write-Utf8File -Path $hostPointerPath -Content (($hostPointer | ConvertTo-Json -Depth 5) + "`n")
+
+    $instanceId = [guid]::NewGuid().ToString("N")
+    $instanceRelativePath = "AIWork/.runtime/codedb/instances/$instanceId"
+    $instanceRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $instanceRelativePath
+    foreach ($directory in @("config", "index", "adapter", "watch", "leases", "logs", "tmp")) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $instanceRoot $directory) | Out-Null
+    }
+    $createdAt = [DateTime]::UtcNow.ToString("o")
+    $instanceManifest = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        project_identity = Get-TestProjectIdentity -Root $hostRoot
+        instance_id = $instanceId
+        instance_relative_path = $instanceRelativePath
+        state = "READY"
+        package_version = $previousPackageVersion
+        payload_version = $previousPayloadVersion
+        payload_sequence = $previousPayloadSequence
+        generation_id = $previousGenerationId
+        generation_relative_path = $generationRelativePath
+        generation_manifest_sha256 = $generationManifestSha256
+        bootstrap_protocol = 1
+        worker_relative_path = $workerRelativePath
+        worker_sha256 = $workerSha256
+        created_at_utc = $createdAt
+        verified_at_utc = $createdAt
+    }
+    $instanceManifestPath = Join-Path $instanceRoot "instance.json"
+    Write-Utf8File -Path $instanceManifestPath -Content (($instanceManifest | ConvertTo-Json -Depth 6) + "`n")
+
+    $selectionPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $selection = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        project_identity = Get-TestProjectIdentity -Root $hostRoot
+        instance_id = $instanceId
+        instance_relative_path = $instanceRelativePath
+        instance_manifest_sha256 = (Get-FileHash -LiteralPath $instanceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        generation_id = $previousGenerationId
+        activated_at_utc = $createdAt
+    }
+    Write-Utf8File -Path $selectionPath -Content (($selection | ConvertTo-Json -Depth 5) + "`n")
+
+    $desiredStatePath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/desired-state.json"
+    $desiredState = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        desired_state = "INSTALLED"
+        state_id = [guid]::NewGuid().ToString("N")
+        cleanup_state = "PENDING"
+        project_root = [System.IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/')
+        project_identity = Get-TestProjectIdentity -Root $hostRoot
+        updated_at_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    Write-Utf8File -Path $desiredStatePath -Content (($desiredState | ConvertTo-Json -Depth 5) + "`n")
+
+    $stableWrapperTarget = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+    $stableWrapperPath = Get-PathFromRelative -Root $hostRoot -RelativePath $stableWrapperTarget
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stableWrapperPath) | Out-Null
+    Export-ReviewedGitBlob `
+        -Tag $previousStableWrapperRevision `
+        -RepositoryPath "com.rice.ai-codedb/Payload~/AIWork/codedb/wrapper/codedb-project-wrapper.mjs" `
+        -Destination $stableWrapperPath
+    Assert-Equal `
+        -Actual (Get-FileHash -LiteralPath $stableWrapperPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -Expected $previousStableWrapperSha256 `
+        -Message "Reviewed poc.33 stable wrapper fixture hash mismatch."
+
+    $process = Get-Process -Id $PID
+    $processStartIdentity = ([DateTimeOffset]::new($process.StartTime.ToUniversalTime())).ToUnixTimeMilliseconds().ToString([Globalization.CultureInfo]::InvariantCulture)
+    $leaseId = "mcp-$PID-$([guid]::NewGuid().ToString('N'))"
+    $instanceLeasePath = Join-Path $instanceRoot "leases\$leaseId.json"
+    $instanceLease = [ordered]@{
+        schema_version = 1
+        instance_lease_version = 1
+        managed_by = "com.rice.ai-codedb"
+        owner = "mcp"
+        instance_id = $instanceId
+        generation_id = $previousGenerationId
+        lease_id = $leaseId
+        pid = $PID
+        process_start_identity = $processStartIdentity
+        project_root = [System.IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/')
+        project_identity = Get-TestProjectIdentity -Root $hostRoot
+        created_at_utc = [DateTime]::UtcNow.AddSeconds(-1).ToString("o")
+        heartbeat_at_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    Write-Utf8File -Path $instanceLeasePath -Content (($instanceLease | ConvertTo-Json -Depth 5) + "`n")
+    $generationLeasePath = New-TestGenerationLease -Owner "mcp" -LeaseGenerationId $previousGenerationId
+
+    return [pscustomobject]@{
+        GenerationId = $previousGenerationId
+        GenerationRoot = $generationRoot
+        InstanceId = $instanceId
+        InstanceRoot = $instanceRoot
+        InstanceManifestPath = $instanceManifestPath
+        SelectionPath = $selectionPath
+        StableWrapperPath = $stableWrapperPath
+        StableWrapperSha256 = $previousStableWrapperSha256
+        InstanceLeasePath = $instanceLeasePath
+        GenerationLeasePath = $generationLeasePath
+    }
+}
+
 function Invoke-PriorGenerationUpgradeScenarios {
     $priorParameters = @{
         PriorGenerationId = "poc.27"
@@ -6719,7 +6866,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $stableWrapperTarget = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
 
     # Candidate and activation failures keep the real v0.2.4 selection and
-    # flat execution closure usable. The verified poc.33 generation may remain
+    # flat execution closure usable. The verified poc.34 generation may remain
     # as an unselected Package-owned side-by-side closure.
     $prior = Install-PriorGenerationFixture @priorParameters
     $dryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
@@ -6752,7 +6899,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $ownerFreeInstance = Get-TestCurrentInstanceSelection
     Assert-TestStableInstanceWrapper
     $selectedHost = Get-Content -LiteralPath $prior.PointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual ([string]$selectedHost.generation_id) -Expected $generationId -Message "Owner-free retirement did not switch host/current to poc.33."
+    Assert-Equal -Actual ([string]$selectedHost.generation_id) -Expected $generationId -Message "Owner-free retirement did not switch host/current to poc.34."
     $lastKnownGoodPath = Get-PathFromRelative -Root $hostRoot -RelativePath $lastKnownGoodPointerRelativePath
     Assert-Equal -Actual (Get-FileHash -LiteralPath $lastKnownGoodPath -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $prior.PointerPath -Algorithm SHA256).Hash -Message "Owner-free retirement did not converge generation last-known-good."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Owner-free retirement retained the legacy marker."
@@ -6797,7 +6944,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
 
     # A real schema-1 flat MCP lease plus a generation request lease preserves
     # the old pointer, marker, scripts, process, lease, and generation. Future
-    # sessions still receive the independently selected poc.33 instance.
+    # sessions still receive the independently selected poc.34 instance.
     $prior = Install-PriorGenerationFixture @priorParameters
     $legacyGate = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/shared/codedb-host-use-gate.mjs"
     $flatMcp = $null
@@ -6862,7 +7009,74 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$unknownOwnerInstance.Selection.instance_id) -Message "Unknown-owner drain replaced the selected instance."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Unknown-owner drain retained poc.27."
     Assert-NoMaterializerResidue
-    Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.33 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
+    Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.34 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
+
+    # A selected immutable instance from an exact Package-declared transition is
+    # a valid automatic handoff source. Its live leases and generation remain
+    # byte-exact until they drain; an undeclared identity still fails closed.
+    $trustedPrevious = Install-TrustedPreviousInstanceFixture
+    Assert-Equal `
+        -Actual (Get-FileHash -LiteralPath $trustedPrevious.StableWrapperPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -Expected $trustedPrevious.StableWrapperSha256 `
+        -Message "Previous-instance Upgrade fixture did not start from the reviewed poc.33 stable wrapper."
+    $previousInstanceSnapshot = Get-FileSnapshot -Root $trustedPrevious.InstanceRoot
+    $previousGenerationSnapshot = Get-FileSnapshot -Root $trustedPrevious.GenerationRoot
+    $previousInstanceLeaseBytes = Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath
+    $previousGenerationLeaseBytes = Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath
+    $trustedUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $trustedUpgrade -ExitCode 0 -Label "Package-declared previous instance Upgrade"
+    Assert-StructuredCommandResult -Result $trustedUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "Package-declared previous instance Upgrade"
+    $trustedCurrent = Get-TestCurrentInstanceSelection
+    Assert-True -Condition (-not [string]::Equals([string]$trustedCurrent.Selection.instance_id, $trustedPrevious.InstanceId, [StringComparison]::Ordinal)) -Message "Previous-instance Upgrade did not activate a new immutable instance."
+    Assert-TestStableInstanceWrapper
+    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.InstanceRoot) -Expected $previousInstanceSnapshot -Message "Previous-instance Upgrade changed the retained instance closure."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.GenerationRoot) -Expected $previousGenerationSnapshot -Message "Previous-instance Upgrade changed the retained generation closure."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath) -Expected $previousInstanceLeaseBytes -Message "Previous-instance Upgrade changed its live instance lease."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath) -Expected $previousGenerationLeaseBytes -Message "Previous-instance Upgrade changed its live generation lease."
+    Assert-True -Condition (-not $trustedUpgrade.Text.Contains("[STOPPING]")) -Message "Previous-instance Upgrade attempted to stop a retained MCP owner."
+
+    Remove-Item -LiteralPath $trustedPrevious.InstanceLeasePath -Force
+    Remove-Item -LiteralPath $trustedPrevious.GenerationLeasePath -Force
+    $trustedDrain = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $trustedDrain -ExitCode 0 -Label "Package-declared previous instance drain"
+    Assert-StructuredCommandResult -Result $trustedDrain -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "Package-declared previous instance drain"
+    Assert-True -Condition (-not (Test-Path -LiteralPath $trustedPrevious.InstanceRoot)) -Message "Drained previous instance was not retired."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $trustedPrevious.GenerationRoot)) -Message "Drained previous generation was not retired."
+
+    $forgedWrapper = Install-TrustedPreviousInstanceFixture
+    Write-Utf8File -Path $forgedWrapper.StableWrapperPath -Content "forged stable wrapper`n"
+    $forgedWrapperSelectionBytes = Get-ByteSnapshot -Path $forgedWrapper.SelectionPath
+    $forgedWrapperBytes = Get-ByteSnapshot -Path $forgedWrapper.StableWrapperPath
+    $forgedWrapperInstanceSnapshot = Get-FileSnapshot -Root $forgedWrapper.InstanceRoot
+    $forgedWrapperGenerationSnapshot = Get-FileSnapshot -Root $forgedWrapper.GenerationRoot
+    $currentGenerationRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $generationTargetPrefix.TrimEnd([char]'/')
+    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Forged-wrapper fixture unexpectedly started with poc.34."
+    $forgedWrapperUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $forgedWrapperUpgrade -ExitCode 6 -Label "Forged previous stable wrapper refusal"
+    Assert-True -Condition ($forgedWrapperUpgrade.Text.Contains("Stable instance wrapper target contains unowned or drifted bytes")) -Message "Forged previous stable wrapper did not report its ownership boundary."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedWrapper.SelectionPath) -Expected $forgedWrapperSelectionBytes -Message "Rejected stable wrapper changed the selected instance."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedWrapper.StableWrapperPath) -Expected $forgedWrapperBytes -Message "Rejected stable wrapper was overwritten."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $forgedWrapper.InstanceRoot) -Expected $forgedWrapperInstanceSnapshot -Message "Rejected stable wrapper changed the retained instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $forgedWrapper.GenerationRoot) -Expected $forgedWrapperGenerationSnapshot -Message "Rejected stable wrapper changed the retained generation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Rejected stable wrapper published poc.34 before refusing activation."
+
+    $forgedPrevious = Install-TrustedPreviousInstanceFixture
+    $forgedManifest = Get-Content -LiteralPath $forgedPrevious.InstanceManifestPath -Raw | ConvertFrom-Json
+    $forgedManifest.payload_version = "poc.33-undeclared"
+    Write-Utf8File -Path $forgedPrevious.InstanceManifestPath -Content (($forgedManifest | ConvertTo-Json -Depth 6) + "`n")
+    $forgedSelection = Get-Content -LiteralPath $forgedPrevious.SelectionPath -Raw | ConvertFrom-Json
+    $forgedSelection.instance_manifest_sha256 = (Get-FileHash -LiteralPath $forgedPrevious.InstanceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Utf8File -Path $forgedPrevious.SelectionPath -Content (($forgedSelection | ConvertTo-Json -Depth 5) + "`n")
+    $forgedSelectionBytes = Get-ByteSnapshot -Path $forgedPrevious.SelectionPath
+    $forgedInstanceSnapshot = Get-FileSnapshot -Root $forgedPrevious.InstanceRoot
+    $forgedGenerationSnapshot = Get-FileSnapshot -Root $forgedPrevious.GenerationRoot
+    $forgedUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $forgedUpgrade -ExitCode 6 -Label "Undeclared previous instance refusal"
+    Assert-True -Condition ($forgedUpgrade.Text.Contains("not an exact Package-declared transition")) -Message "Undeclared previous instance did not report the transition identity boundary."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedPrevious.SelectionPath) -Expected $forgedSelectionBytes -Message "Rejected previous instance changed its selection."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $forgedPrevious.InstanceRoot) -Expected $forgedInstanceSnapshot -Message "Rejected previous instance changed its closure."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $forgedPrevious.GenerationRoot) -Expected $forgedGenerationSnapshot -Message "Rejected previous instance changed its generation."
+    Write-Host "[OK] Exact Package-declared immutable instances hand off automatically, retain live owners, drain idempotently, and reject undeclared identities before activation."
 }
 
 $packageSnapshotBefore = $null
@@ -6874,7 +7088,7 @@ try {
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
     Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.5-preview.5" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 33 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 34 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 22 -Message "Flat target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 23 -Message "Generation target count mismatch."
@@ -7150,7 +7364,7 @@ try {
     Assert-Equal -Actual $marker.schema_version -Expected 2 -Message "Marker schema version mismatch."
     Assert-Equal -Actual $marker.package_version -Expected "0.2.5-preview.5" -Message "Marker package version mismatch."
     Assert-Equal -Actual $marker.payload_version -Expected $generationId -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 33 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 34 -Message "Marker payload sequence mismatch."
     Assert-True -Condition ([string]$marker.payload_content_sha256 -match '^[0-9a-f]{64}$') -Message "Marker payload content identity mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual $marker.generation_lease_version -Expected 2 -Message "Marker generation-lease version mismatch."

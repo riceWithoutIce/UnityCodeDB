@@ -66,9 +66,21 @@ namespace Rice.AI.Codedb.Editor
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
             var normalizedPackageRoot = AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/');
-            var currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot);
+            var currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot, normalizedPackageRoot);
             if (currentInstance.Present)
             {
+                if (currentInstance.IsTrustedPrevious)
+                {
+                    return new AICodedbHostGenerationSelection(
+                        AICodedbHostGenerationState.Previous,
+                        currentInstance.GenerationId,
+                        currentInstance.PackageVersion,
+                        currentInstance.PayloadVersion,
+                        currentInstance.PayloadSequence,
+                        currentInstance.BootstrapProtocol,
+                        currentInstance.GenerationRoot,
+                        currentInstance.Detail);
+                }
                 if (!currentInstance.IsCurrent)
                 {
                     return new AICodedbHostGenerationSelection(
@@ -84,7 +96,8 @@ namespace Rice.AI.Codedb.Editor
                 return ResolveSelectedInstanceGeneration(
                     normalizedRoot,
                     normalizedPackageRoot,
-                    currentInstance.GenerationRoot);
+                    currentInstance.GenerationRoot,
+                    currentInstance.GenerationId);
             }
 
             var currentPath = AICodedbPaths.NormalizePath(Path.Combine(
@@ -100,13 +113,15 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbHostGenerationSelection ResolveSelectedInstanceGeneration(
             string projectRoot,
             string packageRoot,
-            string generationRoot)
+            string generationRoot,
+            string generationId)
         {
             try
             {
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
                 var expectedGenerationRoot = CombineInside(
                     projectRoot,
-                    AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId,
+                    AICodedbProjectSettings.HostGenerationsRelativePath + "/" + generationId,
                     "selected instance generation");
                 if (!string.Equals(
                         AICodedbPaths.NormalizePath(generationRoot).TrimEnd('/'),
@@ -122,7 +137,7 @@ namespace Rice.AI.Codedb.Editor
                 AssertNoReparsePoints(projectRoot, installedManifestPath, "selected instance generation manifest");
                 var packagePointer = ReadCurrentPointer(packagePointerPath, "Package Current pointer");
                 ValidatePointer(packagePointer);
-                if (ClassifyValidatedPointer(packagePointer) != AICodedbHostGenerationState.Current)
+                if (ClassifyValidatedPointer(packagePointer, runtimeContract) != AICodedbHostGenerationState.Current)
                     throw new InvalidOperationException("Package Current pointer does not identify the loaded instance generation.");
                 if (!string.Equals(
                         GetFileSha256(installedManifestPath),
@@ -137,7 +152,8 @@ namespace Rice.AI.Codedb.Editor
                     packagePointer,
                     installedManifestPath,
                     generationRoot,
-                    packageRoot);
+                    packageRoot,
+                    runtimeContract);
                 return new AICodedbHostGenerationSelection(
                     AICodedbHostGenerationState.Current,
                     packagePointer.generation_id,
@@ -221,6 +237,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 AssertNoReparsePoints(projectRoot, currentPath, "current generation pointer");
                 var pointer = ReadCurrentPointer(currentPath, "current generation pointer");
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
 
                 ValidatePointer(pointer);
                 var expectedGenerationRelativePath = AICodedbProjectSettings.HostGenerationsRelativePath + "/" + pointer.generation_id;
@@ -241,9 +258,14 @@ namespace Rice.AI.Codedb.Editor
 
                 var manifest = ReadGenerationManifest(manifestPath, "generation manifest");
                 ValidateGenerationManifest(pointer, manifest, generationRoot);
-                var state = ClassifyValidatedPointer(pointer);
+                var state = ClassifyValidatedPointer(pointer, runtimeContract);
                 if (state == AICodedbHostGenerationState.Current)
-                    ValidatePackageOwnedCurrentGeneration(pointer, manifestPath, generationRoot, packageRoot);
+                    ValidatePackageOwnedCurrentGeneration(
+                        pointer,
+                        manifestPath,
+                        generationRoot,
+                        packageRoot,
+                        runtimeContract);
                 var detail = state == AICodedbHostGenerationState.Previous
                     ? "Validated compatible previous generation selected by " + ToProjectRelativeDisplayPath(projectRoot, currentPath) + ". Use Reinstall CodeDB before running Host commands."
                     : state == AICodedbHostGenerationState.DowngradeReviewRequired
@@ -414,29 +436,39 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static AICodedbHostGenerationState ClassifyValidatedPointer(CurrentPointerDocument pointer)
+        private static AICodedbHostGenerationState ClassifyValidatedPointer(
+            CurrentPointerDocument pointer,
+            AICodedbPackageRuntimeContract runtimeContract)
         {
-            if (pointer.bootstrap_protocol != AICodedbProjectSettings.CurrentBootstrapProtocol)
-                throw new InvalidOperationException("Selected generation uses an unsupported bootstrap protocol.");
-            if (pointer.payload_sequence > AICodedbProjectSettings.CurrentPayloadSequence)
-                return AICodedbHostGenerationState.DowngradeReviewRequired;
-            if (pointer.payload_sequence < AICodedbProjectSettings.CurrentPayloadSequence)
-                return AICodedbHostGenerationState.Previous;
-
-            if (!string.Equals(pointer.package_version, AICodedbProjectSettings.CurrentPackageVersion, StringComparison.Ordinal)
-                || !string.Equals(pointer.payload_version, AICodedbProjectSettings.CurrentPayloadVersion, StringComparison.Ordinal)
-                || !string.Equals(pointer.generation_id, AICodedbProjectSettings.CurrentGenerationId, StringComparison.Ordinal))
+            var disposition = runtimeContract.Classify(new AICodedbRuntimeIdentity(
+                pointer.package_version,
+                pointer.payload_version,
+                pointer.payload_sequence,
+                pointer.generation_id,
+                pointer.bootstrap_protocol));
+            switch (disposition)
             {
-                throw new InvalidOperationException("Selected generation reuses the current payload sequence with a different identity.");
+                case AICodedbRuntimeGenerationDisposition.Current:
+                    return AICodedbHostGenerationState.Current;
+                case AICodedbRuntimeGenerationDisposition.TrustedPrevious:
+                    return AICodedbHostGenerationState.Previous;
+                case AICodedbRuntimeGenerationDisposition.Newer:
+                    return AICodedbHostGenerationState.DowngradeReviewRequired;
+                case AICodedbRuntimeGenerationDisposition.SequenceCollision:
+                    throw new InvalidOperationException(
+                        "Selected generation reuses the current payload sequence with a different identity.");
+                default:
+                    throw new InvalidOperationException(
+                        "Selected generation is not current or an exact Package-declared transition.");
             }
-            return AICodedbHostGenerationState.Current;
         }
 
         private static void ValidatePackageOwnedCurrentGeneration(
             CurrentPointerDocument installedPointer,
             string installedManifestPath,
             string installedGenerationRoot,
-            string packageRoot)
+            string packageRoot,
+            AICodedbPackageRuntimeContract runtimeContract)
         {
             if (string.IsNullOrWhiteSpace(packageRoot) || !Directory.Exists(packageRoot))
                 throw new InvalidOperationException("Resolved Package root is unavailable for Current generation authentication.");
@@ -445,7 +477,7 @@ namespace Rice.AI.Codedb.Editor
             var packagePointerPath = CombineInside(packageRoot, "Payload~/host-current.json", "Package Current pointer");
             var packageGenerationRoot = CombineInside(
                 packageRoot,
-                "Payload~/Generations/" + AICodedbProjectSettings.CurrentGenerationId,
+                "Payload~/Generations/" + runtimeContract.Target.GenerationId,
                 "Package Current generation");
             var packageManifestPath = CombineInside(
                 packageGenerationRoot,
@@ -463,7 +495,7 @@ namespace Rice.AI.Codedb.Editor
 
             var packagePointer = ReadCurrentPointer(packagePointerPath, "Package Current pointer");
             ValidatePointer(packagePointer);
-            if (ClassifyValidatedPointer(packagePointer) != AICodedbHostGenerationState.Current
+            if (ClassifyValidatedPointer(packagePointer, runtimeContract) != AICodedbHostGenerationState.Current
                 || !PointersHaveSameIdentity(installedPointer, packagePointer))
             {
                 throw new InvalidOperationException(

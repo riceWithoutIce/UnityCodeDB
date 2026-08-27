@@ -77,9 +77,10 @@ $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $script:MarkerSchemaVersion = 2
 $script:TargetPrefix = "AIWork/codedb/"
-$script:GenerationId = "poc.33"
-$script:BootstrapProtocol = 1
-$script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$($script:GenerationId)/"
+$script:GenerationId = ""
+$script:BootstrapProtocol = 0
+$script:SupportedBootstrapProtocol = 1
+$script:GenerationTargetPrefix = ""
 $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
 $script:GenerationLeaseRelativePath = "AIWork/.runtime/codedb/host/leases"
@@ -808,7 +809,7 @@ function Get-PayloadContentIdentitySha256 {
     }
     foreach ($transition in @($Manifest.BootstrapTransitions | Sort-Object SourcePayloadSequence, SourcePackageVersion)) {
         $lines.Add(
-            "bootstrap_transition=$($transition.SourceMarkerSchemaVersion):$($transition.SourcePackageVersion):$($transition.SourcePayloadVersion):$($transition.SourcePayloadSequence):$($transition.SourceGenerationId):$($transition.SourceBootstrapProtocol):$($transition.SourceHostUseGateVersion):$($transition.SourceGenerationLeaseVersion):$($transition.SourceFlatFileCount):$($transition.SourceFlatClosureSha256)")
+            "bootstrap_transition=$($transition.SourceMarkerSchemaVersion):$($transition.SourcePackageVersion):$($transition.SourcePayloadVersion):$($transition.SourcePayloadSequence):$($transition.SourceGenerationId):$($transition.SourceBootstrapProtocol):$($transition.SourceHostUseGateVersion):$($transition.SourceGenerationLeaseVersion):$($transition.SourceFlatFileCount):$($transition.SourceFlatClosureSha256):$($transition.SourceStableWrapperSha256)")
     }
     foreach ($file in @($Manifest.Files | Sort-Object Target)) {
         if ([string]::Equals($file.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
@@ -1289,6 +1290,27 @@ function Assert-TargetRelativePath {
     return $normalized
 }
 
+function Initialize-PackageRuntimeContract {
+    param(
+        [Parameter(Mandatory = $true)][string]$GenerationId,
+        [Parameter(Mandatory = $true)][int]$BootstrapProtocol
+    )
+
+    if ($GenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $BootstrapProtocol -ne $script:SupportedBootstrapProtocol) {
+        Throw-MaterializerError -Message "Payload runtime contract identity or bootstrap protocol is unsupported." -ExitCode 2
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:GenerationId) -and
+        (-not [string]::Equals($script:GenerationId, $GenerationId, [StringComparison]::Ordinal) -or
+         $script:BootstrapProtocol -ne $BootstrapProtocol)) {
+        Throw-MaterializerError -Message "Payload runtime contract changed during one materializer invocation." -ExitCode 2
+    }
+
+    $script:GenerationId = $GenerationId
+    $script:BootstrapProtocol = $BootstrapProtocol
+    $script:GenerationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$GenerationId/"
+}
+
 function Read-PayloadManifest {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -1326,12 +1348,13 @@ function Read-PayloadManifest {
         [string]::IsNullOrWhiteSpace($packageVersion) -or
         [string]::IsNullOrWhiteSpace($payloadVersion) -or
         $payloadSequence -lt 1 -or
-        -not [string]::Equals($generationId, $script:GenerationId, [StringComparison]::Ordinal) -or
-        $bootstrapProtocol -ne $script:BootstrapProtocol -or
+        $generationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $bootstrapProtocol -ne $script:SupportedBootstrapProtocol -or
         -not [string]::Equals($currentPointerTarget, $script:CurrentPointerRelativePath, [StringComparison]::Ordinal) -or
         $manifestFiles.Count -eq 0) {
         Throw-MaterializerError -Message "Payload manifest identity, version, or file list is invalid." -ExitCode 2
     }
+    Initialize-PackageRuntimeContract -GenerationId $generationId -BootstrapProtocol $bootstrapProtocol
 
     $seenSources = @{}
     $seenTargets = @{}
@@ -1350,6 +1373,7 @@ function Read-PayloadManifest {
         $sourceGenerationLeaseVersion = Get-RequiredJsonInt32 -Object $entry -Name "source_generation_lease_version" -Label "payload bootstrap transition"
         $sourceFlatFileCount = Get-RequiredJsonInt32 -Object $entry -Name "source_flat_file_count" -Label "payload bootstrap transition"
         $sourceFlatClosureSha256 = (Get-RequiredJsonString -Object $entry -Name "source_flat_closure_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
+        $sourceStableWrapperSha256 = (Get-RequiredJsonString -Object $entry -Name "source_stable_wrapper_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
         $transitionKey = "$sourcePackageVersion|$sourcePayloadVersion|$sourcePayloadSequence|$sourceGenerationId"
         if ($sourceTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$' -or
             [string]::IsNullOrWhiteSpace($sourcePackageVersion) -or
@@ -1362,6 +1386,7 @@ function Read-PayloadManifest {
             $sourceGenerationLeaseVersion -lt 2 -or
             $sourceFlatFileCount -lt 1 -or
             $sourceFlatClosureSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $sourceStableWrapperSha256 -notmatch '^[0-9a-f]{64}$' -or
             $seenBootstrapTransitions.ContainsKey($transitionKey)) {
             Throw-MaterializerError -Message "Payload manifest contains an invalid or duplicate bootstrap transition: $transitionKey" -ExitCode 2
         }
@@ -1378,6 +1403,7 @@ function Read-PayloadManifest {
             SourceGenerationLeaseVersion = $sourceGenerationLeaseVersion
             SourceFlatFileCount = $sourceFlatFileCount
             SourceFlatClosureSha256 = $sourceFlatClosureSha256
+            SourceStableWrapperSha256 = $sourceStableWrapperSha256
         })
     }
     $retiredTargetMap = @{}
@@ -5357,7 +5383,7 @@ function Get-ValidatedPackageOwnedInstalledGeneration {
         [string]::IsNullOrWhiteSpace($packageVersion) -or
         [string]::IsNullOrWhiteSpace($payloadVersion) -or
         $payloadSequence -lt 1 -or
-        $bootstrapProtocol -lt 1 -or $bootstrapProtocol -gt $script:BootstrapProtocol -or
+        $bootstrapProtocol -lt 1 -or $bootstrapProtocol -gt $script:SupportedBootstrapProtocol -or
         $manifestFiles.Count -eq 0) {
         return $null
     }
@@ -8238,7 +8264,7 @@ function Get-ValidatedInstalledGenerationPointer {
         -not [string]::Equals($generationRelativePath, $expectedRelativePath, [StringComparison]::Ordinal) -or
         $manifestSha256 -notmatch '^[0-9a-f]{64}$' -or
         $pointerBootstrapProtocol -lt 1 -or
-        $pointerBootstrapProtocol -gt $script:BootstrapProtocol) {
+        $pointerBootstrapProtocol -gt $script:SupportedBootstrapProtocol) {
         throw "Installed generation pointer identity is invalid."
     }
 
@@ -8330,7 +8356,7 @@ function Read-GenerationPointerIdentity {
         $manifestSha256 -notmatch '^[0-9a-f]{64}$' -or
         $payloadSequence -lt 1 -or
         $bootstrapProtocol -lt 1 -or
-        $bootstrapProtocol -gt $script:BootstrapProtocol) {
+        $bootstrapProtocol -gt $script:SupportedBootstrapProtocol) {
         throw "$PointerLabel identity is invalid."
     }
     return [pscustomobject]@{
@@ -8735,13 +8761,39 @@ function Invoke-AutomaticGenerationCleanup {
     if ($currentIsPackageGeneration) {
         Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $current.GenerationRoot -ProjectRoot $ProjectRoot -SkipSyntaxValidation
     } else {
-        if ($null -eq $legacyRetirement -or
-            -not [string]::Equals([string]$current.GenerationId, [string]$legacyRetirement.Transition.SourceGenerationId, [StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$current.PackageVersion, [string]$legacyRetirement.Transition.SourcePackageVersion, [StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$current.PayloadVersion, [string]$legacyRetirement.Transition.SourcePayloadVersion, [StringComparison]::Ordinal) -or
-            $current.PayloadSequence -ne $legacyRetirement.Transition.SourcePayloadSequence -or
-            $current.BootstrapProtocol -ne $legacyRetirement.Transition.SourceBootstrapProtocol) {
+        $reviewedTransition = if ($null -ne $legacyRetirement) {
+            $legacyRetirement.Transition
+        } else {
+            $matches = @($Manifest.BootstrapTransitions | Where-Object {
+                [string]::Equals([string]$current.GenerationId, [string]$_.SourceGenerationId, [StringComparison]::Ordinal) -and
+                [string]::Equals([string]$current.PackageVersion, [string]$_.SourcePackageVersion, [StringComparison]::Ordinal) -and
+                [string]::Equals([string]$current.PayloadVersion, [string]$_.SourcePayloadVersion, [StringComparison]::Ordinal) -and
+                $current.PayloadSequence -eq [int]$_.SourcePayloadSequence -and
+                $current.BootstrapProtocol -eq [int]$_.SourceBootstrapProtocol
+            })
+            if ($matches.Count -eq 1) { $matches[0] } else { $null }
+        }
+        if ($null -eq $reviewedTransition -or
+            -not [string]::Equals([string]$current.GenerationId, [string]$reviewedTransition.SourceGenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$current.PackageVersion, [string]$reviewedTransition.SourcePackageVersion, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$current.PayloadVersion, [string]$reviewedTransition.SourcePayloadVersion, [StringComparison]::Ordinal) -or
+            $current.PayloadSequence -ne $reviewedTransition.SourcePayloadSequence -or
+            $current.BootstrapProtocol -ne $reviewedTransition.SourceBootstrapProtocol) {
             throw "Legacy host/current.json does not match the reviewed bootstrap-transition identity."
+        }
+        if ($null -eq $legacyRetirement) {
+            $packageOwnedPrevious = Get-ValidatedPackageOwnedInstalledGeneration `
+                -GenerationId $current.GenerationId `
+                -ProjectRoot $ProjectRoot `
+                -PayloadRoot $Manifest.Root
+            if ($null -eq $packageOwnedPrevious -or
+                -not [string]::Equals([string]$packageOwnedPrevious.PackageVersion, [string]$current.PackageVersion, [StringComparison]::Ordinal) -or
+                -not [string]::Equals([string]$packageOwnedPrevious.PayloadVersion, [string]$current.PayloadVersion, [StringComparison]::Ordinal) -or
+                $packageOwnedPrevious.PayloadSequence -ne $current.PayloadSequence -or
+                $packageOwnedPrevious.BootstrapProtocol -ne $current.BootstrapProtocol -or
+                -not [string]::Equals([string]$packageOwnedPrevious.GenerationManifestSha256, [string]$current.GenerationManifestSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Previous-instance host/current.json does not match the Package-preserved immutable generation."
+            }
         }
     }
 

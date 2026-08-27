@@ -41,6 +41,7 @@ namespace Rice.AI.Codedb.Editor
         internal string IndexRootRelativePath { get; }
         internal string TextAdapterRootRelativePath { get; }
         internal string WatchRootRelativePath { get; }
+        internal string RuntimeContractTargetGenerationId { get; }
 
         /// <summary>
         /// Captures the current read-only codedb setup status.
@@ -50,8 +51,10 @@ namespace Rice.AI.Codedb.Editor
             AICodedbCommandResult hostPayloadResult)
         {
             _context = context;
+            var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
+            RuntimeContractTargetGenerationId = runtimeContract.Target.GenerationId;
             ProjectIntegrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
-            CurrentInstanceStatus = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+            CurrentInstanceStatus = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
             RuntimeRootRelativePath = CurrentInstanceStatus.IsCurrent
                 ? CurrentInstanceStatus.InstanceRelativePath
                 : context.RuntimeRelativePath;
@@ -75,7 +78,7 @@ namespace Rice.AI.Codedb.Editor
             HostLastKnownGood = CreateLastKnownGoodStatus(hostPayloadMarkerExists);
             HostUpgradeStatus = AICodedbHostUpgradeStatusStore.Read(
                 context.ProjectRoot,
-                AICodedbProjectSettings.CurrentGenerationId);
+                runtimeContract.Target.GenerationId);
             HostUpgrade = HostUpgradeStatus.ToStatusItem(hostPayloadMarkerExists);
             HostUpdatePolicy = CreateHostUpdatePolicyStatus(HostUpdatePolicyValue);
             ProviderExecutable = CreateAbsoluteFileStatus("Machine Provider executable", context.MachineProviderExecutablePath);
@@ -145,9 +148,6 @@ namespace Rice.AI.Codedb.Editor
             var runtimeRelativePath = cachedReady
                 ? AICodedbProjectSettings.RuntimeRelativePath
                 : string.Empty;
-            var generationRelativePath = cachedReady
-                ? AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId
-                : string.Empty;
             ProjectIntegrationStatus = new AICodedbProjectIntegrationStatus(
                 cachedUninstalled
                     ? AICodedbProjectIntegrationState.Uninstalled
@@ -166,12 +166,16 @@ namespace Rice.AI.Codedb.Editor
                 detail);
             CurrentInstanceStatus = cachedReady
                 ? new AICodedbCurrentInstanceStatus(
-                    true,
-                    true,
+                    AICodedbCurrentInstanceState.Current,
                     "cached-ready",
                     AICodedbProjectSettings.InstancesRelativePath + "/cached-ready",
                     string.Empty,
-                    generationRelativePath,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    0,
                     detail)
                 : default(AICodedbCurrentInstanceStatus);
             CurrentInstance = cachedReady
@@ -190,6 +194,7 @@ namespace Rice.AI.Codedb.Editor
             IndexRootRelativePath = cachedReady ? runtimeRelativePath + "/index" : string.Empty;
             TextAdapterRootRelativePath = cachedReady ? runtimeRelativePath + "/adapter/text-index" : string.Empty;
             WatchRootRelativePath = cachedReady ? runtimeRelativePath + "/watch" : string.Empty;
+            RuntimeContractTargetGenerationId = string.Empty;
             HostPayloadStatus = new AICodedbHostPayloadStatus(
                 cachedReady ? AICodedbHostPayloadState.Current : AICodedbHostPayloadState.Unknown,
                 cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Warning,
@@ -197,17 +202,17 @@ namespace Rice.AI.Codedb.Editor
                 detail);
             HostGenerationSelection = new AICodedbHostGenerationSelection(
                 cachedReady ? AICodedbHostGenerationState.Current : AICodedbHostGenerationState.Unavailable,
-                cachedReady ? AICodedbProjectSettings.CurrentGenerationId : string.Empty,
-                cachedReady ? AICodedbProjectSettings.CurrentPackageVersion : string.Empty,
-                cachedReady ? AICodedbProjectSettings.CurrentPayloadVersion : string.Empty,
-                cachedReady ? AICodedbProjectSettings.CurrentPayloadSequence : 0,
-                cachedReady ? AICodedbProjectSettings.CurrentBootstrapProtocol : 0,
-                generationRelativePath,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                0,
+                0,
+                string.Empty,
                 detail);
             HostUpgradeStatus = new AICodedbHostUpgradeStatus(
                 cachedReady ? AICodedbHostUpgradePhase.Current : AICodedbHostUpgradePhase.Unavailable,
                 cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Inactive,
-                cachedReady ? AICodedbProjectSettings.CurrentGenerationId : string.Empty,
+                string.Empty,
                 cachedReady ? "Last verified" : "Checking",
                 detail);
             HostUpdatePolicyValue = new AICodedbHostUpdatePolicy(true, true, true, detail);
@@ -619,8 +624,15 @@ namespace Rice.AI.Codedb.Editor
             {
                 return AICodedbStatusItem.Ok(
                     "Current instance",
-                    AICodedbProjectSettings.CurrentGenerationId,
+                    status.GenerationId,
                     status.InstanceRelativePath);
+            }
+            if (status.IsTrustedPrevious)
+            {
+                return AICodedbStatusItem.Warning(
+                    "Current instance",
+                    "Updating from " + status.GenerationId,
+                    status.Detail);
             }
             if (status.Present)
                 return AICodedbStatusItem.Error("Current instance", "Invalid", status.Detail);

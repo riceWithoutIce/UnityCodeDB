@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased v0.3.0 development
+
+- Bound every reviewed previous-generation transition to its exact stable
+  wrapper SHA-256. A legitimate `poc.33` instance now hands off to `poc.34`
+  without treating its Package-owned launcher as drift, while forged launcher
+  bytes still fail before generation publication or instance activation.
+  Manager status observation now stays on the Supervisor query/reconnect lane
+  and cannot turn a repaint into a Probe/Upgrade maintenance loop.
+- Changed Supervisor maintenance commands to return a durable operation
+  identity immediately and complete through bounded reconnectable polling.
+  Slow materializer work no longer occupies a single IPC request, duplicate
+  lifecycle probes reuse one operation, terminal failures remain attributable,
+  and instance activation still performs an authenticated Supervisor handoff.
+  Supervisor protocol 2 also drains and replaces an authenticated protocol-1
+  development process without PID cleanup or external-process termination.
+- Added immutable generation `poc.34` for the project-local Codex MCP discovery
+  blocker. Its six bounded tools now advertise complete read-only MCP
+  annotations, candidate verification rejects missing annotations, and the
+  retained `poc.33` closure remains byte-exact for existing leases.
+- Changed Manager MCP wording to distinguish project configuration, Package
+  backend availability, and neutral unobserved Codex-client state. The
+  real-task helper now derives the expected server and tool namespace from the
+  actual Unity project slug.
+
 ## 0.2.5-preview.5 - 2026-08-14
 
 - Added explicit `INSTALLED -> CONFIGURED -> MCP_AVAILABLE -> READY` product

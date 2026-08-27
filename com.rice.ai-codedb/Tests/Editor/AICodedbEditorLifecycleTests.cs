@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -92,7 +93,8 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(true, false, false, false, ExpectedResult = true)]
         [TestCase(false, true, false, false, ExpectedResult = true)]
         [TestCase(false, false, true, false, ExpectedResult = true)]
-        [TestCase(false, false, false, true, ExpectedResult = true)]
+        [TestCase(false, false, false, true, ExpectedResult = false)]
+        [TestCase(false, false, true, true, ExpectedResult = false)]
         public bool LifecycleInitialization_DefersDuringUnityTransition(
             bool isCompiling,
             bool isUpdating,
@@ -104,6 +106,35 @@ namespace Rice.AI.Codedb.Editor.Tests
                 isUpdating,
                 isPlayingOrWillChangePlaymode,
                 applicationPlaying);
+        }
+
+        [TestCase(false, false, false, false, ExpectedResult = false)]
+        [TestCase(false, false, true, false, ExpectedResult = true)]
+        [TestCase(false, false, true, true, ExpectedResult = false)]
+        [TestCase(true, false, true, true, ExpectedResult = true)]
+        public bool SupervisorReconnect_DefersOnlyForUnsafeUnityTransitions(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return AICodedbEditorLifecycle.ShouldDeferSupervisorReconnect(
+                isCompiling,
+                isUpdating,
+                isPlayingOrWillChangePlaymode,
+                applicationPlaying);
+        }
+
+        [TestCase(true, false, ExpectedResult = true)]
+        [TestCase(true, true, ExpectedResult = false)]
+        [TestCase(false, false, ExpectedResult = false)]
+        public bool DomainReload_RestoresOnlyCurrentPackageLeasePrerequisite(
+            bool persistedPrerequisiteCurrent,
+            bool packageFingerprintChanged)
+        {
+            return AICodedbEditorLifecycle.ShouldRestoreLeasePrerequisite(
+                persistedPrerequisiteCurrent,
+                packageFingerprintChanged);
         }
 
         [Test]
@@ -124,6 +155,96 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(
                 AICodedbStrictJson.GetRequiredString(document, "request_id", "Supervisor request"),
                 Is.EqualTo("request-1"));
+        }
+
+        [Test]
+        public void SupervisorProtocol_OperationRequestUsesShortPollingEnvelope()
+        {
+            const string operationId = "0123456789abcdef0123456789abcdef";
+            var request = AICodedbSupervisorProtocol.BuildOperationRequest(
+                "token",
+                "request-operation",
+                operationId);
+            var document = AICodedbStrictJson.ParseObject(request, "Supervisor operation request");
+
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    document,
+                    "command",
+                    "Supervisor operation request"),
+                Is.EqualTo("operation"));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    document,
+                    "operation_id",
+                    "Supervisor operation request"),
+                Is.EqualTo(operationId));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredInt32(
+                    document,
+                    "protocol_version",
+                    "Supervisor operation request"),
+                Is.EqualTo(AICodedbSupervisorProtocol.Version));
+        }
+
+        [Test]
+        public void SupervisorProtocol_RoundTripsNestedOperationStatus()
+        {
+            var envelope = AICodedbStrictJson.ParseObject(
+                "{\"status\":{\"readiness_state\":\"maintenance\","
+                + "\"operation\":{\"operation_id\":\"0123456789abcdef0123456789abcdef\","
+                + "\"state\":\"running\",\"result\":null},\"event_sequence\":7}}",
+                "Supervisor operation envelope");
+            var status = AICodedbStrictJson.RequireObject(
+                envelope["status"],
+                "Supervisor operation status");
+
+            var serialized = AICodedbSupervisorBridge.SerializeJsonObject(status);
+            var roundTrip = AICodedbStrictJson.ParseObject(
+                serialized,
+                "Round-tripped Supervisor operation status");
+            var operation = AICodedbStrictJson.RequireObject(
+                roundTrip["operation"],
+                "Round-tripped Supervisor operation");
+
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    operation,
+                    "state",
+                    "Round-tripped Supervisor operation"),
+                Is.EqualTo("running"));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredInt32(
+                    roundTrip,
+                    "event_sequence",
+                    "Round-tripped Supervisor operation status"),
+                Is.EqualTo(7));
+        }
+
+        [Test]
+        public void SupervisorProtocol_FinalShutdownBindsExpectedLifecycle()
+        {
+            var request = AICodedbSupervisorProtocol.BuildCommandRequest(
+                "token",
+                "request-final-shutdown",
+                "shutdown",
+                null,
+                "unity-bridge",
+                false);
+            var document = AICodedbStrictJson.ParseObject(request, "Supervisor shutdown request");
+
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    document,
+                    "command",
+                    "Supervisor shutdown request"),
+                Is.EqualTo("shutdown"));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    document,
+                    "expected_lifecycle_id",
+                    "Supervisor shutdown request"),
+                Is.EqualTo("unity-bridge"));
         }
 
         [Test]
@@ -167,6 +288,52 @@ namespace Rice.AI.Codedb.Editor.Tests
                     out parsed),
                 Is.True);
             Assert.That(parsed, Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void SupervisorProtocol_UsesCanonicalPipeIdentityAndRecognizesExactV1Handoff()
+        {
+            var root = "G" + @":\RiceProgram\Test\Test";
+            var runtime = root + @"\AIWork\.runtime\codedb\control\supervisor";
+
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
+                    root,
+                    runtime,
+                    out var canonical),
+                Is.True);
+            Assert.That(canonical, Is.EqualTo("codedb-supervisor-0ca345c1003467dd849d"));
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetLegacySupervisorPipeName(
+                    root,
+                    runtime,
+                    out var legacy),
+                Is.True);
+            Assert.That(legacy, Is.EqualTo("codedb-supervisor-f08a16463cf35b32cdab"));
+            Assert.That(
+                AICodedbSupervisorProtocol.IsExpectedSupervisorPipeName(
+                    canonical,
+                    root,
+                    runtime,
+                    root,
+                    runtime),
+                Is.True);
+            Assert.That(
+                AICodedbSupervisorProtocol.IsExpectedSupervisorPipeName(
+                    legacy,
+                    root,
+                    runtime,
+                    root,
+                    runtime),
+                Is.True);
+            Assert.That(
+                AICodedbSupervisorProtocol.IsExpectedSupervisorPipeName(
+                    "codedb-supervisor-00000000000000000000",
+                    root,
+                    runtime,
+                    root,
+                    runtime),
+                Is.False);
         }
 
         [TestCase(
@@ -316,29 +483,20 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
             var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
-            var jsonRoot = root.Replace('\\', '/');
-            var jsonRuntime = runtime.Replace('\\', '/');
-            var response = "{\"ok\":true,\"status\":{"
-                           + "\"schema_version\":2,"
-                           + "\"generation_id\":\"poc.33\","
-                           + "\"root\":\"" + jsonRoot + "\","
-                           + "\"runtime\":\"" + jsonRuntime + "\","
-                           + "\"coordinator_pid\":1234,"
-                           + "\"lifecycle_id\":null,"
-                           + "\"desired_state\":\"enabled\","
-                           + "\"editor_demand\":\"online\","
-                           + "\"provider_state\":\"ready\","
-                           + "\"provider_ready_at_utc\":\"2026-08-25T00:00:00.0000000Z\","
-                           + "\"adapter_enabled\":false,"
-                           + "\"adapter_state\":\"disabled\","
-                           + "\"adapter_worker\":null,"
-                           + "\"adapter_worker_state\":\"disabled\","
-                           + "\"last_event\":\"provider_ready\"}}";
+            var contract = ReadPackageRuntimeContract();
+            var response = SupervisorStatusResponse(
+                root,
+                runtime,
+                contract,
+                "2026-08-25T00:00:00.0000000Z");
 
             var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
                 response,
                 root,
-                "poc.33",
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
                 runtime);
 
             Assert.That(snapshot.ConnectionState, Is.EqualTo(AICodedbSupervisorConnectionState.Connected));
@@ -348,6 +506,11 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.ProviderState, Is.EqualTo("ready"));
             Assert.That(snapshot.DesiredState, Is.EqualTo("enabled"));
             Assert.That(snapshot.EditorDemand, Is.EqualTo("online"));
+            Assert.That(snapshot.SupervisorSchemaVersion, Is.EqualTo(2));
+            Assert.That(snapshot.TargetGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(snapshot.SelectedGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(snapshot.RuntimeContractSha256, Is.EqualTo(contract.Sha256));
+            Assert.That(snapshot.GenerationDisposition, Is.EqualTo("CURRENT"));
         }
 
         [Test]
@@ -356,34 +519,26 @@ namespace Rice.AI.Codedb.Editor.Tests
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
             var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var wrongRoot = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "OtherProject");
-            var jsonWrongRoot = wrongRoot.Replace('\\', '/');
-            var jsonWrongRuntime = Path.Combine(
+            var wrongRuntime = Path.Combine(
                 wrongRoot,
                 "instances",
                 "current",
                 "watch",
-                "coordinator").Replace('\\', '/');
-            var response = "{\"ok\":true,\"status\":{"
-                           + "\"schema_version\":2,"
-                           + "\"generation_id\":\"poc.33\","
-                           + "\"root\":\"" + jsonWrongRoot + "\","
-                           + "\"runtime\":\"" + jsonWrongRuntime + "\","
-                           + "\"coordinator_pid\":1234,"
-                           + "\"lifecycle_id\":null,"
-                           + "\"desired_state\":\"enabled\","
-                           + "\"editor_demand\":\"online\","
-                           + "\"provider_state\":\"ready\","
-                           + "\"provider_ready_at_utc\":\"2026-08-25T00:00:00.0000000Z\","
-                           + "\"adapter_enabled\":false,"
-                           + "\"adapter_state\":\"disabled\","
-                           + "\"adapter_worker\":null,"
-                           + "\"adapter_worker_state\":\"disabled\","
-                           + "\"last_event\":\"provider_ready\"}}";
+                "coordinator");
+            var contract = ReadPackageRuntimeContract();
+            var response = SupervisorStatusResponse(
+                wrongRoot,
+                wrongRuntime,
+                contract,
+                "2026-08-25T00:00:00.0000000Z");
 
             var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
                 response,
                 root,
-                "poc.33",
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
                 runtime);
 
             Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
@@ -406,10 +561,50 @@ namespace Rice.AI.Codedb.Editor.Tests
             var oversized = new string('x', AICodedbSupervisorProtocol.MaximumMessageBytes + 1);
             using (var reader = new StringReader(oversized))
             {
-                Assert.Throws<InvalidOperationException>(
+                Assert.That(
                     () => AICodedbSupervisorBridge.ReadBoundedLine(
                         reader,
-                        CancellationToken.None));
+                        CancellationToken.None),
+                    Throws.InstanceOf<InvalidOperationException>());
+            }
+        }
+
+        [Test]
+        public void SupervisorBridge_ExchangesMessageWithoutStreamTimeoutProperties()
+        {
+            var pipeName = "codedb-supervisor-test-" + Guid.NewGuid().ToString("N");
+            using (var server = new NamedPipeServerStream(
+                       pipeName,
+                       PipeDirection.InOut,
+                       1,
+                       PipeTransmissionMode.Byte,
+                       PipeOptions.Asynchronous))
+            {
+                var serverTask = Task.Run(async () =>
+                {
+                    await server.WaitForConnectionAsync();
+                    using (var reader = new StreamReader(
+                               server,
+                               new UTF8Encoding(false, true),
+                               false,
+                               4096,
+                               true))
+                    {
+                        var request = await reader.ReadLineAsync();
+                        Assert.That(request, Is.EqualTo("{\"command\":\"status\"}"));
+                        var response = new UTF8Encoding(false).GetBytes("{\"ok\":true}\n");
+                        await server.WriteAsync(response, 0, response.Length);
+                        await server.FlushAsync();
+                    }
+                });
+
+                var response = AICodedbSupervisorBridge.SendPipeRequest(
+                    pipeName,
+                    "{\"command\":\"status\"}",
+                    CancellationToken.None);
+                serverTask.GetAwaiter().GetResult();
+
+                Assert.That(response, Is.EqualTo("{\"ok\":true}"));
             }
         }
 
@@ -418,34 +613,118 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
             var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
-            var jsonRoot = root.Replace('\\', '/');
-            var jsonRuntime = runtime.Replace('\\', '/');
-            var response = "{\"ok\":true,\"status\":{"
-                           + "\"schema_version\":2,"
-                           + "\"generation_id\":\"poc.33\","
-                           + "\"root\":\"" + jsonRoot + "\","
-                           + "\"runtime\":\"" + jsonRuntime + "\","
-                           + "\"coordinator_pid\":1234,"
-                           + "\"lifecycle_id\":null,"
-                           + "\"desired_state\":\"enabled\","
-                           + "\"editor_demand\":\"online\","
-                           + "\"provider_state\":\"ready\","
-                           + "\"provider_ready_at_utc\":null,"
-                           + "\"adapter_enabled\":false,"
-                           + "\"adapter_state\":\"disabled\","
-                           + "\"adapter_worker\":null,"
-                           + "\"adapter_worker_state\":\"disabled\","
-                           + "\"last_event\":\"provider_ready\"}}";
+            var contract = ReadPackageRuntimeContract();
+            var response = SupervisorStatusResponse(root, runtime, contract, null);
 
             var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
                 response,
                 root,
-                "poc.33",
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
                 runtime);
 
             Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
             Assert.That(snapshot.ReasonCode, Is.EqualTo("INVALID_PROVIDER_HANDSHAKE"));
             Assert.That(snapshot.IsCoreReady, Is.False);
+        }
+
+        [Test]
+        public void SupervisorProtocol_RunningOperationCannotReportReady()
+        {
+            var root = _projectRoot;
+            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
+            var contract = ReadPackageRuntimeContract();
+            var response = SupervisorStatusResponse(
+                    root,
+                    runtime,
+                    contract,
+                    "2026-08-26T00:00:00.0000000Z")
+                .Replace(
+                    "\"last_event\":\"provider_ready\"",
+                    "\"readiness_state\":\"maintenance\","
+                    + "\"reason_code\":\"SUPERVISOR_MAINTENANCE\","
+                    + "\"detail\":\"Supervisor operation materialize:Probe is running.\","
+                    + "\"last_event\":\"operation_started\"");
+
+            var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
+                response,
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+
+            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Maintenance));
+            Assert.That(snapshot.IsCoreReady, Is.False);
+            Assert.That(snapshot.ReasonCode, Is.EqualTo("SUPERVISOR_MAINTENANCE"));
+        }
+
+        [Test]
+        public void SupervisorProtocol_LegacyCommandModelCannotMasqueradeAsCurrent()
+        {
+            var root = _projectRoot;
+            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
+            var contract = ReadPackageRuntimeContract();
+            var response = SupervisorStatusResponse(
+                    root,
+                    runtime,
+                    contract,
+                    "2026-08-26T00:00:00.0000000Z")
+                .Replace(
+                    "\"supervisor_protocol_version\":" + AICodedbSupervisorProtocol.SupervisorVersion,
+                    "\"supervisor_protocol_version\":" + AICodedbSupervisorProtocol.LegacySupervisorVersion);
+
+            var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
+                response,
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+
+            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(snapshot.ReasonCode, Is.EqualTo("PROTOCOL_MISMATCH"));
+        }
+
+        [Test]
+        public void SupervisorProtocol_LegacyHandoffWaitsForAdmittedMaintenance()
+        {
+            var statePath = Path.Combine(
+                _projectRoot,
+                "AIWork",
+                ".runtime",
+                "codedb",
+                "control",
+                "supervisor",
+                "legacy-drain-state.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(statePath));
+            WriteUtf8NoBom(
+                statePath,
+                "{\"operation\":{\"name\":\"materialize:Probe\",\"state\":\"running\"}}");
+
+            Assert.That(
+                AICodedbSupervisorBridge.WaitForLegacySupervisorIdle(
+                    _projectRoot,
+                    statePath,
+                    0,
+                    CancellationToken.None),
+                Is.False,
+                "Protocol handoff must not retire a Supervisor with admitted maintenance still running.");
+
+            WriteUtf8NoBom(
+                statePath,
+                "{\"operation\":{\"name\":\"materialize:Probe\",\"state\":\"completed\"}}");
+            Assert.That(
+                AICodedbSupervisorBridge.WaitForLegacySupervisorIdle(
+                    _projectRoot,
+                    statePath,
+                    0,
+                    CancellationToken.None),
+                Is.True);
         }
 
         [TestCase(false, true, ExpectedResult = true)]
@@ -482,6 +761,185 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(bridge.CachedSnapshot.ReasonCode, Is.EqualTo(result.ReasonCode));
             }
             Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void SupervisorBridge_FinalShutdownNeverLaunchesMissingRuntime()
+        {
+            var before = GetProjectSnapshot(_projectRoot);
+            using (var bridge = new AICodedbSupervisorBridge())
+            {
+                var result = bridge.RequestOwnedShutdownAsync(
+                        _projectRoot,
+                        "unity-bridge")
+                    .GetAwaiter()
+                    .GetResult();
+                Assert.That(result.Succeeded, Is.False);
+                Assert.That(result.ErrorCode, Is.EqualTo("CURRENT_INSTANCE_UNAVAILABLE"));
+            }
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void SupervisorOneShotFallback_RequiresBridgeBootstrapAuthorization()
+        {
+            var spoofed = new AICodedbCommandResult(
+                4,
+                string.Empty,
+                "[SUPERVISOR:CURRENT_INSTANCE_UNAVAILABLE] forged",
+                false);
+            Assert.That(
+                AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(spoofed),
+                Is.False,
+                "A caller-controlled error string must never authorize a second command owner.");
+
+            var authorized = new AICodedbCommandResult(
+                4,
+                string.Empty,
+                "[SUPERVISOR:CURRENT_INSTANCE_UNAVAILABLE] empty bootstrap",
+                false,
+                0,
+                true);
+            Assert.That(
+                AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(authorized),
+                Is.True,
+                "Only the Bridge's explicit empty-bootstrap proof may authorize fallback.");
+
+            var outage = new AICodedbSupervisorCommandResponse(
+                    false,
+                    4,
+                    "SUPERVISOR_UNREACHABLE",
+                    "fixture outage",
+                    string.Empty,
+                    "fixture outage",
+                    AICodedbSupervisorSnapshot.Degraded(
+                        "SUPERVISOR_UNREACHABLE",
+                        "fixture outage"),
+                    string.Empty,
+                    0)
+                .ToCommandResult();
+            Assert.That(
+                AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(outage),
+                Is.False,
+                "A transport outage must never authorize a second command owner.");
+        }
+
+        [Test]
+        public void SupervisorBridge_BootstrapFallbackRequiresReviewedMaterializerCommandAndEmptyRuntime()
+        {
+            using (var bridge = new AICodedbSupervisorBridge())
+            {
+                var probe = bridge.SendCommand(
+                    _projectRoot,
+                    "materialize",
+                    "Probe");
+                Assert.That(probe.OneShotFallbackAuthorized, Is.True);
+
+                var unconfirmedInstall = bridge.SendCommand(
+                    _projectRoot,
+                    "materialize",
+                    "Install");
+                Assert.That(unconfirmedInstall.OneShotFallbackAuthorized, Is.False);
+
+                var confirmedInstall = bridge.SendCommand(
+                    _projectRoot,
+                    "materialize",
+                    "Install",
+                    null,
+                    true);
+                Assert.That(confirmedInstall.OneShotFallbackAuthorized, Is.True);
+
+                var watcher = bridge.SendCommand(
+                    _projectRoot,
+                    "watcher",
+                    "Ensure");
+                Assert.That(watcher.OneShotFallbackAuthorized, Is.False);
+
+                var shutdown = bridge.RequestOwnedShutdownAsync(
+                        _projectRoot,
+                        "unity-bridge")
+                    .GetAwaiter()
+                    .GetResult();
+                Assert.That(shutdown.OneShotFallbackAuthorized, Is.False);
+
+                var runtime = AICodedbSupervisorLauncher.GetSupervisorRuntimePath(_projectRoot);
+                Directory.CreateDirectory(runtime);
+                Assert.That(
+                    bridge.SendCommand(_projectRoot, "materialize", "Probe")
+                        .OneShotFallbackAuthorized,
+                    Is.True,
+                    "An empty reviewed runtime remains a bootstrap case.");
+
+                WriteUtf8NoBom(Path.Combine(runtime, "operation.json"), "{}");
+                Assert.That(
+                    bridge.SendCommand(_projectRoot, "materialize", "Probe")
+                        .OneShotFallbackAuthorized,
+                    Is.False,
+                    "Any control evidence must close fallback until ownership is classified.");
+            }
+        }
+
+        [Test]
+        public void SupervisorLauncher_RoutesProviderConfigThroughSelectedInstance()
+        {
+            var instanceRoot = Path.Combine(
+                _projectRoot,
+                "AIWork",
+                ".runtime",
+                "codedb",
+                "instances",
+                "0123456789abcdef0123456789abcdef");
+
+            Assert.That(
+                AICodedbSupervisorLauncher.GetSelectedInstanceProviderConfigPath(instanceRoot),
+                Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
+                    instanceRoot,
+                    "config",
+                    "codedb-mcp.toml"))));
+        }
+
+        [Test]
+        public void SupervisorLauncher_ValidatesExternalPackageAgainstItsOwnRoot()
+        {
+            var packageRoot = _projectRoot + "-package";
+            var unrelatedRoot = _projectRoot + "-unrelated";
+            var supervisorScript = Path.Combine(
+                packageRoot,
+                "Tools~",
+                "codedb-project-supervisor.mjs");
+            var unrelatedScript = Path.Combine(
+                unrelatedRoot,
+                "codedb-project-supervisor.mjs");
+            var runtime = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceControlRelativePath,
+                "supervisor");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(supervisorScript));
+                Directory.CreateDirectory(unrelatedRoot);
+                File.WriteAllText(supervisorScript, "// fixture");
+                File.WriteAllText(unrelatedScript, "// fixture");
+
+                Assert.DoesNotThrow(() => AICodedbSupervisorLauncher.ValidateLaunchRoots(
+                    _projectRoot,
+                    packageRoot,
+                    runtime,
+                    supervisorScript));
+                Assert.Throws<InvalidOperationException>(() =>
+                    AICodedbSupervisorLauncher.ValidateLaunchRoots(
+                        _projectRoot,
+                        packageRoot,
+                        runtime,
+                        unrelatedScript));
+            }
+            finally
+            {
+                if (Directory.Exists(packageRoot))
+                    Directory.Delete(packageRoot, true);
+                if (Directory.Exists(unrelatedRoot))
+                    Directory.Delete(unrelatedRoot, true);
+            }
         }
 
         [Test]
@@ -928,25 +1386,27 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void HostGenerationStore_ResolvesValidCurrentGeneration()
         {
+            var target = ReadPackageRuntimeContract().Target;
             InstallCurrentGeneration();
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
             Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Current));
-            Assert.That(selection.GenerationId, Is.EqualTo(AICodedbProjectSettings.CurrentGenerationId));
-            Assert.That(selection.PayloadSequence, Is.EqualTo(AICodedbProjectSettings.CurrentPayloadSequence));
-            Assert.That(selection.BootstrapProtocol, Is.EqualTo(AICodedbProjectSettings.CurrentBootstrapProtocol));
-            Assert.That(selection.RootPath, Does.EndWith("/host/generations/" + AICodedbProjectSettings.CurrentGenerationId));
+            Assert.That(selection.GenerationId, Is.EqualTo(target.GenerationId));
+            Assert.That(selection.PayloadSequence, Is.EqualTo(target.PayloadSequence));
+            Assert.That(selection.BootstrapProtocol, Is.EqualTo(target.BootstrapProtocol));
+            Assert.That(selection.RootPath, Does.EndWith("/host/generations/" + target.GenerationId));
         }
 
         [Test]
         public void HostGenerationStore_RejectsSelfConsistentCurrentGenerationNotOwnedByPackage()
         {
+            var target = ReadPackageRuntimeContract().Target;
             InstallGeneration(
-                AICodedbProjectSettings.CurrentPackageVersion,
-                AICodedbProjectSettings.CurrentPayloadVersion,
-                AICodedbProjectSettings.CurrentPayloadSequence,
-                AICodedbProjectSettings.CurrentGenerationId);
+                target.PackageVersion,
+                target.PayloadVersion,
+                target.PayloadSequence,
+                target.GenerationId);
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
@@ -1080,6 +1540,143 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CurrentInstanceStore_TrustedPoc33PlansAutomaticPoc34Handoff()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33");
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+            var selection = AICodedbHostGenerationStore.Resolve(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+            var plan = AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                status.State,
+                new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Current,
+                    AICodedbProductLayerState.Unavailable,
+                    AICodedbProductLayerState.Unavailable,
+                    AICodedbProductLayerState.Unavailable,
+                    "Previous generation is selected."));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.TrustedPrevious));
+            Assert.That(status.IsTrustedPrevious, Is.True);
+            Assert.That(status.CanPublishEditorLease, Is.True);
+            Assert.That(
+                status.EditorLeaseRelativePath,
+                Is.EqualTo(status.InstanceRelativePath + "/watch/lifecycle/editor-leases"));
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldPublishEditorLeaseForInstance(
+                    AICodedbProjectIntegrationStateStore.Read(_projectRoot),
+                    status),
+                Is.True);
+            Assert.That(status.GenerationId, Is.EqualTo("poc.33"));
+            Assert.That(status.PayloadSequence, Is.EqualTo(33));
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Previous));
+            Assert.That(plan, Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Deploy));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Classification must be read-only.");
+        }
+
+        [Test]
+        public void SupervisorBridge_HandoffsOnlyAfterSuccessfulSelectedInstanceChange()
+        {
+            var previous = SupervisorInstanceStatus(
+                AICodedbCurrentInstanceState.TrustedPrevious,
+                "11111111111111111111111111111111",
+                "poc.33");
+            var current = SupervisorInstanceStatus(
+                AICodedbCurrentInstanceState.Current,
+                "22222222222222222222222222222222",
+                "poc.34");
+            var unchanged = SupervisorInstanceStatus(
+                AICodedbCurrentInstanceState.TrustedPrevious,
+                previous.InstanceId,
+                previous.GenerationId);
+            var invalid = SupervisorInstanceStatus(
+                AICodedbCurrentInstanceState.Invalid,
+                "33333333333333333333333333333333",
+                "poc.34");
+            var missing = SupervisorInstanceStatus(
+                AICodedbCurrentInstanceState.Missing,
+                string.Empty,
+                string.Empty);
+
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "materialize",
+                    true,
+                    previous,
+                    current),
+                Is.True);
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "materialize",
+                    true,
+                    previous,
+                    missing),
+                Is.True,
+                "Logical Uninstall removes the selected instance and retires the authenticated Supervisor.");
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "materialize",
+                    true,
+                    previous,
+                    unchanged),
+                Is.False);
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "materialize",
+                    false,
+                    previous,
+                    current),
+                Is.False);
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "watcher",
+                    true,
+                    previous,
+                    current),
+                Is.False);
+            Assert.That(
+                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
+                    "materialize",
+                    true,
+                    previous,
+                    invalid),
+                Is.False,
+                "Invalid post-activation evidence stays fail-closed.");
+        }
+
+        [Test]
+        public void CurrentInstanceStore_DriftedPoc33RemainsInvalidAndBlocked()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33");
+            var workerPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostGenerationsRelativePath,
+                "poc.33",
+                "wrapper",
+                "codedb-project-instance-worker.mjs");
+            File.AppendAllText(workerPath, "\n// drift\n");
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+            var plan = AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                status.State,
+                default(AICodedbProductStatus));
+
+            Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.Invalid));
+            Assert.That(status.IsTrustedPrevious, Is.False);
+            Assert.That(status.Detail, Does.Contain("generation closure"));
+            Assert.That(plan, Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Rejected evidence must remain read-only.");
+        }
+
+        [Test]
         public void HostGenerationStore_ResolvesValidatedPreviousGenerationWithoutMarkingItInvalid()
         {
             InstallGeneration("0.2.5-preview.2", "poc.29", 29, "poc.29");
@@ -1101,18 +1698,24 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void HostGenerationStore_ResolvesValidatedNewerGenerationAsDowngradeReviewRequired()
         {
-            InstallGeneration("0.2.5-preview.4", "poc.31", 31, "poc.31");
+            var target = ReadPackageRuntimeContract().Target;
+            InstallGeneration(
+                "future-package",
+                "future-payload",
+                target.PayloadSequence + 1,
+                "future-generation");
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
             Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.DowngradeReviewRequired));
-            Assert.That(selection.GenerationId, Is.EqualTo("poc.31"));
+            Assert.That(selection.GenerationId, Is.EqualTo("future-generation"));
             Assert.That(selection.Detail, Does.Contain("newer than the loaded Package"));
         }
 
         [Test]
         public void HostGenerationStore_TreatsTrackedAdoptionWithoutRuntimeAsUnavailable()
         {
+            var target = ReadPackageRuntimeContract().Target;
             var trackedFile = Path.Combine(_projectRoot, "AIWork", "codedb", "scripts", "fixture.ps1");
             Directory.CreateDirectory(Path.GetDirectoryName(trackedFile));
             File.WriteAllText(trackedFile, "tracked");
@@ -1120,13 +1723,13 @@ namespace Rice.AI.Codedb.Editor.Tests
             File.WriteAllText(
                 markerPath,
                 "{\"schema_version\":2,\"managed_by\":\"com.rice.ai-codedb\","
-                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
-                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
-                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
+                + "\"package_version\":\"" + target.PackageVersion + "\","
+                + "\"payload_version\":\"" + target.PayloadVersion + "\","
+                + "\"payload_sequence\":" + target.PayloadSequence + ","
                 + "\"payload_content_sha256\":\"" + new string('a', 64) + "\","
                 + "\"host_use_gate_version\":1,\"generation_lease_version\":2,"
-                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
-                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
+                + "\"generation_id\":\"" + target.GenerationId + "\","
+                + "\"bootstrap_protocol\":" + target.BootstrapProtocol + ","
                 + "\"current_pointer\":\"" + AICodedbProjectSettings.HostCurrentPointerRelativePath + "\","
                 + "\"files\":[{\"path\":\"AIWork/codedb/scripts/fixture.ps1\","
                 + "\"installed_sha256\":\"" + GetSha256(trackedFile) + "\"}]}");
@@ -1140,18 +1743,19 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void HostGenerationStore_RejectsSchemaTwoMarkerThatClaimsIgnoredRuntimeOwnership()
         {
+            var target = ReadPackageRuntimeContract().Target;
             var markerPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostPayloadMarkerRelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(markerPath));
             File.WriteAllText(
                 markerPath,
                 "{\"schema_version\":2,\"managed_by\":\"com.rice.ai-codedb\","
-                + "\"package_version\":\"" + AICodedbProjectSettings.CurrentPackageVersion + "\","
-                + "\"payload_version\":\"" + AICodedbProjectSettings.CurrentPayloadVersion + "\","
-                + "\"payload_sequence\":" + AICodedbProjectSettings.CurrentPayloadSequence + ","
+                + "\"package_version\":\"" + target.PackageVersion + "\","
+                + "\"payload_version\":\"" + target.PayloadVersion + "\","
+                + "\"payload_sequence\":" + target.PayloadSequence + ","
                 + "\"payload_content_sha256\":\"" + new string('a', 64) + "\","
                 + "\"host_use_gate_version\":1,\"generation_lease_version\":2,"
-                + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
-                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
+                + "\"generation_id\":\"" + target.GenerationId + "\","
+                + "\"bootstrap_protocol\":" + target.BootstrapProtocol + ","
                 + "\"current_pointer\":\"" + AICodedbProjectSettings.HostCurrentPointerRelativePath + "\","
                 + "\"files\":[{\"path\":\"AIWork/.runtime/codedb/host/current.json\","
                 + "\"installed_sha256\":\"" + new string('b', 64) + "\"}]}");
@@ -1451,6 +2055,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase("invalid-utf8")]
         public void HostUpgradeStateStore_RejectsAmbiguousOrInvalidStrictJson(string invalidKind)
         {
+            var target = ReadPackageRuntimeContract().Target;
             var statePath = Path.Combine(
                 _projectRoot,
                 AICodedbProjectSettings.HostPayloadUpgradeStateRelativePath);
@@ -1458,7 +2063,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                        + "\"managed_by\":\"com.rice.ai-codedb\","
                        + "\"project_root\":\"" + JsonPath(_projectRoot) + "\","
                        + "\"state\":\"CURRENT\","
-                       + "\"generation_id\":\"" + AICodedbProjectSettings.CurrentGenerationId + "\","
+                       + "\"generation_id\":\"" + target.GenerationId + "\","
                        + "\"updated_at_utc\":\"2026-08-13T00:00:00.0000000Z\","
                        + "\"message\":null}";
             WriteInvalidJsonEvidence(
@@ -1472,7 +2077,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             var status = AICodedbHostUpgradeStatusStore.Read(
                 _projectRoot,
-                AICodedbProjectSettings.CurrentGenerationId);
+                target.GenerationId);
 
             Assert.That(status.Phase, Is.EqualTo(AICodedbHostUpgradePhase.Invalid));
             Assert.That(status.DisplayState, Is.EqualTo(AICodedbStatusState.Error));
@@ -2060,40 +2665,18 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void BackgroundScheduler_QueuesProcessCleanupOffCallingThread()
+        public void BackgroundScheduler_HasNoProcessCancellationOwner()
         {
-            var callerThreadId = 0;
-            var cleanupThreadId = 0;
-            using (var cleanupStarted = new ManualResetEventSlim(false))
-            using (var cleanupRelease = new ManualResetEventSlim(false))
-            using (var callerRelease = new ManualResetEventSlim(false))
-            {
-                var scheduler = new AICodedbEditorBackgroundScheduler(() =>
-                {
-                    cleanupThreadId = Thread.CurrentThread.ManagedThreadId;
-                    cleanupStarted.Set();
-                    cleanupRelease.Wait(TimeSpan.FromSeconds(5));
-                });
-
-                var callerReturned = new ManualResetEventSlim(false);
-                var setSuspended = Task.Run(() =>
-                {
-                    callerThreadId = Thread.CurrentThread.ManagedThreadId;
-                    scheduler.SetMaintenanceSuspended(true);
-                    callerReturned.Set();
-                    callerRelease.Wait(TimeSpan.FromSeconds(5));
-                });
-
-                Assert.That(cleanupStarted.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                var returnedBeforeCleanupRelease = callerReturned.IsSet;
-                cleanupRelease.Set();
-                callerRelease.Set();
-                Assert.That(setSuspended.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                Assert.That(returnedBeforeCleanupRelease, Is.True,
-                    "Suspension must return before process cleanup finishes.");
-                Assert.That(cleanupThreadId, Is.Not.EqualTo(callerThreadId),
-                    "Process inspection/termination must remain off the boundary callback thread.");
-            }
+            var delegateFields = typeof(AICodedbEditorBackgroundScheduler).GetFields(
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public);
+            Assert.That(
+                Array.Exists(
+                    delegateFields,
+                    field => typeof(Delegate).IsAssignableFrom(field.FieldType)),
+                Is.False,
+                "A Play/Domain Reload scheduler must not retain a process-kill callback.");
         }
 
         [Test]
@@ -2169,10 +2752,43 @@ namespace Rice.AI.Codedb.Editor.Tests
             return AICodedbEditorLifecycle.ShouldReconcileAfterPlayModeResume(previousProductState);
         }
 
-        [TestCase(AICodedbProductState.Ready, ExpectedResult = true)]
+        [TestCase(false, ExpectedResult = false)]
+        [TestCase(true, ExpectedResult = true)]
+        public bool ReadyPlayResume_ForcesReconcileOnlyForPendingPackageChange(
+            bool packageFingerprintChanged)
+        {
+            return AICodedbEditorLifecycle.ShouldForceReconcileAfterPlayModeResume(
+                packageFingerprintChanged);
+        }
+
+        [Test]
+        public void ReadyPlayResume_SamePackageReconnectsWithoutReconcile()
+        {
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldForceReconcileAfterPlayModeResume(false),
+                Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldReconcileAfterPlayModeResume(
+                    AICodedbProductState.Ready),
+                Is.False);
+        }
+
+        [TestCase(true, false, ExpectedResult = true)]
+        [TestCase(true, true, ExpectedResult = false)]
+        [TestCase(false, false, ExpectedResult = false)]
+        public bool PackageChangeSignal_IsClearedOnlyByCompletedReconcile(
+            bool packageFingerprintChanged,
+            bool reconcileCompleted)
+        {
+            return AICodedbEditorLifecycle.ShouldRetainPendingPackageChange(
+                packageFingerprintChanged,
+                reconcileCompleted);
+        }
+
+        [TestCase(AICodedbProductState.Ready, ExpectedResult = false)]
         [TestCase(AICodedbProductState.Starting, ExpectedResult = false)]
         [TestCase(AICodedbProductState.NeedsAttention, ExpectedResult = false)]
-        public bool ReadyPlayResume_RequestsAnInPlaceAvailabilityPass(
+        public bool ReadyPlayResume_DoesNotForceAvailabilityRecovery(
             AICodedbProductState previousProductState)
         {
             return AICodedbEditorLifecycle.ShouldForceAvailabilityReconcileAfterPlayModeResume(
@@ -2571,6 +3187,48 @@ namespace Rice.AI.Codedb.Editor.Tests
             return AICodedbPaths.NormalizePath(path).Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
+        private static AICodedbPackageRuntimeContract ReadPackageRuntimeContract()
+        {
+            return AICodedbPackageRuntimeContractStore.Read(AICodedbPaths.PackageRootPath);
+        }
+
+        private static string SupervisorStatusResponse(
+            string root,
+            string runtime,
+            AICodedbPackageRuntimeContract contract,
+            string providerReadyAtUtc)
+        {
+            var target = contract.Target;
+            var providerReadyValue = providerReadyAtUtc == null
+                ? "null"
+                : "\"" + providerReadyAtUtc + "\"";
+            return "{\"ok\":true,\"status\":{"
+                   + "\"schema_version\":" + AICodedbSupervisorProtocol.CoordinatorStateSchemaVersion + ","
+                   + "\"supervisor_schema_version\":" + AICodedbSupervisorProtocol.SupervisorStateSchemaVersion + ","
+                   + "\"protocol_version\":" + AICodedbSupervisorProtocol.Version + ","
+                   + "\"supervisor_protocol_version\":" + AICodedbSupervisorProtocol.SupervisorVersion + ","
+                   + "\"role\":\"" + AICodedbSupervisorProtocol.SupervisorRole + "\","
+                   + "\"root\":\"" + JsonPath(root) + "\","
+                   + "\"project_identity\":\"" + AICodedbEditorLifecycle.CreateProjectIdentity(root) + "\","
+                   + "\"generation_id\":\"" + target.GenerationId + "\","
+                   + "\"target_generation_id\":\"" + target.GenerationId + "\","
+                   + "\"selected_generation_id\":\"" + target.GenerationId + "\","
+                   + "\"runtime_contract_sha256\":\"" + contract.Sha256 + "\","
+                   + "\"generation_disposition\":\"CURRENT\","
+                   + "\"runtime\":\"" + JsonPath(runtime) + "\","
+                   + "\"coordinator_pid\":1234,"
+                   + "\"lifecycle_id\":null,"
+                   + "\"desired_state\":\"enabled\","
+                   + "\"editor_demand\":\"online\","
+                   + "\"provider_state\":\"ready\","
+                   + "\"provider_ready_at_utc\":" + providerReadyValue + ","
+                   + "\"adapter_enabled\":false,"
+                   + "\"adapter_state\":\"disabled\","
+                   + "\"adapter_worker\":null,"
+                   + "\"adapter_worker_state\":\"disabled\","
+                   + "\"last_event\":\"provider_ready\"}}";
+        }
+
         private static string IntegrationStateJson(string projectRoot)
         {
             return IntegrationStateJson(projectRoot, "PENDING");
@@ -2636,15 +3294,16 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         private string InstallCurrentGeneration()
         {
+            var target = ReadPackageRuntimeContract().Target;
             var sourceRoot = Path.Combine(
                 AICodedbPaths.PackageRootPath,
                 "Payload~",
                 "Generations",
-                AICodedbProjectSettings.CurrentGenerationId);
+                target.GenerationId);
             var generationRoot = Path.Combine(
                 _projectRoot,
                 AICodedbProjectSettings.HostGenerationsRelativePath,
-                AICodedbProjectSettings.CurrentGenerationId);
+                target.GenerationId);
             CopyDirectory(sourceRoot, generationRoot);
 
             var currentPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
@@ -2656,12 +3315,137 @@ namespace Rice.AI.Codedb.Editor.Tests
             return Path.Combine(generationRoot, "scripts", "verify-codedb-project.ps1");
         }
 
+        private static AICodedbCurrentInstanceStatus SupervisorInstanceStatus(
+            AICodedbCurrentInstanceState state,
+            string instanceId,
+            string generationId)
+        {
+            var instanceRelativePath = string.IsNullOrWhiteSpace(instanceId)
+                ? string.Empty
+                : AICodedbProjectSettings.InstancesRelativePath + "/" + instanceId;
+            return new AICodedbCurrentInstanceStatus(
+                state,
+                instanceId,
+                instanceRelativePath,
+                instanceRelativePath,
+                string.IsNullOrWhiteSpace(generationId)
+                    ? string.Empty
+                    : AICodedbProjectSettings.HostGenerationsRelativePath + "/" + generationId,
+                generationId,
+                "0.2.5-preview.5",
+                generationId,
+                string.Equals(generationId, "poc.33", StringComparison.Ordinal) ? 33 : 34,
+                1,
+                string.Empty);
+        }
+
+        private string InstallPackageDeclaredPreviousInstance(string generationId)
+        {
+            var packageGenerationRoot = Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Payload~",
+                "Generations",
+                generationId);
+            var generationRoot = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostGenerationsRelativePath,
+                generationId);
+            CopyDirectory(packageGenerationRoot, generationRoot);
+
+            var generationManifestPath = Path.Combine(generationRoot, "generation-manifest.json");
+            var generationManifest = AICodedbStrictJson.ReadObject(
+                generationManifestPath,
+                1024 * 1024,
+                "previous generation fixture manifest");
+            var packageVersion = AICodedbStrictJson.GetRequiredString(
+                generationManifest,
+                "package_version",
+                "previous generation fixture manifest");
+            var payloadVersion = AICodedbStrictJson.GetRequiredString(
+                generationManifest,
+                "payload_version",
+                "previous generation fixture manifest");
+            var payloadSequence = AICodedbStrictJson.GetRequiredInt32(
+                generationManifest,
+                "payload_sequence",
+                "previous generation fixture manifest");
+            var bootstrapProtocol = AICodedbStrictJson.GetRequiredInt32(
+                generationManifest,
+                "bootstrap_protocol",
+                "previous generation fixture manifest");
+            var generationManifestHash = GetSha256(generationManifestPath);
+            const string workerRelativePath = "wrapper/codedb-project-instance-worker.mjs";
+            var workerHash = GetSha256(Path.Combine(
+                generationRoot,
+                workerRelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            var generationRelativePath = AICodedbProjectSettings.HostGenerationsRelativePath + "/" + generationId;
+
+            var hostPointerPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostCurrentPointerRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(hostPointerPath));
+            WriteUtf8NoBom(
+                hostPointerPath,
+                "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"package_version\":\"" + packageVersion + "\","
+                + "\"payload_version\":\"" + payloadVersion + "\","
+                + "\"payload_sequence\":" + payloadSequence + ","
+                + "\"generation_id\":\"" + generationId + "\","
+                + "\"generation_relative_path\":\"" + generationRelativePath + "\","
+                + "\"generation_manifest_sha256\":\"" + generationManifestHash + "\","
+                + "\"bootstrap_protocol\":" + bootstrapProtocol + "}");
+
+            var instanceId = Guid.NewGuid().ToString("N");
+            var instanceRelativePath = AICodedbProjectSettings.InstancesRelativePath + "/" + instanceId;
+            var instanceRoot = Path.Combine(
+                _projectRoot,
+                instanceRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            foreach (var directory in new[] { "config", "index", "adapter", "watch", "leases", "logs", "tmp" })
+                Directory.CreateDirectory(Path.Combine(instanceRoot, directory));
+            var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
+            var instanceManifestPath = Path.Combine(instanceRoot, "instance.json");
+            WriteUtf8NoBom(
+                instanceManifestPath,
+                "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"project_identity\":\"" + projectIdentity + "\","
+                + "\"instance_id\":\"" + instanceId + "\","
+                + "\"instance_relative_path\":\"" + instanceRelativePath + "\","
+                + "\"state\":\"READY\","
+                + "\"package_version\":\"" + packageVersion + "\","
+                + "\"payload_version\":\"" + payloadVersion + "\","
+                + "\"payload_sequence\":" + payloadSequence + ","
+                + "\"generation_id\":\"" + generationId + "\","
+                + "\"generation_relative_path\":\"" + generationRelativePath + "\","
+                + "\"generation_manifest_sha256\":\"" + generationManifestHash + "\","
+                + "\"bootstrap_protocol\":" + bootstrapProtocol + ","
+                + "\"worker_relative_path\":\"" + workerRelativePath + "\","
+                + "\"worker_sha256\":\"" + workerHash + "\","
+                + "\"created_at_utc\":\"2026-08-26T00:00:00.0000000Z\","
+                + "\"verified_at_utc\":\"2026-08-26T00:00:01.0000000Z\"}");
+
+            var instancePointerPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceCurrentRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(instancePointerPath));
+            WriteUtf8NoBom(
+                instancePointerPath,
+                "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"project_identity\":\"" + projectIdentity + "\","
+                + "\"instance_id\":\"" + instanceId + "\","
+                + "\"instance_relative_path\":\"" + instanceRelativePath + "\","
+                + "\"instance_manifest_sha256\":\"" + GetSha256(instanceManifestPath) + "\","
+                + "\"generation_id\":\"" + generationId + "\","
+                + "\"activated_at_utc\":\"2026-08-26T00:00:02.0000000Z\"}");
+            return instanceRoot;
+        }
+
         private string InstallGeneration(
             string packageVersion,
             string payloadVersion,
             int payloadSequence,
             string generationId)
         {
+            var bootstrapProtocol = ReadPackageRuntimeContract().Target.BootstrapProtocol;
             var generationRoot = Path.Combine(
                 _projectRoot,
                 AICodedbProjectSettings.HostGenerationsRelativePath,
@@ -2678,7 +3462,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 + "\"package_version\":\"" + packageVersion + "\","
                 + "\"payload_version\":\"" + payloadVersion + "\","
                 + "\"payload_sequence\":" + payloadSequence + ","
-                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + ","
+                + "\"bootstrap_protocol\":" + bootstrapProtocol + ","
                 + "\"files\":[{\"path\":\"scripts/fixture.ps1\","
                 + "\"sha256\":\"" + GetSha256(generationFile) + "\"}]}");
 
@@ -2694,7 +3478,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 + "\"generation_relative_path\":\"" + AICodedbProjectSettings.HostGenerationsRelativePath
                 + "/" + generationId + "\","
                 + "\"generation_manifest_sha256\":\"" + GetSha256(manifestPath) + "\","
-                + "\"bootstrap_protocol\":" + AICodedbProjectSettings.CurrentBootstrapProtocol + "}");
+                + "\"bootstrap_protocol\":" + bootstrapProtocol + "}");
             return generationFile;
         }
 

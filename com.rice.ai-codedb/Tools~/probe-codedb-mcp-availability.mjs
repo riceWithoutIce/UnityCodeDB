@@ -3,11 +3,14 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const EXIT_TIMEOUT_MS = 5_000;
 const MAX_STDERR_CHARS = 64 * 1024;
+const MAX_CANDIDATE_WORKER_BYTES = 4 * 1024 * 1024;
 const AVAILABILITY_QUERY = "__RICE_CODEDB_PACKAGE_AVAILABILITY_PROBE__";
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_TOOLS = [
   "codedb_context",
   "codedb_find",
@@ -16,6 +19,12 @@ const EXPECTED_TOOLS = [
   "codedb_status",
   "codedb_text_search"
 ];
+const EXPECTED_READ_ONLY_ANNOTATIONS = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+});
 
 let wrapperWorker = null;
 const probeEvidence = createProbeEvidence();
@@ -25,7 +34,10 @@ try {
   const projectRoot = options.projectRoot;
   const wrapperRelativePath = options.wrapperRelativePath
     ?? path.join("AIWork", "codedb", "wrapper", "codedb-project-wrapper.mjs");
-  const wrapperPath = assertOwnedWrapper(projectRoot, wrapperRelativePath, options.candidateMode);
+  const wrapperPath = assertOwnedWrapper(
+    projectRoot,
+    wrapperRelativePath,
+    options.instanceRoot);
   process.chdir(projectRoot);
   const result = await probeWrapper(projectRoot, wrapperPath, options.instanceRoot, probeEvidence);
   process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -92,18 +104,14 @@ function readProbeOptions(args) {
   return {
     projectRoot: root,
     wrapperRelativePath,
-    instanceRoot,
-    candidateMode: wrapperRelativePath !== undefined
+    instanceRoot
   };
 }
 
-function assertOwnedWrapper(projectRoot, relativePath, candidateMode) {
+function assertOwnedWrapper(projectRoot, relativePath, instanceRoot) {
   const normalized = String(relativePath).replace(/\\/g, "/");
   if (path.isAbsolute(normalized) || normalized.includes("\0") || normalized.includes("..")) {
     throw new Error("CodeDB probe wrapper path must be a project-relative path without traversal.");
-  }
-  if (candidateMode && normalized !== "AIWork/.runtime/codedb/host/generations/poc.33/wrapper/codedb-project-instance-worker.mjs") {
-    throw new Error("Candidate probe only permits the Package-owned poc.33 instance worker.");
   }
   const expectedPath = path.resolve(projectRoot, normalized.replace(/\//g, path.sep));
   const actualPath = fs.realpathSync(expectedPath);
@@ -112,6 +120,31 @@ function assertOwnedWrapper(projectRoot, relativePath, candidateMode) {
   }
   if (!fs.statSync(actualPath).isFile()) {
     throw new Error(`CodeDB wrapper is not a file: ${actualPath}`);
+  }
+  if (instanceRoot !== undefined) {
+    const match = /^AIWork\/\.runtime\/codedb\/host\/generations\/([A-Za-z0-9._-]{1,64})\/wrapper\/codedb-project-instance-worker\.mjs$/.exec(normalized);
+    const normalizedInstanceRoot = String(instanceRoot).replace(/\\/g, "/");
+    if (!match
+        || !/^AIWork\/\.runtime\/codedb\/instances\/[0-9a-f]{32}$/i.test(normalizedInstanceRoot)) {
+      throw new Error("Candidate probe paths do not match the immutable instance layout.");
+    }
+    const packageWorkerPath = path.join(
+      PACKAGE_ROOT,
+      "Payload~",
+      "Generations",
+      match[1],
+      "wrapper",
+      "codedb-project-instance-worker.mjs");
+    const packageWorker = fs.realpathSync(packageWorkerPath);
+    const projectWorkerBytes = fs.readFileSync(actualPath);
+    const packageWorkerBytes = fs.readFileSync(packageWorker);
+    if (!samePath(packageWorkerPath, packageWorker)
+        || !fs.statSync(packageWorker).isFile()
+        || projectWorkerBytes.length === 0
+        || projectWorkerBytes.length > MAX_CANDIDATE_WORKER_BYTES
+        || !projectWorkerBytes.equals(packageWorkerBytes)) {
+      throw new Error("Candidate probe only permits an exact Package-owned immutable instance worker.");
+    }
   }
   return actualPath;
 }
@@ -230,6 +263,11 @@ async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
   if (JSON.stringify(toolNames) !== JSON.stringify(EXPECTED_TOOLS)) {
     throw new Error(`CodeDB wrapper tools/list mismatch: ${toolNames.join(", ") || "none"}.`);
   }
+  for (const tool of listed.tools) {
+    if (!hasExpectedReadOnlyAnnotations(tool?.annotations)) {
+      throw new Error(`CodeDB wrapper tool ${String(tool?.name ?? "<unnamed>")} is missing the required read-only MCP annotations.`);
+    }
+  }
   evidence.tool_names = toolNames;
   evidence.tools_list_callable = true;
 
@@ -283,6 +321,14 @@ async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
   evidence.availability = "AVAILABLE";
   evidence.detail = "Project backend READY and bounded codedb_text_search succeeded.";
   return evidence;
+}
+
+function hasExpectedReadOnlyAnnotations(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.entries(EXPECTED_READ_ONLY_ANNOTATIONS)
+    .every(([name, expected]) => value[name] === expected);
 }
 
 async function waitForExit(worker, exitPromise, timeoutMs) {

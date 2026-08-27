@@ -8,9 +8,9 @@
 
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
-and bounded MCP discovery surface. The `0.2.5-preview.5` validation prerelease
-candidate targets Unity `2022.3` on Windows and advances the immutable Host to
-`poc.33` while retaining published historical generations; stable remains `0.2.4`.
+and bounded MCP discovery surface. The active `v0.3.0` development line targets
+Unity `2022.3` on Windows and advances the immutable Host to `poc.34` while
+retaining historical generations; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
 `https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5`.
@@ -45,8 +45,9 @@ copied into the project. The selected byte-exact baseline is commit
 `0.5.0-28e3912` and machine path
 `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912`. The preserved
 `poc.31`/`poc.32` generations may still use their historical Provider identity;
-they are not rewritten in place. The active `poc.33` generation uses the
-reviewed `0.5.0-28e3912` baseline. The preview.5 development descriptor lets
+they are not rewritten in place. The retained `poc.33` and active `poc.34`
+generations use the reviewed `0.5.0-28e3912` baseline. The preview.5
+development descriptor lets
 the Manager's `Configure Dependencies` action retrieve the executable from the
 exact upstream commit and verify its Package-pinned SHA-256 before installing
 it into the machine-scoped directory. This is a development-only integration

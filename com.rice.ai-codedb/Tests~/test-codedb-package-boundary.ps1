@@ -62,7 +62,31 @@ $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
 $expectedUpmPackageVersion = "0.2.5-preview.5"
 $expectedHostCompatibilityPackageVersion = "0.2.5-preview.5"
-$expectedGenerationId = "poc.33"
+$expectedGenerationId = "poc.34"
+
+# v0.3 P1-B moves command ownership to the project-local Supervisor. Keep
+# these paths in the package boundary so a package cannot silently fall back to
+# an unreviewed machine-global daemon or a missing bridge launcher.
+$supervisorScriptPath = Join-Path $packageRoot "Tools~\codedb-project-supervisor.mjs"
+$supervisorLauncherPath = Join-Path $packageRoot "Editor\AICodedbSupervisorLauncher.cs"
+Assert-True -Condition (Test-Path -LiteralPath $supervisorScriptPath -PathType Leaf) -Message "Project Supervisor script is missing."
+Assert-True -Condition (Test-Path -LiteralPath $supervisorLauncherPath -PathType Leaf) -Message "Project Supervisor launcher is missing."
+$supervisorLauncherSource = [System.IO.File]::ReadAllText($supervisorLauncherPath)
+Assert-True `
+    -Condition ($supervisorLauncherSource.IndexOf('GetSelectedInstanceProviderConfigPath(currentInstance.InstanceRoot)', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Project Supervisor launcher does not derive Provider config from the atomically selected instance."
+Assert-True `
+    -Condition ($supervisorLauncherSource.IndexOf('"--provider-config", providerConfig', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Project Supervisor launcher does not pass the selected-instance Provider config."
+Assert-True `
+    -Condition ($supervisorLauncherSource.IndexOf('context.GetProjectPath(context.ProviderConfigRelativePath)', [StringComparison]::Ordinal) -lt 0) `
+    -Message "Project Supervisor launcher still routes through the legacy project runtime Provider config."
+Assert-True `
+    -Condition ($supervisorLauncherSource.IndexOf('AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(packageRoot, supervisorScript);', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Project Supervisor launcher does not validate the Package-owned script against the resolved Package root."
+Assert-True `
+    -Condition ($supervisorLauncherSource.IndexOf('AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(context.ProjectRoot, supervisorScript);', [StringComparison]::Ordinal) -lt 0) `
+    -Message "Project Supervisor launcher still rejects legitimate UPM packages resolved outside the Unity project."
 
 $expectedTopLevel = @(
     ".gitattributes",
@@ -241,13 +265,13 @@ Assert-Equal `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
 Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 33 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 34 -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
 $bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
-Assert-Equal -Actual $bootstrapTransitions.Count -Expected 2 -Label "Reviewed bootstrap transition count"
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 3 -Label "Reviewed bootstrap transition count"
 $v024Transition = $bootstrapTransitions[0]
 Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
 Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
@@ -260,6 +284,7 @@ Assert-Equal -Actual ([int]$v024Transition.source_host_use_gate_version) -Expect
 Assert-Equal -Actual ([int]$v024Transition.source_generation_lease_version) -Expected 2 -Label "Reviewed bootstrap transition generation lease"
 Assert-Equal -Actual ([int]$v024Transition.source_flat_file_count) -Expected 21 -Label "Reviewed bootstrap transition flat file count"
 Assert-Equal -Actual ([string]$v024Transition.source_flat_closure_sha256) -Expected "d6d64725fbc15066ea6062cb8d8de46ff1eb0133d13ff9906c1a5231da6a484c" -Label "Reviewed bootstrap transition closure"
+Assert-Equal -Actual ([string]$v024Transition.source_stable_wrapper_sha256) -Expected "b8858bbe4b94c8a7e6f12d3268424b2bb0e09cef2febeb68889ea993e3ccda3c" -Label "Reviewed bootstrap transition stable wrapper"
 $preview5Transition = $bootstrapTransitions[1]
 Assert-Equal -Actual ([string]$preview5Transition.source_tag) -Expected "v0.2.5-preview.5" -Label "Reviewed preview.5 bootstrap transition tag"
 Assert-Equal -Actual ([string]$preview5Transition.source_package_version) -Expected "0.2.5-preview.5" -Label "Reviewed preview.5 bootstrap transition Package"
@@ -269,6 +294,17 @@ Assert-Equal -Actual ([string]$preview5Transition.source_generation_id) -Expecte
 Assert-Equal -Actual ([int]$preview5Transition.source_marker_schema_version) -Expected 2 -Label "Reviewed preview.5 bootstrap transition marker schema"
 Assert-Equal -Actual ([int]$preview5Transition.source_flat_file_count) -Expected 22 -Label "Reviewed preview.5 bootstrap transition flat file count"
 Assert-Equal -Actual ([string]$preview5Transition.source_flat_closure_sha256) -Expected "10f61a75a04a484b431ccb2a94f79ae61cfbb0f81da2b306990a26c8fb8250e1" -Label "Reviewed preview.5 bootstrap transition closure"
+Assert-Equal -Actual ([string]$preview5Transition.source_stable_wrapper_sha256) -Expected "8f7b43408299c947a76d2d4306d31ca611964c59f7b42be679f995ec07c44c06" -Label "Reviewed preview.5 bootstrap transition stable wrapper"
+$poc33Transition = $bootstrapTransitions[2]
+Assert-Equal -Actual ([string]$poc33Transition.source_tag) -Expected "v0.2.5-preview.5" -Label "Reviewed poc.33 bootstrap transition tag"
+Assert-Equal -Actual ([string]$poc33Transition.source_package_version) -Expected "0.2.5-preview.5" -Label "Reviewed poc.33 bootstrap transition Package"
+Assert-Equal -Actual ([string]$poc33Transition.source_payload_version) -Expected "poc.33" -Label "Reviewed poc.33 bootstrap transition payload"
+Assert-Equal -Actual ([int]$poc33Transition.source_payload_sequence) -Expected 33 -Label "Reviewed poc.33 bootstrap transition sequence"
+Assert-Equal -Actual ([string]$poc33Transition.source_generation_id) -Expected "poc.33" -Label "Reviewed poc.33 bootstrap transition generation"
+Assert-Equal -Actual ([int]$poc33Transition.source_marker_schema_version) -Expected 2 -Label "Reviewed poc.33 bootstrap transition marker schema"
+Assert-Equal -Actual ([int]$poc33Transition.source_flat_file_count) -Expected 22 -Label "Reviewed poc.33 bootstrap transition flat file count"
+Assert-Equal -Actual ([string]$poc33Transition.source_flat_closure_sha256) -Expected "629f8873e93bc6e3aab2da167ae4c0439e23bf5ea467e882d2a99b7ed866f8f9" -Label "Reviewed poc.33 bootstrap transition closure"
+Assert-Equal -Actual ([string]$poc33Transition.source_stable_wrapper_sha256) -Expected "740fc4114d5a0e41d20a6f49f8178a61a68243b6646fbc02dc06ddfbf0432791" -Label "Reviewed poc.33 bootstrap transition stable wrapper"
 
 $flatTargetPrefix = "AIWork/codedb/"
 $generationSourcePrefix = "Generations/$expectedGenerationId/"
@@ -330,6 +366,11 @@ $poc32RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc32Retire
     Get-RelativePath -Root $poc32RetiredGenerationSourceRoot -Path $_.FullName
 } | Sort-Object)
 Assert-Equal -Actual $poc32RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.32 retired generation closure"
+$poc33RetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.33"
+$poc33RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc33RetiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $poc33RetiredGenerationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual $poc33RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.33 retired generation closure"
 $expectedRetiredTargets = @(
     foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
         foreach ($generationSuffix in $legacyRetiredGenerationRelativePaths) {
@@ -338,6 +379,9 @@ $expectedRetiredTargets = @(
     }
     foreach ($generationSuffix in $poc32RetiredGenerationRelativePaths) {
         "AIWork/.runtime/codedb/host/generations/poc.32/$generationSuffix"
+    }
+    foreach ($generationSuffix in $poc33RetiredGenerationRelativePaths) {
+        "AIWork/.runtime/codedb/host/generations/poc.33/$generationSuffix"
     }
 ) | Sort-Object
 $actualRetiredTargets = New-Object System.Collections.Generic.List[string]
@@ -350,7 +394,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 212 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 235 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -382,7 +426,7 @@ Assert-Equal -Actual @($generationManifest.files).Count -Expected 22 -Label "Gen
 $generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
 $generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
 Assert-Equal `
-    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.33";$').Count) `
+    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.34";$').Count) `
     -Expected 1 `
     -Label "Generation lease identity closure"
 
@@ -419,6 +463,22 @@ Assert-Equal `
     -Actual ($actualGenerationImplementationPaths -join "|") `
     -Expected (($generationManifestPaths | Sort-Object) -join "|") `
     -Label "Generation manifest source closure"
+
+$generationWorkerSource = [System.IO.File]::ReadAllText((Join-Path $generationSourceRoot "wrapper\codedb-project-instance-worker.mjs"))
+Assert-Equal `
+    -Actual ([regex]::Matches($generationWorkerSource, '(?m)^\s*annotations: READ_ONLY_TOOL_ANNOTATIONS,\s*$').Count) `
+    -Expected 6 `
+    -Label "Project MCP read-only annotation coverage"
+foreach ($annotationBoundary in @(
+    "readOnlyHint: true",
+    "destructiveHint: false",
+    "idempotentHint: true",
+    "openWorldHint: false"
+)) {
+    Assert-True `
+        -Condition ($generationWorkerSource.IndexOf($annotationBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Project MCP worker is missing annotation boundary: $annotationBoundary"
+}
 
 $currentPointerPath = Join-Path $payloadRoot $currentPointerSource
 $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
@@ -458,12 +518,55 @@ foreach ($requiredRule in @(
 }
 
 $projectSettingsSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbProjectSettings.cs"))
-Assert-Equal `
-    -Actual ([regex]::Matches(
-        $projectSettingsSource,
-        'internal const string CurrentPackageVersion = "0\.2\.5-preview\.5";').Count) `
-    -Expected 1 `
-    -Label "Editor Host compatibility identity"
+$forbiddenRuntimePolicyNames = @(
+    "CurrentPackageVersion",
+    "CurrentPayloadVersion",
+    "CurrentPayloadSequence",
+    "CurrentGenerationId",
+    "CurrentBootstrapProtocol"
+)
+foreach ($forbiddenRuntimePolicyName in $forbiddenRuntimePolicyNames) {
+    Assert-True `
+        -Condition ($projectSettingsSource.IndexOf($forbiddenRuntimePolicyName, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Editor settings still duplicate Package runtime policy: $forbiddenRuntimePolicyName"
+}
+$runtimeContractSourcePath = Join-Path $packageRoot "Editor\AICodedbPackageRuntimeContract.cs"
+$runtimeContractMetaPath = "$runtimeContractSourcePath.meta"
+Assert-True -Condition (Test-Path -LiteralPath $runtimeContractSourcePath -PathType Leaf) -Message "Package runtime contract reader is missing."
+Assert-True -Condition (Test-Path -LiteralPath $runtimeContractMetaPath -PathType Leaf) -Message "Package runtime contract reader meta file is missing."
+$runtimeContractSource = [System.IO.File]::ReadAllText($runtimeContractSourcePath)
+foreach ($requiredRuntimeContractBoundary in @(
+    '"Payload~"',
+    '"payload-manifest.json"',
+    "AICodedbStrictJson.ParseObject(",
+    "bootstrap_transitions",
+    "AICodedbRuntimeGenerationDisposition.Current",
+    "AICodedbRuntimeGenerationDisposition.TrustedPrevious",
+    "AICodedbRuntimeGenerationDisposition.Newer",
+    "AICodedbRuntimeGenerationDisposition.SequenceCollision",
+    "AICodedbRuntimeGenerationDisposition.Invalid"
+)) {
+    Assert-True `
+        -Condition ($runtimeContractSource.IndexOf($requiredRuntimeContractBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Package runtime contract reader is missing boundary: $requiredRuntimeContractBoundary"
+}
+
+$runtimePolicySources = @(
+    Get-ChildItem -LiteralPath (Join-Path $packageRoot "Editor") -Recurse -File -Filter "*.cs"
+    Get-ChildItem -LiteralPath (Join-Path $packageRoot "Tools~") -Recurse -File | Where-Object { $_.Extension -in @(".mjs", ".ps1") }
+    Get-ChildItem -LiteralPath (Join-Path $payloadRoot "AIWork") -Recurse -File | Where-Object { $_.Extension -in @(".mjs", ".ps1") }
+)
+foreach ($runtimePolicyFile in $runtimePolicySources) {
+    $runtimePolicySource = [System.IO.File]::ReadAllText($runtimePolicyFile.FullName)
+    foreach ($forbiddenRuntimePolicyName in $forbiddenRuntimePolicyNames) {
+        Assert-True `
+            -Condition ($runtimePolicySource.IndexOf($forbiddenRuntimePolicyName, [StringComparison]::Ordinal) -lt 0) `
+            -Message "Runtime control source duplicates Package runtime policy ($forbiddenRuntimePolicyName): $(Get-RelativePath -Root $packageRoot -Path $runtimePolicyFile.FullName)"
+    }
+    Assert-True `
+        -Condition ($runtimePolicySource.IndexOf('poc.34', [StringComparison]::Ordinal) -lt 0) `
+        -Message "Runtime control source hard-codes the current generation: $(Get-RelativePath -Root $packageRoot -Path $runtimePolicyFile.FullName)"
+}
 
 $legacyStopClientPath = Join-Path $packageRoot "Tools~\stop-codedb-legacy-watcher.mjs"
 Assert-True -Condition (Test-Path -LiteralPath $legacyStopClientPath -PathType Leaf) -Message "Package-owned legacy watcher Stop client is missing."
@@ -510,7 +613,11 @@ foreach ($requiredProbeBoundary in @(
     '"Watch coordinator: ready"',
     'name: "codedb_text_search"',
     'codedb_status_usable: false',
-    'codedb_text_search_callable: false'
+    'codedb_text_search_callable: false',
+    'readOnlyHint: true',
+    'destructiveHint: false',
+    'idempotentHint: true',
+    'openWorldHint: false'
 )) {
     Assert-True `
         -Condition ($mcpAvailabilityProbeSource.IndexOf($requiredProbeBoundary, [StringComparison]::Ordinal) -ge 0) `
@@ -550,13 +657,20 @@ $supervisorBridgeSource = [System.IO.File]::ReadAllText($supervisorBridgePath)
 Assert-True `
     -Condition ($supervisorBridgeSource.IndexOf("protocol_version", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("NamedPipeClientStream", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("PipeOptions.Asynchronous", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("WaitForPipeIo(", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("Task.Run", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("TryGetExpectedWindowsPipeName", [StringComparison]::Ordinal) -ge 0 -and
-        $supervisorBridgeSource.IndexOf("CurrentGenerationId", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("runtime_contract_sha256", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("generation_disposition", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("CORE_READY", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("ReadBoundedLine", [StringComparison]::Ordinal) -ge 0 -and
         $supervisorBridgeSource.IndexOf("provider_ready_at_utc", [StringComparison]::Ordinal) -ge 0) `
     -Message "Supervisor Bridge must use a versioned asynchronous named-pipe boundary."
+Assert-True `
+    -Condition ($supervisorBridgeSource.IndexOf("pipe.ReadTimeout =", [StringComparison]::Ordinal) -lt 0 -and
+        $supervisorBridgeSource.IndexOf("pipe.WriteTimeout =", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Supervisor Bridge must not assign unsupported NamedPipeClientStream timeout properties."
 foreach ($forbiddenBridgeMainThreadCall in @(
     "EditorApplication.",
     "AssetDatabase.",
@@ -600,7 +714,8 @@ foreach ($forbiddenReloadCall in @(
     "ValidateProjectRoot(",
     "CreateProjectIdentity(",
     "ReadPersistedProductState(",
-    "ReadAndRecordPackageFingerprint(",
+    "HasPackageFingerprintChanged(",
+    "RecordReconciledPackageFingerprint(",
     "Process.GetCurrentProcess(",
     "SessionState."
 )) {
@@ -612,11 +727,14 @@ $initializeFunction = [regex]::Match(
     $editorLifecycleSource,
     '(?s)private\s+static\s+void\s+Initialize\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+void\s+QueueInitialReconcile')
 Assert-True -Condition $initializeFunction.Success -Message "Package boundary could not isolate Editor lifecycle Initialize."
+$initialReconcileIndex = $initializeFunction.Groups["body"].Value.IndexOf("QueueInitialReconcile()", [StringComparison]::Ordinal)
+$stablePlayLeaseIndex = $initializeFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal)
 Assert-True `
-    -Condition ($initializeFunction.Groups["body"].Value.IndexOf("QueueInitialReconcile()", [StringComparison]::Ordinal) -ge 0 -and
-        $initializeFunction.Groups["body"].Value.IndexOf("BeginReconcile(true)", [StringComparison]::Ordinal) -lt 0 -and
-        $initializeFunction.Groups["body"].Value.IndexOf("QueueLeaseRefresh()", [StringComparison]::Ordinal) -lt 0) `
-    -Message "Editor cold start must queue delayed background reconciliation before it can queue a lease refresh."
+    -Condition ($initialReconcileIndex -ge 0 -and
+        $stablePlayLeaseIndex -gt $initialReconcileIndex -and
+        $initializeFunction.Groups["body"].Value.IndexOf("if (!maintenanceSuspended)", [StringComparison]::Ordinal) -ge 0 -and
+        $initializeFunction.Groups["body"].Value.IndexOf("BeginReconcile(true)", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Editor cold start must queue delayed reconciliation, while stable Play may queue only the persisted lease heartbeat."
 foreach ($forbiddenMainThreadCall in @(
     "PublishLease(",
     "RefreshEditorLeaseForIntegrationState(",
@@ -669,20 +787,26 @@ $quittingFunction = [regex]::Match(
 Assert-True -Condition $quittingFunction.Success -Message "Package boundary could not isolate Editor quitting callback."
 Assert-True `
     -Condition ($quittingFunction.Groups["body"].Value.IndexOf("QueueEditorLeaseDeletion(", [StringComparison]::Ordinal) -ge 0 -and
+        $quittingFunction.Groups["body"].Value.IndexOf("QueueOwnedSupervisorShutdown(", [StringComparison]::Ordinal) -ge 0 -and
         $quittingFunction.Groups["body"].Value.IndexOf("DeleteEditorLease(", [StringComparison]::Ordinal) -lt 0) `
-    -Message "Editor quitting must queue lease deletion instead of performing filesystem I/O inline."
+    -Message "Editor quitting must queue lease deletion and authenticated Supervisor shutdown without filesystem I/O inline."
 $schedulerSuspensionFunction = [regex]::Match(
     $editorLifecycleSource,
-    '(?s)internal\s+void\s+SetMaintenanceSuspended\s*\(\s*bool\s+suspended\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+QueueProcessCancellation')
+    '(?s)internal\s+void\s+SetMaintenanceSuspended\s*\(\s*bool\s+suspended\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*internal\s+Task<T>\s+QueueMaintenance')
 Assert-True -Condition $schedulerSuspensionFunction.Success -Message "Package boundary could not isolate scheduler suspension."
 Assert-True `
-    -Condition ($schedulerSuspensionFunction.Groups["body"].Value.IndexOf("QueueProcessCancellation(", [StringComparison]::Ordinal) -ge 0 -and
-        $schedulerSuspensionFunction.Groups["body"].Value.IndexOf("AICodedbProcessRunner.CancelBackgroundProcesses(", [StringComparison]::Ordinal) -lt 0) `
-    -Message "Scheduler suspension must defer process cleanup to a worker."
+    -Condition ($schedulerSuspensionFunction.Groups["body"].Value.IndexOf("CancelMaintenance(", [StringComparison]::Ordinal) -ge 0 -and
+        $editorLifecycleSource.IndexOf("QueueProcessCancellation(", [StringComparison]::Ordinal) -lt 0 -and
+        $editorLifecycleSource.IndexOf("AICodedbProcessRunner.CancelBackgroundProcesses", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Scheduler suspension must cancel Unity-side tokens without retaining a process-kill route."
 $playCallbackFunction = [regex]::Match(
     $editorLifecycleSource,
     '(?s)private\s+static\s+void\s+OnPlayModeStateChanged\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*private\s+static\s+void\s+OnEditorQuitting')
 Assert-True -Condition $playCallbackFunction.Success -Message "Package boundary could not isolate the Play-mode callback."
+Assert-True `
+    -Condition ($playCallbackFunction.Groups["body"].Value.IndexOf("SupervisorBridge.Invalidate(", [StringComparison]::Ordinal) -lt 0 -and
+        $playCallbackFunction.Groups["body"].Value.IndexOf("QueueSupervisorReconnect(false)", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Play mode must preserve the healthy Bridge and permit stable-Play reconnect."
 foreach ($forbiddenBoundaryIo in @(
     "AICodedbPaths.CaptureExecutionContext(",
     "AICodedbHostPayloadMaterializer.",
@@ -716,15 +840,53 @@ $reconcileWorkerFunction = [regex]::Match(
     $editorLifecycleSource,
     '(?s)private\s+static\s+LifecycleReconcileResult\s+RunReconcileWorker\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static')
 Assert-True -Condition $reconcileWorkerFunction.Success -Message "Package boundary could not isolate Editor lifecycle reconcile worker."
-$readStatusIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
-    "AICodedbHostPayloadMaterializer.ReadStatus(context",
+$supervisorProbeIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    'RunSupervisorCommand(context, "materialize", "Probe"',
+    [StringComparison]::Ordinal)
+$supervisorRecoveryIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "RecoverCurrentInstanceAvailability(",
+    [StringComparison]::Ordinal)
+$supervisorWatcherIndex = $editorLifecycleSource.IndexOf(
+    'RunSupervisorCommand(context, "watcher", "Ensure"',
     [StringComparison]::Ordinal)
 $prerequisiteLeaseGateIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
     "ApplyPrerequisiteGatedLeaseRefresh(",
     [StringComparison]::Ordinal)
 Assert-True `
-    -Condition ($readStatusIndex -ge 0 -and $prerequisiteLeaseGateIndex -gt $readStatusIndex) `
-    -Message "Editor lifecycle must classify machine prerequisites before any lease publication gate."
+    -Condition ($supervisorProbeIndex -ge 0 -and $prerequisiteLeaseGateIndex -gt $supervisorProbeIndex) `
+    -Message "Editor lifecycle must obtain a Supervisor-backed prerequisite/status observation before any lease publication gate."
+Assert-True `
+    -Condition ($supervisorRecoveryIndex -ge 0 -and $supervisorWatcherIndex -ge 0) `
+    -Message "Editor lifecycle must route watcher maintenance through the project-local Supervisor."
+$actionsSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbActions.cs"))
+$supervisorWatcherCommandFunction = [regex]::Match(
+    $actionsSource,
+    '(?s)private\s+static\s+AICodedbCommandResult\s+RunSupervisorWatcherCommandSync\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*///')
+Assert-True -Condition $supervisorWatcherCommandFunction.Success -Message "Package boundary could not isolate the explicit Supervisor watcher command route."
+$explicitWatcherLeaseIndex = $supervisorWatcherCommandFunction.Groups["body"].Value.IndexOf(
+    "TryPrepareCurrentEditorLease(",
+    [StringComparison]::Ordinal)
+$explicitWatcherSupervisorIndex = $supervisorWatcherCommandFunction.Groups["body"].Value.IndexOf(
+    "RunSupervisorCommandAsync(",
+    [StringComparison]::Ordinal)
+Assert-True `
+    -Condition ($explicitWatcherLeaseIndex -ge 0 -and $explicitWatcherSupervisorIndex -gt $explicitWatcherLeaseIndex) `
+    -Message "Explicit watcher controls must publish the prerequisite-gated Editor lease before Supervisor admission."
+$supervisorBridgeSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbSupervisorBridge.cs"))
+Assert-True `
+    -Condition ($supervisorBridgeSource.IndexOf("SendCommandAsync(", [StringComparison]::Ordinal) -ge 0 -and
+        $supervisorBridgeSource.IndexOf("AICodedbStrictJson.ReadObject(", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Supervisor Bridge must use asynchronous IPC and strict JSON evidence."
+Assert-True `
+    -Condition ([regex]::IsMatch(
+            $supervisorBridgeSource,
+            '(?s)RequestOwnedShutdownAsync\s*\(.*?SendCommandWorker\s*\(.*?CancellationToken\.None,\s*false(?:,\s*false)?\s*\)') -and
+        $supervisorBridgeSource.IndexOf("if (!startIfMissing)", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Final Editor shutdown must authenticate an existing Supervisor without launching a missing runtime."
+$supervisorLifecycleSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbEditorLifecycle.cs"))
+Assert-True `
+    -Condition ($supervisorLifecycleSource.IndexOf("IsSupervisorOneShotFallbackAllowed(", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Supervisor fallback must be explicitly bounded to reviewed one-shot outage/bootstrap conditions."
 $managerSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbManagerWindow.cs"))
 $managerEnableFunction = [regex]::Match(
     $managerSource,
@@ -762,6 +924,21 @@ foreach ($forbiddenTransientRefreshCall in @(
     Assert-True `
         -Condition ($managerTransientRefreshFunction.Groups["body"].Value.IndexOf($forbiddenTransientRefreshCall, [StringComparison]::Ordinal) -lt 0) `
         -Message "Play-mode transient refresh must not launch a second status process: $forbiddenTransientRefreshCall"
+}
+$lifecycleObservationFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)internal\s+static\s+void\s+RequestBackgroundStatusObservation\s*\(\s*bool\s+force\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*internal\s+static\s+bool\s+IsLifecycleInitialized')
+Assert-True -Condition $lifecycleObservationFunction.Success -Message "Package boundary could not isolate Lifecycle status observation."
+Assert-True `
+    -Condition ($lifecycleObservationFunction.Groups["body"].Value.IndexOf("QueueSupervisorReconnect(force)", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Manager status observation must use the Supervisor query/reconnect lane."
+foreach ($forbiddenObservationMutation in @(
+    "BeginReconcile(",
+    "_nextReconcileAt"
+)) {
+    Assert-True `
+        -Condition ($lifecycleObservationFunction.Groups["body"].Value.IndexOf($forbiddenObservationMutation, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Manager status observation must not trigger or reschedule lifecycle mutation: $forbiddenObservationMutation"
 }
 $editorMaterializerSource = Get-Content -LiteralPath (Join-Path $packageRoot "Editor\AICodedbHostPayloadMaterializer.cs") -Raw
 Assert-True `

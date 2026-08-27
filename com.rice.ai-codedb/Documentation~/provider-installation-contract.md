@@ -2,7 +2,7 @@
 
 Status: frozen development-baseline decision for v0.2.5-preview.5 (2026-08-20).
 The Package includes a strict, Package-owned installer entry point and activates
-this identity through immutable generation `poc.33`. The development installer
+this identity through retained `poc.33` and active `poc.34`. The development installer
 remains separate from release approval: a production descriptor still requires
 the Rice artifact, license, hash, and signing review below.
 
@@ -55,8 +55,8 @@ different graph-first protocol surface. Its Windows artifact is
 not provide the required search tools. It must not be silently substituted for
 the frozen development baseline.
 
-The checked-in preview.5 development descriptor and active `poc.33` payload use
-the frozen `28e3912` identity. The preserved `poc.31`/`poc.32` payloads continue
+The checked-in preview.5 development descriptor and `poc.33`/`poc.34` payloads
+use the frozen `28e3912` identity. The preserved `poc.31`/`poc.32` payloads continue
 to describe the older `13de004` snapshot as immutable historical state. The
 installer only activates `28e3912` after downloading and verifying the exact
 Package-pinned executable bytes.
@@ -74,7 +74,7 @@ Package-pinned executable bytes.
    identity. A migration must publish a new generation and preserve older
    generation bytes and leases.
 5. The preview.5 `poc.31`/`poc.32` snapshots and their `13de004` references
-   remain immutable historical state. Active generation `poc.33` uses the
+   remain immutable historical state. Retained `poc.33` and active `poc.34` use the
    `0.5.0-28e3912` machine directory; no older generation is rewritten or
    replaced in place.
 

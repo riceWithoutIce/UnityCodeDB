@@ -18,6 +18,10 @@ namespace Rice.AI.Codedb.Editor
         internal string StandardError { get; }
         internal bool TimedOut { get; }
         internal long ElapsedMilliseconds { get; }
+        // Only the Supervisor Bridge may set this bit. It records a
+        // read-only proof that the command is in the empty-runtime bootstrap
+        // case; callers must never infer fallback permission from text output.
+        internal bool OneShotFallbackAuthorized { get; }
         internal bool Succeeded => !TimedOut && ExitCode == 0;
 
         /// <summary>
@@ -28,13 +32,20 @@ namespace Rice.AI.Codedb.Editor
         /// <param name="standardError">Captured stderr text.</param>
         /// <param name="timedOut">Whether the process exceeded the timeout.</param>
         /// <param name="elapsedMilliseconds">Elapsed wall-clock time for the command.</param>
-        internal AICodedbCommandResult(int exitCode, string standardOutput, string standardError, bool timedOut, long elapsedMilliseconds = 0)
+        internal AICodedbCommandResult(
+            int exitCode,
+            string standardOutput,
+            string standardError,
+            bool timedOut,
+            long elapsedMilliseconds = 0,
+            bool oneShotFallbackAuthorized = false)
         {
             ExitCode = exitCode;
             StandardOutput = standardOutput ?? string.Empty;
             StandardError = standardError ?? string.Empty;
             TimedOut = timedOut;
             ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
+            OneShotFallbackAuthorized = oneShotFallbackAuthorized;
         }
 
         /// <summary>

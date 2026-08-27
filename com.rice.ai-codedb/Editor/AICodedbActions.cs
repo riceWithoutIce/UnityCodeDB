@@ -116,7 +116,8 @@ namespace Rice.AI.Codedb.Editor
             var preflight = AICodedbHostPayloadStatusBuilder.Build(
                 File.Exists(AICodedbPaths.HostPayloadMarkerPath),
                 preflightResult,
-                AICodedbProjectSettings.CurrentGenerationId);
+                AICodedbPackageRuntimeContractStore.Read(AICodedbPaths.PackageRootPath)
+                    .Target.GenerationId);
             if (!preflight.CanRedeploy)
             {
                 return new AICodedbCommandResult(
@@ -173,7 +174,10 @@ namespace Rice.AI.Codedb.Editor
 
         internal static async Task<AICodedbCommandResult> RunUninstallCodeDBAsync()
         {
-            var result = await AICodedbHostPayloadMaterializer.RunUninstallAsync();
+            var result = await RunSupervisorCommandWithFallbackAsync(
+                "Uninstall",
+                true,
+                () => AICodedbHostPayloadMaterializer.RunUninstallAsync());
             AICodedbEditorLifecycle.RequestReconcile();
             return result;
         }
@@ -187,7 +191,10 @@ namespace Rice.AI.Codedb.Editor
 
         internal static async Task<AICodedbCommandResult> RunInstallCodeDBAsync()
         {
-            var result = await AICodedbHostPayloadMaterializer.RunInstallAsync();
+            var result = await RunSupervisorCommandWithFallbackAsync(
+                "Install",
+                true,
+                () => AICodedbHostPayloadMaterializer.RunInstallAsync());
             AICodedbEditorLifecycle.RequestReconcile();
             return result;
         }
@@ -201,9 +208,36 @@ namespace Rice.AI.Codedb.Editor
 
         internal static async Task<AICodedbCommandResult> RunReinstallCodeDBAsync()
         {
-            var result = await AICodedbHostPayloadMaterializer.RunReinstallAsync();
+            var result = await RunSupervisorCommandWithFallbackAsync(
+                "Reinstall",
+                true,
+                () => AICodedbHostPayloadMaterializer.RunReinstallAsync());
             AICodedbEditorLifecycle.RequestReconcile();
             return result;
+        }
+
+        private static async Task<AICodedbCommandResult> RunSupervisorCommandWithFallbackAsync(
+            string action,
+            bool confirmedProjectMutation,
+            Func<Task<AICodedbCommandResult>> fallback)
+        {
+            var supervisorResult = await AICodedbEditorLifecycle.RunSupervisorCommandAsync(
+                "materialize",
+                action,
+                confirmedProjectMutation);
+            if (supervisorResult == null)
+            {
+                return new AICodedbCommandResult(
+                    4,
+                    string.Empty,
+                    "The project Supervisor returned no command response; the fallback was not authorized.",
+                    false);
+            }
+
+            if (!supervisorResult.Succeeded
+                && AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(supervisorResult))
+                return await fallback();
+            return supervisorResult;
         }
 
         /// <summary>
@@ -274,7 +308,8 @@ namespace Rice.AI.Codedb.Editor
                     context,
                     ProviderInstallTimeoutMilliseconds,
                     "-PackageVersion",
-                    AICodedbProjectSettings.CurrentPackageVersion);
+                    AICodedbPackageRuntimeContractStore.Read(context.PackageRoot)
+                        .Target.PackageVersion);
             }
             finally
             {
@@ -307,7 +342,8 @@ namespace Rice.AI.Codedb.Editor
                 ProviderInstallTimeoutMilliseconds,
                 outputLine,
                 "-PackageVersion",
-                AICodedbProjectSettings.CurrentPackageVersion);
+                AICodedbPackageRuntimeContractStore.Read(context.PackageRoot)
+                    .Target.PackageVersion);
         }
 
         /// <summary>
@@ -387,7 +423,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunEnableWatcher()
         {
-            return RunWatcherAction("Codedb Enable Watcher", "Enable", RefreshIndexTimeoutMilliseconds);
+            return RunSupervisorWatcherCommandSync("Enable");
         }
 
         /// <summary>
@@ -395,7 +431,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunDisableWatcher()
         {
-            return RunWatcherAction("Codedb Disable Watcher", "Disable", 0);
+            return RunSupervisorWatcherCommandSync("Disable");
         }
 
         /// <summary>
@@ -403,7 +439,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunStartWatcher()
         {
-            return RunWatcherAction("Codedb Start Now", "Start", RefreshIndexTimeoutMilliseconds);
+            return RunSupervisorWatcherCommandSync("Start");
         }
 
         /// <summary>
@@ -411,11 +447,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static Task<AICodedbCommandResult> RunEnsureWatcherAsync()
         {
-            var context = AICodedbPaths.CaptureExecutionContext();
-            return Task.Run(() => RunWatcherScript(
-                context,
-                "Ensure",
-                RefreshIndexTimeoutMilliseconds));
+            return RunSupervisorWatcherCommandAsync("Ensure");
         }
 
         internal static AICodedbCommandResult RunEnsureWatcher(AICodedbEditorExecutionContext context)
@@ -445,13 +477,46 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunWatcherStatus()
         {
-            return RunWatcherAction("Codedb Watcher Status", "Status", 0);
+            return RunSupervisorWatcherCommandSync("Status");
         }
 
         internal static Task<AICodedbCommandResult> RunWatcherStatusAsync()
         {
+            return RunSupervisorWatcherCommandAsync("Status");
+        }
+
+        private static Task<AICodedbCommandResult> RunSupervisorWatcherCommandAsync(
+            string action)
+        {
+            return AICodedbEditorLifecycle.RunSupervisorCommandAsync(
+                "watcher",
+                action,
+                false);
+        }
+
+        private static AICodedbCommandResult RunSupervisorWatcherCommandSync(
+            string action)
+        {
             var context = AICodedbPaths.CaptureExecutionContext();
-            return Task.Run(() => RunWatcherScript(context, "Status", 0));
+            if (WatcherActionRequiresEditorLease(action))
+            {
+                string leaseDetail;
+                if (!AICodedbEditorLifecycle.TryPrepareCurrentEditorLease(context, out leaseDetail))
+                {
+                    return new AICodedbCommandResult(
+                        4,
+                        string.Empty,
+                        leaseDetail,
+                        false);
+                }
+            }
+
+            return AICodedbEditorLifecycle.RunSupervisorCommandAsync(
+                    "watcher",
+                    action,
+                    false)
+                .GetAwaiter()
+                .GetResult();
         }
 
         /// <summary>
@@ -459,7 +524,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunStopWatcher()
         {
-            return RunWatcherAction("Codedb Stop Now", "Stop", 0);
+            return RunSupervisorWatcherCommandSync("Stop");
         }
 
         /// <summary>
@@ -467,7 +532,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunRestartWatcher()
         {
-            return RunWatcherAction("Codedb Restart", "Restart", RefreshIndexTimeoutMilliseconds);
+            return RunSupervisorWatcherCommandSync("Restart");
         }
 
         internal static string[] BuildWatcherScriptArguments(string action)

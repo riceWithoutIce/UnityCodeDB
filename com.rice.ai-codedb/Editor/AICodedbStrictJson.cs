@@ -21,7 +21,14 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException(label + " has an invalid size.");
 
             byte[] bytes;
-            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            // Control JSON is atomically replaced by the Supervisor. Allow an
+            // already-open snapshot to be renamed on Windows while retaining
+            // the reader's own consistent byte buffer.
+            using (var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
             {
                 if (stream.Length <= 0 || stream.Length > maximumBytes || stream.Length > int.MaxValue)
                     throw new InvalidOperationException(label + " changed to an invalid size while it was read.");

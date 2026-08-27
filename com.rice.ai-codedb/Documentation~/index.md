@@ -49,11 +49,12 @@ the Package launches its current wrapper from the project working directory and
 requires MCP initialize, the bounded tool list, usable `codedb_status`, and a
 bounded `codedb_text_search`.
 This Package-owned probe supports but does not replace the real new Codex
-Desktop task acceptance. The preserved preview.5 snapshot advances the
-Package-owned immutable Host to `poc.33` and activates the byte-exact `28e3912`
+Desktop task acceptance. The active v0.3 development snapshot advances the
+Package-owned immutable Host to `poc.34` and activates the byte-exact `28e3912`
 artifact under the versioned machine identity `0.5.0-28e3912`. The preserved
-`poc.31`/`poc.32` generations retain their historical Provider identity and are
-not rewritten in place. See the Provider contract for the identity boundary.
+`poc.31`/`poc.32` generations retain their historical Provider identity;
+`poc.33` is also retained byte-exact and is not rewritten in place. See the
+Provider contract for the identity boundary.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -64,6 +65,10 @@ The active project-tool availability blocker is frozen in the
 [v0.3.0 P0 project-local Codex MCP discovery task](v0.3.0-p0-codex-client-discovery.md).
 The first active runtime-isolation slice is documented in the
 [v0.3.0 P1-A Supervisor request queue](v0.3.0-p1-supervisor-queue.md).
+The project-local command-owner implementation is documented in the
+[v0.3.0 P1-B Supervisor command ownership](v0.3.0-p1-supervisor-commands.md).
+Play/Domain Reload continuity and authenticated final shutdown are documented
+in [v0.3.0 P1-C Supervisor lifecycle ownership](v0.3.0-p1-supervisor-lifecycle.md).
 
 ## Version Support Policy
 
@@ -87,7 +92,7 @@ an old `v0.2.x` artifact remain historical context only.
 - External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0`; the selected
   baseline is commit `28e3912d5cd67ff3499734984f3e3d626a204796`, distributed
   under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912` for active
-  generation `poc.33`. The older `poc.31`/`poc.32` machine identity is not
+  generation `poc.34`. The older `poc.31`/`poc.32` machine identity is not
   rewritten or mixed with this directory.
 
 The package does not bundle or redistribute the external provider.

@@ -61,6 +61,9 @@ namespace Rice.AI.Codedb.Editor
             + "The machine Provider, reviewed custom runtime configuration, business files, user policy, unrelated MCP content, "
             + "comments, ordering, and existing immutable instances are preserved. Retired Package-owned state is cleaned in the background. "
             + "External MCP clients and unrelated processes are never terminated.";
+        internal const string McpConfigurationReadyMessage = "Project configuration is ready";
+        internal const string McpConfigurationAttentionMessage = "Project configuration needs attention";
+        internal const string McpClientUnobservedLabel = "Not observed";
         internal const string UninstallCodeDBConfirmationTitle = "Uninstall CodeDB from Project";
         internal const string UninstallCodeDBConfirmationMessage =
             "Uninstall CodeDB integration from this Unity project?\n\n"
@@ -331,7 +334,7 @@ namespace Rice.AI.Codedb.Editor
 
             var suppressed = AICodedbEditorLifecycle.IsAutomaticHostUpgradeSuppressed(
                 _statusSnapshot.HostUpgradeStatus,
-                AICodedbProjectSettings.CurrentGenerationId);
+                _statusSnapshot.RuntimeContractTargetGenerationId);
             if (_statusSnapshot.ProductStatus.State == AICodedbProductState.Ready
                 && !ShouldAutoObserveHostStatus(
                     _statusSnapshot.HostPayloadStatus.State,
@@ -356,7 +359,25 @@ namespace Rice.AI.Codedb.Editor
             var playModeStatusGeneration = _playModeStatusGeneration;
             try
             {
-                var result = await AICodedbHostPayloadMaterializer.ReadStatusAsync(_executionContext);
+                var result = await AICodedbEditorLifecycle.RunSupervisorCommandAsync(
+                    "materialize",
+                    "Probe",
+                    false);
+                if (result != null
+                    && AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(result))
+                {
+                    // The Bridge authorizes this only for an empty bootstrap
+                    // runtime; an outage or ambiguous owner stays fail-closed.
+                    result = await AICodedbHostPayloadMaterializer.ReadStatusAsync(_executionContext);
+                }
+                if (result == null)
+                {
+                    result = new AICodedbCommandResult(
+                        4,
+                        string.Empty,
+                        "The project Supervisor returned no status response; fallback was not authorized.",
+                        false);
+                }
                 var snapshot = await AICodedbStatusSnapshot.RefreshAsync(_executionContext, result);
                 if (this == null || _userActionInFlight)
                     return;
@@ -380,8 +401,7 @@ namespace Rice.AI.Codedb.Editor
                     ? AICodedbProductState.Starting
                     : _statusSnapshot.ProductStatus.State;
                 var convergencePlan = AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
-                    snapshot.CurrentInstanceStatus.Present,
-                    snapshot.CurrentInstanceStatus.IsCurrent,
+                    snapshot.CurrentInstanceStatus.State,
                     snapshot.ProductStatus);
                 if (ShouldPreserveReadyDuringTransientRefresh(
                         previousState,
@@ -1306,19 +1326,19 @@ namespace Rice.AI.Codedb.Editor
             var updateAction = _statusSnapshot.HostPayloadStatus.CanUpgradeAutomatically
                 && !IsCurrentHostUpgradeInProgress(
                     _statusSnapshot.HostUpgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId)
+                    _statusSnapshot.RuntimeContractTargetGenerationId)
                 ? (Action)(() => RunAction("Host Payload Upgrade", AICodedbActions.RunHostPayloadUpgrade))
                 : null;
             var redeployAction = _statusSnapshot.HostPayloadStatus.CanRedeploy
                 ? (Action)RunHostPayloadRedeployWithConfirmation
                 : null;
             var updateLabel = IsCurrentHostUpgradeInProgress(
-                _statusSnapshot.HostUpgradeStatus,
-                AICodedbProjectSettings.CurrentGenerationId)
+                    _statusSnapshot.HostUpgradeStatus,
+                    _statusSnapshot.RuntimeContractTargetGenerationId)
                     ? "Update in progress"
                     : GetHostUpgradeActionLabel(
                         _statusSnapshot.HostUpgradeStatus,
-                        AICodedbProjectSettings.CurrentGenerationId);
+                        _statusSnapshot.RuntimeContractTargetGenerationId);
             DrawActionGrid(2,
                 AICodedbActionButton.Create("Inspect host files", () => RunAction("Host Payload DryRun", AICodedbActions.RunHostPayloadDryRun)),
                 AICodedbActionButton.Create("Verify host files", () => RunAction("Host Payload Verify", AICodedbActions.RunHostPayloadVerify)),
@@ -1526,32 +1546,43 @@ namespace Rice.AI.Codedb.Editor
         {
             AICodedbSectionView.DrawPageHeader(
                 "MCP",
-                "当前项目的客户端注册",
-                "Verify registration",
+                "当前项目的配置与 Package 后端",
+                "Verify configuration",
                 GetHostAction(() => RunAction("Project Config Validation", AICodedbActions.RunRegistrationValidation)));
 
-            var mcpState = _statusSnapshot.GetMcpState();
+            var configurationState = _statusSnapshot.ProjectMcpConfig.State;
+            var backendState = _statusSnapshot.McpAvailability.State;
             AICodedbSectionView.DrawBanner(
-                mcpState == AICodedbStatusState.Ok
-                    ? "Project registration is current"
-                    : "Project registration needs attention",
+                configurationState == AICodedbStatusState.Ok
+                    ? McpConfigurationReadyMessage
+                    : McpConfigurationAttentionMessage,
                 AICodedbProjectSettings.ProjectMcpConfigRelativePath + " · " + AICodedbProjectSettings.ProviderSlug,
-                mcpState,
+                configurationState,
                 "Copy snippet",
                 CopyMcpSnippet);
 
-            AICodedbSectionView.DrawStatusGroup("Registration", string.Empty, null, () =>
+            AICodedbSectionView.DrawStatusGroup("Project MCP", string.Empty, null, () =>
             {
                 AICodedbSectionView.DrawStatusRow(
                     "Scope",
-                    "Workspace / project level",
+                    "Project-local configuration",
                     AICodedbStatusState.Ok,
                     "Project-owned");
                 AICodedbSectionView.DrawStatusRow(
-                    "Server",
+                    "Configuration",
                     AICodedbProjectSettings.ProviderSlug,
-                    mcpState,
-                    GetStateLabel(mcpState, "Configured"));
+                    configurationState,
+                    GetStateLabel(configurationState, "Ready"));
+                AICodedbSectionView.DrawStatusRow(
+                    "Package backend",
+                    "Initialize, tools, status, and bounded query",
+                    backendState,
+                    GetStateLabel(backendState, "Available"));
+                AICodedbSectionView.DrawStatusRow(
+                    "Codex client",
+                    "Verified separately in a new project task",
+                    AICodedbStatusState.Inactive,
+                    McpClientUnobservedLabel);
                 var runtimeState = _statusSnapshot.GetRuntimeState();
                 AICodedbSectionView.DrawStatusRow(
                     "Runtime root",
@@ -1562,13 +1593,13 @@ namespace Rice.AI.Codedb.Editor
 
             _showMcpSnippet = AICodedbSectionView.DrawDisclosure(
                 _showMcpSnippet,
-                "Registration snippet",
+                "Project configuration snippet",
                 "Copy-only",
                 DrawMcpProjectSnippetSection);
             _showMcpPolicy = AICodedbSectionView.DrawDisclosure(
                 _showMcpPolicy,
-                "Registration policy",
-                "Global config is fallback-only",
+                "Configuration policy",
+                "Project-local only",
                 DrawMcpPolicy);
         }
 
@@ -1594,13 +1625,13 @@ namespace Rice.AI.Codedb.Editor
             DrawDetailsPanel(() =>
             {
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProjectMcpConfig);
-                AICodedbDetailRowView.DrawValue("Registration", "Scope", "Workspace-local/project-level first");
-                AICodedbDetailRowView.DrawValue("Registration", "Target", AICodedbProjectSettings.ProjectMcpConfigRelativePath);
+                AICodedbDetailRowView.DrawValue("Configuration", "Scope", "Project-local only");
+                AICodedbDetailRowView.DrawValue("Configuration", "Target", AICodedbProjectSettings.ProjectMcpConfigRelativePath);
                 AICodedbDetailRowView.DrawValue("Server", "Name", AICodedbProjectSettings.ProviderSlug);
-                AICodedbDetailRowView.DrawValue("Global config", "Fallback only", "User/global registration is temporary smoke fallback only.");
+                AICodedbDetailRowView.DrawValue("Global config", "Not used", "CodeDB does not create a user-global project registration.");
             });
             EditorGUILayout.HelpBox(
-                "The Manager validates project registration material and never writes MCP client configuration.",
+                "CodeDB owns only its managed keys in the project-local configuration. A new Codex task loads that configuration independently.",
                 MessageType.Info);
         }
 
@@ -2104,19 +2135,13 @@ namespace Rice.AI.Codedb.Editor
             if (_userActionInFlight || action == null)
                 return;
 
-            _lastResultTitle = title;
-            _lastResult = action();
-            if (AICodedbWatcherStatusBuilder.IsWatcherActivity(title, _lastResult.StandardOutput))
-            {
-                _watcherStatus = AICodedbWatcherStatusBuilder.Build(_lastResult);
-                _watcherStatusLoaded = true;
-                ApplyWatcherDisclosurePolicy();
-            }
-
-            GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
-            RefreshStatus();
-            BeginStatusRefresh();
-            Repaint();
+            // Diagnostics and watcher controls use the same asynchronous
+            // command lane as ordinary user actions. The callback only queues
+            // work and paints cached progress; PowerShell/Node/IPC work stays
+            // off Unity's main thread.
+            RunUserActionAsync(
+                title,
+                _ => Task.Run(action));
         }
 
         private void RunUserActionAsync(

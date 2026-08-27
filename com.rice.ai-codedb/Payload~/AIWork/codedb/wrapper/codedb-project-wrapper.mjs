@@ -7,7 +7,6 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 
 const MANAGED_BY = "com.rice.ai-codedb";
-const EXPECTED_GENERATION = "poc.33";
 const EXPECTED_WORKER_RELATIVE_PATH = "wrapper/codedb-project-instance-worker.mjs";
 const MAX_CONTROL_BYTES = 64 * 1024;
 const MAX_INSTANCE_BYTES = 128 * 1024;
@@ -93,6 +92,7 @@ function resolveSelectedInstance(unityRoot) {
   const selection = parseStrictFlatJson(decodeStrictUtf8(selectionBytes, "current instance selection"), "current instance selection");
   const instanceId = requiredString(selection, "instance_id", "current instance selection");
   const instanceRelativePath = normalizeRelativePath(requiredString(selection, "instance_relative_path", "current instance selection"));
+  const selectionGenerationId = requiredString(selection, "generation_id", "current instance selection");
   const expectedInstanceRelativePath = `AIWork/.runtime/codedb/instances/${instanceId}`;
   const expectedProjectIdentity = createProjectIdentity(unityRoot);
   if (requiredInteger(selection, "schema_version", "current instance selection") !== 1
@@ -100,7 +100,7 @@ function resolveSelectedInstance(unityRoot) {
       || requiredString(selection, "project_identity", "current instance selection") !== expectedProjectIdentity
       || !/^[a-f0-9]{32}$/.test(instanceId)
       || instanceRelativePath !== expectedInstanceRelativePath
-      || requiredString(selection, "generation_id", "current instance selection") !== EXPECTED_GENERATION) {
+      || !/^[A-Za-z0-9._-]{1,64}$/.test(selectionGenerationId)) {
     throw new Error("[CHECK_FAILED] Current CodeDB instance selection identity is invalid.");
   }
   const instanceRoot = path.resolve(unityRoot, instanceRelativePath.replace(/\//g, path.sep));
@@ -123,7 +123,7 @@ function resolveSelectedInstance(unityRoot) {
       || requiredString(instance, "instance_id", "selected CodeDB instance manifest") !== instanceId
       || requiredString(instance, "instance_relative_path", "selected CodeDB instance manifest") !== instanceRelativePath
       || requiredString(instance, "state", "selected CodeDB instance manifest") !== "READY"
-      || generationId !== EXPECTED_GENERATION
+      || generationId !== selectionGenerationId
       || generationRelativePath !== expectedGenerationRelativePath
       || workerRelativePath !== EXPECTED_WORKER_RELATIVE_PATH) {
     throw new Error("[CHECK_FAILED] Selected CodeDB instance manifest identity is invalid.");

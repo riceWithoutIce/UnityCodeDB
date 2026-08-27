@@ -204,36 +204,61 @@ namespace Rice.AI.Codedb.Editor
         }
     }
 
+    internal enum AICodedbCurrentInstanceState
+    {
+        Missing,
+        Current,
+        TrustedPrevious,
+        Invalid
+    }
+
     internal readonly struct AICodedbCurrentInstanceStatus
     {
-        internal bool Present { get; }
-        internal bool IsCurrent { get; }
+        internal AICodedbCurrentInstanceState State { get; }
+        internal bool Present => State != AICodedbCurrentInstanceState.Missing;
+        internal bool IsCurrent => State == AICodedbCurrentInstanceState.Current;
+        internal bool IsTrustedPrevious => State == AICodedbCurrentInstanceState.TrustedPrevious;
+        internal bool CanPublishEditorLease => IsCurrent || IsTrustedPrevious;
         internal string InstanceId { get; }
         internal string InstanceRelativePath { get; }
         internal string InstanceRoot { get; }
         internal string GenerationRoot { get; }
-        internal string EditorLeaseRelativePath => IsCurrent
+        internal string GenerationId { get; }
+        internal string PackageVersion { get; }
+        internal string PayloadVersion { get; }
+        internal int PayloadSequence { get; }
+        internal int BootstrapProtocol { get; }
+        internal string EditorLeaseRelativePath => CanPublishEditorLease
             ? InstanceRelativePath + "/watch/lifecycle/editor-leases"
             : string.Empty;
         internal string Detail { get; }
 
         internal AICodedbCurrentInstanceStatus(
-            bool present,
-            bool isCurrent,
+            AICodedbCurrentInstanceState state,
             string instanceId,
             string instanceRelativePath,
             string instanceRoot,
             string generationRoot,
+            string generationId,
+            string packageVersion,
+            string payloadVersion,
+            int payloadSequence,
+            int bootstrapProtocol,
             string detail)
         {
-            Present = present;
-            IsCurrent = isCurrent;
+            State = state;
             InstanceId = instanceId ?? string.Empty;
             InstanceRelativePath = instanceRelativePath ?? string.Empty;
             InstanceRoot = instanceRoot ?? string.Empty;
             GenerationRoot = generationRoot ?? string.Empty;
+            GenerationId = generationId ?? string.Empty;
+            PackageVersion = packageVersion ?? string.Empty;
+            PayloadVersion = payloadVersion ?? string.Empty;
+            PayloadSequence = payloadSequence;
+            BootstrapProtocol = bootstrapProtocol;
             Detail = detail ?? string.Empty;
         }
+
     }
 
     internal static class AICodedbCurrentInstanceStore
@@ -245,6 +270,11 @@ namespace Rice.AI.Codedb.Editor
         private const long WorkerMaximumBytes = 4 * 1024 * 1024;
 
         internal static AICodedbCurrentInstanceStatus Read(string projectRoot)
+        {
+            return Read(projectRoot, AICodedbPaths.PackageRootPath);
+        }
+
+        internal static AICodedbCurrentInstanceStatus Read(string projectRoot, string packageRoot)
         {
             try
             {
@@ -258,12 +288,16 @@ namespace Rice.AI.Codedb.Editor
                     if (Directory.Exists(pointerPath))
                         throw new InvalidOperationException("Current CodeDB instance selection is not a regular file.");
                     return new AICodedbCurrentInstanceStatus(
-                        false,
-                        false,
+                        AICodedbCurrentInstanceState.Missing,
                         string.Empty,
                         string.Empty,
                         string.Empty,
                         string.Empty,
+                        string.Empty,
+                        string.Empty,
+                        string.Empty,
+                        0,
+                        0,
                         "No current CodeDB instance is selected.");
                 }
 
@@ -276,6 +310,10 @@ namespace Rice.AI.Codedb.Editor
                 var manifestHash = AICodedbStrictJson.GetRequiredString(
                     pointer,
                     "instance_manifest_sha256",
+                    pointerLabel);
+                var pointerGenerationId = AICodedbStrictJson.GetRequiredString(
+                    pointer,
+                    "generation_id",
                     pointerLabel);
                 var activatedAtText = AICodedbStrictJson.GetRequiredString(pointer, "activated_at_utc", pointerLabel);
                 DateTimeOffset activatedAt;
@@ -293,10 +331,7 @@ namespace Rice.AI.Codedb.Editor
                     || !string.Equals(instanceId, instanceId.ToLowerInvariant(), StringComparison.Ordinal)
                     || !string.Equals(instanceRelativePath, expectedInstanceRelativePath, StringComparison.Ordinal)
                     || !IsSha256(manifestHash)
-                    || !string.Equals(
-                        AICodedbStrictJson.GetRequiredString(pointer, "generation_id", pointerLabel),
-                        AICodedbProjectSettings.CurrentGenerationId,
-                        StringComparison.Ordinal)
+                    || !IsGenerationId(pointerGenerationId)
                     || !DateTimeOffset.TryParse(
                         activatedAtText,
                         CultureInfo.InvariantCulture,
@@ -332,21 +367,27 @@ namespace Rice.AI.Codedb.Editor
                 var workerRelativePath = NormalizeRelativePath(
                     AICodedbStrictJson.GetRequiredString(manifest, "worker_relative_path", manifestLabel));
                 var workerHash = AICodedbStrictJson.GetRequiredString(manifest, "worker_sha256", manifestLabel);
+                var packageVersion = AICodedbStrictJson.GetRequiredString(manifest, "package_version", manifestLabel);
+                var payloadVersion = AICodedbStrictJson.GetRequiredString(manifest, "payload_version", manifestLabel);
+                var payloadSequence = AICodedbStrictJson.GetRequiredInt32(manifest, "payload_sequence", manifestLabel);
+                var manifestGenerationId = AICodedbStrictJson.GetRequiredString(manifest, "generation_id", manifestLabel);
+                var bootstrapProtocol = AICodedbStrictJson.GetRequiredInt32(manifest, "bootstrap_protocol", manifestLabel);
                 var expectedGenerationRelativePath =
-                    AICodedbProjectSettings.HostGenerationsRelativePath + "/" + AICodedbProjectSettings.CurrentGenerationId;
+                    AICodedbProjectSettings.HostGenerationsRelativePath + "/" + manifestGenerationId;
                 if (AICodedbStrictJson.GetRequiredInt32(manifest, "schema_version", manifestLabel) != 1
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "managed_by", manifestLabel), ManagedBy, StringComparison.Ordinal)
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "project_identity", manifestLabel), AICodedbEditorLifecycle.CreateProjectIdentity(root), StringComparison.Ordinal)
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "instance_id", manifestLabel), instanceId, StringComparison.Ordinal)
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "instance_relative_path", manifestLabel), instanceRelativePath, StringComparison.Ordinal)
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "state", manifestLabel), "READY", StringComparison.Ordinal)
-                    || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "package_version", manifestLabel), AICodedbProjectSettings.CurrentPackageVersion, StringComparison.Ordinal)
-                    || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "payload_version", manifestLabel), AICodedbProjectSettings.CurrentPayloadVersion, StringComparison.Ordinal)
-                    || AICodedbStrictJson.GetRequiredInt32(manifest, "payload_sequence", manifestLabel) != AICodedbProjectSettings.CurrentPayloadSequence
-                    || !string.Equals(AICodedbStrictJson.GetRequiredString(manifest, "generation_id", manifestLabel), AICodedbProjectSettings.CurrentGenerationId, StringComparison.Ordinal)
+                    || !string.Equals(pointerGenerationId, manifestGenerationId, StringComparison.Ordinal)
+                    || !IsGenerationId(manifestGenerationId)
+                    || string.IsNullOrWhiteSpace(packageVersion)
+                    || string.IsNullOrWhiteSpace(payloadVersion)
+                    || payloadSequence < 1
                     || !string.Equals(generationRelativePath, expectedGenerationRelativePath, StringComparison.Ordinal)
                     || !IsSha256(generationManifestHash)
-                    || AICodedbStrictJson.GetRequiredInt32(manifest, "bootstrap_protocol", manifestLabel) != AICodedbProjectSettings.CurrentBootstrapProtocol
+                    || bootstrapProtocol < 1
                     || !string.Equals(workerRelativePath, "wrapper/codedb-project-instance-worker.mjs", StringComparison.Ordinal)
                     || !IsSha256(workerHash))
                 {
@@ -364,26 +405,188 @@ namespace Rice.AI.Codedb.Editor
                     throw new InvalidOperationException("Current CodeDB instance generation closure does not match its manifest.");
                 }
 
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
+                var selectedIdentity = new AICodedbRuntimeIdentity(
+                    packageVersion,
+                    payloadVersion,
+                    payloadSequence,
+                    manifestGenerationId,
+                    bootstrapProtocol);
+                var disposition = runtimeContract.Classify(selectedIdentity);
+                AICodedbCurrentInstanceState state;
+                if (disposition == AICodedbRuntimeGenerationDisposition.Current)
+                {
+                    state = AICodedbCurrentInstanceState.Current;
+                }
+                else if (disposition == AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+                {
+                    state = ValidateTrustedPreviousIdentity(
+                        root,
+                        packageRoot,
+                        runtimeContract,
+                        selectedIdentity,
+                        packageVersion,
+                        payloadVersion,
+                        payloadSequence,
+                        manifestGenerationId,
+                        generationManifestHash,
+                        workerRelativePath,
+                        workerHash,
+                        bootstrapProtocol,
+                        generationRoot);
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        "Selected CodeDB instance generation disposition is " + disposition + ".");
+                }
+
                 return new AICodedbCurrentInstanceStatus(
-                    true,
-                    true,
+                    state,
                     instanceId,
                     instanceRelativePath,
                     instanceRoot,
                     generationRoot,
-                    "The selected CodeDB instance identity and generation closure are current.");
+                    manifestGenerationId,
+                    packageVersion,
+                    payloadVersion,
+                    payloadSequence,
+                    bootstrapProtocol,
+                    state == AICodedbCurrentInstanceState.Current
+                        ? "The selected CodeDB instance identity and generation closure are current."
+                        : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.");
             }
             catch (Exception exception)
             {
                 return new AICodedbCurrentInstanceStatus(
-                    true,
-                    false,
+                    AICodedbCurrentInstanceState.Invalid,
                     string.Empty,
                     string.Empty,
                     string.Empty,
                     string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    0,
                     exception.Message);
             }
+        }
+
+        private static AICodedbCurrentInstanceState ValidateTrustedPreviousIdentity(
+            string projectRoot,
+            string packageRoot,
+            AICodedbPackageRuntimeContract runtimeContract,
+            AICodedbRuntimeIdentity selectedIdentity,
+            string packageVersion,
+            string payloadVersion,
+            int payloadSequence,
+            string generationId,
+            string generationManifestHash,
+            string workerRelativePath,
+            string workerHash,
+            int bootstrapProtocol,
+            string generationRoot)
+        {
+            if (runtimeContract.Classify(selectedIdentity)
+                != AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+            {
+                throw new InvalidOperationException(
+                    "Selected CodeDB instance is not an exact Package-declared transition.");
+            }
+
+            var normalizedPackageRoot = AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/');
+            if (!Directory.Exists(normalizedPackageRoot)
+                || (File.GetAttributes(normalizedPackageRoot) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("Resolved Package root is unavailable or untrusted for previous-instance authentication.");
+            }
+
+            var packageGenerationRoot = CombineInside(
+                normalizedPackageRoot,
+                "Payload~/Generations/" + generationId,
+                "Package previous generation");
+            var packageGenerationManifestPath = CombineInside(
+                packageGenerationRoot,
+                "generation-manifest.json",
+                "Package previous generation manifest");
+            var packageWorkerPath = CombineInside(
+                packageGenerationRoot,
+                workerRelativePath,
+                "Package previous generation worker");
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedPackageRoot, packageGenerationRoot);
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedPackageRoot, packageGenerationManifestPath);
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedPackageRoot, packageWorkerPath);
+            if (!string.Equals(HashFile(packageGenerationManifestPath, GenerationManifestMaximumBytes), generationManifestHash, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(HashFile(packageWorkerPath, WorkerMaximumBytes), workerHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Selected previous instance does not match the Package-preserved generation bytes.");
+            }
+
+            var packageGenerationManifest = AICodedbStrictJson.ReadObject(
+                packageGenerationManifestPath,
+                GenerationManifestMaximumBytes,
+                "Package previous generation manifest");
+            if (AICodedbStrictJson.GetRequiredInt32(packageGenerationManifest, "schema_version", "Package previous generation manifest") != 1
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(packageGenerationManifest, "managed_by", "Package previous generation manifest"), ManagedBy, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(packageGenerationManifest, "package_version", "Package previous generation manifest"), packageVersion, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(packageGenerationManifest, "payload_version", "Package previous generation manifest"), payloadVersion, StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(packageGenerationManifest, "payload_sequence", "Package previous generation manifest") != payloadSequence
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(packageGenerationManifest, "generation_id", "Package previous generation manifest"), generationId, StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(packageGenerationManifest, "bootstrap_protocol", "Package previous generation manifest") != bootstrapProtocol)
+            {
+                throw new InvalidOperationException("Package-preserved previous generation identity is invalid.");
+            }
+
+            var hostPointerPath = AICodedbPaths.NormalizePath(Path.Combine(
+                projectRoot,
+                AICodedbProjectSettings.HostCurrentPointerRelativePath));
+            var generationSelection = AICodedbHostGenerationStore.ResolvePointer(
+                projectRoot,
+                hostPointerPath,
+                normalizedPackageRoot);
+            if (generationSelection.State != AICodedbHostGenerationState.Previous
+                || !string.Equals(generationSelection.GenerationId, generationId, StringComparison.Ordinal)
+                || !string.Equals(generationSelection.PackageVersion, packageVersion, StringComparison.Ordinal)
+                || !string.Equals(generationSelection.PayloadVersion, payloadVersion, StringComparison.Ordinal)
+                || generationSelection.PayloadSequence != payloadSequence
+                || generationSelection.BootstrapProtocol != bootstrapProtocol
+                || !string.Equals(
+                    AICodedbPaths.NormalizePath(generationSelection.RootPath).TrimEnd('/'),
+                    AICodedbPaths.NormalizePath(generationRoot).TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Selected previous instance generation closure is not a validated upgrade source.");
+            }
+
+            return AICodedbCurrentInstanceState.TrustedPrevious;
+        }
+
+        private static string CombineInside(string root, string relativePath, string label)
+        {
+            var normalizedRoot = AICodedbPaths.NormalizePath(root).TrimEnd('/');
+            var normalizedRelativePath = NormalizeRelativePath(relativePath);
+            var combined = AICodedbPaths.NormalizePath(Path.Combine(normalizedRoot, normalizedRelativePath));
+            if (!combined.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(label + " escapes its reviewed root.");
+            return combined;
+        }
+
+        private static bool IsGenerationId(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 64)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < 'A' || character > 'Z')
+                    && (character < 'a' || character > 'z')
+                    && (character < '0' || character > '9')
+                    && character != '.'
+                    && character != '_'
+                    && character != '-')
+                    return false;
+            }
+            return true;
         }
 
         private static string NormalizeRelativePath(string value)

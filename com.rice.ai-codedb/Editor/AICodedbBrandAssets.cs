@@ -15,6 +15,8 @@ namespace Rice.AI.Codedb.Editor
         private static bool s_packageVersionResolved;
         private static string s_packageVersion = string.Empty;
 
+        internal static string PackageVersion => ResolvePackageVersion();
+
         internal static Texture2D Icon
         {
             get
@@ -83,7 +85,8 @@ namespace Rice.AI.Codedb.Editor
                 // Unity can briefly withhold package metadata during package refresh.
             }
 
-            s_packageVersion = AICodedbProjectSettings.CurrentPackageVersion;
+            s_packageVersion = typeof(AICodedbBrandAssets).Assembly.GetName().Version?.ToString()
+                               ?? string.Empty;
             return s_packageVersion;
         }
     }

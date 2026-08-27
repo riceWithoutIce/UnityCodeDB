@@ -79,6 +79,20 @@ namespace Rice.AI.Codedb.Editor.Tests
                     "args = [\"AIWork/codedb/wrapper/codedb-project-wrapper.mjs\", \"--root\", \".\"]\n" +
                     "startup_timeout_sec = 120"));
         }
+
+        [Test]
+        public void McpPresentation_DistinguishesConfigurationFromClientObservation()
+        {
+            Assert.That(
+                AICodedbManagerWindow.McpConfigurationReadyMessage,
+                Is.EqualTo("Project configuration is ready"));
+            Assert.That(
+                AICodedbManagerWindow.McpConfigurationAttentionMessage,
+                Is.EqualTo("Project configuration needs attention"));
+            Assert.That(
+                AICodedbManagerWindow.McpClientUnobservedLabel,
+                Is.EqualTo("Not observed"));
+        }
     }
 
     internal sealed class AICodedbProductStatusTests

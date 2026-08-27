@@ -36,6 +36,7 @@ namespace Rice.AI.Codedb.Editor
         private const string LastProductStateKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastProductState.";
         private const string LastPackageFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastPackageFingerprint.";
         private const string LastVerifiedReadyFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastVerifiedReadyFingerprint.";
+        private const string LeasePrerequisiteCurrentKeyPrefix = "Rice.AICodedb.EditorLifecycle.LeasePrerequisiteCurrent.";
         private const string PlayModeProductStateKeyPrefix = "Rice.AICodedb.EditorLifecycle.PlayModeProductState.";
         private const string PlayModePackageFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.PlayModePackageFingerprint.";
 
@@ -143,7 +144,16 @@ namespace Rice.AI.Codedb.Editor
                 if (string.IsNullOrWhiteSpace(_projectIdentity))
                     throw new InvalidOperationException("Unity project root could not be identified.");
                 _lastProductState = ReadPersistedProductState(_projectIdentity);
-                _packageFingerprintChanged = ReadAndRecordPackageFingerprint(_projectIdentity);
+                _packageFingerprintChanged = HasPackageFingerprintChanged(_projectIdentity);
+                Interlocked.Exchange(
+                    ref _leasePrerequisiteCurrent,
+                    ShouldRestoreLeasePrerequisite(
+                        ReadPersistedLeasePrerequisite(_projectIdentity),
+                        _packageFingerprintChanged)
+                        ? 1
+                        : 0);
+                if (_packageFingerprintChanged)
+                    PersistLeasePrerequisite(_projectIdentity, false);
                 _sessionId = GetOrCreateSessionValue(SessionIdKey, () => Guid.NewGuid().ToString("N"));
                 _sessionCreatedAtUtc = GetOrCreateSessionValue(SessionCreatedAtKey, () => DateTime.UtcNow.ToString("o"));
                 _leasePath = string.Empty;
@@ -211,8 +221,9 @@ namespace Rice.AI.Codedb.Editor
                 AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
 
                 _initialized = true;
-                BackgroundScheduler.SetMaintenanceSuspended(IsPlayModeMaintenanceSuspended());
-                SupervisorRequestQueue.SetMaintenanceSuspended(IsPlayModeMaintenanceSuspended());
+                var maintenanceSuspended = IsPlayModeMaintenanceSuspended();
+                BackgroundScheduler.SetMaintenanceSuspended(maintenanceSuspended);
+                SupervisorRequestQueue.SetMaintenanceSuspended(maintenanceSuspended);
                 _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
                 _initializationRetryCount = 0;
                 _initialReconcileNotBefore =
@@ -221,7 +232,10 @@ namespace Rice.AI.Codedb.Editor
                 // instance before any lease can be published, but it must not
                 // compete with an immediate Play transition. Later reload and
                 // resume paths use the persisted Ready short-circuit.
-                QueueInitialReconcile();
+                if (!maintenanceSuspended)
+                    QueueInitialReconcile();
+                else
+                    QueueLeaseRefresh();
                 QueueSupervisorReconnect(true);
             }
             catch (Exception exception)
@@ -328,8 +342,7 @@ namespace Rice.AI.Codedb.Editor
         {
             return isCompiling
                    || isUpdating
-                   || isPlayingOrWillChangePlaymode
-                   || applicationPlaying;
+                   || (isPlayingOrWillChangePlaymode && !applicationPlaying);
         }
 
         private static void OnEditorUpdate()
@@ -401,11 +414,6 @@ namespace Rice.AI.Codedb.Editor
                 if (_initialized)
                     RecordProductStateForPlayModeIfAbsent();
                 CancelBackgroundMaintenanceForBoundary();
-                // Do not carry a named-pipe worker into Unity's Play-mode
-                // domain reload. The cached snapshot is sufficient while Play
-                // is active; reconnect is scheduled after edit mode resumes.
-                SupervisorBridge.Invalidate();
-                SupervisorRequestQueue.Invalidate();
             }
             else if (state == PlayModeStateChange.EnteredEditMode)
                 ClearProductStateForPlayMode();
@@ -413,17 +421,17 @@ namespace Rice.AI.Codedb.Editor
             var suspended = state != PlayModeStateChange.EnteredEditMode;
             BackgroundScheduler.SetMaintenanceSuspended(suspended);
             SupervisorRequestQueue.SetMaintenanceSuspended(suspended);
-            if (!suspended && !_quitting)
+            if (state == PlayModeStateChange.EnteredPlayMode && !_quitting)
+            {
+                // Stable Play permits query-priority reconnects. Maintenance
+                // remains suspended until Edit mode resumes.
+                QueueSupervisorReconnect(false);
+            }
+            else if (!suspended && !_quitting)
             {
                 _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-                if (ShouldForceAvailabilityReconcileAfterPlayModeResume(_lastProductState))
-                {
-                    // Play mode can interrupt the coordinator without a domain
-                    // reload. Re-enter the same background worker so it can
-                    // recover availability in place; the convergence plan
-                    // keeps a current immutable instance from being replaced.
+                if (ShouldForceReconcileAfterPlayModeResume(_packageFingerprintChanged))
                     BeginReconcile(true);
-                }
                 else if (ShouldReconcileAfterPlayModeResume(_lastProductState))
                     BeginReconcile(false);
                 QueueSupervisorReconnect(false);
@@ -434,21 +442,20 @@ namespace Rice.AI.Codedb.Editor
         {
             _quitting = true;
             CancelBackgroundMaintenanceForBoundary();
+            QueueEditorLeaseDeletion();
+            QueueOwnedSupervisorShutdown();
             SupervisorBridge.Dispose();
             SupervisorRequestQueue.Dispose();
             EditorApplication.update -= CompleteDeferredInitialization;
             _initializationCompletionQueued = false;
             EditorApplication.update -= OnEditorUpdate;
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
-            QueueEditorLeaseDeletion();
         }
 
         private static void OnBeforeAssemblyReload()
         {
-            // Unity waits for managed work that is still inside a process or
-            // redirected-output wait while unloading the domain. Stop only
-            // CodeDB's Package-launched parents and leave their external
-            // Provider/MCP children untouched.
+            // Invalidate only Unity-side admission and IPC waiters. The
+            // external Supervisor owns backend processes across Domain Reload.
             CancelBackgroundMaintenanceForBoundary();
             SupervisorBridge.Invalidate();
             SupervisorRequestQueue.Invalidate();
@@ -477,10 +484,9 @@ namespace Rice.AI.Codedb.Editor
                 var previousProductState = _lastProductState;
                 // All lifecycle maintenance enters through the same
                 // query-first admission queue as Supervisor reconnects. The
-                // existing background scheduler still owns process
-                // cancellation and Play-boundary tokens; this outer queue
-                // prevents a status/reconcile request from starting beside a
-                // reconnect or a second maintenance pass.
+                // background scheduler owns only Play-boundary cancellation
+                // tokens; this outer queue prevents a status/reconcile request
+                // from starting beside a reconnect or second maintenance pass.
                 var result = await SupervisorRequestQueue.Enqueue(
                     AICodedbSupervisorRequestKind.Reconcile,
                     AICodedbSupervisorRequestPriority.Maintenance,
@@ -499,6 +505,13 @@ namespace Rice.AI.Codedb.Editor
                 {
                     _lastProductState = result.ProductState;
                     PersistProductState(_projectIdentity, result.ProductState);
+                    PersistLeasePrerequisite(
+                        _projectIdentity,
+                        Volatile.Read(ref _leasePrerequisiteCurrent) != 0);
+                    RecordReconciledPackageFingerprint(_projectIdentity);
+                    _packageFingerprintChanged = ShouldRetainPendingPackageChange(
+                        _packageFingerprintChanged,
+                        true);
                 }
                 if (result.RetrySoon)
                 {
@@ -555,7 +568,7 @@ namespace Rice.AI.Codedb.Editor
                 if (!canContinue())
                     return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
                 var cleanupResult = RememberHostStatusResult(
-                    AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
+                    RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
                 return cleanupResult.Succeeded
                     ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
                     : LifecycleReconcileResult.WithWarning(
@@ -572,7 +585,7 @@ namespace Rice.AI.Codedb.Editor
             if (!canContinue())
                 return null;
             var hostResult = RememberHostStatusResult(
-                AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken));
+                RunSupervisorCommand(context, "materialize", "Probe", cancellationToken));
             var hostStatus = BuildHostPayloadStatus(hostResult, context);
             var productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, hostResult);
             var workerResult = LifecycleReconcileResult.WithState(productStatus.State);
@@ -603,19 +616,18 @@ namespace Rice.AI.Codedb.Editor
             // Automatic lifecycle convergence is instance-first. The legacy
             // flat/generation path remains available to diagnostics, but it
             // must not be selected after a Package reload.
-            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
-            if (currentInstance.Present && !currentInstance.IsCurrent)
+            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+            if (currentInstance.State == AICodedbCurrentInstanceState.Invalid)
             {
                 Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
                 workerResult.ProductState = AICodedbProductState.NeedsAttention;
                 workerResult.Warning = "CodeDB current instance identity is invalid: " + currentInstance.Detail;
                 return workerResult;
             }
-            if (!currentInstance.Present || currentInstance.IsCurrent)
+            if (!currentInstance.Present || currentInstance.IsCurrent || currentInstance.IsTrustedPrevious)
             {
                 var convergencePlan = ResolveCurrentInstanceConvergencePlan(
-                    currentInstance.Present,
-                    currentInstance.IsCurrent,
+                    currentInstance.State,
                     productStatus);
                 if (convergencePlan == AICodedbCurrentInstanceConvergencePlan.Deploy)
                 {
@@ -623,13 +635,13 @@ namespace Rice.AI.Codedb.Editor
                     if (!canContinue())
                         return workerResult;
                     var instanceResult = RememberHostStatusResult(
-                        AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
+                        RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, instanceResult);
                     workerResult.ProductState = productStatus.State;
                     if (!canContinue())
                         return workerResult;
                     var verifiedInstanceResult = RememberHostStatusResult(
-                        AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken));
+                        RunSupervisorCommand(context, "materialize", "Probe", cancellationToken));
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedInstanceResult);
                     workerResult.ProductState = productStatus.State;
                     if (productStatus.State == AICodedbProductState.Ready)
@@ -655,161 +667,85 @@ namespace Rice.AI.Codedb.Editor
                 RefreshEditorLeaseForIntegrationState(context);
                 return workerResult;
             }
-
-            var watcherEnsured = false;
-            var availabilityConvergedByUpgrade = false;
-            var upgradeStatus = AICodedbHostUpgradeStatusStore.Read(
-                context.ProjectRoot,
-                AICodedbProjectSettings.CurrentGenerationId);
-            if (hostStatus.IsCurrent && ShouldRunAutomaticGenerationCleanup(
-                    upgradeStatus,
-                    AICodedbProjectSettings.CurrentGenerationId))
-            {
-                if (!canContinue())
-                    return workerResult;
-                var cleanupResult = RememberHostStatusResult(
-                    AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
-                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, cleanupResult);
-                workerResult.ProductState = productStatus.State;
-                if (!canContinue())
-                    return workerResult;
-                hostStatus = ReadHostStatusAfterUpgrade(
-                    context,
-                    cleanupResult,
-                    canContinue,
-                    ConcurrentUpgradeStatusReadAttempts,
-                    cancellationToken);
-                if (!hostStatus.IsCurrent)
-                {
-                    if (!IsConcurrentUpgrade(cleanupResult))
-                    {
-                        workerResult.Warning =
-                            $"CodeDB automatic generation cleanup failed: {cleanupResult.GetSummary()} {cleanupResult.StandardError}".Trim();
-                    }
-                    else
-                    {
-                        workerResult.RetrySoon = true;
-                    }
-                    return workerResult;
-                }
-                availabilityConvergedByUpgrade = cleanupResult.Succeeded && productStatus.IsReady;
-                watcherEnsured = availabilityConvergedByUpgrade;
-            }
-            else if (hostStatus.CanUpgradeAutomatically)
-            {
-                var updatePolicy = AICodedbHostUpdatePolicyStore.Read(context.ProjectRoot);
-                if (!updatePolicy.IsValid)
-                {
-                    workerResult.Warning = "CodeDB automatic host update policy is invalid: " + updatePolicy.Detail;
-                }
-                else if (updatePolicy.IsEnabled && !IsAutomaticHostUpgradeSuppressed(
-                             upgradeStatus,
-                             AICodedbProjectSettings.CurrentGenerationId))
-                {
-                    if (!canContinue())
-                        return workerResult;
-                    var upgradeResult = RememberHostStatusResult(
-                        AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
-                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, upgradeResult);
-                    workerResult.ProductState = productStatus.State;
-                    if (!canContinue())
-                        return workerResult;
-                    hostStatus = ReadHostStatusAfterUpgrade(
-                        context,
-                        upgradeResult,
-                        canContinue,
-                        ConcurrentUpgradeStatusReadAttempts,
-                        cancellationToken);
-                    if (!hostStatus.IsCurrent)
-                    {
-                        if (!IsConcurrentUpgrade(upgradeResult))
-                        {
-                            workerResult.Warning =
-                                $"CodeDB automatic host upgrade failed: {upgradeResult.GetSummary()} {upgradeResult.StandardError}".Trim();
-                        }
-                        else
-                        {
-                            workerResult.RetrySoon = true;
-                        }
-                        return workerResult;
-                    }
-                    availabilityConvergedByUpgrade = upgradeResult.Succeeded && productStatus.IsReady;
-                    watcherEnsured = availabilityConvergedByUpgrade;
-                }
-            }
-
-            if (!canContinue())
-                return workerResult;
-            var generation = AICodedbHostGenerationStore.Resolve(context.ProjectRoot, context.PackageRoot);
-            if (!CanEnsureHostGeneration(hostStatus, generation.State))
-                return workerResult;
-
-            if (ShouldRunAvailabilityConvergence(hostStatus, availabilityConvergedByUpgrade))
-            {
-                if (!canContinue())
-                    return workerResult;
-                AICodedbCommandResult ensureResult;
-                var convergenceResult = RunWatcherThenAvailability(
-                    canContinue,
-                    () => AICodedbActions.RunEnsureWatcher(
-                        context,
-                        LifecycleMaintenanceTimeoutMilliseconds,
-                        cancellationToken),
-                    () => productStatus.Configured == AICodedbProductLayerState.Current
-                        ? RememberHostStatusResult(
-                            AICodedbHostPayloadMaterializer.RunProbe(context, cancellationToken))
-                        : RememberHostStatusResult(
-                            AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken)),
-                    out ensureResult);
-                if (!ensureResult.Succeeded)
-                {
-                    workerResult.ProductState = AICodedbProductState.NeedsAttention;
-                    workerResult.Warning =
-                        $"CodeDB Editor lifecycle reconcile failed: {ensureResult.GetSummary()} {ensureResult.StandardError}".Trim();
-                    return workerResult;
-                }
-                watcherEnsured = true;
-                if (convergenceResult == null)
-                    return workerResult;
-                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, convergenceResult);
-                workerResult.ProductState = productStatus.State;
-                if (!convergenceResult.Succeeded)
-                {
-                    workerResult.Warning =
-                        $"CodeDB automatic project availability convergence failed: {convergenceResult.GetSummary()} {convergenceResult.StandardError}".Trim();
-                    return workerResult;
-                }
-
-                if (!canContinue())
-                    return workerResult;
-                var verifiedResult = RememberHostStatusResult(
-                    AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken));
-                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedResult);
-                workerResult.ProductState = productStatus.State;
-                if (!productStatus.IsReady)
-                {
-                    workerResult.Warning =
-                        "CodeDB automatic convergence completed without reaching Ready: " + productStatus.Detail;
-                    return workerResult;
-                }
-            }
-
-            if (!watcherEnsured)
-            {
-                if (!canContinue())
-                    return workerResult;
-                var ensureResult = RememberHostStatusResult(AICodedbActions.RunEnsureWatcher(
-                    context,
-                    LifecycleMaintenanceTimeoutMilliseconds,
-                    cancellationToken));
-                if (!ensureResult.Succeeded)
-                {
-                    workerResult.ProductState = AICodedbProductState.NeedsAttention;
-                    workerResult.Warning =
-                        $"CodeDB Editor lifecycle reconcile failed: {ensureResult.GetSummary()} {ensureResult.StandardError}".Trim();
-                }
-            }
+            workerResult.ProductState = AICodedbProductState.NeedsAttention;
+            workerResult.Warning = "CodeDB selected-instance state is unsupported by the v0.3 Supervisor route.";
             return workerResult;
+        }
+
+        /// <summary>
+        /// Routes lifecycle commands through the project-local Supervisor. The
+        /// call is made only from the background scheduler; Unity callbacks
+        /// consume the resulting cache and never wait for this method.
+        /// </summary>
+        private static AICodedbCommandResult RunSupervisorCommand(
+            AICodedbEditorExecutionContext context,
+            string command,
+            string action,
+            CancellationToken cancellationToken)
+        {
+            var response = SupervisorBridge.SendCommand(
+                context.ProjectRoot,
+                command,
+                action,
+                null,
+                false,
+                cancellationToken);
+            if (response != null && response.Snapshot != null)
+                RememberSupervisorSnapshot(response.Snapshot);
+            var commandResult = response == null
+                ? new AICodedbCommandResult(4, string.Empty, "The project Supervisor returned no command response.", false)
+                : response.ToCommandResult();
+            if (!commandResult.Succeeded
+                && IsSupervisorOneShotFallbackAllowed(commandResult)
+                && string.Equals(command, "materialize", StringComparison.Ordinal))
+            {
+                // The Bridge grants this only for an empty-runtime bootstrap.
+                // Outage or ambiguous-owner failures never enter this branch.
+                if (string.Equals(action, "Probe", StringComparison.Ordinal))
+                    return RememberHostStatusResult(
+                        AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken));
+                if (string.Equals(action, "Upgrade", StringComparison.Ordinal))
+                    return RememberHostStatusResult(
+                        AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
+            }
+            return commandResult;
+        }
+
+        internal static bool IsSupervisorOneShotFallbackAllowed(AICodedbCommandResult result)
+        {
+            return result != null
+                   && !result.Succeeded
+                   && result.OneShotFallbackAuthorized;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunSupervisorCommandAsync(
+            string command,
+            string action,
+            bool confirmedProjectMutation)
+        {
+            var projectRoot = _projectRoot;
+            if (string.IsNullOrWhiteSpace(projectRoot))
+                projectRoot = AICodedbPaths.ProjectRoot;
+            var response = await SupervisorBridge.SendCommandAsync(
+                projectRoot,
+                command,
+                action,
+                null,
+                confirmedProjectMutation);
+            if (response != null && response.Snapshot != null)
+                RememberSupervisorSnapshot(response.Snapshot);
+            return response == null
+                ? new AICodedbCommandResult(4, string.Empty, "The project Supervisor returned no command response.", false)
+                : response.ToCommandResult();
+        }
+
+        private static void RememberSupervisorSnapshot(AICodedbSupervisorSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return;
+            // The Bridge remains the source of truth for the snapshot. This
+            // hook intentionally stays side-effect free so lifecycle workers
+            // can update only their in-memory observation.
         }
 
         internal static AICodedbCommandResult RunWatcherThenAvailability(
@@ -851,8 +787,10 @@ namespace Rice.AI.Codedb.Editor
                 return false;
             if (!ShouldInspectBackendForScheduledReconcile(lastProductState))
                 return false;
-            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
             if (!currentInstance.Present)
+                return true;
+            if (currentInstance.IsTrustedPrevious)
                 return true;
             if (!currentInstance.IsCurrent)
                 return false;
@@ -883,9 +821,23 @@ namespace Rice.AI.Codedb.Editor
             bool currentInstanceIsCurrent,
             AICodedbProductStatus productStatus)
         {
-            if (!currentInstancePresent)
+            return ResolveCurrentInstanceConvergencePlan(
+                !currentInstancePresent
+                    ? AICodedbCurrentInstanceState.Missing
+                    : currentInstanceIsCurrent
+                        ? AICodedbCurrentInstanceState.Current
+                        : AICodedbCurrentInstanceState.Invalid,
+                productStatus);
+        }
+
+        internal static AICodedbCurrentInstanceConvergencePlan ResolveCurrentInstanceConvergencePlan(
+            AICodedbCurrentInstanceState currentInstanceState,
+            AICodedbProductStatus productStatus)
+        {
+            if (currentInstanceState == AICodedbCurrentInstanceState.Missing
+                || currentInstanceState == AICodedbCurrentInstanceState.TrustedPrevious)
                 return AICodedbCurrentInstanceConvergencePlan.Deploy;
-            if (!currentInstanceIsCurrent)
+            if (currentInstanceState != AICodedbCurrentInstanceState.Current)
                 return AICodedbCurrentInstanceConvergencePlan.Blocked;
             if (productStatus.State == AICodedbProductState.Ready)
                 return AICodedbCurrentInstanceConvergencePlan.None;
@@ -916,12 +868,9 @@ namespace Rice.AI.Codedb.Editor
             AICodedbCommandResult ensureResult;
             var probeResult = RunWatcherThenAvailability(
                 canContinue,
-                () => AICodedbActions.RunEnsureWatcher(
-                    context,
-                    LifecycleMaintenanceTimeoutMilliseconds,
-                    cancellationToken),
+                () => RunSupervisorCommand(context, "watcher", "Ensure", cancellationToken),
                 () => RememberHostStatusResult(
-                    AICodedbHostPayloadMaterializer.RunProbe(context, cancellationToken)),
+                    RunSupervisorCommand(context, "materialize", "Probe", cancellationToken)),
                 out ensureResult);
             if (probeResult == null)
             {
@@ -1119,11 +1068,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static void RequestBackgroundStatusObservation(bool force)
         {
-            _nextReconcileAt = 0d;
-            if (_initialized
-                && !_quitting
-                && !IsPlayModeMaintenanceSuspended())
-                BeginReconcile(force);
+            if (_initialized && !_quitting)
+                QueueSupervisorReconnect(force);
         }
 
         internal static bool IsLifecycleInitialized => _initialized && !_quitting;
@@ -1153,7 +1099,11 @@ namespace Rice.AI.Codedb.Editor
         {
             if (!_initialized
                 || _quitting
-                || IsPlayModeMaintenanceSuspended()
+                || ShouldDeferSupervisorReconnect(
+                    EditorApplication.isCompiling,
+                    EditorApplication.isUpdating,
+                    EditorApplication.isPlayingOrWillChangePlaymode,
+                    Application.isPlaying)
                 || string.IsNullOrWhiteSpace(_projectRoot))
                 return;
 
@@ -1179,6 +1129,48 @@ namespace Rice.AI.Codedb.Editor
                 TaskScheduler.Default);
         }
 
+        internal static bool ShouldDeferSupervisorReconnect(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayingOrWillChangePlaymode,
+            bool applicationPlaying)
+        {
+            return ShouldDeferLifecycleInitialization(
+                isCompiling,
+                isUpdating,
+                isPlayingOrWillChangePlaymode,
+                applicationPlaying);
+        }
+
+        private static void QueueOwnedSupervisorShutdown()
+        {
+            if (string.IsNullOrWhiteSpace(_projectRoot))
+                return;
+
+            try
+            {
+                // This only schedules a worker. The quitting callback neither
+                // reads Supervisor evidence nor waits for named-pipe I/O.
+                var task = SupervisorBridge.RequestOwnedShutdownAsync(
+                    _projectRoot,
+                    "unity-bridge");
+                _ = task.ContinueWith(
+                    completed =>
+                    {
+                        // Observe a fault without touching Unity APIs. The
+                        // Supervisor also has a coordinator-offline fallback.
+                        _ = completed.Exception;
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            catch
+            {
+                // Final shutdown is best-effort and must never block Editor exit.
+            }
+        }
+
         private static void ReconnectSupervisorAfterReload()
         {
             if (!ShouldReconnectSupervisorAfterDomainReload(_initialized, _quitting))
@@ -1202,7 +1194,7 @@ namespace Rice.AI.Codedb.Editor
                 return;
 
             _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-            if (ShouldForceAvailabilityReconcileAfterPlayModeResume(_lastProductState))
+            if (ShouldForceReconcileAfterPlayModeResume(_packageFingerprintChanged))
                 BeginReconcile(true);
             else if (ShouldReconcileAfterPlayModeResume(_lastProductState))
                 BeginReconcile(false);
@@ -1215,10 +1207,23 @@ namespace Rice.AI.Codedb.Editor
                    && previousProductState != AICodedbProductState.Uninstalled;
         }
 
+        internal static bool ShouldForceReconcileAfterPlayModeResume(bool packageFingerprintChanged)
+        {
+            return packageFingerprintChanged;
+        }
+
+        internal static bool ShouldRetainPendingPackageChange(
+            bool packageFingerprintChanged,
+            bool reconcileCompleted)
+        {
+            return packageFingerprintChanged && !reconcileCompleted;
+        }
+
         internal static bool ShouldForceAvailabilityReconcileAfterPlayModeResume(
             AICodedbProductState previousProductState)
         {
-            return previousProductState == AICodedbProductState.Ready;
+            _ = previousProductState;
+            return false;
         }
 
         private static AICodedbProductState ReadPersistedProductState(string projectIdentity)
@@ -1251,6 +1256,35 @@ namespace Rice.AI.Codedb.Editor
             {
                 SessionState.SetString(LastVerifiedReadyFingerprintKeyPrefix + projectIdentity, string.Empty);
             }
+        }
+
+        private static bool ReadPersistedLeasePrerequisite(string projectIdentity)
+        {
+            return !string.IsNullOrWhiteSpace(projectIdentity)
+                   && string.Equals(
+                       SessionState.GetString(
+                           LeasePrerequisiteCurrentKeyPrefix + projectIdentity,
+                           string.Empty),
+                       "true",
+                       StringComparison.Ordinal);
+        }
+
+        private static void PersistLeasePrerequisite(
+            string projectIdentity,
+            bool prerequisiteCurrent)
+        {
+            if (string.IsNullOrWhiteSpace(projectIdentity))
+                return;
+            SessionState.SetString(
+                LeasePrerequisiteCurrentKeyPrefix + projectIdentity,
+                prerequisiteCurrent ? "true" : string.Empty);
+        }
+
+        internal static bool ShouldRestoreLeasePrerequisite(
+            bool persistedPrerequisiteCurrent,
+            bool packageFingerprintChanged)
+        {
+            return persistedPrerequisiteCurrent && !packageFingerprintChanged;
         }
 
         internal static bool HasVerifiedReadyForCurrentPackage()
@@ -1540,7 +1574,7 @@ namespace Rice.AI.Codedb.Editor
             return result;
         }
 
-        private static bool ReadAndRecordPackageFingerprint(string projectIdentity)
+        private static bool HasPackageFingerprintChanged(string projectIdentity)
         {
             if (string.IsNullOrWhiteSpace(projectIdentity))
                 return true;
@@ -1548,18 +1582,25 @@ namespace Rice.AI.Codedb.Editor
             var fingerprint = GetCurrentPackageFingerprint();
             var key = LastPackageFingerprintKeyPrefix + projectIdentity;
             var previous = SessionState.GetString(key, string.Empty);
-            SessionState.SetString(key, fingerprint);
             return !string.Equals(previous, fingerprint, StringComparison.Ordinal);
+        }
+
+        private static void RecordReconciledPackageFingerprint(string projectIdentity)
+        {
+            if (string.IsNullOrWhiteSpace(projectIdentity))
+                return;
+
+            SessionState.SetString(
+                LastPackageFingerprintKeyPrefix + projectIdentity,
+                GetCurrentPackageFingerprint());
         }
 
         private static string GetCurrentPackageFingerprint()
         {
             return string.Join(
                 "|",
-                AICodedbProjectSettings.CurrentPackageVersion,
-                AICodedbProjectSettings.CurrentPayloadVersion,
-                AICodedbProjectSettings.CurrentGenerationId,
-                AICodedbProjectSettings.CurrentPayloadSequence.ToString(CultureInfo.InvariantCulture));
+                AICodedbBrandAssets.PackageVersion,
+                typeof(AICodedbEditorLifecycle).Assembly.ManifestModule.ModuleVersionId.ToString("N"));
         }
 
         internal static bool ShouldPublishEditorLease(AICodedbProjectIntegrationStatus integrationStatus)
@@ -1633,7 +1674,7 @@ namespace Rice.AI.Codedb.Editor
                 {
                     var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
                     var statusResult = RememberHostStatusResult(
-                        AICodedbHostPayloadMaterializer.ReadStatus(context));
+                        RunSupervisorCommand(context, "materialize", "Probe", CancellationToken.None));
                     var productStatus = AICodedbProductStatusBuilder.Build(
                         integrationStatus,
                         statusResult);
@@ -1756,8 +1797,8 @@ namespace Rice.AI.Codedb.Editor
             lock (LeaseIoLock)
             {
                 var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
-                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
-                if (ShouldPublishEditorLease(integrationStatus) && currentInstance.IsCurrent)
+                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+                if (ShouldPublishEditorLeaseForInstance(integrationStatus, currentInstance))
                 {
                     var previousLeasePath = _leasePath;
                     _leasePath = Path.Combine(
@@ -1776,10 +1817,27 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        internal static bool ShouldPublishEditorLeaseForInstance(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbCurrentInstanceStatus currentInstance)
+        {
+            return ShouldPublishEditorLease(integrationStatus)
+                   && currentInstance.CanPublishEditorLease;
+        }
+
         private static void RefreshEditorLeaseHeartbeat()
         {
             lock (LeaseIoLock)
             {
+                if (string.IsNullOrWhiteSpace(_leasePath))
+                {
+                    // Domain Reload clears managed fields but preserves the
+                    // current Editor session and its durable lease. Re-resolve
+                    // the exact selected-instance lease path on this worker.
+                    RefreshEditorLeaseForIntegrationState(_executionContext);
+                    return;
+                }
+
                 // Reconciliation owns instance/state transitions. During a
                 // long transition, refresh the already selected lease path
                 // without rereading partially published control files; the
@@ -1882,7 +1940,7 @@ namespace Rice.AI.Codedb.Editor
             var sessions = new HashSet<string>(StringComparer.Ordinal);
             try
             {
-                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot);
+                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
                 if (!currentInstance.IsCurrent)
                     return new string[0];
                 var leaseRoot = context.GetProjectPath(currentInstance.EditorLeaseRelativePath);
@@ -2010,7 +2068,7 @@ namespace Rice.AI.Codedb.Editor
                     return status;
                 status = BuildHostPayloadStatus(
                     RememberHostStatusResult(
-                        AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken)),
+                        RunSupervisorCommand(context, "materialize", "Probe", cancellationToken)),
                     context);
                 if (status.IsCurrent || attempt + 1 >= attempts)
                     return status;
@@ -2572,21 +2630,7 @@ namespace Rice.AI.Codedb.Editor
         private readonly object _maintenanceLock = new object();
         private readonly HashSet<CancellationTokenSource> _activeMaintenanceCancellations =
             new HashSet<CancellationTokenSource>();
-        private readonly Action _requestProcessCancellation;
         private int _maintenanceSuspended;
-        private int _processCancellationInFlight;
-        private int _suspensionEpoch;
-
-        internal AICodedbEditorBackgroundScheduler()
-            : this(null)
-        {
-        }
-
-        internal AICodedbEditorBackgroundScheduler(Action requestProcessCancellation)
-        {
-            _requestProcessCancellation = requestProcessCancellation
-                ?? AICodedbProcessRunner.CancelBackgroundProcesses;
-        }
 
         internal bool IsMaintenanceSuspended => Volatile.Read(ref _maintenanceSuspended) != 0;
 
@@ -2594,56 +2638,14 @@ namespace Rice.AI.Codedb.Editor
         {
             var wasSuspended = Interlocked.Exchange(ref _maintenanceSuspended, suspended ? 1 : 0);
             if (!suspended)
-            {
-                // Invalidate a cleanup request that has not started yet. A
-                // quick Play/edit transition must never let an old cleanup
-                // task kill a process belonging to resumed maintenance.
-                Interlocked.Increment(ref _suspensionEpoch);
                 return;
-            }
             if (wasSuspended != 0)
                 return;
 
-            // Cancellation only flips worker state here. Process inspection
-            // and termination are explicitly deferred so a Play/domain-reload
-            // callback never touches Process.HasExited or Process.Kill.
+            // The Unity boundary owns admission tokens only. Detached runtime
+            // processes belong to the authenticated project Supervisor and
+            // survive Play, compilation, and Domain Reload.
             CancelMaintenance();
-            QueueProcessCancellation(Interlocked.Increment(ref _suspensionEpoch));
-        }
-
-        private void QueueProcessCancellation(int suspensionEpoch)
-        {
-            if (Interlocked.CompareExchange(ref _processCancellationInFlight, 1, 0) != 0)
-                return;
-
-            try
-            {
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        if (IsMaintenanceSuspended
-                            && Volatile.Read(ref _suspensionEpoch) == suspensionEpoch)
-                            _requestProcessCancellation();
-                    }
-                    catch
-                    {
-                        // Process cleanup is best-effort at a lifecycle
-                        // boundary. The owning worker also observes its token.
-                    }
-                    finally
-                    {
-                        Interlocked.Exchange(ref _processCancellationInFlight, 0);
-                        var currentEpoch = Volatile.Read(ref _suspensionEpoch);
-                        if (IsMaintenanceSuspended && currentEpoch != suspensionEpoch)
-                            QueueProcessCancellation(currentEpoch);
-                    }
-                });
-            }
-            catch
-            {
-                Interlocked.Exchange(ref _processCancellationInFlight, 0);
-            }
         }
 
         internal Task<T> QueueMaintenance<T>(Func<Func<bool>, T> work)
