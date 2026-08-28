@@ -276,6 +276,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCurrentInstanceStatus Read(string projectRoot, string packageRoot)
         {
+            var hasValidatedSelection = false;
+            var validatedSelection = default(AICodedbCurrentInstanceStatus);
             try
             {
                 var root = AICodedbEditorLifecycle.ValidateProjectRoot(projectRoot);
@@ -413,6 +415,38 @@ namespace Rice.AI.Codedb.Editor
                     manifestGenerationId,
                     bootstrapProtocol);
                 var disposition = runtimeContract.Classify(selectedIdentity);
+
+                // Preserve the identity after the project-owned instance and
+                // its immutable generation closure have passed structural
+                // validation. Later authentication failures must remain
+                // unusable, but retaining this evidence keeps INVALID status
+                // diagnostics tied to the selection that was actually read.
+                validatedSelection = new AICodedbCurrentInstanceStatus(
+                    AICodedbCurrentInstanceState.Invalid,
+                    instanceId,
+                    instanceRelativePath,
+                    instanceRoot,
+                    generationRoot,
+                    manifestGenerationId,
+                    packageVersion,
+                    payloadVersion,
+                    payloadSequence,
+                    bootstrapProtocol,
+                    string.Empty);
+                hasValidatedSelection = true;
+
+                // Authenticate the stable router before the more involved
+                // previous-generation transition checks so wrapper drift is
+                // reported directly and cannot be obscured by a later
+                // validation summary.
+                if (disposition == AICodedbRuntimeGenerationDisposition.Current
+                    || disposition == AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+                {
+                    AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
+                        root,
+                        runtimeContract.GetExpectedStableWrapperSha256(selectedIdentity));
+                }
+
                 AICodedbCurrentInstanceState state;
                 if (disposition == AICodedbRuntimeGenerationDisposition.Current)
                 {
@@ -458,6 +492,22 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (Exception exception)
             {
+                if (hasValidatedSelection)
+                {
+                    return new AICodedbCurrentInstanceStatus(
+                        AICodedbCurrentInstanceState.Invalid,
+                        validatedSelection.InstanceId,
+                        validatedSelection.InstanceRelativePath,
+                        validatedSelection.InstanceRoot,
+                        validatedSelection.GenerationRoot,
+                        validatedSelection.GenerationId,
+                        validatedSelection.PackageVersion,
+                        validatedSelection.PayloadVersion,
+                        validatedSelection.PayloadSequence,
+                        validatedSelection.BootstrapProtocol,
+                        exception.Message);
+                }
+
                 return new AICodedbCurrentInstanceStatus(
                     AICodedbCurrentInstanceState.Invalid,
                     string.Empty,

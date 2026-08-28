@@ -2042,17 +2042,22 @@ namespace Rice.AI.Codedb.Editor
             RunAction("Host Payload Sync", AICodedbActions.RunHostPayloadSync);
         }
 
-        private void RunHostPayloadRedeployWithConfirmation()
+        private async void RunHostPayloadRedeployWithConfirmation()
         {
-            var preflightResult = AICodedbActions.RunHostPayloadDryRun();
-            RefreshStatus(preflightResult);
+            await RunUserActionAsync(
+                "Host Payload Redeploy",
+                _ => Task.Run(() => AICodedbActions.RunHostPayloadDryRun()),
+                ContinueHostPayloadRedeployAfterPreflightAsync);
+        }
+
+        private async Task<AICodedbCommandResult> ContinueHostPayloadRedeployAfterPreflightAsync(
+            AICodedbCommandResult preflightResult)
+        {
+            await RefreshStatusAsync(preflightResult);
             if (!preflightResult.Succeeded)
             {
                 _lastResultTitle = "Host Payload Redeploy Preflight";
-                _lastResult = preflightResult;
-                GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
-                Repaint();
-                return;
+                return preflightResult;
             }
 
             var hostPayload = _statusSnapshot.HostPayloadStatus;
@@ -2062,8 +2067,12 @@ namespace Rice.AI.Codedb.Editor
                     "Redeploy status changed",
                     "The Manager refreshed CodeDB status and Redeploy is no longer available. Review the updated Host status before continuing.",
                     "OK");
-                Repaint();
-                return;
+                return new AICodedbCommandResult(
+                    4,
+                    preflightResult.StandardOutput,
+                    "Redeploy is no longer available after the background preflight.",
+                    false,
+                    preflightResult.ElapsedMilliseconds);
             }
 
             if (hostPayload.ActiveOwners.Length > 0 && !hostPayload.HasOnlyLegacyWatcherOwners)
@@ -2077,7 +2086,12 @@ namespace Rice.AI.Codedb.Editor
                     "Redeploy host is blocked",
                     mcpGuidance + " The Manager never terminates external client processes.",
                     "OK");
-                return;
+                return new AICodedbCommandResult(
+                    4,
+                    preflightResult.StandardOutput,
+                    mcpGuidance,
+                    false,
+                    preflightResult.ElapsedMilliseconds);
             }
 
             var stopLegacyWatcher = hostPayload.LegacyWatcherCount > 0;
@@ -2093,10 +2107,21 @@ namespace Rice.AI.Codedb.Editor
                     stopLegacyWatcher ? "Stop and Redeploy" : "Redeploy Host",
                     "Cancel"))
             {
-                return;
+                return BuildCancelledHostPayloadRedeployResult(preflightResult);
             }
 
-            RunAction("Host Payload Redeploy", () => AICodedbActions.RunHostPayloadRedeploy(true));
+            return await Task.Run(() => AICodedbActions.RunHostPayloadRedeploy(true));
+        }
+
+        internal static AICodedbCommandResult BuildCancelledHostPayloadRedeployResult(
+            AICodedbCommandResult preflightResult)
+        {
+            return new AICodedbCommandResult(
+                1,
+                preflightResult == null ? string.Empty : preflightResult.StandardOutput,
+                "Host Payload Redeploy was cancelled by the user.",
+                false,
+                preflightResult == null ? 0 : preflightResult.ElapsedMilliseconds);
         }
 
         private void RunHostPayloadRemoveWithConfirmation()
@@ -2158,6 +2183,14 @@ namespace Rice.AI.Codedb.Editor
             string title,
             Func<Action<string>, Task<AICodedbCommandResult>> action)
         {
+            await RunUserActionAsync(title, action, null);
+        }
+
+        private async Task RunUserActionAsync(
+            string title,
+            Func<Action<string>, Task<AICodedbCommandResult>> action,
+            Func<AICodedbCommandResult, Task<AICodedbCommandResult>> continueOnMainThread)
+        {
             if (_userActionInFlight || action == null)
                 return;
 
@@ -2177,6 +2210,8 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 result = await action(line => { actionStatus.UpdateProgressLine(line); });
+                if (continueOnMainThread != null && this != null)
+                    result = await continueOnMainThread(result);
             }
             catch (Exception exception)
             {

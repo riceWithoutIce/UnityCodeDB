@@ -73,11 +73,11 @@ Assert-True -Condition (Test-Path -LiteralPath $supervisorScriptPath -PathType L
 Assert-True -Condition (Test-Path -LiteralPath $supervisorLauncherPath -PathType Leaf) -Message "Project Supervisor launcher is missing."
 $supervisorLauncherSource = [System.IO.File]::ReadAllText($supervisorLauncherPath)
 Assert-True `
-    -Condition ($supervisorLauncherSource.IndexOf('GetSelectedInstanceProviderConfigPath(currentInstance.InstanceRoot)', [StringComparison]::Ordinal) -ge 0) `
-    -Message "Project Supervisor launcher does not derive Provider config from the atomically selected instance."
+    -Condition ($supervisorLauncherSource.IndexOf('"--package-root", packageRoot', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Project Supervisor launcher does not route startup through the resolved Package root."
 Assert-True `
-    -Condition ($supervisorLauncherSource.IndexOf('"--provider-config", providerConfig', [StringComparison]::Ordinal) -ge 0) `
-    -Message "Project Supervisor launcher does not pass the selected-instance Provider config."
+    -Condition ($supervisorLauncherSource.IndexOf('AICodedbCurrentInstanceStatus', [StringComparison]::Ordinal) -lt 0) `
+    -Message "Project Supervisor launcher still depends on a Bridge-side current-instance decision."
 Assert-True `
     -Condition ($supervisorLauncherSource.IndexOf('context.GetProjectPath(context.ProviderConfigRelativePath)', [StringComparison]::Ordinal) -lt 0) `
     -Message "Project Supervisor launcher still routes through the legacy project runtime Provider config."
@@ -87,6 +87,16 @@ Assert-True `
 Assert-True `
     -Condition ($supervisorLauncherSource.IndexOf('AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(context.ProjectRoot, supervisorScript);', [StringComparison]::Ordinal) -lt 0) `
     -Message "Project Supervisor launcher still rejects legitimate UPM packages resolved outside the Unity project."
+
+$supervisorBridgePath = Join-Path $packageRoot "Editor\AICodedbSupervisorBridge.cs"
+Assert-True -Condition (Test-Path -LiteralPath $supervisorBridgePath -PathType Leaf) -Message "Project Supervisor bridge is missing."
+$supervisorBridgeSource = [System.IO.File]::ReadAllText($supervisorBridgePath)
+Assert-True `
+    -Condition ($supervisorBridgeSource.IndexOf('AICodedbCurrentInstanceStore.Read', [StringComparison]::Ordinal) -lt 0) `
+    -Message "Project Supervisor bridge still classifies or routes through current-instance storage."
+Assert-True `
+    -Condition ($supervisorBridgeSource.IndexOf('"handoff_queued"', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Project Supervisor bridge does not consume the Supervisor handoff disposition."
 
 $expectedTopLevel = @(
     ".gitattributes",

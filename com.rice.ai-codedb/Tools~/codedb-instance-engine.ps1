@@ -169,6 +169,9 @@ function Get-ValidatedCurrentInstance {
         throw "Current CodeDB instance manifest identity is invalid."
     }
     $generation = Assert-InstanceGenerationClosure -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceManifest $instanceManifestDocument
+    Assert-InstanceStableWrapper `
+        -ProjectRoot $ProjectRoot `
+        -ExpectedSha256 ([string]$generation.StableWrapperSha256)
     return [pscustomobject]@{
         InstanceId = $instanceId
         InstanceRelativePath = $instanceRelativePath
@@ -1079,6 +1082,28 @@ function Get-InstanceManifestExpectedHash {
     return $hash.ToLowerInvariant()
 }
 
+function Assert-InstanceStableWrapper {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $expected = $ExpectedSha256.ToLowerInvariant()
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        throw "Selected instance has no valid Package-owned stable-wrapper identity."
+    }
+    $wrapperPath = Get-InstanceProjectPath `
+        -ProjectRoot $ProjectRoot `
+        -RelativePath "AIWork/codedb/wrapper/codedb-project-wrapper.mjs" `
+        -Label "selected stable wrapper"
+    if (-not (Test-Path -LiteralPath $wrapperPath -PathType Leaf)) {
+        throw "Selected stable wrapper is missing."
+    }
+    if (-not [string]::Equals((Get-FileSha256 -Path $wrapperPath), $expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Selected stable wrapper does not match the Package-declared runtime identity."
+    }
+}
+
 function Get-InstanceGenerationPackageIdentity {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -1257,6 +1282,7 @@ function Assert-InstanceGenerationClosure {
         GenerationRoot = $generationRoot
         GenerationId = $generationId
         WorkerPath = $workerPath
+        StableWrapperSha256 = [string]$packageIdentity.StableWrapperSha256
         Disposition = if ($packageIdentity.Current) { "CURRENT" } else { "TRUSTED_PREVIOUS" }
     }
 }

@@ -1863,7 +1863,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var result = AICodedbHostPayloadMaterializer.RunRedeploy(false);
 
             Assert.That(result.Succeeded, Is.False);
-            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, and Install require second-level project mutation confirmation."));
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, Install, and Reinstall require second-level project mutation confirmation."));
         }
 
         [Test]
@@ -1872,7 +1872,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var result = AICodedbActions.RunHostPayloadRedeploy(false);
 
             Assert.That(result.Succeeded, Is.False);
-            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, and Install require second-level project mutation confirmation."));
+            Assert.That(result.StandardError, Does.Contain("Redeploy, Repair, Sync, Remove, Uninstall, Install, and Reinstall require second-level project mutation confirmation."));
         }
 
         [Test]
@@ -2186,6 +2186,25 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("fresh project-local instance"));
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("unrelated MCP content"));
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("External MCP clients and unrelated processes are never terminated"));
+        }
+
+        [Test]
+        public void HostPayloadRedeploy_CancelAfterPreflightReturnsExplicitFailure()
+        {
+            var preflight = new AICodedbCommandResult(
+                0,
+                "dry-run output",
+                string.Empty,
+                false,
+                17);
+
+            var result = AICodedbManagerWindow.BuildCancelledHostPayloadRedeployResult(preflight);
+
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.ExitCode, Is.EqualTo(1));
+            Assert.That(result.StandardOutput, Is.EqualTo("dry-run output"));
+            Assert.That(result.StandardError, Is.EqualTo("Host Payload Redeploy was cancelled by the user."));
+            Assert.That(result.ElapsedMilliseconds, Is.EqualTo(17));
         }
 
         [TestCase(false)]

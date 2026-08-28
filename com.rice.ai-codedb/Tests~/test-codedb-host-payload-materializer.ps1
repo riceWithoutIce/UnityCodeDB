@@ -7053,7 +7053,9 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Forged-wrapper fixture unexpectedly started with poc.34."
     $forgedWrapperUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $forgedWrapperUpgrade -ExitCode 6 -Label "Forged previous stable wrapper refusal"
-    Assert-True -Condition ($forgedWrapperUpgrade.Text.Contains("Stable instance wrapper target contains unowned or drifted bytes")) -Message "Forged previous stable wrapper did not report its ownership boundary."
+    Assert-True `
+        -Condition ($forgedWrapperUpgrade.Text.IndexOf("stable wrapper", [StringComparison]::OrdinalIgnoreCase) -ge 0) `
+        -Message "Forged previous stable wrapper did not report its ownership boundary."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedWrapper.SelectionPath) -Expected $forgedWrapperSelectionBytes -Message "Rejected stable wrapper changed the selected instance."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedWrapper.StableWrapperPath) -Expected $forgedWrapperBytes -Message "Rejected stable wrapper was overwritten."
     Assert-Equal -Actual (Get-FileSnapshot -Root $forgedWrapper.InstanceRoot) -Expected $forgedWrapperInstanceSnapshot -Message "Rejected stable wrapper changed the retained instance."

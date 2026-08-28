@@ -1374,11 +1374,11 @@ function Read-PayloadManifest {
         $sourceFlatFileCount = Get-RequiredJsonInt32 -Object $entry -Name "source_flat_file_count" -Label "payload bootstrap transition"
         $sourceFlatClosureSha256 = (Get-RequiredJsonString -Object $entry -Name "source_flat_closure_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
         $sourceStableWrapperSha256 = (Get-RequiredJsonString -Object $entry -Name "source_stable_wrapper_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
-        $transitionKey = "$sourcePackageVersion|$sourcePayloadVersion|$sourcePayloadSequence|$sourceGenerationId"
+        $transitionKey = "$sourcePackageVersion|$sourcePayloadVersion|$sourcePayloadSequence|$sourceGenerationId|$sourceBootstrapProtocol"
         if ($sourceTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$' -or
             [string]::IsNullOrWhiteSpace($sourcePackageVersion) -or
             [string]::IsNullOrWhiteSpace($sourcePayloadVersion) -or
-            $sourcePayloadSequence -lt 22 -or $sourcePayloadSequence -ge $payloadSequence -or
+            $sourcePayloadSequence -lt 1 -or $sourcePayloadSequence -ge $payloadSequence -or
             $sourceGenerationId -notmatch '^[A-Za-z0-9._-]{1,64}$' -or
             $sourceBootstrapProtocol -lt 1 -or
             $sourceMarkerSchemaVersion -notin @(1, $script:MarkerSchemaVersion) -or
@@ -1481,8 +1481,7 @@ function Read-PayloadManifest {
         TargetMap = $targetMap
     }
     $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
-    $usesGenerationContract = $payloadSequence -ge 22 -or
-        $targetMap.ContainsKey($generationManifestTarget) -or
+    $usesGenerationContract = $targetMap.ContainsKey($generationManifestTarget) -or
         $targetMap.ContainsKey($script:CurrentPointerRelativePath)
     $manifest | Add-Member -NotePropertyName UsesGenerationContract -NotePropertyValue $usesGenerationContract
     if ($usesGenerationContract) {
@@ -1820,6 +1819,167 @@ function Read-InstalledMarker {
     }
 }
 
+function Test-RuntimeIdentityMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    return [string]::Equals([string]$Left.PackageVersion, [string]$Right.PackageVersion, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$Left.PayloadVersion, [string]$Right.PayloadVersion, [StringComparison]::Ordinal) -and
+        [int]$Left.PayloadSequence -eq [int]$Right.PayloadSequence -and
+        [string]::Equals([string]$Left.GenerationId, [string]$Right.GenerationId, [StringComparison]::Ordinal) -and
+        [int]$Left.BootstrapProtocol -eq [int]$Right.BootstrapProtocol
+}
+
+function Get-RuntimeTransitionForIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Identity
+    )
+
+    $matches = @($Manifest.BootstrapTransitions | Where-Object {
+        [string]::Equals([string]$_.SourcePackageVersion, [string]$Identity.PackageVersion, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$_.SourcePayloadVersion, [string]$Identity.PayloadVersion, [StringComparison]::Ordinal) -and
+        [int]$_.SourcePayloadSequence -eq [int]$Identity.PayloadSequence -and
+        [string]::Equals([string]$_.SourceGenerationId, [string]$Identity.GenerationId, [StringComparison]::Ordinal) -and
+        [int]$_.SourceBootstrapProtocol -eq [int]$Identity.BootstrapProtocol
+    })
+    if ($matches.Count -eq 1) { return $matches[0] }
+    return $null
+}
+
+function Get-RuntimeIdentityDisposition {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Identity
+    )
+
+    $identityIsWellFormed = -not [string]::IsNullOrWhiteSpace([string]$Identity.PackageVersion) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Identity.PayloadVersion) -and
+        [int]$Identity.PayloadSequence -ge 1 -and
+        [string]$Identity.GenerationId -match '^[A-Za-z0-9._-]{1,64}$' -and
+        [int]$Identity.BootstrapProtocol -ge 1
+    if (-not $identityIsWellFormed) { return "INVALID" }
+
+    if (Test-RuntimeIdentityMatch -Left $Identity -Right $Manifest) { return "CURRENT" }
+    if ([int]$Identity.PayloadSequence -gt [int]$Manifest.PayloadSequence) { return "NEWER" }
+    if ([int]$Identity.PayloadSequence -eq [int]$Manifest.PayloadSequence) { return "SEQUENCE_COLLISION" }
+    if ($null -ne (Get-RuntimeTransitionForIdentity -Manifest $Manifest -Identity $Identity)) {
+        return "TRUSTED_PREVIOUS"
+    }
+    return "INVALID"
+}
+
+function Get-PackageGenerationIdentityForRuntimeIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Identity
+    )
+
+    $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $Identity
+    if ([string]::Equals($disposition, "CURRENT", [StringComparison]::Ordinal)) {
+        $manifestTarget = "AIWork/.runtime/codedb/host/generations/$($Manifest.GenerationId)/generation-manifest.json"
+        if (-not $Manifest.TargetMap.ContainsKey($manifestTarget)) { return $null }
+        return [pscustomobject]@{
+            Disposition = $disposition
+            Transition = $null
+            GenerationManifestSha256 = [string]$Manifest.TargetMap[$manifestTarget].Sha256
+        }
+    }
+    if (-not [string]::Equals($disposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal)) {
+        return $null
+    }
+
+    $transition = Get-RuntimeTransitionForIdentity -Manifest $Manifest -Identity $Identity
+    if ($null -eq $transition) { return $null }
+    $generationPrefix = "AIWork/.runtime/codedb/host/generations/$($transition.SourceGenerationId)/"
+    $manifestTarget = $generationPrefix + "generation-manifest.json"
+    if (-not $Manifest.RetiredTargetMap.ContainsKey($manifestTarget)) { return $null }
+
+    $packageGenerationRoot = ConvertTo-AbsoluteChildPath `
+        -Root $Manifest.Root `
+        -RelativePath "Generations/$($transition.SourceGenerationId)" `
+        -Label "Package transition generation"
+    $packageGenerationManifestPath = Join-Path $packageGenerationRoot "generation-manifest.json"
+    Assert-NoReparsePoint -Path $packageGenerationRoot -Root $Manifest.Root -Label "Package transition generation"
+    Assert-NoReparsePoint -Path $packageGenerationManifestPath -Root $packageGenerationRoot -Label "Package transition generation manifest"
+    if (-not (Test-Path -LiteralPath $packageGenerationManifestPath -PathType Leaf)) { return $null }
+
+    $document = (Read-BoundedJsonDocument `
+        -Path $packageGenerationManifestPath `
+        -Label "Package transition generation manifest" `
+        -MaximumBytes (1024 * 1024)).Document
+    $files = Get-RequiredJsonArray -Object $document -Name "files" -Label "Package transition generation manifest"
+    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "Package transition generation manifest") -ne 1 -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label "Package transition generation manifest"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "package_version" -Label "Package transition generation manifest"), [string]$Identity.PackageVersion, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "payload_version" -Label "Package transition generation manifest"), [string]$Identity.PayloadVersion, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonInt32 -Object $document -Name "payload_sequence" -Label "Package transition generation manifest") -ne [int]$Identity.PayloadSequence -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_id" -Label "Package transition generation manifest"), [string]$Identity.GenerationId, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonInt32 -Object $document -Name "bootstrap_protocol" -Label "Package transition generation manifest") -ne [int]$Identity.BootstrapProtocol -or
+        $files.Count -eq 0) {
+        return $null
+    }
+
+    $expectedFiles = New-Object System.Collections.Generic.List[string]
+    $expectedFiles.Add("generation-manifest.json")
+    $seen = @{}
+    foreach ($entry in $files) {
+        $null = Assert-JsonObject -Value $entry -Label "Package transition generation file"
+        $relativePath = ConvertTo-SafeRelativePath `
+            -Path (Get-RequiredJsonString -Object $entry -Name "path" -Label "Package transition generation file") `
+            -Label "Package transition generation file"
+        $sha256 = (Get-RequiredJsonString -Object $entry -Name "sha256" -Label "Package transition generation file").ToLowerInvariant()
+        $retiredTarget = $generationPrefix + $relativePath
+        if ($sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $seen.ContainsKey($relativePath) -or
+            -not $Manifest.RetiredTargetMap.ContainsKey($retiredTarget)) {
+            return $null
+        }
+        $seen[$relativePath] = $true
+        $packagePath = ConvertTo-AbsoluteChildPath `
+            -Root $packageGenerationRoot `
+            -RelativePath $relativePath `
+            -Label "Package transition generation file"
+        Assert-NoReparsePoint -Path $packagePath -Root $packageGenerationRoot -Label "Package transition generation file"
+        if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $packagePath), $sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        $expectedFiles.Add($relativePath)
+    }
+    Assert-ImmutableGenerationFilesystemClosure `
+        -Root $packageGenerationRoot `
+        -ExpectedFiles $expectedFiles.ToArray() `
+        -Label "Package transition generation"
+    return [pscustomobject]@{
+        Disposition = $disposition
+        Transition = $transition
+        GenerationManifestSha256 = Get-FileSha256 -Path $packageGenerationManifestPath
+    }
+}
+
+function Test-EarliestLegacyBootstrapCompatibility {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Marker
+    )
+
+    return $Manifest.UsesGenerationContract -and
+        $Manifest.BootstrapProtocol -eq $script:SupportedBootstrapProtocol -and
+        $Marker.SchemaVersion -eq 1 -and
+        [string]::Equals($Marker.ManagedBy, $script:ManagedBy, [StringComparison]::Ordinal) -and
+        [string]::Equals($Marker.PackageVersion, "0.2.2", [StringComparison]::Ordinal) -and
+        [string]::Equals($Marker.PayloadVersion, "poc.21", [StringComparison]::Ordinal) -and
+        $Marker.PayloadSequence -eq 21 -and
+        $Marker.HostUseGateVersion -eq 1 -and
+        $Marker.GenerationLeaseVersion -eq 0 -and
+        [string]::IsNullOrWhiteSpace([string]$Marker.GenerationId) -and
+        $Marker.BootstrapProtocol -eq 0 -and
+        $Marker.AllFiles.Count -eq 22
+}
+
 function Get-InstalledPayloadVersionPolicy {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -1831,6 +1991,9 @@ function Get-InstalledPayloadVersionPolicy {
             IsDowngrade = $false
             IsSequenceCollision = $false
             PayloadIdentityMatches = $false
+            Disposition = "MISSING"
+            Transition = $null
+            IsInvalid = $false
         }
     }
 
@@ -1841,33 +2004,69 @@ function Get-InstalledPayloadVersionPolicy {
         @($Manifest.Files | Where-Object { $_.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) })
     })
     $markerIdentityMap = if ($Marker.SchemaVersion -eq 1) { $Marker.AllMap } else { $Marker.Map }
-    $sequenceIdentityMatches =
+    $closureMatches =
         [string]::Equals($Marker.PayloadVersion, $Manifest.PayloadVersion, [StringComparison]::Ordinal) -and
         $markerIdentityFiles.Count -eq $manifestIdentityFiles.Count
-    if ($sequenceIdentityMatches) {
+    if ($closureMatches) {
         foreach ($file in $manifestIdentityFiles) {
             if (-not $markerIdentityMap.ContainsKey($file.Target) -or
                 -not [string]::Equals($markerIdentityMap[$file.Target].InstalledSha256, $file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
-                $sequenceIdentityMatches = $false
+                $closureMatches = $false
                 break
             }
         }
     }
-    if ($sequenceIdentityMatches -and $Marker.SchemaVersion -eq $script:MarkerSchemaVersion) {
-        $sequenceIdentityMatches =
+    if ($closureMatches -and $Marker.SchemaVersion -eq $script:MarkerSchemaVersion) {
+        $closureMatches =
             [string]::Equals($Marker.PayloadContentSha256, (Get-PayloadContentIdentitySha256 -Manifest $Manifest), [StringComparison]::OrdinalIgnoreCase) -and
             [string]::Equals($Marker.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal) -and
             $Marker.BootstrapProtocol -eq $Manifest.BootstrapProtocol
     }
-    $payloadIdentityMatches = $sequenceIdentityMatches -and
+    $payloadIdentityMatches = $closureMatches -and
         [string]::Equals($Marker.PackageVersion, $Manifest.PackageVersion, [StringComparison]::Ordinal)
 
-    $isDowngrade = $Marker.PayloadSequence -gt $Manifest.PayloadSequence
-    $isSequenceCollision = $Marker.PayloadSequence -eq $Manifest.PayloadSequence -and -not $sequenceIdentityMatches
+    $disposition = "LEGACY_COMPATIBLE"
+    $transition = $null
+    $isInvalid = $false
+    if ($Manifest.UsesGenerationContract -and
+        -not [string]::IsNullOrWhiteSpace([string]$Marker.GenerationId)) {
+        $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $Marker
+        if ([string]::Equals($disposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal)) {
+            $transition = Get-ReviewedBootstrapTransition -Manifest $Manifest -Marker $Marker
+            if ($null -eq $transition) {
+                $disposition = "INVALID"
+            }
+        } elseif ([string]::Equals($disposition, "CURRENT", [StringComparison]::Ordinal) -and
+            -not $payloadIdentityMatches) {
+            $disposition = "INVALID"
+        }
+        $isInvalid = [string]::Equals($disposition, "INVALID", [StringComparison]::Ordinal)
+    } elseif ($Manifest.UsesGenerationContract) {
+        $reviewedLegacy = $null -ne (Get-ReviewedLegacyMarkerIdentity -Marker $Marker) -or
+            (Test-EarliestLegacyBootstrapCompatibility -Manifest $Manifest -Marker $Marker)
+        if (-not $reviewedLegacy) {
+            $disposition = "INVALID"
+            $isInvalid = $true
+        }
+    }
+
+    $isDowngrade = if ($Manifest.UsesGenerationContract) {
+        [string]::Equals($disposition, "NEWER", [StringComparison]::Ordinal)
+    } else {
+        $Marker.PayloadSequence -gt $Manifest.PayloadSequence
+    }
+    $isSequenceCollision = if ($Manifest.UsesGenerationContract) {
+        [string]::Equals($disposition, "SEQUENCE_COLLISION", [StringComparison]::Ordinal)
+    } else {
+        $Marker.PayloadSequence -eq $Manifest.PayloadSequence -and -not $closureMatches
+    }
     return [pscustomobject]@{
         IsDowngrade = $isDowngrade
         IsSequenceCollision = $isSequenceCollision
         PayloadIdentityMatches = $payloadIdentityMatches
+        Disposition = $disposition
+        Transition = $transition
+        IsInvalid = $isInvalid
     }
 }
 
@@ -1884,6 +2083,7 @@ function Get-MaterializationPlan {
     $hasConflict = $false
     $runtimeConflict = $null
     $selectedGeneration = $null
+    $selectedDisposition = "MISSING"
     $pointerValidationError = $null
     $candidateGenerationRoot = $null
     $candidateGenerationExists = $false
@@ -1896,6 +2096,9 @@ function Get-MaterializationPlan {
             } else {
                 try {
                     $selectedGeneration = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
+                    if ($null -ne $selectedGeneration) {
+                        $selectedDisposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $selectedGeneration
+                    }
                 } catch {
                     $pointerValidationError = $_.Exception.Message
                 }
@@ -1972,24 +2175,55 @@ function Get-MaterializationPlan {
                 } elseif ($null -eq $selectedGeneration) {
                     $status = "Conflict"
                     $detail = "selected generation could not be validated"
-                } elseif ([string]::Equals($targetHash, $file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
-                    $status = "Current"
-                    $detail = "current pointer selects the validated package generation"
-                } elseif ($selectedGeneration.PayloadSequence -gt $Manifest.PayloadSequence) {
-                    $status = "Conflict"
-                    $detail = "selected generation is newer than the requested package"
-                } elseif ($selectedGeneration.BootstrapProtocol -ne $Manifest.BootstrapProtocol) {
-                    $status = "Conflict"
-                    $detail = "selected generation uses an unsupported bootstrap protocol"
-                } elseif ($selectedGeneration.PayloadSequence -eq $Manifest.PayloadSequence -and
-                    (-not [string]::Equals($selectedGeneration.PackageVersion, $Manifest.PackageVersion, [StringComparison]::Ordinal) -or
-                     -not [string]::Equals($selectedGeneration.PayloadVersion, $Manifest.PayloadVersion, [StringComparison]::Ordinal) -or
-                     -not [string]::Equals($selectedGeneration.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal))) {
-                    $status = "Conflict"
-                    $detail = "selected generation reuses the requested sequence with a different identity"
                 } else {
-                    $status = "Upgradeable"
-                    $detail = "valid selected generation can switch atomically to the package generation"
+                    switch ($selectedDisposition) {
+                        "CURRENT" {
+                            $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
+                            if (-not [string]::Equals(
+                                $selectedGeneration.GenerationManifestSha256,
+                                $Manifest.TargetMap[$generationManifestTarget].Sha256,
+                                [StringComparison]::OrdinalIgnoreCase)) {
+                                $status = "Conflict"
+                                $detail = "selected current generation does not match the Package immutable manifest"
+                            } elseif ([string]::Equals($targetHash, $file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+                                $status = "Current"
+                                $detail = "current pointer selects the validated package generation"
+                            } else {
+                                $status = "Upgradeable"
+                                $detail = "current generation identity is valid and its pointer bytes can converge"
+                            }
+                        }
+                        "TRUSTED_PREVIOUS" {
+                            $packagePrevious = Get-ValidatedPackageOwnedInstalledGeneration `
+                                -GenerationId $selectedGeneration.GenerationId `
+                                -ProjectRoot $ProjectRoot `
+                                -PayloadRoot $Manifest.Root
+                            if ($null -eq $packagePrevious -or
+                                -not (Test-RuntimeIdentityMatch -Left $selectedGeneration -Right $packagePrevious) -or
+                                -not [string]::Equals(
+                                    $selectedGeneration.GenerationManifestSha256,
+                                    $packagePrevious.GenerationManifestSha256,
+                                    [StringComparison]::OrdinalIgnoreCase)) {
+                                $status = "Conflict"
+                                $detail = "selected previous generation does not match its Package-preserved immutable closure"
+                            } else {
+                                $status = "Upgradeable"
+                                $detail = "Package-declared previous generation can switch atomically to the current generation"
+                            }
+                        }
+                        "NEWER" {
+                            $status = "Conflict"
+                            $detail = "selected generation is newer than the requested package"
+                        }
+                        "SEQUENCE_COLLISION" {
+                            $status = "Conflict"
+                            $detail = "selected generation reuses the requested sequence with a different identity"
+                        }
+                        default {
+                            $status = "Conflict"
+                            $detail = "selected generation is not an exact Package-declared transition"
+                        }
+                    }
                 }
             }
         } elseif (Test-Path -LiteralPath $file.TargetPath) {
@@ -2092,7 +2326,7 @@ function Get-MaterializationPlan {
     }
 
     $versionPolicy = Get-InstalledPayloadVersionPolicy -Manifest $Manifest -Marker $marker
-    if ($versionPolicy.IsDowngrade -or $versionPolicy.IsSequenceCollision) {
+    if ($versionPolicy.IsDowngrade -or $versionPolicy.IsSequenceCollision -or $versionPolicy.IsInvalid) {
         $hasConflict = $true
     }
 
@@ -2113,9 +2347,13 @@ function Get-MaterializationPlan {
         MarkerNeedsUpdate = -not $markerCurrent
         IsDowngrade = $versionPolicy.IsDowngrade
         IsSequenceCollision = $versionPolicy.IsSequenceCollision
+        IsInvalidIdentity = $versionPolicy.IsInvalid
+        MarkerDisposition = $versionPolicy.Disposition
+        BootstrapTransition = $versionPolicy.Transition
         PayloadIdentityMatches = $versionPolicy.PayloadIdentityMatches
         RuntimeConflict = $runtimeConflict
         SelectedGeneration = $selectedGeneration
+        SelectedDisposition = $selectedDisposition
         CandidateGenerationExists = $candidateGenerationExists
     }
 }
@@ -2131,6 +2369,9 @@ function Write-MaterializationPlan {
     }
     if ($Plan.IsSequenceCollision) {
         Write-Host "[CONFLICT] SequenceCollision: the installed and requested payloads reuse one sequence with different identities or file hashes."
+    }
+    if ($Plan.IsInvalidIdentity) {
+        Write-Host "[CONFLICT] InvalidIdentity: the installed payload is not current or an exact Package-declared transition."
     }
     foreach ($item in @($Plan.Files) + @($Plan.Retired)) {
         $prefix = if ($item.Status -in @("Conflict", "ManagedDrift", "ManagedMissing", "RetireConflict", "UntrustedOwnedPath")) { "[CONFLICT]" } else { "[PLAN]" }
@@ -2239,38 +2480,23 @@ function Get-AutomaticUpgradeEligibility {
             return [pscustomobject]@{ Eligible = $false; Reason = "non-generation retired target requires explicit review" }
         }
     }
-    $knownLegacy = $marker.PayloadSequence -eq 21 -and
-        [string]::Equals($marker.PackageVersion, "0.2.2", [StringComparison]::Ordinal) -and
-        [string]::Equals($marker.PayloadVersion, "poc.21", [StringComparison]::Ordinal) -and
-        $marker.HostUseGateVersion -eq 1 -and
-        $Manifest.PayloadSequence -ge 22 -and
-        $Manifest.BootstrapProtocol -eq 1 -and
-        [string]::Equals($Manifest.GenerationId, $script:GenerationId, [StringComparison]::Ordinal)
-    $knownGenerationUpgrade = $marker.PayloadSequence -ge 22 -and
-        $marker.PayloadSequence -lt $Manifest.PayloadSequence -and
-        $marker.GenerationLeaseVersion -ge 2 -and
-        $marker.GenerationId -match '^[A-Za-z0-9._-]{1,64}$' -and
-        $marker.BootstrapProtocol -ge 1 -and
-        $marker.BootstrapProtocol -eq $Manifest.BootstrapProtocol -and
-        -not [string]::Equals($marker.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal)
-    $bootstrapTransition = if ($knownGenerationUpgrade) {
-        Get-ReviewedBootstrapTransition -Manifest $Manifest -Marker $marker
-    } else {
-        $null
-    }
-    $knownAdoptedRuntimeRepair = $marker.PayloadSequence -eq $Manifest.PayloadSequence -and
+    $earliestLegacyBootstrap = Test-EarliestLegacyBootstrapCompatibility -Manifest $Manifest -Marker $marker
+    $bootstrapTransition = if ([string]::Equals([string]$Plan.MarkerDisposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal)) {
+        $Plan.BootstrapTransition
+    } else { $null }
+    $knownGenerationUpgrade = $null -ne $bootstrapTransition
+    $knownAdoptedRuntimeRepair = [string]::Equals([string]$Plan.MarkerDisposition, "CURRENT", [StringComparison]::Ordinal) -and
         $Plan.PayloadIdentityMatches -and
         $marker.GenerationLeaseVersion -ge 2 -and
-        [string]::Equals($marker.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal) -and
-        $marker.BootstrapProtocol -eq $Manifest.BootstrapProtocol
-    if (-not $knownLegacy -and -not $knownGenerationUpgrade -and -not $knownAdoptedRuntimeRepair) {
+        (Test-RuntimeIdentityMatch -Left $marker -Right $Manifest)
+    if (-not $earliestLegacyBootstrap -and -not $knownGenerationUpgrade -and -not $knownAdoptedRuntimeRepair) {
         return [pscustomobject]@{ Eligible = $false; Reason = "installed payload is not a supported owned generation upgrade source" }
     }
 
     $wrapperTarget = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
     foreach ($item in $Plan.Files) {
         if ([string]::Equals($item.Target, $wrapperTarget, [StringComparison]::OrdinalIgnoreCase)) {
-            $ownedWrapperTransition = if ($knownLegacy) {
+            $ownedWrapperTransition = if ($earliestLegacyBootstrap) {
                 $item.Status -eq "Upgradeable" -and
                     -not [string]::IsNullOrWhiteSpace([string]$item.PreviousSha256) -and
                     [string]::Equals([string]$item.TargetSha256, [string]$item.PreviousSha256, [StringComparison]::OrdinalIgnoreCase)
@@ -2284,7 +2510,7 @@ function Get-AutomaticUpgradeEligibility {
             if (-not $ownedWrapperTransition) {
                 return [pscustomobject]@{ Eligible = $false; Reason = "bootstrap wrapper is not byte-exact at a supported protocol transition" }
             }
-            if ($null -eq $bootstrapTransition -or $knownLegacy) {
+            if ($null -eq $bootstrapTransition -or $earliestLegacyBootstrap) {
                 continue
             }
         }
@@ -2295,7 +2521,7 @@ function Get-AutomaticUpgradeEligibility {
             continue
         }
         if ([string]::Equals($item.Target, $script:CurrentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
-            $ownedPointerTransition = if ($knownLegacy) {
+            $ownedPointerTransition = if ($earliestLegacyBootstrap) {
                 $item.Status -eq "Missing"
             } else {
                 $item.Status -in @("Missing", "Upgradeable", "Current")
@@ -2326,8 +2552,8 @@ function Get-AutomaticUpgradeEligibility {
             return [pscustomobject]@{ Eligible = $false; Reason = "existing bootstrap payload is not fully owned and byte-exact" }
         }
     }
-    $reason = if ($knownLegacy) {
-        "owned poc.21 bootstrap can migrate without replacing active legacy scripts"
+    $reason = if ($earliestLegacyBootstrap) {
+        "owned earliest legacy bootstrap can migrate without replacing active legacy scripts"
     } elseif ($knownAdoptedRuntimeRepair) {
         "tracked adoption is current and ignored runtime can be reconstructed safely"
     } elseif ($null -ne $bootstrapTransition) {
@@ -2354,11 +2580,12 @@ function Get-OwnedLegacyRedeployEligibility {
     if ($Plan.HasConflict) {
         return [pscustomobject]@{ Eligible = $false; Reason = "a CodeDB ownership or path conflict requires explicit review" }
     }
-    if ($marker.PayloadSequence -ge $Manifest.PayloadSequence -or
+    if (-not [string]::Equals([string]$Plan.MarkerDisposition, "LEGACY_COMPATIBLE", [StringComparison]::Ordinal) -or
+        $marker.PayloadSequence -ge $Manifest.PayloadSequence -or
         -not [string]::IsNullOrWhiteSpace([string]$marker.GenerationId) -or
         $marker.HostUseGateVersion -lt 1 -or
-        $Manifest.BootstrapProtocol -ne 1 -or
-        -not [string]::Equals($Manifest.GenerationId, $script:GenerationId, [StringComparison]::Ordinal)) {
+        -not $Manifest.UsesGenerationContract -or
+        $Manifest.BootstrapProtocol -ne $script:SupportedBootstrapProtocol) {
         return [pscustomobject]@{ Eligible = $false; Reason = "installed payload is not a supported flat legacy redeploy source" }
     }
 
@@ -7570,19 +7797,35 @@ function Assert-RepairPointerCanBeQuarantined {
     $manifestSha256 = Get-RequiredJsonString -Object $pointer -Name "generation_manifest_sha256" -Label "repair generation pointer"
     $bootstrapProtocol = Get-RequiredJsonInt32 -Object $pointer -Name "bootstrap_protocol" -Label "repair generation pointer"
     $payloadSequence = Get-RequiredJsonInt32 -Object $pointer -Name "payload_sequence" -Label "repair generation pointer"
+    $packageVersion = Get-RequiredJsonString -Object $pointer -Name "package_version" -Label "repair generation pointer"
+    $payloadVersion = Get-RequiredJsonString -Object $pointer -Name "payload_version" -Label "repair generation pointer"
     if ((Get-RequiredJsonInt32 -Object $pointer -Name "schema_version" -Label "repair generation pointer") -ne 1 -or
         -not [string]::Equals((Get-RequiredJsonString -Object $pointer -Name "managed_by" -Label "repair generation pointer"), $script:ManagedBy, [StringComparison]::Ordinal) -or
         $generationId -notmatch '^[A-Za-z0-9._-]{1,64}$' -or
         -not [string]::Equals($relativePath, "AIWork/.runtime/codedb/host/generations/$generationId", [StringComparison]::Ordinal) -or
-        $manifestSha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
-        $bootstrapProtocol -lt 1 -or
-        $bootstrapProtocol -gt $Manifest.BootstrapProtocol -or
-        $payloadSequence -gt $Manifest.PayloadSequence) {
+        $manifestSha256 -cnotmatch '^[0-9a-fA-F]{64}$') {
         throw "Generation pointer does not prove CodeDB ownership and cannot be quarantined."
+    }
+    $identity = [pscustomobject]@{
+        PackageVersion = $packageVersion
+        PayloadVersion = $payloadVersion
+        PayloadSequence = $payloadSequence
+        GenerationId = $generationId
+        BootstrapProtocol = $bootstrapProtocol
+    }
+    $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $identity
+    if ([string]::Equals($disposition, "NEWER", [StringComparison]::Ordinal) -or
+        [string]::Equals($disposition, "SEQUENCE_COLLISION", [StringComparison]::Ordinal)) {
+        throw "Generation pointer exceeds the current Package identity and cannot be quarantined."
+    }
+    if (-not [string]::Equals($disposition, "CURRENT", [StringComparison]::Ordinal) -and
+        -not [string]::Equals($disposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal)) {
+        throw "Generation pointer is not an exact Package runtime identity and cannot be quarantined."
     }
     return [pscustomobject]@{
         GenerationId = $generationId
         PayloadSequence = $payloadSequence
+        Disposition = $disposition
     }
 }
 
@@ -8378,22 +8621,23 @@ function Assert-RemovalGenerationIdentityUpperBound {
         [Parameter(Mandatory = $true)][string]$PointerLabel
     )
 
-    if ($Selection.PayloadSequence -gt $Manifest.PayloadSequence) {
+    $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $Selection
+    if ([string]::Equals($disposition, "NEWER", [StringComparison]::Ordinal)) {
         Write-Host "[CONFLICT] Downgrade: $PointerLabel selects newer generation $($Selection.GenerationId), sequence $($Selection.PayloadSequence)."
         Throw-MaterializerError -Message "Payload removal was rejected because an older manifest cannot remove the generation selected by $PointerLabel." -ExitCode 3
     }
-    if ($Selection.PayloadSequence -eq $Manifest.PayloadSequence) {
-        $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
-        $expectedManifestSha256 = $Manifest.TargetMap[$generationManifestTarget].Sha256
-        $identityMatches =
-            [string]::Equals($Selection.PayloadVersion, $Manifest.PayloadVersion, [StringComparison]::Ordinal) -and
-            [string]::Equals($Selection.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal) -and
-            $Selection.BootstrapProtocol -eq $Manifest.BootstrapProtocol -and
-            [string]::Equals($Selection.GenerationManifestSha256, $expectedManifestSha256, [StringComparison]::OrdinalIgnoreCase)
-        if (-not $identityMatches) {
-            Write-Host "[CONFLICT] SequenceCollision: $PointerLabel selects a different generation identity at sequence $($Manifest.PayloadSequence)."
-            Throw-MaterializerError -Message "Payload removal was rejected because $PointerLabel does not match this manifest identity." -ExitCode 3
-        }
+    if ([string]::Equals($disposition, "SEQUENCE_COLLISION", [StringComparison]::Ordinal)) {
+        Write-Host "[CONFLICT] SequenceCollision: $PointerLabel selects a different generation identity at sequence $($Manifest.PayloadSequence)."
+        Throw-MaterializerError -Message "Payload removal was rejected because $PointerLabel does not match this manifest identity." -ExitCode 3
+    }
+    $packageIdentity = Get-PackageGenerationIdentityForRuntimeIdentity -Manifest $Manifest -Identity $Selection
+    if ($null -eq $packageIdentity -or
+        -not [string]::Equals(
+            [string]$Selection.GenerationManifestSha256,
+            [string]$packageIdentity.GenerationManifestSha256,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "[CONFLICT] InvalidIdentity: $PointerLabel is not current or an exact Package-declared transition."
+        Throw-MaterializerError -Message "Payload removal was rejected because $PointerLabel has no authenticated Package runtime identity." -ExitCode 3
     }
 }
 
@@ -8408,30 +8652,39 @@ function Assert-RemovalTransactionProvenanceUpperBound {
         Throw-MaterializerError -Message "Payload removal was rejected because pending transaction $TransactionId has no package/generation provenance." -ExitCode 3
     }
     $provenance = $Journal.Provenance
-    if ($provenance.PayloadSequence -gt $Manifest.PayloadSequence) {
+    $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $provenance
+    if ([string]::Equals($disposition, "NEWER", [StringComparison]::Ordinal)) {
         Write-Host "[CONFLICT] Downgrade: pending transaction $TransactionId belongs to newer generation $($provenance.GenerationId), sequence $($provenance.PayloadSequence)."
         Throw-MaterializerError -Message "Payload removal was rejected because an older manifest cannot recover a newer transaction." -ExitCode 3
     }
-    if ($provenance.PayloadSequence -eq $Manifest.PayloadSequence) {
-        $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
-        $expectedGenerationManifestSha256 = if ($Manifest.UsesGenerationContract) {
-            $Manifest.TargetMap[$generationManifestTarget].Sha256
-        } else {
-            $null
-        }
-        $identityMatches =
-            [string]::Equals($provenance.PackageVersion, $Manifest.PackageVersion, [StringComparison]::Ordinal) -and
+    if ([string]::Equals($disposition, "SEQUENCE_COLLISION", [StringComparison]::Ordinal)) {
+        Write-Host "[CONFLICT] SequenceCollision: pending transaction $TransactionId has another package/generation identity at sequence $($Manifest.PayloadSequence)."
+        Throw-MaterializerError -Message "Payload removal was rejected because a pending transaction does not match this manifest identity." -ExitCode 3
+    }
+
+    if (-not $Manifest.UsesGenerationContract) {
+        $identityMatches = [string]::Equals($provenance.PackageVersion, $Manifest.PackageVersion, [StringComparison]::Ordinal) -and
             [string]::Equals($provenance.PayloadVersion, $Manifest.PayloadVersion, [StringComparison]::Ordinal) -and
+            $provenance.PayloadSequence -eq $Manifest.PayloadSequence -and
             [string]::Equals($provenance.PayloadContentSha256, (Get-PayloadContentIdentitySha256 -Manifest $Manifest), [StringComparison]::OrdinalIgnoreCase) -and
-            [string]::Equals($provenance.GenerationId, $Manifest.GenerationId, [StringComparison]::Ordinal) -and
-            $provenance.BootstrapProtocol -eq $Manifest.BootstrapProtocol -and
-            (($null -eq $provenance.GenerationManifestSha256) -eq ($null -eq $expectedGenerationManifestSha256)) -and
-            ($null -eq $expectedGenerationManifestSha256 -or
-                [string]::Equals($provenance.GenerationManifestSha256, $expectedGenerationManifestSha256, [StringComparison]::OrdinalIgnoreCase))
+            $null -eq $provenance.GenerationManifestSha256
         if (-not $identityMatches) {
-            Write-Host "[CONFLICT] SequenceCollision: pending transaction $TransactionId has another package/generation identity at sequence $($Manifest.PayloadSequence)."
-            Throw-MaterializerError -Message "Payload removal was rejected because a pending transaction does not match this manifest identity." -ExitCode 3
+            Throw-MaterializerError -Message "Payload removal was rejected because a pending transaction does not match this non-generation manifest identity." -ExitCode 3
         }
+        return
+    }
+
+    $packageIdentity = Get-PackageGenerationIdentityForRuntimeIdentity -Manifest $Manifest -Identity $provenance
+    $currentContentMatches = -not [string]::Equals($disposition, "CURRENT", [StringComparison]::Ordinal) -or
+        [string]::Equals($provenance.PayloadContentSha256, (Get-PayloadContentIdentitySha256 -Manifest $Manifest), [StringComparison]::OrdinalIgnoreCase)
+    if ($null -eq $packageIdentity -or
+        -not $currentContentMatches -or
+        -not [string]::Equals(
+            [string]$provenance.GenerationManifestSha256,
+            [string]$packageIdentity.GenerationManifestSha256,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "[CONFLICT] InvalidIdentity: pending transaction $TransactionId is not current or an exact Package-declared transition."
+        Throw-MaterializerError -Message "Payload removal was rejected because a pending transaction has no authenticated Package runtime identity." -ExitCode 3
     }
 }
 
@@ -8479,7 +8732,7 @@ function Assert-RemovalPendingTransactionUpperBound {
                 Throw-MaterializerError -Message "Payload removal was rejected because the marker backup in $($record.Id) is invalid: $($_.Exception.Message)" -ExitCode 3
             }
             $backupPolicy = Get-InstalledPayloadVersionPolicy -Manifest $Manifest -Marker $backupMarker
-            if ($backupPolicy.IsDowngrade -or $backupPolicy.IsSequenceCollision) {
+            if ($backupPolicy.IsDowngrade -or $backupPolicy.IsSequenceCollision -or $backupPolicy.IsInvalid) {
                 Throw-MaterializerError -Message "Payload removal was rejected because the marker backup in $($record.Id) exceeds this manifest identity." -ExitCode 3
             }
         }
@@ -8545,6 +8798,10 @@ function Assert-RemovalIdentityUpperBound {
             Write-Host "[CONFLICT] SequenceCollision: the installed and requested payloads reuse one sequence with different identities or file hashes."
             Throw-MaterializerError -Message "Payload removal was rejected because the installed payload identity does not match this manifest sequence." -ExitCode 3
         }
+        if ($versionPolicy.IsInvalid) {
+            Write-Host "[CONFLICT] InvalidIdentity: the installed payload is not current or an exact Package-declared transition."
+            Throw-MaterializerError -Message "Payload removal was rejected because the installed payload has no authenticated Package runtime identity." -ExitCode 3
+        }
     }
 
     $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "selected generation pointer"
@@ -8580,13 +8837,21 @@ function Save-LastKnownGoodPointer {
 
 function Get-ValidatedPlanRetiredGenerationForCleanup {
     param(
+        [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$GenerationId,
         [Parameter(Mandatory = $true)]$Plan,
         [Parameter(Mandatory = $true)]$LastKnownGood,
         [Parameter(Mandatory = $true)][string]$ProjectRoot
     )
 
-    if (-not [string]::Equals([string]$LastKnownGood.GenerationId, $GenerationId, [StringComparison]::Ordinal)) {
+    $packageIdentity = Get-PackageGenerationIdentityForRuntimeIdentity -Manifest $Manifest -Identity $LastKnownGood
+    if ($null -eq $packageIdentity -or
+        -not [string]::Equals([string]$packageIdentity.Disposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$LastKnownGood.GenerationId, $GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals(
+            [string]$LastKnownGood.GenerationManifestSha256,
+            [string]$packageIdentity.GenerationManifestSha256,
+            [StringComparison]::OrdinalIgnoreCase)) {
         return $null
     }
     $generationPrefix = "AIWork/.runtime/codedb/host/generations/$GenerationId/"
@@ -8757,28 +9022,14 @@ function Invoke-AutomaticGenerationCleanup {
     $currentPointerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:CurrentPointerRelativePath -Label "automatic cleanup current generation pointer"
     $current = Get-ValidatedInstalledGenerationPointer -PointerPath $currentPointerPath -ProjectRoot $ProjectRoot
     if ($null -eq $current) { throw "Automatic retirement cannot validate host/current.json." }
-    $currentIsPackageGeneration = [string]::Equals([string]$current.GenerationId, [string]$Manifest.GenerationId, [StringComparison]::Ordinal)
+    $currentDisposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $current
+    $currentIsPackageGeneration = [string]::Equals($currentDisposition, "CURRENT", [StringComparison]::Ordinal)
     if ($currentIsPackageGeneration) {
         Assert-GenerationDirectoryMatchesManifest -Manifest $Manifest -GenerationRoot $current.GenerationRoot -ProjectRoot $ProjectRoot -SkipSyntaxValidation
     } else {
-        $reviewedTransition = if ($null -ne $legacyRetirement) {
-            $legacyRetirement.Transition
-        } else {
-            $matches = @($Manifest.BootstrapTransitions | Where-Object {
-                [string]::Equals([string]$current.GenerationId, [string]$_.SourceGenerationId, [StringComparison]::Ordinal) -and
-                [string]::Equals([string]$current.PackageVersion, [string]$_.SourcePackageVersion, [StringComparison]::Ordinal) -and
-                [string]::Equals([string]$current.PayloadVersion, [string]$_.SourcePayloadVersion, [StringComparison]::Ordinal) -and
-                $current.PayloadSequence -eq [int]$_.SourcePayloadSequence -and
-                $current.BootstrapProtocol -eq [int]$_.SourceBootstrapProtocol
-            })
-            if ($matches.Count -eq 1) { $matches[0] } else { $null }
-        }
+        $reviewedTransition = Get-RuntimeTransitionForIdentity -Manifest $Manifest -Identity $current
         if ($null -eq $reviewedTransition -or
-            -not [string]::Equals([string]$current.GenerationId, [string]$reviewedTransition.SourceGenerationId, [StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$current.PackageVersion, [string]$reviewedTransition.SourcePackageVersion, [StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$current.PayloadVersion, [string]$reviewedTransition.SourcePayloadVersion, [StringComparison]::Ordinal) -or
-            $current.PayloadSequence -ne $reviewedTransition.SourcePayloadSequence -or
-            $current.BootstrapProtocol -ne $reviewedTransition.SourceBootstrapProtocol) {
+            -not [string]::Equals($currentDisposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal)) {
             throw "Legacy host/current.json does not match the reviewed bootstrap-transition identity."
         }
         if ($null -eq $legacyRetirement) {
@@ -8821,8 +9072,20 @@ function Invoke-AutomaticGenerationCleanup {
                 continue
             }
             $validatedGeneration = Get-ValidatedPackageOwnedInstalledGeneration -GenerationId $directory.Name -ProjectRoot $ProjectRoot -PayloadRoot $Manifest.Root
+            if ($null -ne $validatedGeneration) {
+                $packageIdentity = Get-PackageGenerationIdentityForRuntimeIdentity -Manifest $Manifest -Identity $validatedGeneration
+                if ($null -eq $packageIdentity -or
+                    -not [string]::Equals([string]$packageIdentity.Disposition, "TRUSTED_PREVIOUS", [StringComparison]::Ordinal) -or
+                    -not [string]::Equals(
+                        [string]$validatedGeneration.GenerationManifestSha256,
+                        [string]$packageIdentity.GenerationManifestSha256,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                    Write-Host "[PRESERVED] Package generation $($directory.Name) is not an exact declared transition and is outside automatic retirement."
+                    continue
+                }
+            }
             if ($null -eq $validatedGeneration -and $null -ne $lastKnownGood) {
-                $validatedGeneration = Get-ValidatedPlanRetiredGenerationForCleanup -GenerationId $directory.Name -Plan $Plan -LastKnownGood $lastKnownGood -ProjectRoot $ProjectRoot
+                $validatedGeneration = Get-ValidatedPlanRetiredGenerationForCleanup -Manifest $Manifest -GenerationId $directory.Name -Plan $Plan -LastKnownGood $lastKnownGood -ProjectRoot $ProjectRoot
             }
             if ($null -eq $validatedGeneration) { throw "Automatic retirement cannot prove Package ownership for historical generation $($directory.Name)." }
             $validatedHistorical.Add($directory.Name, $validatedGeneration)

@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const PROTOCOL_VERSION = 1;
+const LEGACY_SUPERVISOR_PROTOCOL_VERSION = 1;
 const SUPERVISOR_PROTOCOL_VERSION = 2;
 const STATE_SCHEMA_VERSION = 3;
 const EVIDENCE_SCHEMA_VERSION = 1;
@@ -42,6 +43,7 @@ const CHILD_EVIDENCE_CAPTURE_DELAY_MS = 50;
 const MAX_START_CLAIM_RETRIES = 16;
 const ATOMIC_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250, 500];
 const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM", "EEXIST"]);
+const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
 
 const { command, options } = parseArgs(process.argv.slice(2));
 
@@ -100,7 +102,7 @@ function parseArgs(args) {
 }
 
 function buildContext(raw) {
-  for (const key of ["root", "runtime", "coordinatorScript", "coordinatorRuntime", "materializerScript", "payloadRoot", "watchManager"]) {
+  for (const key of ["root", "runtime", "packageRoot"]) {
     if (!raw[key]) {
       throw new Error(`--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} is required.`);
     }
@@ -111,33 +113,36 @@ function buildContext(raw) {
   if (!pathsEqual(runtime, expectedSupervisorRuntime))
     throw new Error("Supervisor runtime does not match the reviewed project control path.");
   assertNoRedirectedAncestors(root, runtime, "Supervisor runtime");
-  const coordinatorScript = realFile(raw.coordinatorScript, "coordinator script");
-  const coordinatorRuntime = path.resolve(raw.coordinatorRuntime);
-  assertInside(coordinatorRuntime, root, "coordinator runtime");
-  const materializerScript = realFile(raw.materializerScript, "materializer script");
-  const payloadRoot = realDirectory(raw.payloadRoot, "Package payload root");
-  const watchManager = realFile(raw.watchManager, "watch manager");
+  const packageRoot = realDirectory(raw.packageRoot, "Package root");
+  const payloadRoot = path.join(packageRoot, "Payload~");
+  assertReviewedPath(packageRoot, payloadRoot, "Package payload root", "directory");
+  const materializerScript = path.join(packageRoot, "Tools~", "materialize-codedb-host-payload.ps1");
+  assertReviewedPath(packageRoot, materializerScript, "Package materializer script", "file");
   const provider = raw.provider ? path.resolve(raw.provider) : "";
-  const providerConfig = raw.providerConfig ? path.resolve(raw.providerConfig) : "";
   if (provider && !isFile(provider)) throw new Error("Provider executable was not found.");
-  if (providerConfig && !isFile(providerConfig)) throw new Error("Provider config was not found.");
   const identity = createProjectIdentity(root);
   const runtimeContract = readPackageRuntimeContract(payloadRoot);
   const selectedInstance = readSelectedInstance(root, runtimeContract);
-  const expectedMaterializerScript = path.join(
-    path.dirname(payloadRoot),
-    "Tools~",
-    "materialize-codedb-host-payload.ps1");
-  const expectedCoordinatorScript = path.join(selectedInstance.generationRoot, "coordinator", "codedb-watch-coordinator.mjs");
-  const expectedWatchManager = path.join(selectedInstance.generationRoot, "scripts", "manage-codedb-project-watch.ps1");
-  const expectedCoordinatorRuntime = path.join(selectedInstance.instanceRoot, "watch", "coordinator");
-  const expectedProviderConfig = path.join(selectedInstance.instanceRoot, "config", "codedb-mcp.toml");
-  if (!pathsEqual(materializerScript, expectedMaterializerScript)
-      || !pathsEqual(coordinatorScript, expectedCoordinatorScript)
-      || !pathsEqual(watchManager, expectedWatchManager)
-      || !pathsEqual(coordinatorRuntime, expectedCoordinatorRuntime)
-      || (providerConfig && !pathsEqual(providerConfig, expectedProviderConfig))) {
-    throw new Error("Supervisor launch paths do not match the atomically selected instance.");
+  const coordinatorScript = path.join(selectedInstance.generationRoot, "coordinator", "codedb-watch-coordinator.mjs");
+  const watchManager = path.join(selectedInstance.generationRoot, "scripts", "manage-codedb-project-watch.ps1");
+  const coordinatorRuntime = path.join(selectedInstance.instanceRoot, "watch", "coordinator");
+  const providerConfig = path.join(selectedInstance.instanceRoot, "config", "codedb-mcp.toml");
+  assertReviewedPath(selectedInstance.generationRoot, coordinatorScript, "selected coordinator script", "file");
+  assertReviewedPath(selectedInstance.generationRoot, watchManager, "selected watch manager", "file");
+  assertNoRedirectedAncestors(selectedInstance.instanceRoot, coordinatorRuntime, "selected coordinator runtime");
+  assertReviewedPath(selectedInstance.instanceRoot, providerConfig, "selected Provider config", "file");
+
+  const optionalPathAssertions = {
+    coordinatorScript,
+    coordinatorRuntime,
+    materializerScript,
+    payloadRoot,
+    watchManager,
+    providerConfig
+  };
+  for (const [name, expected] of Object.entries(optionalPathAssertions)) {
+    if (raw[name] && !pathsEqual(path.resolve(raw[name]), expected))
+      throw new Error(`--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} does not match the Package-derived runtime path.`);
   }
   // CLI diagnostics may omit an explicit identity. Derive a stable project
   // default so status/stop can reconnect to the same owner; Bridge callers
@@ -156,6 +161,7 @@ function buildContext(raw) {
     takeoverClaimPath: path.join(runtime, TAKEOVER_CLAIM_NAME),
     eventPath: path.join(runtime, EVENT_NAME),
     errorPath: path.join(runtime, ERROR_NAME),
+    packageRoot,
     coordinatorScript,
     coordinatorRuntime,
     materializerScript,
@@ -185,11 +191,7 @@ function buildDaemonArguments(context, ownerEpoch = context.ownerEpoch) {
     "daemon",
     "--root", context.root,
     "--runtime", context.runtime,
-    "--coordinator-script", context.coordinatorScript,
-    "--coordinator-runtime", context.coordinatorRuntime,
-    "--materializer-script", context.materializerScript,
-    "--payload-root", context.payloadRoot,
-    "--watch-manager", context.watchManager,
+    "--package-root", context.packageRoot,
     "--lifecycle-id", context.lifecycleId,
     "--supervisor-id", context.supervisorId,
     "--owner-epoch", ownerEpoch,
@@ -444,7 +446,8 @@ async function inspectExistingSupervisor(context) {
       context,
       actualEvidence.normalizedArgv,
       "daemon",
-      evidenceState.owner_epoch);
+      evidenceState.owner_epoch,
+      evidenceState.supervisor_protocol_version === LEGACY_SUPERVISOR_PROTOCOL_VERSION);
   } catch (error) {
     return {
       classification: "INVALID_OR_AMBIGUOUS",
@@ -676,7 +679,8 @@ function validateSupervisorOwnerRecord(context, value, label) {
       || value.selected_generation_id !== context.selectedGenerationId
       || value.selected_instance_id !== context.selectedInstance.instanceId
       || value.runtime_contract_sha256 !== context.runtimeContractSha256
-      || value.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+      || (value.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+          && value.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
       || value.generation_disposition !== context.generationDisposition
       || value.lifecycle_id !== context.lifecycleId
       || value.supervisor_id !== context.supervisorId)
@@ -1920,7 +1924,12 @@ function hashArgv(argv) {
   return hash(JSON.stringify(argv));
 }
 
-function validateSupervisorInvocation(context, normalizedArgv, commandName, ownerEpoch = "") {
+function validateSupervisorInvocation(
+  context,
+  normalizedArgv,
+  commandName,
+  ownerEpoch = "",
+  allowLegacyRouting = false) {
   if (!Array.isArray(normalizedArgv) || normalizedArgv.length < 2)
     throw new Error("Supervisor process argv evidence is incomplete.");
   const expectedScript = normalizeProcessArgv([fileURLToPath(import.meta.url)])[0];
@@ -1936,23 +1945,37 @@ function validateSupervisorInvocation(context, normalizedArgv, commandName, owne
   }
   const expectedPaths = {
     "--root": context.root,
-    "--runtime": context.runtime,
-    "--coordinator-script": context.coordinatorScript,
-    "--coordinator-runtime": context.coordinatorRuntime,
-    "--materializer-script": context.materializerScript,
-    "--payload-root": context.payloadRoot,
-    "--watch-manager": context.watchManager
+    "--runtime": context.runtime
   };
+  if (Object.hasOwn(values, "--package-root")) {
+    expectedPaths["--package-root"] = context.packageRoot;
+  } else if (!allowLegacyRouting
+      || commandName !== "daemon"
+      || !Object.hasOwn(values, "--payload-root")) {
+    throw new Error("Supervisor process argv must declare --package-root or the legacy --payload-root identity.");
+  }
   if (context.provider) expectedPaths["--provider"] = context.provider;
-  if (context.providerConfig) expectedPaths["--provider-config"] = context.providerConfig;
   for (const [name, expected] of Object.entries(expectedPaths)) {
     const normalizedExpected = normalizeProcessArgv([expected])[0];
     if (values[name] !== normalizedExpected)
       throw new Error(`Supervisor process argv ${name} does not match the reviewed runtime.`);
   }
-  for (const name of ["--provider", "--provider-config"]) {
-    if (!expectedPaths[name] && Object.hasOwn(values, name))
-      throw new Error(`Supervisor process argv contains unexpected option ${name}.`);
+  if (!expectedPaths["--provider"] && Object.hasOwn(values, "--provider")) {
+    throw new Error("Supervisor process argv contains unexpected option --provider.");
+  }
+  const optionalDerivedPaths = {
+    "--coordinator-script": context.coordinatorScript,
+    "--coordinator-runtime": context.coordinatorRuntime,
+    "--materializer-script": context.materializerScript,
+    "--payload-root": context.payloadRoot,
+    "--watch-manager": context.watchManager,
+    "--provider-config": context.providerConfig
+  };
+  for (const [name, expected] of Object.entries(optionalDerivedPaths)) {
+    if (!Object.hasOwn(values, name)) continue;
+    const normalizedExpected = normalizeProcessArgv([expected])[0];
+    if (values[name] !== normalizedExpected)
+      throw new Error(`Supervisor process argv ${name} does not match the Package-derived runtime.`);
   }
   const lifecycleProvided = Object.hasOwn(values, "--lifecycle-id");
   const supervisorProvided = Object.hasOwn(values, "--supervisor-id");
@@ -1968,7 +1991,7 @@ function validateSupervisorInvocation(context, normalizedArgv, commandName, owne
   if (commandName === "start" && Object.hasOwn(values, "--owner-epoch"))
     throw new Error("Supervisor start process unexpectedly declares an owner epoch.");
   const accepted = new Set([
-    "--root", "--runtime", "--coordinator-script", "--coordinator-runtime",
+    "--root", "--runtime", "--package-root", "--coordinator-script", "--coordinator-runtime",
     "--materializer-script", "--payload-root", "--watch-manager", "--lifecycle-id",
     "--supervisor-id", "--startup-timeout-ms", "--provider", "--provider-config"
   ]);
@@ -2034,7 +2057,8 @@ function validateSupervisorState(context, state) {
       || state.selected_generation_id !== context.selectedGenerationId
       || state.selected_instance_id !== context.selectedInstance.instanceId
       || state.runtime_contract_sha256 !== context.runtimeContractSha256
-      || state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+      || (state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+          && state.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
       || state.generation_disposition !== context.generationDisposition
       || state.lifecycle_id !== context.lifecycleId
       || state.pipe_name !== context.pipeName
@@ -2210,23 +2234,58 @@ function readPackageRuntimeContract(payloadRoot) {
       || bootstrapProtocol < 1) {
     throw new Error("Package runtime contract identity or protocol is invalid.");
   }
+  const packageFiles = requiredArray(value, "files", "Package runtime contract");
+  const seenTargets = new Set();
+  let stableWrapperSha256 = null;
+  for (const document of packageFiles) {
+    requireObject(document, "Package runtime file");
+    const source = requiredString(document, "source", "Package runtime file");
+    const target = requiredString(document, "target", "Package runtime file");
+    const digest = requiredHash(document, "sha256", "Package runtime file");
+    const targetKey = target.toLowerCase();
+    if (seenTargets.has(targetKey))
+      throw new Error("Package runtime contract contains a duplicate target path.");
+    seenTargets.add(targetKey);
+    if (target !== STABLE_WRAPPER_RELATIVE_PATH)
+      continue;
+    if (source !== STABLE_WRAPPER_RELATIVE_PATH)
+      throw new Error("Package runtime stable-wrapper source path is invalid.");
+    stableWrapperSha256 = digest;
+  }
+  if (!stableWrapperSha256)
+    throw new Error("Package runtime contract does not declare the stable wrapper.");
+  const packageWrapperPath = path.resolve(payloadRoot, STABLE_WRAPPER_RELATIVE_PATH.replace(/\//g, path.sep));
+  assertReviewedPath(payloadRoot, packageWrapperPath, "Package stable wrapper", "file");
+  if (hashBytes(readBoundedBytes(packageWrapperPath, MAX_INSTANCE_WORKER_BYTES, "Package stable wrapper")) !== stableWrapperSha256)
+    throw new Error("Package runtime stable wrapper bytes do not match its manifest identity.");
   const transitionDocuments = requiredArray(value, "bootstrap_transitions", "Package runtime contract");
   const transitions = [];
   const seen = new Set();
   for (const document of transitionDocuments) {
     requireObject(document, "Package runtime transition");
     const transition = {
+      sourceTag: requiredString(document, "source_tag", "Package runtime transition"),
       packageVersion: requiredString(document, "source_package_version", "Package runtime transition"),
       payloadVersion: requiredString(document, "source_payload_version", "Package runtime transition"),
       payloadSequence: requiredInteger(document, "source_payload_sequence", "Package runtime transition"),
       generationId: requiredGenerationId(document, "source_generation_id", "Package runtime transition"),
       bootstrapProtocol: requiredInteger(document, "source_bootstrap_protocol", "Package runtime transition"),
+      sourceMarkerSchemaVersion: requiredInteger(document, "source_marker_schema_version", "Package runtime transition"),
+      sourceHostUseGateVersion: requiredInteger(document, "source_host_use_gate_version", "Package runtime transition"),
+      sourceGenerationLeaseVersion: requiredInteger(document, "source_generation_lease_version", "Package runtime transition"),
+      sourceFlatFileCount: requiredInteger(document, "source_flat_file_count", "Package runtime transition"),
+      sourceFlatClosureSha256: requiredHash(document, "source_flat_closure_sha256", "Package runtime transition"),
       stableWrapperSha256: requiredHash(document, "source_stable_wrapper_sha256", "Package runtime transition")
     };
     const key = `${transition.packageVersion}\n${transition.payloadVersion}\n${transition.payloadSequence}\n${transition.generationId}\n${transition.bootstrapProtocol}`;
-    if (transition.payloadSequence < 1
+    if (!/^v[A-Za-z0-9.-]{0,127}$/.test(transition.sourceTag)
+        || transition.payloadSequence < 1
         || transition.payloadSequence >= payloadSequence
         || transition.bootstrapProtocol < 1
+        || transition.sourceMarkerSchemaVersion < 1
+        || transition.sourceHostUseGateVersion < 1
+        || transition.sourceGenerationLeaseVersion < 2
+        || transition.sourceFlatFileCount < 1
         || seen.has(key)) {
       throw new Error("Package runtime contract contains an invalid or duplicate transition.");
     }
@@ -2241,6 +2300,7 @@ function readPackageRuntimeContract(payloadRoot) {
     payloadSequence,
     generationId,
     bootstrapProtocol,
+    stableWrapperSha256,
     transitions
   };
 }
@@ -2296,13 +2356,28 @@ function readSelectedInstance(root, contract) {
     throw new Error("Selected instance manifest identity is invalid.");
   }
 
-  const disposition = classifySelectedGeneration(contract, {
+  const selectedIdentity = {
     packageVersion,
     payloadVersion,
     payloadSequence,
     generationId,
     bootstrapProtocol
-  });
+  };
+  const disposition = classifySelectedGeneration(contract, selectedIdentity);
+  const expectedStableWrapperSha256 = getExpectedStableWrapperSha256(
+    contract,
+    selectedIdentity,
+    disposition);
+  const stableWrapperPath = path.resolve(
+    root,
+    STABLE_WRAPPER_RELATIVE_PATH.replace(/\//g, path.sep));
+  assertReviewedPath(root, stableWrapperPath, "selected stable wrapper", "file");
+  if (hashBytes(readBoundedBytes(
+    stableWrapperPath,
+    MAX_INSTANCE_WORKER_BYTES,
+    "selected stable wrapper")) !== expectedStableWrapperSha256) {
+    throw new Error("Selected stable wrapper does not match the Package-declared runtime identity.");
+  }
   const generationRoot = path.resolve(root, generationRelativePath.replace(/\//g, path.sep));
   assertInside(generationRoot, generationsRoot, "selected generation");
   assertReviewedPath(root, generationRoot, "selected generation", "directory");
@@ -2322,7 +2397,15 @@ function readSelectedInstance(root, contract) {
       || workerHash !== requiredHash(instance, "worker_sha256", "selected instance manifest")) {
     throw new Error("Selected instance does not match the Package-owned immutable generation closure.");
   }
-  return { instanceId, instanceRoot, generationId, generationRoot, disposition };
+  return {
+    instanceId,
+    instanceRoot,
+    generationId,
+    generationRoot,
+    disposition,
+    stableWrapperPath,
+    stableWrapperSha256: expectedStableWrapperSha256
+  };
 }
 
 function validateGenerationClosure({
@@ -2458,6 +2541,20 @@ function classifySelectedGeneration(contract, selected) {
     && transition.bootstrapProtocol === selected.bootstrapProtocol);
   if (matches.length !== 1) return failDisposition("INVALID");
   return "TRUSTED_PREVIOUS";
+}
+
+function getExpectedStableWrapperSha256(contract, selected, disposition) {
+  if (disposition === "CURRENT") return contract.stableWrapperSha256;
+  if (disposition === "TRUSTED_PREVIOUS") {
+    const matches = contract.transitions.filter((transition) =>
+      transition.packageVersion === selected.packageVersion
+      && transition.payloadVersion === selected.payloadVersion
+      && transition.payloadSequence === selected.payloadSequence
+      && transition.generationId === selected.generationId
+      && transition.bootstrapProtocol === selected.bootstrapProtocol);
+    if (matches.length === 1) return matches[0].stableWrapperSha256;
+  }
+  throw new Error(`Selected instance generation disposition is ${disposition}.`);
 }
 
 function failDisposition(disposition) {

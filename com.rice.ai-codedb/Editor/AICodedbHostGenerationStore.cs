@@ -85,12 +85,12 @@ namespace Rice.AI.Codedb.Editor
                 {
                     return new AICodedbHostGenerationSelection(
                         AICodedbHostGenerationState.Invalid,
-                        string.Empty,
-                        string.Empty,
-                        string.Empty,
-                        0,
-                        0,
-                        string.Empty,
+                        currentInstance.GenerationId,
+                        currentInstance.PackageVersion,
+                        currentInstance.PayloadVersion,
+                        currentInstance.PayloadSequence,
+                        currentInstance.BootstrapProtocol,
+                        currentInstance.GenerationRoot,
                         currentInstance.Detail);
                 }
                 return ResolveSelectedInstanceGeneration(
@@ -148,6 +148,14 @@ namespace Rice.AI.Codedb.Editor
                 }
                 var installedManifest = ReadGenerationManifest(installedManifestPath, "selected instance generation manifest");
                 ValidateGenerationManifest(packagePointer, installedManifest, generationRoot);
+                AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
+                    projectRoot,
+                    runtimeContract.GetExpectedStableWrapperSha256(new AICodedbRuntimeIdentity(
+                        packagePointer.package_version,
+                        packagePointer.payload_version,
+                        packagePointer.payload_sequence,
+                        packagePointer.generation_id,
+                        packagePointer.bootstrap_protocol)));
                 ValidatePackageOwnedCurrentGeneration(
                     packagePointer,
                     installedManifestPath,
@@ -233,6 +241,9 @@ namespace Rice.AI.Codedb.Editor
             string packageRoot,
             string currentPath)
         {
+            var hasValidatedPointer = false;
+            var validatedPointer = default(CurrentPointerDocument);
+            var validatedGenerationRoot = string.Empty;
             try
             {
                 AssertNoReparsePoints(projectRoot, currentPath, "current generation pointer");
@@ -258,7 +269,24 @@ namespace Rice.AI.Codedb.Editor
 
                 var manifest = ReadGenerationManifest(manifestPath, "generation manifest");
                 ValidateGenerationManifest(pointer, manifest, generationRoot);
+                // Keep the authenticated pointer identity available for an
+                // INVALID result when a later Package/router check fails.
+                validatedPointer = pointer;
+                validatedGenerationRoot = generationRoot;
+                hasValidatedPointer = true;
                 var state = ClassifyValidatedPointer(pointer, runtimeContract);
+                if (state == AICodedbHostGenerationState.Current
+                    || state == AICodedbHostGenerationState.Previous)
+                {
+                    AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
+                        projectRoot,
+                        runtimeContract.GetExpectedStableWrapperSha256(new AICodedbRuntimeIdentity(
+                            pointer.package_version,
+                            pointer.payload_version,
+                            pointer.payload_sequence,
+                            pointer.generation_id,
+                            pointer.bootstrap_protocol)));
+                }
                 if (state == AICodedbHostGenerationState.Current)
                     ValidatePackageOwnedCurrentGeneration(
                         pointer,
@@ -283,6 +311,19 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (Exception exception)
             {
+                if (hasValidatedPointer)
+                {
+                    return new AICodedbHostGenerationSelection(
+                        AICodedbHostGenerationState.Invalid,
+                        validatedPointer.generation_id,
+                        validatedPointer.package_version,
+                        validatedPointer.payload_version,
+                        validatedPointer.payload_sequence,
+                        validatedPointer.bootstrap_protocol,
+                        validatedGenerationRoot,
+                        exception.Message);
+                }
+
                 return new AICodedbHostGenerationSelection(
                     AICodedbHostGenerationState.Invalid,
                     string.Empty,

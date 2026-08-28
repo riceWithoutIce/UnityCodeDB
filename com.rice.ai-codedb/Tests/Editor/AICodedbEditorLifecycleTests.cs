@@ -12,6 +12,8 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbEditorLifecycleTests
     {
+        private const string Poc33WrapperSourceRevision = "d1313efa540f5fc805d83a830951afdb8cd2b256";
+        private const string Poc33WrapperSourcePath = "com.rice.ai-codedb/Payload~/AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
         private string _projectRoot;
 
         [SetUp]
@@ -880,22 +882,15 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void SupervisorLauncher_RoutesProviderConfigThroughSelectedInstance()
+        public void SupervisorLauncher_UsesProjectControlSupervisorRuntime()
         {
-            var instanceRoot = Path.Combine(
-                _projectRoot,
-                "AIWork",
-                ".runtime",
-                "codedb",
-                "instances",
-                "0123456789abcdef0123456789abcdef");
-
             Assert.That(
-                AICodedbSupervisorLauncher.GetSelectedInstanceProviderConfigPath(instanceRoot),
+                AICodedbSupervisorLauncher.GetSupervisorStatePath(_projectRoot),
                 Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
-                    instanceRoot,
-                    "config",
-                    "codedb-mcp.toml"))));
+                    _projectRoot,
+                    AICodedbProjectSettings.InstanceControlRelativePath,
+                    "supervisor",
+                    "supervisor-state.json"))));
         }
 
         [Test]
@@ -1399,6 +1394,23 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void HostGenerationStore_RejectsStableWrapperDrift()
+        {
+            var target = ReadPackageRuntimeContract().Target;
+            InstallCurrentGeneration();
+            var wrapperPath = Path.Combine(
+                _projectRoot,
+                AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            File.AppendAllText(wrapperPath, "\n// drift\n");
+
+            var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
+
+            Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(selection.GenerationId, Is.EqualTo(target.GenerationId));
+            Assert.That(selection.Detail, Does.Contain("stable wrapper"));
+        }
+
+        [Test]
         public void HostGenerationStore_RejectsSelfConsistentCurrentGenerationNotOwnedByPackage()
         {
             var target = ReadPackageRuntimeContract().Target;
@@ -1582,71 +1594,31 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorBridge_HandoffsOnlyAfterSuccessfulSelectedInstanceChange()
         {
-            var previous = SupervisorInstanceStatus(
-                AICodedbCurrentInstanceState.TrustedPrevious,
-                "11111111111111111111111111111111",
-                "poc.33");
-            var current = SupervisorInstanceStatus(
-                AICodedbCurrentInstanceState.Current,
-                "22222222222222222222222222222222",
-                "poc.34");
-            var unchanged = SupervisorInstanceStatus(
-                AICodedbCurrentInstanceState.TrustedPrevious,
-                previous.InstanceId,
-                previous.GenerationId);
-            var invalid = SupervisorInstanceStatus(
-                AICodedbCurrentInstanceState.Invalid,
-                "33333333333333333333333333333333",
-                "poc.34");
-            var missing = SupervisorInstanceStatus(
-                AICodedbCurrentInstanceState.Missing,
-                string.Empty,
-                string.Empty);
-
             Assert.That(
                 AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
                     "materialize",
                     true,
-                    previous,
-                    current),
+                    true),
                 Is.True);
             Assert.That(
                 AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
                     "materialize",
                     true,
-                    previous,
-                    missing),
-                Is.True,
-                "Logical Uninstall removes the selected instance and retires the authenticated Supervisor.");
-            Assert.That(
-                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
-                    "materialize",
-                    true,
-                    previous,
-                    unchanged),
+                    false),
                 Is.False);
             Assert.That(
                 AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
                     "materialize",
                     false,
-                    previous,
-                    current),
+                    true),
                 Is.False);
             Assert.That(
                 AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
                     "watcher",
                     true,
-                    previous,
-                    current),
-                Is.False);
-            Assert.That(
-                AICodedbSupervisorBridge.ShouldHandoffAfterMaterializerCommand(
-                    "materialize",
-                    true,
-                    previous,
-                    invalid),
+                    true),
                 Is.False,
-                "Invalid post-activation evidence stays fail-closed.");
+                "Only the Supervisor's authenticated handoff disposition can trigger retirement.");
         }
 
         [Test]
@@ -1677,22 +1649,41 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CurrentInstanceStore_DriftedStableWrapperRemainsInvalidAndBlocked()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33");
+            var wrapperPath = Path.Combine(
+                _projectRoot,
+                AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            File.AppendAllText(wrapperPath, "\n// drift\n");
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+
+            Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.Invalid));
+            Assert.That(status.Detail, Does.Contain("stable wrapper"));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Rejected evidence must remain read-only.");
+        }
+
+        [Test]
         public void HostGenerationStore_ResolvesValidatedPreviousGenerationWithoutMarkingItInvalid()
         {
-            InstallGeneration("0.2.5-preview.2", "poc.29", 29, "poc.29");
+            InstallPackageDeclaredPreviousInstance("poc.33");
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
             Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Previous));
             Assert.That(selection.IsUsable, Is.False);
-            Assert.That(selection.GenerationId, Is.EqualTo("poc.29"));
-            Assert.That(selection.Detail, Does.Contain("compatible previous generation"));
+            Assert.That(selection.GenerationId, Is.EqualTo("poc.33"));
+            Assert.That(selection.Detail, Does.Contain("Package-declared previous generation"));
             Assert.That(
                 AICodedbHostGenerationStore.ResolveHostPath(
                     _projectRoot,
-                    "scripts/fixture.ps1",
+                    "scripts/manage-codedb-project-watch.ps1",
                     AICodedbProjectSettings.WatchManageScriptRelativePath),
-                Does.EndWith("/host/generations/poc.29/scripts/fixture.ps1"));
+                Does.EndWith("/host/generations/poc.33/scripts/manage-codedb-project-watch.ps1"));
         }
 
         [Test]
@@ -3312,31 +3303,18 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Path.Combine(AICodedbPaths.PackageRootPath, "Payload~", "host-current.json"),
                 currentPath,
                 true);
+            var stableWrapperPath = Path.Combine(
+                _projectRoot,
+                AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(stableWrapperPath));
+            File.Copy(
+                Path.Combine(
+                    AICodedbPaths.PackageRootPath,
+                    "Payload~",
+                    AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar)),
+                stableWrapperPath,
+                true);
             return Path.Combine(generationRoot, "scripts", "verify-codedb-project.ps1");
-        }
-
-        private static AICodedbCurrentInstanceStatus SupervisorInstanceStatus(
-            AICodedbCurrentInstanceState state,
-            string instanceId,
-            string generationId)
-        {
-            var instanceRelativePath = string.IsNullOrWhiteSpace(instanceId)
-                ? string.Empty
-                : AICodedbProjectSettings.InstancesRelativePath + "/" + instanceId;
-            return new AICodedbCurrentInstanceStatus(
-                state,
-                instanceId,
-                instanceRelativePath,
-                instanceRelativePath,
-                string.IsNullOrWhiteSpace(generationId)
-                    ? string.Empty
-                    : AICodedbProjectSettings.HostGenerationsRelativePath + "/" + generationId,
-                generationId,
-                "0.2.5-preview.5",
-                generationId,
-                string.Equals(generationId, "poc.33", StringComparison.Ordinal) ? 33 : 34,
-                1,
-                string.Empty);
         }
 
         private string InstallPackageDeclaredPreviousInstance(string generationId)
@@ -3402,6 +3380,25 @@ namespace Rice.AI.Codedb.Editor.Tests
                 instanceRelativePath.Replace('/', Path.DirectorySeparatorChar));
             foreach (var directory in new[] { "config", "index", "adapter", "watch", "leases", "logs", "tmp" })
                 Directory.CreateDirectory(Path.Combine(instanceRoot, directory));
+            var stableWrapperPath = Path.Combine(
+                _projectRoot,
+                AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(stableWrapperPath));
+            File.WriteAllBytes(
+                stableWrapperPath,
+                ReadImmutableGitBlob(Poc33WrapperSourceRevision, Poc33WrapperSourcePath));
+            var transition = ReadPackageRuntimeContract().Transitions;
+            var expectedWrapperHash = string.Empty;
+            foreach (var candidate in transition)
+            {
+                if (string.Equals(candidate.Identity.GenerationId, generationId, StringComparison.Ordinal))
+                {
+                    expectedWrapperHash = candidate.StableWrapperSha256;
+                    break;
+                }
+            }
+            Assert.That(expectedWrapperHash, Is.Not.Empty, "Previous-generation fixture is not declared by the Package contract.");
+            Assert.That(GetSha256(stableWrapperPath), Is.EqualTo(expectedWrapperHash));
             var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
             var instanceManifestPath = Path.Combine(instanceRoot, "instance.json");
             WriteUtf8NoBom(
@@ -3487,6 +3484,47 @@ namespace Rice.AI.Codedb.Editor.Tests
             using (var stream = File.OpenRead(path))
             using (var sha256 = SHA256.Create())
                 return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+        }
+
+        private static byte[] ReadImmutableGitBlob(string revision, string relativePath)
+        {
+            var repositoryRoot = FindRepositoryRoot(AICodedbPaths.PackageRootPath);
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git.exe",
+                Arguments = "cat-file blob " + revision + ":" + relativePath,
+                WorkingDirectory = repositoryRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (var process = System.Diagnostics.Process.Start(startInfo))
+            {
+                Assert.That(process, Is.Not.Null, "The immutable Git fixture process could not start.");
+                using (var output = new MemoryStream())
+                {
+                    process.StandardOutput.BaseStream.CopyTo(output);
+                    var error = process.StandardError.ReadToEnd();
+                    Assert.That(process.WaitForExit(10000), Is.True, "The immutable Git fixture process timed out.");
+                    Assert.That(process.ExitCode, Is.Zero, error);
+                    return output.ToArray();
+                }
+            }
+        }
+
+        private static string FindRepositoryRoot(string startPath)
+        {
+            var directory = new DirectoryInfo(startPath);
+            while (directory != null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, ".git"))
+                    || Directory.Exists(Path.Combine(directory.FullName, ".git")))
+                    return directory.FullName;
+                directory = directory.Parent;
+            }
+            Assert.Fail("The Editor fixture requires the repository Git root to construct an immutable previous wrapper.");
+            return string.Empty;
         }
 
         private static string GetProjectSnapshot(string root)

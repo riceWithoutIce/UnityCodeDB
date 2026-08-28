@@ -1066,28 +1066,36 @@ namespace Rice.AI.Codedb.Editor
             CancellationToken cancellationToken)
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
-            AICodedbCurrentInstanceStatus currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot);
-            if (!currentInstance.Present
-                || (!currentInstance.IsCurrent && !currentInstance.IsTrustedPrevious)
-                || string.IsNullOrWhiteSpace(currentInstance.InstanceRoot))
-            {
-                return AICodedbSupervisorSnapshot.Disconnected(
-                    "CURRENT_INSTANCE_UNAVAILABLE",
-                    currentInstance.Detail);
-            }
-
             var supervisorStatePath = AICodedbSupervisorLauncher.GetSupervisorStatePath(normalizedRoot);
             try
             {
+                var stateExistedBeforeLaunch = File.Exists(supervisorStatePath);
+                if (!stateExistedBeforeLaunch && IsCurrentInstanceSelectionMissing(normalizedRoot))
+                {
+                    return AICodedbSupervisorSnapshot.Disconnected(
+                        "CURRENT_INSTANCE_UNAVAILABLE",
+                        "No current CodeDB instance is selected.");
+                }
+
                 var context = AICodedbPaths.CaptureExecutionContext();
                 var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
                         context,
-                        currentInstance,
                         cancellationToken)
                     .GetAwaiter()
                     .GetResult();
                 if (!launch.Succeeded)
                 {
+                    // A new owner can publish between the initial state check
+                    // and the launcher request. Authenticate that race-created
+                    // state, but never bypass the launcher for state that was
+                    // already present (it may require stale-owner takeover).
+                    if (!stateExistedBeforeLaunch && File.Exists(supervisorStatePath))
+                    {
+                        return ConnectSupervisorWorker(
+                            normalizedRoot,
+                            supervisorStatePath,
+                            cancellationToken);
+                    }
                     return AICodedbSupervisorSnapshot.Degraded(
                         "SUPERVISOR_START_FAILED",
                         string.IsNullOrWhiteSpace(launch.StandardError)
@@ -1096,7 +1104,6 @@ namespace Rice.AI.Codedb.Editor
                 }
                 return ConnectSupervisorWorker(
                     normalizedRoot,
-                    currentInstance,
                     supervisorStatePath,
                     cancellationToken);
             }
@@ -1112,7 +1119,6 @@ namespace Rice.AI.Codedb.Editor
 
         private static AICodedbSupervisorSnapshot ConnectSupervisorWorker(
             string normalizedRoot,
-            AICodedbCurrentInstanceStatus currentInstance,
             string statePath,
             CancellationToken cancellationToken)
         {
@@ -1120,12 +1126,10 @@ namespace Rice.AI.Codedb.Editor
             {
                 var observedIdentity = ReadSupervisorRuntimeIdentity(
                     normalizedRoot,
-                    currentInstance,
                     statePath);
                 SupervisorRuntimeIdentity identity;
                 if (!TryEnsureCurrentSupervisorProtocol(
                         normalizedRoot,
-                        currentInstance,
                         statePath,
                         observedIdentity,
                         cancellationToken,
@@ -1175,7 +1179,6 @@ namespace Rice.AI.Codedb.Editor
 
         private static bool TryEnsureCurrentSupervisorProtocol(
             string normalizedRoot,
-            AICodedbCurrentInstanceStatus currentInstance,
             string statePath,
             SupervisorRuntimeIdentity observedIdentity,
             CancellationToken cancellationToken,
@@ -1254,7 +1257,6 @@ namespace Rice.AI.Codedb.Editor
                 }
                 var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
                         context,
-                        currentInstance,
                         cancellationToken)
                     .GetAwaiter()
                     .GetResult();
@@ -1268,7 +1270,6 @@ namespace Rice.AI.Codedb.Editor
 
                 identity = ReadSupervisorRuntimeIdentity(
                     normalizedRoot,
-                    currentInstance,
                     statePath);
                 if (identity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.SupervisorVersion)
                 {
@@ -1323,7 +1324,6 @@ namespace Rice.AI.Codedb.Editor
 
         private static SupervisorRuntimeIdentity ReadSupervisorRuntimeIdentity(
             string normalizedRoot,
-            AICodedbCurrentInstanceStatus currentInstance,
             string statePath)
         {
             const string label = "CodeDB Supervisor state";
@@ -1421,11 +1421,10 @@ namespace Rice.AI.Codedb.Editor
                 || !IsGenerationId(targetGenerationId)
                 || !IsGenerationId(selectedGenerationId)
                 || !string.Equals(stateGenerationId, selectedGenerationId, StringComparison.Ordinal)
-                || !string.Equals(selectedGenerationId, currentInstance.GenerationId, StringComparison.Ordinal)
-                || (canonicalPipe
-                    && !string.Equals(selectedInstanceId, currentInstance.InstanceId, StringComparison.Ordinal))
+                || (supervisorProtocol == AICodedbSupervisorProtocol.SupervisorVersion
+                    && !IsInstanceId(selectedInstanceId))
                 || (!string.IsNullOrWhiteSpace(selectedInstanceId)
-                    && !string.Equals(selectedInstanceId, currentInstance.InstanceId, StringComparison.Ordinal))
+                    && !IsInstanceId(selectedInstanceId))
                 || !IsSha256(runtimeContractSha256)
                 || (!dispositionIsCurrent && !dispositionIsPrevious)
                 || (dispositionIsCurrent
@@ -1476,6 +1475,20 @@ namespace Rice.AI.Codedb.Editor
                     || (character >= 'A' && character <= 'Z')
                     || (character >= '0' && character <= '9')
                     || character == '.' || character == '_' || character == '-')
+                    continue;
+                return false;
+            }
+            return true;
+        }
+
+        private static bool IsInstanceId(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 32)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'f'))
                     continue;
                 return false;
             }
@@ -1538,30 +1551,6 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
-                var currentInstance = AICodedbCurrentInstanceStore.Read(normalizedRoot);
-                if (!currentInstance.Present
-                    || (!currentInstance.IsCurrent && !currentInstance.IsTrustedPrevious))
-                {
-                    var bootstrapFallbackAuthorized = IsProvenBootstrapFallback(
-                        normalizedRoot,
-                        currentInstance,
-                        command,
-                        action,
-                        confirmedProjectMutation,
-                        startIfMissing);
-                    return new AICodedbSupervisorCommandResponse(
-                        false,
-                        4,
-                        "CURRENT_INSTANCE_UNAVAILABLE",
-                        currentInstance.Detail,
-                        string.Empty,
-                        currentInstance.Detail,
-                        AICodedbSupervisorSnapshot.Disconnected("CURRENT_INSTANCE_UNAVAILABLE", currentInstance.Detail),
-                        string.Empty,
-                        0,
-                        bootstrapFallbackAuthorized);
-                }
-
                 var statePath = AICodedbSupervisorLauncher.GetSupervisorStatePath(normalizedRoot);
                 if (!startIfMissing)
                 {
@@ -1585,6 +1574,23 @@ namespace Rice.AI.Codedb.Editor
                 {
                     if (!File.Exists(statePath))
                     {
+                        if (!startIfMissing && IsCurrentInstanceSelectionMissing(normalizedRoot))
+                        {
+                            const string detail = "No current CodeDB instance is selected.";
+                            return new AICodedbSupervisorCommandResponse(
+                                false,
+                                4,
+                                "CURRENT_INSTANCE_UNAVAILABLE",
+                                detail,
+                                string.Empty,
+                                detail,
+                                AICodedbSupervisorSnapshot.Disconnected(
+                                    "CURRENT_INSTANCE_UNAVAILABLE",
+                                    detail),
+                                string.Empty,
+                                0);
+                        }
+
                         return new AICodedbSupervisorCommandResponse(
                             true,
                             0,
@@ -1602,14 +1608,37 @@ namespace Rice.AI.Codedb.Editor
                 }
                 else if (startIfMissing)
                 {
+                    var stateExistedBeforeLaunch = File.Exists(statePath);
+                    if (!stateExistedBeforeLaunch
+                        && IsCurrentInstanceSelectionMissing(normalizedRoot))
+                    {
+                        const string detail = "No current CodeDB instance is selected.";
+                        return new AICodedbSupervisorCommandResponse(
+                            false,
+                            4,
+                            "CURRENT_INSTANCE_UNAVAILABLE",
+                            detail,
+                            string.Empty,
+                            detail,
+                            AICodedbSupervisorSnapshot.Disconnected("CURRENT_INSTANCE_UNAVAILABLE", detail),
+                            string.Empty,
+                            0,
+                            IsProvenBootstrapFallback(
+                                normalizedRoot,
+                                command,
+                                action,
+                                confirmedProjectMutation,
+                                startIfMissing));
+                    }
+
                     var context = AICodedbPaths.CaptureExecutionContext();
                     var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
                             context,
-                            currentInstance,
                             cancellationToken)
                         .GetAwaiter()
                         .GetResult();
-                    if (!launch.Succeeded)
+                    if (!launch.Succeeded
+                        && (stateExistedBeforeLaunch || !File.Exists(statePath)))
                     {
                         return new AICodedbSupervisorCommandResponse(
                             false,
@@ -1626,13 +1655,11 @@ namespace Rice.AI.Codedb.Editor
 
                 var observedIdentity = ReadSupervisorRuntimeIdentity(
                     normalizedRoot,
-                    currentInstance,
                     statePath);
                 var identity = observedIdentity;
                 if (!string.Equals(command, "shutdown", StringComparison.Ordinal)
                     && !TryEnsureCurrentSupervisorProtocol(
                         normalizedRoot,
-                        currentInstance,
                         statePath,
                         observedIdentity,
                         cancellationToken,
@@ -1703,21 +1730,16 @@ namespace Rice.AI.Codedb.Editor
                     eventSequence = AICodedbStrictJson.GetOptionalNullableInt32(status, "event_sequence", "CodeDB Supervisor command status") ?? 0;
                 }
                 var commandSucceeded = succeeded && exitCode == 0;
-                var selectedAfterCommand = commandSucceeded
-                                           && string.Equals(command, "materialize", StringComparison.Ordinal)
-                    ? AICodedbCurrentInstanceStore.Read(normalizedRoot)
-                    : currentInstance;
+                var handoffQueued = AICodedbStrictJson.GetOptionalBoolean(
+                    response,
+                    "handoff_queued",
+                    "CodeDB Supervisor command response",
+                    false);
                 if (ShouldHandoffAfterMaterializerCommand(
                         command,
                         commandSucceeded,
-                        currentInstance,
-                        selectedAfterCommand))
+                        handoffQueued))
                 {
-                    var handoffQueued = AICodedbStrictJson.GetOptionalBoolean(
-                        response,
-                        "handoff_queued",
-                        "CodeDB Supervisor command response",
-                        false);
                     if (!CompleteSupervisorHandoff(
                             normalizedRoot,
                             statePath,
@@ -1796,13 +1818,12 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         private static bool IsProvenBootstrapFallback(
             string normalizedRoot,
-            AICodedbCurrentInstanceStatus currentInstance,
             string command,
             string action,
             bool confirmedProjectMutation,
             bool startIfMissing)
         {
-            if (currentInstance.State != AICodedbCurrentInstanceState.Missing
+            if (!IsCurrentInstanceSelectionMissing(normalizedRoot)
                 || !IsBootstrapFallbackCommandAllowed(
                     command,
                     action,
@@ -1826,6 +1847,15 @@ namespace Rice.AI.Codedb.Editor
             {
                 return false;
             }
+        }
+
+        private static bool IsCurrentInstanceSelectionMissing(string normalizedRoot)
+        {
+            var selectionPath = AICodedbPaths.NormalizePath(Path.Combine(
+                normalizedRoot,
+                AICodedbProjectSettings.InstanceCurrentRelativePath));
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, selectionPath);
+            return !File.Exists(selectionPath) && !Directory.Exists(selectionPath);
         }
 
         private static bool IsBootstrapFallbackCommandAllowed(
@@ -1955,25 +1985,11 @@ namespace Rice.AI.Codedb.Editor
         internal static bool ShouldHandoffAfterMaterializerCommand(
             string command,
             bool commandSucceeded,
-            AICodedbCurrentInstanceStatus selectedBefore,
-            AICodedbCurrentInstanceStatus selectedAfter)
+            bool handoffQueued)
         {
-            if (!commandSucceeded
-                || !string.Equals(command, "materialize", StringComparison.Ordinal)
-                || (!selectedBefore.IsCurrent && !selectedBefore.IsTrustedPrevious))
-                return false;
-            if (!selectedAfter.Present)
-                return true;
-            if (!selectedAfter.IsCurrent && !selectedAfter.IsTrustedPrevious)
-                return false;
-            return !string.Equals(
-                       selectedBefore.InstanceId,
-                       selectedAfter.InstanceId,
-                       StringComparison.Ordinal)
-                   || !string.Equals(
-                       selectedBefore.GenerationId,
-                       selectedAfter.GenerationId,
-                       StringComparison.Ordinal);
+            return commandSucceeded
+                   && handoffQueued
+                   && string.Equals(command, "materialize", StringComparison.Ordinal);
         }
 
         private static bool CompleteSupervisorHandoff(

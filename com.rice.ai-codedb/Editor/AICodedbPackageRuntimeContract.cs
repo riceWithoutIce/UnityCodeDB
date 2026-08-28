@@ -50,25 +50,72 @@ namespace Rice.AI.Codedb.Editor
         }
     }
 
+    /// <summary>
+    /// The immutable source evidence for one Package-declared bootstrap
+    /// transition.  Keeping the wrapper hash beside the identity prevents a
+    /// caller from classifying a previous generation and then silently using
+    /// the current launcher bytes.
+    /// </summary>
+    internal sealed class AICodedbRuntimeTransition
+    {
+        internal AICodedbRuntimeIdentity Identity { get; }
+        internal string SourceTag { get; }
+        internal int SourceMarkerSchemaVersion { get; }
+        internal int SourceHostUseGateVersion { get; }
+        internal int SourceGenerationLeaseVersion { get; }
+        internal int SourceFlatFileCount { get; }
+        internal string SourceFlatClosureSha256 { get; }
+        internal string StableWrapperSha256 { get; }
+
+        internal AICodedbRuntimeTransition(
+            AICodedbRuntimeIdentity identity,
+            string sourceTag,
+            int sourceMarkerSchemaVersion,
+            int sourceHostUseGateVersion,
+            int sourceGenerationLeaseVersion,
+            int sourceFlatFileCount,
+            string sourceFlatClosureSha256,
+            string stableWrapperSha256)
+        {
+            Identity = identity;
+            SourceTag = sourceTag ?? string.Empty;
+            SourceMarkerSchemaVersion = sourceMarkerSchemaVersion;
+            SourceHostUseGateVersion = sourceHostUseGateVersion;
+            SourceGenerationLeaseVersion = sourceGenerationLeaseVersion;
+            SourceFlatFileCount = sourceFlatFileCount;
+            SourceFlatClosureSha256 = sourceFlatClosureSha256 ?? string.Empty;
+            StableWrapperSha256 = stableWrapperSha256 ?? string.Empty;
+        }
+    }
+
     internal sealed class AICodedbPackageRuntimeContract
     {
-        private readonly HashSet<string> _transitionKeys;
+        private readonly Dictionary<string, AICodedbRuntimeTransition> _transitions;
 
         internal AICodedbRuntimeIdentity Target { get; }
+        internal string TargetStableWrapperSha256 { get; }
         internal string Sha256 { get; }
+
+        internal IEnumerable<AICodedbRuntimeTransition> Transitions => _transitions.Values;
 
         internal AICodedbPackageRuntimeContract(
             AICodedbRuntimeIdentity target,
             string sha256,
-            IEnumerable<AICodedbRuntimeIdentity> transitions)
+            string targetStableWrapperSha256,
+            IEnumerable<AICodedbRuntimeTransition> transitions)
         {
             Target = target;
+            TargetStableWrapperSha256 = targetStableWrapperSha256 ?? string.Empty;
             Sha256 = sha256 ?? string.Empty;
-            _transitionKeys = new HashSet<string>(StringComparer.Ordinal);
+            _transitions = new Dictionary<string, AICodedbRuntimeTransition>(StringComparer.Ordinal);
             foreach (var transition in transitions)
             {
-                if (!_transitionKeys.Add(transition.GetStableKey()))
+                if (transition == null)
+                    throw new InvalidOperationException("Package runtime contract contains a null transition.");
+                var key = transition.Identity.GetStableKey();
+                if (_transitions.ContainsKey(key))
                     throw new InvalidOperationException("Package runtime contract contains a duplicate transition.");
+                _transitions.Add(key, transition);
             }
         }
 
@@ -80,15 +127,41 @@ namespace Rice.AI.Codedb.Editor
                 return AICodedbRuntimeGenerationDisposition.Newer;
             if (selected.PayloadSequence == Target.PayloadSequence)
                 return AICodedbRuntimeGenerationDisposition.SequenceCollision;
-            return _transitionKeys.Contains(selected.GetStableKey())
+            return _transitions.ContainsKey(selected.GetStableKey())
                 ? AICodedbRuntimeGenerationDisposition.TrustedPrevious
                 : AICodedbRuntimeGenerationDisposition.Invalid;
         }
+
+        internal bool TryGetTransition(
+            AICodedbRuntimeIdentity selected,
+            out AICodedbRuntimeTransition transition)
+        {
+            return _transitions.TryGetValue(selected.GetStableKey(), out transition);
+        }
+
+        internal string GetExpectedStableWrapperSha256(AICodedbRuntimeIdentity selected)
+        {
+            switch (Classify(selected))
+            {
+                case AICodedbRuntimeGenerationDisposition.Current:
+                    return TargetStableWrapperSha256;
+                case AICodedbRuntimeGenerationDisposition.TrustedPrevious:
+                    AICodedbRuntimeTransition transition;
+                    if (TryGetTransition(selected, out transition))
+                        return transition.StableWrapperSha256;
+                    break;
+            }
+
+            throw new InvalidOperationException(
+                "Selected runtime identity has no Package-owned stable-wrapper identity.");
+        }
+
     }
 
     internal static class AICodedbPackageRuntimeContractStore
     {
         private const string ManagedBy = "com.rice.ai-codedb";
+        internal const string StableWrapperRelativePath = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
         private const long MaximumBytes = 4 * 1024 * 1024;
 
         internal static AICodedbPackageRuntimeContract Read(string packageRoot)
@@ -127,22 +200,112 @@ namespace Rice.AI.Codedb.Editor
 
             var target = ReadIdentity(document, string.Empty, label);
             ValidateIdentity(target, true, target.PayloadSequence);
-            var transitions = new List<AICodedbRuntimeIdentity>();
+            var targetStableWrapperSha256 = ReadTargetStableWrapperSha256(
+                document,
+                normalizedRoot,
+                label);
+            var transitions = new List<AICodedbRuntimeTransition>();
             foreach (var value in AICodedbStrictJson.GetRequiredArray(document, "bootstrap_transitions", label))
             {
                 var transition = AICodedbStrictJson.RequireObject(value, "Package runtime transition");
                 var identity = ReadIdentity(transition, "source_", "Package runtime transition");
                 ValidateIdentity(identity, false, target.PayloadSequence);
+                var sourceTag = AICodedbStrictJson.GetRequiredString(
+                    transition,
+                    "source_tag",
+                    "Package runtime transition");
+                var sourceMarkerSchemaVersion = AICodedbStrictJson.GetRequiredInt32(
+                    transition,
+                    "source_marker_schema_version",
+                    "Package runtime transition");
+                var sourceHostUseGateVersion = AICodedbStrictJson.GetRequiredInt32(
+                    transition,
+                    "source_host_use_gate_version",
+                    "Package runtime transition");
+                var sourceGenerationLeaseVersion = AICodedbStrictJson.GetRequiredInt32(
+                    transition,
+                    "source_generation_lease_version",
+                    "Package runtime transition");
+                var sourceFlatFileCount = AICodedbStrictJson.GetRequiredInt32(
+                    transition,
+                    "source_flat_file_count",
+                    "Package runtime transition");
+                var sourceFlatClosureSha256 = AICodedbStrictJson.GetRequiredString(
+                    transition,
+                    "source_flat_closure_sha256",
+                    "Package runtime transition").ToLowerInvariant();
+                if (sourceMarkerSchemaVersion < 1
+                    || sourceHostUseGateVersion < 1
+                    || sourceGenerationLeaseVersion < 2
+                    || sourceFlatFileCount < 1
+                    || !IsSourceTag(sourceTag))
+                {
+                    throw new InvalidOperationException("Package runtime transition metadata is invalid.");
+                }
+                ValidateSha256(sourceFlatClosureSha256, "Package runtime transition flat closure");
+                var stableWrapperSha256 = AICodedbStrictJson.GetRequiredString(
+                    transition,
+                    "source_stable_wrapper_sha256",
+                    "Package runtime transition").ToLowerInvariant();
                 ValidateSha256(
-                    AICodedbStrictJson.GetRequiredString(
-                        transition,
-                        "source_stable_wrapper_sha256",
-                        "Package runtime transition"),
+                    stableWrapperSha256,
                     "Package runtime transition stable wrapper");
-                transitions.Add(identity);
+                transitions.Add(new AICodedbRuntimeTransition(
+                    identity,
+                    sourceTag,
+                    sourceMarkerSchemaVersion,
+                    sourceHostUseGateVersion,
+                    sourceGenerationLeaseVersion,
+                    sourceFlatFileCount,
+                    sourceFlatClosureSha256,
+                    stableWrapperSha256));
             }
 
-            return new AICodedbPackageRuntimeContract(target, GetSha256(bytes), transitions);
+            return new AICodedbPackageRuntimeContract(
+                target,
+                GetSha256(bytes),
+                targetStableWrapperSha256,
+                transitions);
+        }
+
+        private static string ReadTargetStableWrapperSha256(
+            Dictionary<string, object> document,
+            string packageRoot,
+            string label)
+        {
+            var files = AICodedbStrictJson.GetRequiredArray(document, "files", label);
+            var seenTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string stableWrapperSha256 = null;
+            foreach (var value in files)
+            {
+                var entry = AICodedbStrictJson.RequireObject(value, "Package runtime file");
+                var source = AICodedbStrictJson.GetRequiredString(entry, "source", "Package runtime file");
+                var target = AICodedbStrictJson.GetRequiredString(entry, "target", "Package runtime file");
+                var hash = AICodedbStrictJson.GetRequiredString(entry, "sha256", "Package runtime file").ToLowerInvariant();
+                ValidateSha256(hash, "Package runtime file");
+                if (!seenTargets.Add(target))
+                    throw new InvalidOperationException("Package runtime contract contains a duplicate target path.");
+                if (!string.Equals(target, StableWrapperRelativePath, StringComparison.Ordinal))
+                    continue;
+                if (!string.Equals(source, StableWrapperRelativePath, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Package runtime stable-wrapper source path is invalid.");
+                stableWrapperSha256 = hash;
+            }
+
+            if (string.IsNullOrEmpty(stableWrapperSha256))
+                throw new InvalidOperationException("Package runtime contract does not declare the stable wrapper.");
+
+            var wrapperPath = AICodedbPaths.NormalizePath(Path.Combine(
+                packageRoot,
+                "Payload~",
+                StableWrapperRelativePath));
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(packageRoot, wrapperPath);
+            if (!File.Exists(wrapperPath)
+                || !string.Equals(GetSha256(wrapperPath), stableWrapperSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Package runtime stable wrapper bytes do not match its manifest identity.");
+            }
+            return stableWrapperSha256;
         }
 
         private static AICodedbRuntimeIdentity ReadIdentity(
@@ -188,6 +351,42 @@ namespace Rice.AI.Codedb.Editor
                 return false;
             }
             return true;
+        }
+
+        private static bool IsSourceTag(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 128 || value[0] != 'v')
+                return false;
+            for (var index = 1; index < value.Length; index++)
+            {
+                var character = value[index];
+                if ((character >= 'A' && character <= 'Z')
+                    || (character >= 'a' && character <= 'z')
+                    || (character >= '0' && character <= '9')
+                    || character == '.'
+                    || character == '-')
+                    continue;
+                return false;
+            }
+            return true;
+        }
+
+        internal static void ValidateProjectStableWrapper(
+            string projectRoot,
+            string expectedSha256)
+        {
+            ValidateSha256(expectedSha256, "Project stable wrapper");
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
+            var wrapperPath = AICodedbPaths.NormalizePath(Path.Combine(
+                normalizedRoot,
+                StableWrapperRelativePath));
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, wrapperPath);
+            if (!File.Exists(wrapperPath)
+                || !string.Equals(GetSha256(wrapperPath), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Project stable wrapper bytes do not match the Package-owned runtime identity.");
+            }
         }
 
         private static void ValidateSha256(string value, string label)
@@ -240,5 +439,19 @@ namespace Rice.AI.Codedb.Editor
                 return builder.ToString();
             }
         }
+
+        private static string GetSha256(string path)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var algorithm = SHA256.Create())
+            {
+                var hash = algorithm.ComputeHash(stream);
+                var builder = new StringBuilder(hash.Length * 2);
+                foreach (var value in hash)
+                    builder.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+                return builder.ToString();
+            }
+        }
+
     }
 }

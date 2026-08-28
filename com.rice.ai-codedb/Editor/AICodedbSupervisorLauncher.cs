@@ -19,7 +19,6 @@ namespace Rice.AI.Codedb.Editor
 
         internal static Task<AICodedbCommandResult> EnsureStartedAsync(
             AICodedbEditorExecutionContext context,
-            AICodedbCurrentInstanceStatus currentInstance,
             CancellationToken cancellationToken)
         {
             if (context.Platform != UnityEngine.RuntimePlatform.WindowsEditor)
@@ -32,7 +31,7 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return Task.Run(
-                () => StartWorker(context, currentInstance, cancellationToken),
+                () => StartWorker(context, cancellationToken),
                 cancellationToken);
         }
 
@@ -46,18 +45,9 @@ namespace Rice.AI.Codedb.Editor
 
         internal static string GetSupervisorStatePath(string projectRoot)
         {
-            return Path.Combine(GetSupervisorRuntimePath(projectRoot), "supervisor-state.json");
-        }
-
-        internal static string GetSelectedInstanceProviderConfigPath(string instanceRoot)
-        {
-            if (string.IsNullOrWhiteSpace(instanceRoot))
-                throw new ArgumentException("The selected CodeDB instance root is required.", nameof(instanceRoot));
-
             return AICodedbPaths.NormalizePath(Path.Combine(
-                instanceRoot,
-                "config",
-                "codedb-mcp.toml"));
+                GetSupervisorRuntimePath(projectRoot),
+                "supervisor-state.json"));
         }
 
         internal static void ValidateLaunchRoots(
@@ -72,64 +62,22 @@ namespace Rice.AI.Codedb.Editor
 
         private static AICodedbCommandResult StartWorker(
             AICodedbEditorExecutionContext context,
-            AICodedbCurrentInstanceStatus currentInstance,
             CancellationToken cancellationToken)
         {
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!currentInstance.Present
-                    || (!currentInstance.IsCurrent && !currentInstance.IsTrustedPrevious)
-                    || string.IsNullOrWhiteSpace(currentInstance.InstanceRoot)
-                    || string.IsNullOrWhiteSpace(currentInstance.GenerationRoot))
-                {
-                    return new AICodedbCommandResult(
-                        4,
-                        string.Empty,
-                        "The selected CodeDB instance is not verified; the Supervisor was not started.",
-                        false);
-                }
-
                 var packageRoot = AICodedbPaths.NormalizePath(context.PackageRoot);
                 var supervisorScript = AICodedbPaths.NormalizePath(Path.Combine(
                     packageRoot,
                     "Tools~",
                     "codedb-project-supervisor.mjs"));
-                var coordinatorScript = AICodedbPaths.NormalizePath(Path.Combine(
-                    currentInstance.GenerationRoot,
-                    "coordinator",
-                    "codedb-watch-coordinator.mjs"));
-                var coordinatorRuntime = AICodedbPaths.NormalizePath(Path.Combine(
-                    currentInstance.InstanceRoot,
-                    "watch",
-                    "coordinator"));
-                var materializerScript = AICodedbPaths.NormalizePath(Path.Combine(
-                    packageRoot,
-                    AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
-                var payloadRoot = AICodedbPaths.NormalizePath(Path.Combine(packageRoot, "Payload~"));
-                var watchManager = AICodedbPaths.NormalizePath(Path.Combine(
-                    currentInstance.GenerationRoot,
-                    "scripts",
-                    "manage-codedb-project-watch.ps1"));
-                var providerConfig = GetSelectedInstanceProviderConfigPath(currentInstance.InstanceRoot);
-                if (!File.Exists(supervisorScript)
-                    || !File.Exists(coordinatorScript)
-                    || !File.Exists(materializerScript)
-                    || !Directory.Exists(payloadRoot)
-                    || !File.Exists(watchManager))
+                if (!File.Exists(supervisorScript))
                 {
                     return new AICodedbCommandResult(
                         4,
                         string.Empty,
-                        "The Package-owned Supervisor scripts are incomplete.",
-                        false);
-                }
-                if (!File.Exists(providerConfig))
-                {
-                    return new AICodedbCommandResult(
-                        4,
-                        string.Empty,
-                        "The selected CodeDB instance Provider config is missing.",
+                        "The Package-owned Supervisor script is missing.",
                         false);
                 }
 
@@ -145,17 +93,14 @@ namespace Rice.AI.Codedb.Editor
                     "start",
                     "--root", context.ProjectRoot,
                     "--runtime", runtime,
-                    "--coordinator-script", coordinatorScript,
-                    "--coordinator-runtime", coordinatorRuntime,
-                    "--materializer-script", materializerScript,
-                    "--payload-root", payloadRoot,
-                    "--watch-manager", watchManager,
+                    "--package-root", packageRoot,
                     "--lifecycle-id", "unity-bridge",
                     "--supervisor-id", "unity-bridge",
-                    "--startup-timeout-ms", "30000",
-                    "--provider", context.MachineProviderExecutablePath ?? string.Empty,
-                    "--provider-config", providerConfig
+                    "--startup-timeout-ms", "30000"
                 };
+                var provider = context.MachineProviderExecutablePath;
+                if (!string.IsNullOrWhiteSpace(provider))
+                    arguments = AppendArguments(arguments, "--provider", provider);
                 return RunNodeStart(arguments, context.ProjectRoot, StartTimeoutMilliseconds, cancellationToken);
             }
             catch (OperationCanceledException)
@@ -167,6 +112,14 @@ namespace Rice.AI.Codedb.Editor
                 Debug.LogWarning("CodeDB Supervisor start failed: " + exception.Message);
                 return new AICodedbCommandResult(4, string.Empty, exception.Message, false);
             }
+        }
+
+        private static string[] AppendArguments(string[] arguments, params string[] additional)
+        {
+            var combined = new string[arguments.Length + additional.Length];
+            Array.Copy(arguments, combined, arguments.Length);
+            Array.Copy(additional, 0, combined, arguments.Length, additional.Length);
+            return combined;
         }
 
         private static AICodedbCommandResult RunNodeStart(

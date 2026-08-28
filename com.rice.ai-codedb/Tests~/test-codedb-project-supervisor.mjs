@@ -35,6 +35,18 @@ const PREVIOUS = Object.freeze({
   generationId: "poc.33",
   bootstrapProtocol: 1
 });
+const SYNTHETIC_BUMP_TARGET = Object.freeze({
+  packageVersion: "0.2.5-preview.6",
+  payloadVersion: "poc.35",
+  payloadSequence: 35,
+  generationId: "poc.35",
+  bootstrapProtocol: 1
+});
+const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
+const TARGET_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned current stable wrapper\n";
+const PREVIOUS_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned previous stable wrapper\n";
+const TARGET_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(TARGET_STABLE_WRAPPER_CONTENT, "utf8"));
+const PREVIOUS_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(PREVIOUS_STABLE_WRAPPER_CONTENT, "utf8"));
 
 function mkdir(directory) { fs.mkdirSync(directory, { recursive: true }); }
 function write(file, text) { mkdir(path.dirname(file)); fs.writeFileSync(file, text, "utf8"); }
@@ -77,7 +89,16 @@ function createFixture(selected = TARGET) {
   for (const marker of ["Assets", "Packages", "ProjectSettings"]) mkdir(path.join(root, marker));
   for (const directory of ["config", "index", "adapter", "watch", "leases", "logs", "tmp"])
     mkdir(path.join(instanceRoot, directory));
+  write(path.join(instanceRoot, "config", "codedb-mcp.toml"), "# synthetic selected Provider config\n");
   write(materializerScript, "# synthetic materializer path identity\n");
+  const packageWrapperPath = path.join(payloadRoot, ...STABLE_WRAPPER_RELATIVE_PATH.split("/"));
+  const stableWrapperPath = path.join(root, ...STABLE_WRAPPER_RELATIVE_PATH.split("/"));
+  write(packageWrapperPath, TARGET_STABLE_WRAPPER_CONTENT);
+  write(
+    stableWrapperPath,
+    selected.generationId === TARGET.generationId
+      ? TARGET_STABLE_WRAPPER_CONTENT
+      : PREVIOUS_STABLE_WRAPPER_CONTENT);
 
   const generationFiles = new Map([
     ["coordinator/codedb-watch-coordinator.mjs", "// synthetic coordinator path identity\n"],
@@ -116,14 +137,24 @@ function createFixture(selected = TARGET) {
     generation_id: TARGET.generationId,
     bootstrap_protocol: TARGET.bootstrapProtocol,
     bootstrap_transitions: [{
+      source_tag: "v0.2.5-preview.5",
       source_package_version: PREVIOUS.packageVersion,
       source_payload_version: PREVIOUS.payloadVersion,
       source_payload_sequence: PREVIOUS.payloadSequence,
       source_generation_id: PREVIOUS.generationId,
       source_bootstrap_protocol: PREVIOUS.bootstrapProtocol,
-      source_stable_wrapper_sha256: "a".repeat(64)
+      source_marker_schema_version: 2,
+      source_host_use_gate_version: 1,
+      source_generation_lease_version: 2,
+      source_flat_file_count: 22,
+      source_flat_closure_sha256: "a".repeat(64),
+      source_stable_wrapper_sha256: PREVIOUS_STABLE_WRAPPER_SHA256
     }],
-    files: []
+    files: [{
+      source: STABLE_WRAPPER_RELATIVE_PATH,
+      target: STABLE_WRAPPER_RELATIVE_PATH,
+      sha256: TARGET_STABLE_WRAPPER_SHA256
+    }]
   };
   const contractPath = path.join(payloadRoot, "payload-manifest.json");
   json(contractPath, contract);
@@ -196,6 +227,10 @@ function createFixture(selected = TARGET) {
     coordinatorToken,
     watchManager,
     workerPath,
+    stableWrapperPath,
+    packageWrapperPath,
+    targetStableWrapperSha256: TARGET_STABLE_WRAPPER_SHA256,
+    previousStableWrapperSha256: PREVIOUS_STABLE_WRAPPER_SHA256,
     materializerScript,
     contractPath,
     contractSha256: hashFile(contractPath),
@@ -244,6 +279,7 @@ function installAdditionalFixtureInstance(fixture, identity) {
   const instanceRoot = path.join(runtimeRoot, "instances", instanceId);
   for (const directory of ["config", "index", "adapter", "watch", "leases", "logs", "tmp"])
     mkdir(path.join(instanceRoot, directory));
+  write(path.join(instanceRoot, "config", "codedb-mcp.toml"), "# synthetic selected Provider config\n");
   const workerPath = path.join(projectGenerationRoot, ...workerRelativePath.split("/"));
   const instanceManifestPath = path.join(instanceRoot, "instance.json");
   json(instanceManifestPath, {
@@ -315,12 +351,38 @@ function writeUpgradeMaterializer(fixture, stagedSelectionPath) {
   write(fixture.materializerScript, [
     "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
     "if ($Action -eq 'Upgrade') {",
+    `  [IO.File]::WriteAllBytes('${quote(fixture.stableWrapperPath)}', [IO.File]::ReadAllBytes('${quote(fixture.packageWrapperPath)}'))`,
     `  [IO.File]::WriteAllBytes('${quote(fixture.selectionPath)}', [IO.File]::ReadAllBytes('${quote(stagedSelectionPath)}'))`,
     "}",
     "Write-Output '[PASS] synthetic materializer'",
     "exit 0",
     ""
   ].join("\r\n"));
+}
+
+function rewriteContractForSyntheticTarget(fixture, target, source) {
+  const contract = JSON.parse(fs.readFileSync(fixture.contractPath, "utf8"));
+  contract.package_version = target.packageVersion;
+  contract.payload_version = target.payloadVersion;
+  contract.payload_sequence = target.payloadSequence;
+  contract.generation_id = target.generationId;
+  contract.bootstrap_protocol = target.bootstrapProtocol;
+  contract.bootstrap_transitions = [{
+    source_tag: "v0.2.5-preview.6",
+    source_package_version: source.packageVersion,
+    source_payload_version: source.payloadVersion,
+    source_payload_sequence: source.payloadSequence,
+    source_generation_id: source.generationId,
+    source_bootstrap_protocol: source.bootstrapProtocol,
+    source_marker_schema_version: 2,
+    source_host_use_gate_version: 1,
+    source_generation_lease_version: 2,
+    source_flat_file_count: 22,
+    source_flat_closure_sha256: "a".repeat(64),
+    source_stable_wrapper_sha256: TARGET_STABLE_WRAPPER_SHA256
+  }];
+  json(fixture.contractPath, contract);
+  fixture.contractSha256 = hashFile(fixture.contractPath);
 }
 
 function writeSlowProbeMaterializer(fixture, counterPath) {
@@ -339,18 +401,15 @@ function writeSlowProbeMaterializer(fixture, counterPath) {
   ].join("\r\n"));
 }
 
-function runSupervisor(fixture, command, extraEnv = {}, includeIdentity = true) {
+function runSupervisor(fixture, command, extraEnv = {}, includeIdentity = true, additionalArguments = []) {
   const args = [
     supervisorScript,
     command,
     "--root", fixture.root,
     "--runtime", fixture.runtime,
-    "--coordinator-script", fixture.coordinatorScript,
-    "--coordinator-runtime", fixture.coordinatorRuntime,
-    "--materializer-script", fixture.materializerScript,
-    "--payload-root", fixture.payloadRoot,
-    "--watch-manager", fixture.watchManager
+    "--package-root", fixture.packageRoot
   ];
+  args.push(...additionalArguments);
   if (includeIdentity) {
     args.push("--lifecycle-id", fixture.lifecycleId, "--supervisor-id", "harness");
   }
@@ -1018,6 +1077,7 @@ async function verifyActivationHandoff() {
     fixture.coordinatorScript = target.coordinatorScript;
     fixture.watchManager = target.watchManager;
     fixture.selected = TARGET;
+    write(fixture.stableWrapperPath, TARGET_STABLE_WRAPPER_CONTENT);
     fixture.coordinatorStopRequested = false;
 
     const restarted = await runSupervisor(fixture, "start");
@@ -1029,6 +1089,67 @@ async function verifyActivationHandoff() {
     assert.equal(currentState.selected_instance_id, target.instanceId);
     assert.equal(currentState.generation_disposition, "CURRENT");
     assert.equal(currentState.pipe_name, expectedSupervisorPipe(fixture.root, fixture.runtime));
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifySyntheticContractTargetBump() {
+  const fixture = createFixture(TARGET);
+  const target = installAdditionalFixtureInstance(fixture, SYNTHETIC_BUMP_TARGET);
+  try {
+    rewriteContractForSyntheticTarget(fixture, SYNTHETIC_BUMP_TARGET, TARGET);
+    writeUpgradeMaterializer(fixture, target.stagedSelectionPath);
+    await startCoordinator(fixture);
+
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const previousState = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    assert.equal(previousState.target_generation_id, SYNTHETIC_BUMP_TARGET.generationId);
+    assert.equal(previousState.selected_generation_id, TARGET.generationId);
+    assert.equal(previousState.generation_disposition, "TRUSTED_PREVIOUS");
+
+    const accepted = await requestPipe(
+      previousState.pipe_name,
+      previousState.auth_token,
+      { command: "materialize", action: "Upgrade" });
+    assert.equal(accepted.ok, true, accepted.error || "Synthetic target upgrade was not admitted.");
+    const upgraded = await waitForOperation(
+      previousState.pipe_name,
+      previousState.auth_token,
+      accepted.operation_id);
+    assert.equal(upgraded.ok, true, upgraded.error || "Synthetic target upgrade failed.");
+    assert.equal(upgraded.handoff_queued, true);
+    assert.equal(await waitForSupervisorExit(fixture, 15000), true);
+
+    const selection = JSON.parse(fs.readFileSync(fixture.selectionPath, "utf8"));
+    assert.equal(selection.instance_id, target.instanceId);
+    assert.equal(selection.generation_id, SYNTHETIC_BUMP_TARGET.generationId);
+    assert.equal(
+      hashFile(fixture.stableWrapperPath),
+      TARGET_STABLE_WRAPPER_SHA256,
+      "Synthetic target activation must route through the Package-owned stable wrapper.");
+
+    fixture.instanceId = target.instanceId;
+    fixture.instanceRoot = target.instanceRoot;
+    fixture.projectGenerationRoot = target.projectGenerationRoot;
+    fixture.coordinatorRuntime = target.coordinatorRuntime;
+    fixture.coordinatorStatePath = target.coordinatorStatePath;
+    fixture.coordinatorScript = target.coordinatorScript;
+    fixture.watchManager = target.watchManager;
+    fixture.selected = SYNTHETIC_BUMP_TARGET;
+    fixture.coordinatorStopRequested = false;
+
+    const restarted = await runSupervisor(fixture, "start");
+    assert.equal(restarted.status, 0, `${restarted.stdout}\n${restarted.stderr}`);
+    const currentState = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    assert.equal(currentState.target_generation_id, SYNTHETIC_BUMP_TARGET.generationId);
+    assert.equal(currentState.selected_generation_id, SYNTHETIC_BUMP_TARGET.generationId);
+    assert.equal(currentState.generation_disposition, "CURRENT");
   } finally {
     await cleanupFixture(fixture);
   }
@@ -1067,6 +1188,7 @@ async function main() {
   await verifyMissingChildEvidenceBlocksBlindRetry();
   await verifyCoordinatorOfflineRetirement();
   await verifyActivationHandoff();
+  await verifySyntheticContractTargetBump();
 
   await verifyRejected("duplicate runtime-contract key", TARGET, (fixture) => {
     const source = fs.readFileSync(fixture.contractPath, "utf8");
@@ -1081,6 +1203,22 @@ async function main() {
   await verifyRejected("tampered selected file", TARGET, (fixture) => {
     fs.appendFileSync(fixture.workerPath, "// tampered\n", "utf8");
   }, /hash|bytes|closure|drifted/i);
+
+  await verifyRejected("wrong current stable wrapper", TARGET, (fixture) => {
+    write(fixture.stableWrapperPath, PREVIOUS_STABLE_WRAPPER_CONTENT);
+  }, /stable wrapper|runtime identity|hash|bytes/i);
+
+  await verifyRejected("wrong previous stable wrapper", PREVIOUS, (fixture) => {
+    write(fixture.stableWrapperPath, TARGET_STABLE_WRAPPER_CONTENT);
+  }, /stable wrapper|runtime identity|hash|bytes/i);
+
+  await verifyRejected("missing stable wrapper", TARGET, (fixture) => {
+    fs.rmSync(fixture.stableWrapperPath, { force: true });
+  }, /stable wrapper|missing|file/i);
+
+  await verifyRejected("Package stable wrapper drift", TARGET, (fixture) => {
+    write(fixture.packageWrapperPath, "// drifted Package wrapper\n");
+  }, /stable wrapper|identity|hash|bytes/i);
 
   await verifyRejected("extra selected file", TARGET, (fixture) => {
     write(path.join(fixture.projectGenerationRoot, "extra.txt"), "extra\n");
@@ -1123,6 +1261,20 @@ async function main() {
     generationId: "poc.31"
   }, () => {}, /INVALID/);
 
+  const callerPathOverride = createFixture(TARGET);
+  try {
+    const mismatched = await runSupervisor(
+      callerPathOverride,
+      "status",
+      {},
+      true,
+      ["--payload-root", path.join(callerPathOverride.root, "caller-selected-payload")]);
+    assert.notEqual(mismatched.status, 0);
+    assert.match(mismatched.stderr, /Package-derived runtime path|payload root/i);
+  } finally {
+    await cleanupFixture(callerPathOverride);
+  }
+
   const forged = createFixture(TARGET);
   try {
     await startCoordinator(forged);
@@ -1151,7 +1303,7 @@ async function main() {
     await cleanupFixture(forged);
   }
 
-  console.log("[PASS] Supervisor runtime contract, asynchronous operation polling, single-flight reuse, terminal failure, reconnect continuity, authenticated shutdown, offline retirement, activation handoff, strict evidence, and immutable closure boundaries.");
+  console.log("[PASS] Supervisor Package-root routing, runtime contract, asynchronous operation polling, single-flight reuse, terminal failure, reconnect continuity, authenticated shutdown, offline retirement, activation handoff, strict evidence, and immutable closure boundaries.");
 }
 
 await main();
