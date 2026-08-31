@@ -69,6 +69,9 @@ The project-local command-owner implementation is documented in the
 [v0.3.0 P1-B Supervisor command ownership](v0.3.0-p1-supervisor-commands.md).
 Play/Domain Reload continuity and authenticated final shutdown are documented
 in [v0.3.0 P1-C Supervisor lifecycle ownership](v0.3.0-p1-supervisor-lifecycle.md).
+The reusable development and validation process is defined in the
+[development workflow](development-workflow.md); version roadmaps may add
+narrower, version-specific gates without duplicating the workflow.
 
 ## Version Support Policy
 
