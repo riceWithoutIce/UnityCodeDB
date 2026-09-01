@@ -39,6 +39,29 @@ Every task uses these stages in order:
 Do not enter a later stage while an earlier stage still has an open decision
 that can change the implementation.
 
+## Dispatch Protocol
+
+When a management session dispatches work to a Code session, the two sessions
+have distinct responsibilities:
+
+- The management session owns requirement alignment, task-card freezing, and
+  review. The Code session owns the bounded preflight, implementation, focused
+  verification, and checkpoint.
+- Immediately before dispatch, management performs one bounded target-state
+  check. Once the task card is frozen and sent, the Code session starts its
+  declared preflight and executes it without an ACK or a second approval.
+- After dispatch, management does not poll, wait, send a follow-up, or duplicate
+  the task while the target is active. It inspects again only on a returned
+  checkpoint, an explicit user request, or a platform-reported interruption or
+  attention event.
+- A user interruption or platform interruption does not prove that no work
+  started. Record the operational state as `INTERRUPTED`, preserve the latest
+  checkpoint, and require an explicit re-dispatch before retrying the slice.
+
+`ALIGN` is the pre-dispatch decision boundary, not a post-dispatch ACK phase.
+`CHECKPOINT` is the result boundary for the same frozen outcome; it does not
+create a second approval gate before implementation.
+
 ## Task Card
 
 Before editing, write a short task card containing:
@@ -51,9 +74,16 @@ In scope:
 Out of scope:
 Existing dirty files:
 Files allowed to change:
+Slice complexity:
+Dispatch mode (default: immediate execution):
+Active-time budget and pause accounting:
+Checkpoint triggers:
+Bounded inspection or extraction plan:
 Definition of done:
-L0 tests:
-Directly affected L1 tests:
+L0 tests (exact commands and filters):
+Directly affected L1 tests (exact commands and filters):
+Budget exceptions:
+EditMode request and authorization:
 User-facing acceptance:
 Real-environment acceptance:
 Forbidden actions:
@@ -80,6 +110,21 @@ The beginning of a task is read-only and bounded:
 Existing dirty worktree changes are preserved. They are not reset, checked out,
 cleaned, or rewritten unless the user explicitly authorizes that exact action.
 
+## Bounded Inspection
+
+The first pass over a large file, generated output, log, or session record is an
+index pass: collect only metadata, sizes, timestamps, counts, and matching line
+numbers needed to choose the next read. Then read the smallest relevant
+excerpts.
+
+- Do not load a complete session JSONL, log, generated artifact, or repository
+  dump into the active context.
+- A broad `rg` is allowed only with a path or symbol filter and the lower log
+  or session output limit in the budget table below.
+- When repeated extraction is justified, reuse an existing bounded helper or
+  make one small reusable extractor. Do not create one-off full dumps merely to
+  avoid selecting evidence.
+
 ## Slice Sizing
 
 The default slice has:
@@ -93,6 +138,54 @@ The default slice has:
 
 These are stop-and-split defaults, not a reason to force an artificial split in
 a tiny change. A slice that exceeds them must be checkpointed and divided.
+Before `IMPLEMENT`, any exception must be written in the task card with a
+reason and an explicit split point. Crossing C#, Node, and PowerShell is not by
+itself a reason to keep one large slice: keep the changes together only when
+they implement one observable contract and are mechanically coupled; otherwise
+split by authority or adapter.
+
+## Command, Output, And Retry Budgets
+
+The following are default hard workflow limits for one implementation slice.
+They are execution rules for the task owner; this document does not install an
+automatic command wrapper or hook. A future mechanical enforcer is a separate
+slice.
+
+| Budget | Warning | Limit and required action |
+| --- | --- | --- |
+| Active implementation time | `45 minutes` | `60 minutes`; write a checkpoint at the warning and stop the slice at the limit unless a task-card exception was authorized in advance. |
+| A normal command's captured output (stdout and stderr) | None | `64 KiB`; mark the result `TRUNCATED`, retain a concise summary, and narrow the next command. |
+| A log, session record, or broad `rg` result | None | `16 KiB` or `120` lines, whichever is reached first; keep only the relevant excerpt or an aggregate summary. This lower limit takes precedence over the normal command limit. |
+| Cumulative captured output in one slice | None | `256 KiB`; stop expanding the inspection, write a checkpoint, and continue only from that checkpoint. |
+| A normal non-test command's wall-clock wait (including reads and searches) | `60 seconds` | `120 seconds`; stop waiting and record `TIMEOUT`. Do not automatically terminate the process. |
+| A focused test command's wall-clock wait | `120 seconds` | `300 seconds`; stop waiting and record `TIMEOUT`. Do not automatically terminate Unity or another external process. |
+| The same command or semantically equivalent filter after failure | None | At most `1` retry, and only after recording a concrete correction or changed prerequisite. A second failure stops the slice and requires a checkpoint. |
+| Context compaction in one slice | None | At most `1`; after the first compaction, write a checkpoint before doing more work and do not expand the slice. |
+
+Count output limits in UTF-8 bytes. When a tool cannot expose a byte count, use
+a conservative estimate and stop before the applicable limit. A retry means
+the same logical operation even if whitespace, ordering, or a display-only
+argument changes. Warnings are a signal to reduce scope; they do not authorize
+a blind rerun. A timeout stops waiting, not ownership or lifecycle cleanup:
+starting, pausing, and closing Unity or another external process still requires
+explicit authorization and a recorded cleanup plan.
+Any planned exception to a numeric limit must be written in the task card and
+authorized before the command starts; otherwise the limit is hard.
+
+### Budget Ledger And Stop Gate
+
+Keep a small ledger for each slice: active minutes, paused or interrupted
+minutes, compaction count, retry count, and cumulative captured output. Calendar
+waiting is not active work, but it is recorded separately so elapsed time is
+not mistaken for implementation effort.
+
+The first of the following events closes the current implementation window and
+requires a checkpoint before another command: the task-card active-time budget
+is reached (by default, checkpoint at 45 minutes and stop at 60), the first
+context compaction occurs, captured output is near the cumulative limit, or a
+second independent behavior or blocker appears. A second compaction or a
+repeated budget overrun stops the slice and requires a new slice; continuation
+may not silently enlarge the original task card.
 
 ## Implementation Rules
 
@@ -142,6 +235,66 @@ Do not repeatedly rerun unchanged tests when the source, test, and environment
 are unchanged. An unrelated failure is recorded as `FOLLOW-UP` unless it
 directly affects the current definition of done.
 
+## Unity EditMode Authorization
+
+Unity EditMode is a separate evidence class and is not a default implementation
+step. Classify the slice before `IMPLEMENT` and request EditMode only when the
+lower-cost evidence cannot answer the declared criterion:
+
+Creating a Unity project or starting a Unity process is forbidden during normal
+implementation. Only a separately declared and explicitly authorized
+acceptance request may start an existing project or process, with the project
+path, exact criterion, maximum wait, and cleanup ownership recorded below.
+
+### Standard Development Validation Project
+
+`<repository-root>/UnityValidationProject` is the only default EditMode
+validation project for UnityCodeDB development. Resolve and record its absolute
+path from the current repository root before an authorized run; do not hard-code
+another checkout. It is a tracked Unity 2022.3 project with a relative reference
+to the sibling `com.rice.ai-codedb` package.
+
+- The tracked project's presence does not authorize starting Unity. Every run
+  still requires the EditMode request below and an exact focused test filter.
+- Do not create, copy, regenerate, or substitute another Unity project during
+  an implementation slice. If the tracked project is missing, invalid, or
+  cannot be opened with its declared Unity version, record `BLOCKED`.
+- Treat `Assets`, `Packages`, and `ProjectSettings` as the validation-project
+  contract. Change them only in an explicitly scoped validation-project
+  maintenance task. Unity-generated state, logs, and test results remain under
+  the project's ignored paths.
+- Evidence from this project is development EditMode evidence only. It does not
+  replace real consumer-project, third-party Package-only, released-artifact,
+  or Codex Desktop acceptance.
+
+- `Low`: documentation, configuration, pure logic, parsers, schemas, or static
+  harness work. Do not start Unity EditMode.
+- `Medium`: an isolated editor API, package contract, or direct consumer whose
+  behavior is not fully covered by L0. EditMode may be requested as one focused
+  L1 check; it is not automatic.
+- `High`: Unity lifecycle, asset import/serialization, scene/project state, or
+  multiple Unity boundaries. If that boundary is part of the definition of
+  done, an EditMode request is required; it must remain a focused filter rather
+  than a broad project regression. If it is not part of the definition of done,
+  record the gate as `DEFERRED` instead of starting Unity opportunistically.
+
+Every request must state all of the following before the process is started:
+
+```text
+Project path:
+Purpose and criterion:
+Exact command and test filter:
+Evidence class:
+Expected duration / maximum wait:
+Cleanup and ownership handoff:
+```
+
+The request must receive explicit authorization. The focused-test budget above
+applies to the approved command, and the result is labeled `PASS`, `FAIL`,
+`BLOCKED`, or `DEFERRED`. Unity startup, shutdown, and any process left after a
+timeout are recorded in the checkpoint; a timeout never authorizes an automatic
+`Stop-Process`.
+
 ## Evidence Labels
 
 Every validation result uses one of these labels:
@@ -155,6 +308,18 @@ Every validation result uses one of these labels:
 Static harnesses, Unity EditMode tests, real Unity behavior, Codex Desktop
 behavior, released artifacts, and third-party Package-only behavior are
 separate evidence classes. One class never substitutes for another.
+
+## Status Namespaces
+
+Workflow execution status and product or runtime status are separate namespaces.
+Operational states such as `DISPATCHED`, `ACTIVE`, `CHECKPOINT`, `BLOCKED`,
+`DEFERRED`, and `INTERRUPTED` describe this workflow; version-specific states
+such as `READY`, `REINSTALL_REQUIRED`, or `NEEDS_ATTENTION` belong to the
+product contract. One namespace must not be inferred from the other.
+
+Any persistent product `NEEDS_ATTENTION` state must expose a reason, owner, next
+action, and exit criterion. `READY` is set only by the acceptance evidence
+declared for that product state, not by a focused test pass alone.
 
 ## Context And Checkpoints
 
@@ -182,11 +347,23 @@ Next slice entry point:
 A new task starts from the latest checkpoint rather than reloading the whole
 roadmap and all prior tool output.
 
+After an interruption, do not infer that the slice was never started and do not
+rerun it automatically. Use the latest checkpoint and the task-card owner to
+decide whether to resume or re-dispatch.
+
 ## Acceptance And Handoff
 
 User-facing acceptance must be written in terms a normal user can observe and
 perform. Do not ask the user to inspect PIDs, hashes, leases, internal JSON, or
 developer logs as the ordinary acceptance procedure.
+
+Every user-facing acceptance entry has this shape:
+
+```text
+User action:
+Visible result:
+Technical evidence (separate from the user procedure):
+```
 
 Real Unity, Codex Desktop, released-artifact, and third-party acceptance are
 separate tasks unless the current task explicitly declares them in scope.

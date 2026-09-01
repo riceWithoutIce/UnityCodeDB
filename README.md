@@ -145,9 +145,17 @@ com.rice.ai-codedb/
   Tools~/          Host payload materializer
   Tests~/          Standalone materializer fixture
   Documentation~/ Package documentation
+UnityValidationProject/
+  Tracked Unity 2022.3 host for focused development EditMode validation
 ```
 
 ## Validation
+
+The repository-tracked Unity validation host is `UnityValidationProject/`. It
+resolves the sibling package through a relative `file:` dependency. Starting
+Unity still requires the focused authorization recorded in the development
+workflow; the project is not an automatic full-suite or release-acceptance
+gate.
 
 Run the standalone package boundary fixture from the repository root. During
 development, select the materializer slice that matches the changed behavior:

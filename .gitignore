@@ -8,6 +8,8 @@
 #
 # Recommended: add any editor/OS/tool-specific ignore rules from the Global/ templates as needed.
 # See: https://github.com/github/gitignore/tree/main/Global
+# The tracked UnityValidationProject owns its nested generated paths through
+# UnityValidationProject/.gitignore.
 #
 /[Ll]ibrary/
 /[Tt]emp/

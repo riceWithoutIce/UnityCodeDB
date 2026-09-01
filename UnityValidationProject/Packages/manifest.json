@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "com.rice.ai-codedb": "file:../com.rice.ai-codedb",
+    "com.unity.test-framework": "1.1.33",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.uielements": "1.0.0"
+  },
+  "testables": [
+    "com.rice.ai-codedb"
+  ]
+}
