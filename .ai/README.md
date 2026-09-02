@@ -57,6 +57,29 @@ not accept the task. A `RESULT` may contain a commit proposal, but it never
 authorizes a commit. `VERIFICATION` is read-only evidence bound to an exact
 SHA. `DECISION` records the user's accept, fix, defer, or stop decision.
 
+## Completion Routing
+
+Every terminal task handoff appends the following footer to the relevant packet
+and the session's completion message:
+
+```text
+Current task:
+Current status:
+Next notification:
+Next action:
+Human decision or authorization required:
+```
+
+The footer identifies the next role/session and bounded action in order. It is
+an explicit coordination record only; it does not automatically dispatch,
+poll, wait, duplicate, or interrupt another session. `WAITING_FOR_USER_DECISION`
+is used when no session should be notified yet.
+
+Default routing is Coder -> Planner for completed implementation, Planner ->
+Verifier for review, and Verifier -> Planner/User for findings and disposition.
+A session may record this route, but it must not bypass the routing owner or
+turn the footer into an automatic cross-session dispatch.
+
 ## Task storage
 
 Create a task directory only when a task is frozen:

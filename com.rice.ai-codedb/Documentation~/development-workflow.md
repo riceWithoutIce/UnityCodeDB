@@ -69,6 +69,52 @@ exact files or hunks, message, and expected scope in its `RESULT` or
 explicitly initiates that exact commit operation. Push and publish remain
 separate human-gated operations.
 
+## Completion Routing
+
+At the end of every terminal task turn, the owning session appends a concise
+completion-routing footer to both its task packet and its user-facing handoff.
+Terminal states include `COMPLETE`, `PARTIAL`, `BLOCKED`, `DEFERRED`, and
+`INTERRUPTED`.
+
+```text
+Current task:
+Current status:
+Next notification:
+Next action:
+Human decision or authorization required:
+```
+
+`Next notification` names the responsible role and exact session alias (for
+example, `UnityCodeDB v0.3 Planner`) and states the one bounded action it must
+take next. When more than one handoff is necessary, list the notifications in
+order; do not broadcast them without an owner. If no handoff is ready, write
+`WAITING_FOR_USER_DECISION` and state the decision needed.
+
+This footer is a coordination record, not an automatic dispatch. It does not
+authorize polling, waiting, duplicate dispatch, or interruption of an active
+session. Planner remains the routing owner for review and repair decisions;
+Verifier returns findings to Planner/User and does not assign repairs directly
+to Coder.
+
+Default role routing is:
+
+- Planner completion: identify whether Coder or Verifier receives the next
+  bounded action, according to the frozen task card.
+- Coder completion: notify Planner with the result, evidence, and any commit
+  proposal; Planner decides whether to start Verifier review.
+- Verifier completion: notify Planner/User with the review conclusion and
+  disposition needed; do not send a direct repair request to Coder.
+
+A typical footer may therefore read:
+
+```text
+Current task: cdb-v0.3-p0-s01
+Current status: COMPLETE
+Next notification: UnityCodeDB v0.3 Planner
+Next action: decide commit authorization, then route the exact SHA to Verifier
+Human decision or authorization required: commit confirmation
+```
+
 ## Task Card
 
 Before editing, write a short task card containing:
