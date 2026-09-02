@@ -93,6 +93,7 @@ namespace Rice.AI.Codedb.Editor
         private readonly Dictionary<string, AICodedbRuntimeTransition> _transitions;
 
         internal AICodedbRuntimeIdentity Target { get; }
+        internal AICodedbControlContractIdentity ControlContract { get; }
         internal string TargetStableWrapperSha256 { get; }
         internal string Sha256 { get; }
 
@@ -100,11 +101,13 @@ namespace Rice.AI.Codedb.Editor
 
         internal AICodedbPackageRuntimeContract(
             AICodedbRuntimeIdentity target,
+            AICodedbControlContractIdentity controlContract,
             string sha256,
             string targetStableWrapperSha256,
             IEnumerable<AICodedbRuntimeTransition> transitions)
         {
             Target = target;
+            ControlContract = controlContract;
             TargetStableWrapperSha256 = targetStableWrapperSha256 ?? string.Empty;
             Sha256 = sha256 ?? string.Empty;
             _transitions = new Dictionary<string, AICodedbRuntimeTransition>(StringComparer.Ordinal);
@@ -198,6 +201,7 @@ namespace Rice.AI.Codedb.Editor
                     StringComparison.Ordinal))
                 throw new InvalidOperationException("Package runtime contract schema or owner is invalid.");
 
+            var controlContract = ReadControlContract(document, label);
             var target = ReadIdentity(document, string.Empty, label);
             ValidateIdentity(target, true, target.PayloadSequence);
             var targetStableWrapperSha256 = ReadTargetStableWrapperSha256(
@@ -263,9 +267,54 @@ namespace Rice.AI.Codedb.Editor
 
             return new AICodedbPackageRuntimeContract(
                 target,
+                controlContract,
                 GetSha256(bytes),
                 targetStableWrapperSha256,
                 transitions);
+        }
+
+        private static AICodedbControlContractIdentity ReadControlContract(
+            Dictionary<string, object> document,
+            string label)
+        {
+            object value;
+            if (!document.TryGetValue("control_contract", out value))
+                throw new InvalidOperationException(label + " is missing required property control_contract.");
+
+            var controlDocument = AICodedbStrictJson.RequireObject(value, "Package control contract");
+            var id = AICodedbStrictJson.GetRequiredString(
+                controlDocument,
+                "id",
+                "Package control contract");
+            var version = AICodedbStrictJson.GetRequiredInt32(
+                controlDocument,
+                "version",
+                "Package control contract");
+            var schemaVersion = AICodedbStrictJson.GetRequiredInt32(
+                controlDocument,
+                "schema_version",
+                "Package control contract");
+            var sha256 = AICodedbStrictJson.GetRequiredString(
+                controlDocument,
+                "sha256",
+                "Package control contract").ToLowerInvariant();
+
+            if (!AICodedbControlContract.IsValidId(id)
+                || version <= 0
+                || schemaVersion != AICodedbControlContractIdentity.CurrentSchemaVersion
+                || !AICodedbControlContract.IsSha256(sha256))
+            {
+                throw new InvalidOperationException("Package control contract identity is invalid.");
+            }
+
+            var identity = new AICodedbControlContractIdentity(
+                id,
+                version,
+                schemaVersion,
+                sha256);
+            if (!identity.IsValid)
+                throw new InvalidOperationException("Package control contract identity hash is invalid.");
+            return identity;
         }
 
         private static string ReadTargetStableWrapperSha256(

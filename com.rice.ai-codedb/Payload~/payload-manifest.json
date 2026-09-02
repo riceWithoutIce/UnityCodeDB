@@ -1,6 +1,12 @@
 {
     "schema_version":  1,
     "managed_by":  "com.rice.ai-codedb",
+    "control_contract":  {
+                              "id":  "v0.3-control",
+                              "version":  1,
+                              "schema_version":  1,
+                              "sha256":  "7c85ebc534091fcb53d40eedd9eadf869c09caf77fb56a35aeb22e0e8aea09a1"
+                          },
     "package_version":  "0.2.5-preview.5",
     "payload_version":  "poc.34",
     "payload_sequence":  34,

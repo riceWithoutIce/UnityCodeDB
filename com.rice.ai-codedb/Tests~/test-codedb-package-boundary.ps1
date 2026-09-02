@@ -270,6 +270,44 @@ Assert-True -Condition ($thirdPartyNotices.IndexOf("https://streamlinehq.com", [
 $payloadManifest = Get-Content -LiteralPath $payloadManifestPath -Raw | ConvertFrom-Json
 Assert-Equal -Actual $payloadManifest.schema_version -Expected 1 -Label "Payload schema"
 Assert-Equal -Actual $payloadManifest.managed_by -Expected $packageManifest.name -Label "Payload manager"
+$controlContract = $payloadManifest.control_contract
+Assert-True -Condition ($null -ne $controlContract) -Message "Payload control contract is missing."
+$controlContractIdentitySource = [System.IO.File]::ReadAllText(
+    (Join-Path $packageRoot "Editor\AICodedbControlContract.cs"))
+$controlContractIdMatch = [regex]::Match(
+    $controlContractIdentitySource,
+    'internal\s+const\s+string\s+DefaultId\s*=\s*"(?<value>[^"]+)";')
+$controlContractVersionMatch = [regex]::Match(
+    $controlContractIdentitySource,
+    'internal\s+const\s+int\s+DefaultVersion\s*=\s*(?<value>\d+);')
+$controlContractSchemaMatch = [regex]::Match(
+    $controlContractIdentitySource,
+    'internal\s+const\s+int\s+CurrentSchemaVersion\s*=\s*(?<value>\d+);')
+Assert-True `
+    -Condition ($controlContractIdMatch.Success -and $controlContractVersionMatch.Success -and $controlContractSchemaMatch.Success) `
+    -Message "Control contract source identity constants are missing."
+$expectedControlContractId = $controlContractIdMatch.Groups["value"].Value
+$expectedControlContractVersion = [int]$controlContractVersionMatch.Groups["value"].Value
+$expectedControlContractSchema = [int]$controlContractSchemaMatch.Groups["value"].Value
+$canonicalControlContract = [string]::Join("`n", @(
+    "com.rice.ai-codedb",
+    "control-contract",
+    $expectedControlContractId,
+    $expectedControlContractVersion.ToString([Globalization.CultureInfo]::InvariantCulture),
+    $expectedControlContractSchema.ToString([Globalization.CultureInfo]::InvariantCulture)
+))
+$controlContractHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $expectedControlContractSha256 = [BitConverter]::ToString(
+        $controlContractHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonicalControlContract)))
+    $expectedControlContractSha256 = $expectedControlContractSha256.Replace("-", "").ToLowerInvariant()
+} finally {
+    $controlContractHasher.Dispose()
+}
+Assert-Equal -Actual $controlContract.id -Expected $expectedControlContractId -Label "Control contract id"
+Assert-Equal -Actual $controlContract.version -Expected $expectedControlContractVersion -Label "Control contract version"
+Assert-Equal -Actual $controlContract.schema_version -Expected $expectedControlContractSchema -Label "Control contract schema"
+Assert-Equal -Actual $controlContract.sha256 -Expected $expectedControlContractSha256 -Label "Control contract canonical hash"
 Assert-Equal `
     -Actual $payloadManifest.package_version `
     -Expected $expectedHostCompatibilityPackageVersion `
@@ -548,6 +586,10 @@ $runtimeContractSource = [System.IO.File]::ReadAllText($runtimeContractSourcePat
 foreach ($requiredRuntimeContractBoundary in @(
     '"Payload~"',
     '"payload-manifest.json"',
+    '"control_contract"',
+    'AICodedbControlContractIdentity',
+    'ControlContract { get; }',
+    'ReadControlContract(',
     "AICodedbStrictJson.ParseObject(",
     "bootstrap_transitions",
     "AICodedbRuntimeGenerationDisposition.Current",
