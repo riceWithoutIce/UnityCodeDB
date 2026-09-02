@@ -561,6 +561,161 @@ foreach ($requiredRuntimeContractBoundary in @(
         -Message "Package runtime contract reader is missing boundary: $requiredRuntimeContractBoundary"
 }
 
+$controlContractSourcePath = Join-Path $packageRoot "Editor\AICodedbControlContract.cs"
+$controlContractMetaPath = "$controlContractSourcePath.meta"
+Assert-True -Condition (Test-Path -LiteralPath $controlContractSourcePath -PathType Leaf) -Message "Control contract migration source is missing."
+Assert-True -Condition (Test-Path -LiteralPath $controlContractMetaPath -PathType Leaf) -Message "Control contract migration meta file is missing."
+$controlContractSource = [System.IO.File]::ReadAllText($controlContractSourcePath)
+foreach ($requiredMigrationBoundary in @(
+    "AICodedbControlContractMigrationState",
+    "ObsoleteReinstallRequired",
+    "InvalidOrAmbiguous",
+    "BlocksAutomaticStart",
+    "AICodedbControlContractMigrationStore",
+    "InspectNamespace(",
+    "AICodedbPackageRuntimeContractStore.Read("
+)) {
+    Assert-True `
+        -Condition ($controlContractSource.IndexOf($requiredMigrationBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Control contract migration source is missing boundary: $requiredMigrationBoundary"
+}
+foreach ($forbiddenMigrationMutation in @(
+    "File.Delete(",
+    "Directory.Delete(",
+    "Process.Kill("
+)) {
+    Assert-True `
+        -Condition ($controlContractSource.IndexOf($forbiddenMigrationMutation, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Control contract classification must remain read-only: $forbiddenMigrationMutation"
+}
+foreach ($requiredFailClosedClassifierBoundary in @(
+    "if (!stateExists || !lockExists)",
+    "LooksLikeKnownLegacyEvidence(",
+    "IsCompleteKnownLegacyEvidence(",
+    "HasCurrentContractEvidence(",
+    "LegacyStateRequiredFields",
+    "LegacyLockRequiredFields",
+    "LegacyStateOptionalFields",
+    "LegacySupervisorStateSchemaVersion = 3",
+    "schema == LegacySupervisorStateSchemaVersion",
+    "supervisorProtocol == LegacySupervisorProtocolVersion",
+    "supervisorProtocol == LegacySupervisorProtocolVersionV1",
+    "SameOwner(state, owner)",
+    "contains an unknown or conflicting property",
+    "!string.Equals(pipeName, expectedPipe",
+    "&& !string.IsNullOrWhiteSpace(recordedPath)"
+)) {
+    Assert-True `
+        -Condition ($controlContractSource.IndexOf($requiredFailClosedClassifierBoundary, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Control contract classifier is missing fail-closed boundary: $requiredFailClosedClassifierBoundary"
+}
+foreach ($forbiddenPermissiveClassifierBoundary in @(
+    "if (legacy || LooksLikeKnownLegacyEvidence(evidence))",
+    "LegacySupervisorStateSchemaVersionV2",
+    "var evidence = state ?? owner;",
+    "(string.IsNullOrWhiteSpace(recordedPath)"
+)) {
+    Assert-True `
+        -Condition ($controlContractSource.IndexOf($forbiddenPermissiveClassifierBoundary, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Control contract classifier still accepts ambiguous evidence: $forbiddenPermissiveClassifierBoundary"
+}
+$legacyEvidenceValidator = [regex]::Match(
+    $controlContractSource,
+    '(?s)private\s+static\s+bool\s+IsCompleteKnownLegacyEvidence\s*\(.*?(?<body>\{.*?\})\s*\r?\n\s*private\s+static\s+bool\s+HasCurrentContractEvidence')
+Assert-True -Condition $legacyEvidenceValidator.Success -Message "Package boundary could not isolate the known legacy evidence validator."
+foreach ($requiredLegacyEvidenceField in @(
+    '"evidence_schema_version"',
+    '"root"',
+    '"project_identity"',
+    '"runtime"',
+    '"pipe_name"',
+    '"generation_id"',
+    '"target_generation_id"',
+    '"selected_generation_id"',
+    '"selected_instance_id"',
+    '"runtime_contract_sha256"',
+    '"generation_disposition"',
+    '"lifecycle_id"',
+    '"supervisor_id"',
+    '"owner_epoch"',
+    '"supervisor_pid"',
+    '"publication_phase"',
+    '"owner_evidence"',
+    '"process_start_identity"',
+    '"executable_path"',
+    '"argv_sha256"',
+    '"command_line_sha256"',
+    '"protocol_version"',
+    '"auth_token"',
+    '"desired_state"',
+    '"editor_demand"',
+    '"readiness_state"',
+    '"reason_code"',
+    '"detail"',
+    '"last_event"',
+    '"last_event_detail"',
+    '"owner_started_at_utc"',
+    "IsExpectedSupervisorPipeName(",
+    "AICodedbEditorLifecycle.CreateProjectIdentity(projectRoot)",
+    "AICodedbControlContract.IsSha256(authToken)",
+    "evidencePid == supervisorPid"
+)) {
+    Assert-True `
+        -Condition ($legacyEvidenceValidator.Groups["body"].Value.IndexOf($requiredLegacyEvidenceField, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Known legacy evidence validator is missing complete evidence boundary: $requiredLegacyEvidenceField"
+}
+foreach ($requiredRejectedCurrentContractField in @(
+    '"control_contract_id"',
+    '"control_contract_version"',
+    '"control_contract_schema_version"',
+    '"control_contract_sha256"',
+    '"control_namespace"'
+)) {
+    Assert-True `
+        -Condition ($controlContractSource.IndexOf($requiredRejectedCurrentContractField, $controlContractSource.IndexOf("HasCurrentContractEvidence("), [StringComparison]::Ordinal) -ge 0) `
+        -Message "Known legacy evidence validator does not reject current-contract lookalikes: $requiredRejectedCurrentContractField"
+}
+$currentNamespacePriority = [regex]::Match(
+    $controlContractSource,
+    'if\s*\(\s*current\.Kind\s*==\s*NamespaceEvidenceKind\.Current\s*\)')
+$legacyInvalidFallback = [regex]::Match(
+    $controlContractSource,
+    '(?s)if\s*\(\s*legacy\.Kind\s*==\s*NamespaceEvidenceKind\.Invalid\s*\)\s*return\s+Invalid')
+Assert-True -Condition $currentNamespacePriority.Success -Message "Control contract classifier does not prioritize the current namespace."
+Assert-True -Condition $legacyInvalidFallback.Success -Message "Control contract classifier is missing the legacy invalid fallback."
+Assert-True `
+    -Condition ($currentNamespacePriority.Index -lt $legacyInvalidFallback.Index) `
+    -Message "Malformed legacy evidence is evaluated before the current namespace result."
+Assert-True `
+    -Condition ($controlContractSource.IndexOf("Legacy namespace evidence was retained for diagnostics and ignored", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Current namespace classification does not explicitly ignore malformed legacy evidence."
+
+$migrationTestsSourcePath = Join-Path $packageRoot "Tests\Editor\AICodedbManagerUiTests.cs"
+Assert-True -Condition (Test-Path -LiteralPath $migrationTestsSourcePath -PathType Leaf) -Message "Control contract migration tests are missing."
+$migrationTestsSource = [System.IO.File]::ReadAllText($migrationTestsSourcePath)
+foreach ($requiredMigrationTest in @(
+    "Read_RecognizesCompleteLegacyStateAndLock",
+    "Read_RejectsSignatureOnlyLegacyEvidence",
+    "Read_RejectsStateOnlyLegacyEvidence",
+    "Read_RejectsLockOnlyLegacyEvidence",
+    "Read_RejectsMissingStateOrLockSpecificFields",
+    "Read_RejectsWrongLegacyPathIdentity",
+    "Read_RejectsDirectoryInEvidencePath",
+    "Read_RejectsMalformedLegacyJson",
+    "Read_RejectsStateLockOwnerConflict",
+    "Read_RejectsStateSpecificFieldOnLegacyLock",
+    "Read_RejectsUnknownLegacyFieldWithoutCurrentNamespace",
+    "Read_RejectsLegacyCurrentContractLookalike",
+    "Read_PreservesAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed",
+    "AICodedbControlContractMigrationStore.Read("
+)) {
+    Assert-True `
+        -Condition ($migrationTestsSource.IndexOf($requiredMigrationTest, [StringComparison]::Ordinal) -ge 0) `
+        -Message "Focused migration behavior matrix is missing: $requiredMigrationTest"
+}
+
+
+
 $runtimePolicySources = @(
     Get-ChildItem -LiteralPath (Join-Path $packageRoot "Editor") -Recurse -File -Filter "*.cs"
     Get-ChildItem -LiteralPath (Join-Path $packageRoot "Tools~") -Recurse -File | Where-Object { $_.Extension -in @(".mjs", ".ps1") }

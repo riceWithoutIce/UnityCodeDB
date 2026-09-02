@@ -1,5 +1,9 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;using System.IO;
 using System.Text;
 using NUnit.Framework;
 using UnityEditor.PackageManager;
@@ -609,6 +613,620 @@ namespace Rice.AI.Codedb.Editor.Tests
         private static AICodedbCommandResult Result(string output)
         {
             return new AICodedbCommandResult(0, output, string.Empty, false);
+        }
+    }
+
+    internal sealed class AICodedbControlContractMigrationClassifierTests
+    {
+        private static readonly AICodedbControlContractIdentity Contract =
+            AICodedbControlContract.CreateDefaultIdentity();
+
+        private string _projectRoot;
+        private string _packageRoot;
+
+        [SetUp]
+        public void SetUp()
+        {
+            _projectRoot = Path.Combine(
+                Path.GetTempPath(),
+                "Rice-AICodedb-ControlContract-Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "Assets"));
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "Packages"));
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "ProjectSettings"));
+            _packageRoot = AICodedbPaths.PackageRootPath;
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            if (Directory.Exists(_projectRoot))
+                Directory.Delete(_projectRoot, true);
+        }
+
+        [Test]
+        public void Read_RecognizesCompleteLegacyStateAndLock()
+        {
+            var fixture = CreateLegacyEvidence();
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            Assert.That(
+                status.State,
+                Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired));
+            Assert.That(status.RequiresReinstall, Is.True);
+            Assert.That(status.BlocksAutomaticStart, Is.True);
+        }
+
+        [Test]
+        public void Read_RejectsSignatureOnlyLegacyEvidence()
+        {
+            var fixture = CreateLegacyEvidence();
+            var signatureOnly = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                { "schema_version", 3 },
+                { "managed_by", "com.rice.ai-codedb" },
+                { "role", "project-local-supervisor" },
+                { "root", fixture.State["root"] },
+                { "runtime", fixture.State["runtime"] },
+                { "pipe_name", fixture.State["pipe_name"] }
+            };
+            fixture.State = CloneDocument(signatureOnly);
+            fixture.Lock = CloneDocument(signatureOnly);
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsStateOnlyLegacyEvidence()
+        {
+            var fixture = CreateLegacyEvidence();
+            PublishEvidence(fixture, true, false);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsLockOnlyLegacyEvidence()
+        {
+            var fixture = CreateLegacyEvidence();
+            PublishEvidence(fixture, false, true);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsMissingStateOrLockSpecificFields()
+        {
+            var stateFixture = CreateLegacyEvidence();
+            stateFixture.State.Remove("desired_state");
+            PublishEvidence(stateFixture);
+            AssertInvalid(
+                AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot));
+
+            TearDownFixtureRoot();
+            CreateFixtureRoot();
+            var lockFixture = CreateLegacyEvidence();
+            lockFixture.Lock.Remove("owner_started_at_utc");
+            PublishEvidence(lockFixture);
+            AssertInvalid(
+                AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot));
+        }
+
+        [Test]
+        public void Read_RejectsWrongLegacyPathIdentity()
+        {
+            var fixture = CreateLegacyEvidence();
+            var wrongRuntime = AICodedbPaths.NormalizePath(
+                Path.Combine(_projectRoot, "AIWork", ".runtime", "codedb", "other-runtime"));
+            fixture.State["runtime"] = wrongRuntime;
+            fixture.Lock["runtime"] = wrongRuntime;
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsDirectoryInEvidencePath()
+        {
+            var fixture = CreateLegacyEvidence();
+            Directory.CreateDirectory(fixture.RuntimePath);
+            Directory.CreateDirectory(Path.Combine(fixture.RuntimePath, "supervisor-state.json"));
+            WriteJson(
+                Path.Combine(fixture.RuntimePath, "supervisor.lock"),
+                fixture.Lock);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsMalformedLegacyJson()
+        {
+            var fixture = CreateLegacyEvidence();
+            Directory.CreateDirectory(fixture.RuntimePath);
+            WriteUtf8NoBom(
+                Path.Combine(fixture.RuntimePath, "supervisor-state.json"),
+                "{\"schema_version\":3");
+            WriteJson(
+                Path.Combine(fixture.RuntimePath, "supervisor.lock"),
+                fixture.Lock);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsStateLockOwnerConflict()
+        {
+            var fixture = CreateLegacyEvidence();
+            fixture.Lock["owner_epoch"] = "different-owner-epoch";
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsStateSpecificFieldOnLegacyLock()
+        {
+            var fixture = CreateLegacyEvidence();
+            fixture.Lock["desired_state"] = "enabled";
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsUnknownLegacyFieldWithoutCurrentNamespace()
+        {
+            var fixture = CreateLegacyEvidence();
+            fixture.State["unexpected_legacy_field"] = "must be rejected";
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_RejectsLegacyCurrentContractLookalike()
+        {
+            var fixture = CreateLegacyEvidence();
+            foreach (var document in new[] { fixture.State, fixture.Lock })
+            {
+                document["control_contract_id"] = Contract.Id;
+                document["control_contract_version"] = Contract.Version;
+                document["control_contract_schema_version"] = Contract.SchemaVersion;
+                document["control_contract_sha256"] = Contract.Sha256;
+                document["control_namespace"] = fixture.RuntimePath;
+            }
+            PublishEvidence(fixture);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            AssertInvalid(status);
+        }
+
+        [Test]
+        public void Read_PreservesAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed()
+        {
+            var current = CreateCurrentEvidence();
+            PublishEvidence(current);
+
+            var legacy = CreateLegacyEvidence();
+            legacy.State["unexpected_legacy_field"] = "must be rejected";
+            PublishEvidence(legacy);
+
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
+
+            Assert.That(
+                status.State,
+                Is.EqualTo(AICodedbControlContractMigrationState.CompatibleStale));
+            Assert.That(status.DiagnosticDetail, Does.Contain("ignored"));
+        }
+
+        private sealed class EvidenceFixture
+        {
+            internal string RuntimePath;
+            internal Dictionary<string, object> State;
+            internal Dictionary<string, object> Lock;
+        }
+
+        private EvidenceFixture CreateLegacyEvidence()
+        {
+            var runtimePath = AICodedbControlContract.GetLegacySupervisorRuntimePath(_projectRoot);
+            string pipeName;
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
+                    _projectRoot,
+                    runtimePath,
+                    out pipeName),
+                Is.True);
+
+            var root = AICodedbPaths.NormalizePath(_projectRoot).TrimEnd('/', '\\');
+            var ownerEvidence = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                { "schema_version", 1 },
+                { "pid", 424242 },
+                { "process_start_identity", "638000000000000000" },
+                { "executable_path", Path.Combine(_projectRoot, "legacy-node.exe") },
+                { "argv_sha256", new string('b', 64) },
+                { "command_line_sha256", new string('c', 64) }
+            };
+            var common = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                { "schema_version", 3 },
+                { "evidence_schema_version", 1 },
+                { "managed_by", "com.rice.ai-codedb" },
+                { "role", "project-local-supervisor" },
+                { "root", root },
+                { "project_identity", AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot) },
+                { "runtime", runtimePath },
+                { "pipe_name", "\\\\.\\pipe\\" + pipeName },
+                { "generation_id", "poc.34" },
+                { "target_generation_id", "poc.34" },
+                { "selected_generation_id", "poc.34" },
+                { "selected_instance_id", "0123456789abcdef0123456789abcdef" },
+                { "runtime_contract_sha256", new string('a', 64) },
+                { "supervisor_protocol_version", 2 },
+                { "generation_disposition", "CURRENT" },
+                { "lifecycle_id", "legacy-lifecycle" },
+                { "supervisor_id", "legacy-supervisor" },
+                { "owner_epoch", "legacy-owner-epoch" },
+                { "owner_evidence", ownerEvidence },
+                { "supervisor_pid", 424242 },
+                { "publication_phase", "listening" },
+                { "owner_started_at_utc", "2026-08-31T00:00:00.0000000Z" }
+            };
+            var state = CloneDocument(common);
+            state.Add("protocol_version", 1);
+            state.Add("auth_token", new string('d', 64));
+            state.Add("desired_state", "enabled");
+            state.Add("editor_demand", "online");
+            state.Add("readiness_state", "starting");
+            state.Add("reason_code", "SUPERVISOR_STARTING");
+            state.Add("detail", "synthetic legacy state");
+            state.Add("last_event", "");
+            state.Add("last_event_detail", "");
+            state.Add("started_at_utc", "2026-08-31T00:00:01.0000000Z");
+            state.Add("operation", null);
+            state.Add("event_sequence", 0);
+            state.Add("coordinator_status", null);
+            state.Add("updated_at_utc", "2026-08-31T00:00:01.0000000Z");
+
+            return new EvidenceFixture
+            {
+                RuntimePath = runtimePath,
+                State = state,
+                Lock = CloneDocument(common)
+            };
+        }
+
+        private EvidenceFixture CreateCurrentEvidence()
+        {
+            var runtimeContract = AICodedbPackageRuntimeContractStore.Read(_packageRoot);
+            var target = runtimeContract.Target;
+            var packageGenerationRoot = Path.Combine(
+                _packageRoot,
+                "Payload~",
+                "Generations",
+                target.GenerationId);
+            var generationRoot = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.HostGenerationsRelativePath,
+                target.GenerationId);
+            CopyDirectory(packageGenerationRoot, generationRoot);
+
+            var wrapperRelativePath = AICodedbPackageRuntimeContractStore.StableWrapperRelativePath
+                .Replace('/', Path.DirectorySeparatorChar);
+            var sourceWrapper = Path.Combine(_packageRoot, "Payload~", wrapperRelativePath);
+            var targetWrapper = Path.Combine(_projectRoot, wrapperRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(targetWrapper));
+            File.Copy(sourceWrapper, targetWrapper, true);
+
+            var instanceId = "fedcba98765432100123456789abcdef";
+            var instanceRelativePath = AICodedbProjectSettings.InstancesRelativePath + "/" + instanceId;
+            var instanceRoot = Path.Combine(
+                _projectRoot,
+                instanceRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(instanceRoot);
+
+            var generationRelativePath = AICodedbProjectSettings.HostGenerationsRelativePath
+                                         + "/"
+                                         + target.GenerationId;
+            var generationManifestPath = Path.Combine(generationRoot, "generation-manifest.json");
+            var workerRelativePath = "wrapper/codedb-project-instance-worker.mjs";
+            var workerPath = Path.Combine(
+                generationRoot,
+                workerRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var generationManifestHash = HashFile(generationManifestPath);
+            var workerHash = HashFile(workerPath);
+            var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
+            var instanceManifestPath = Path.Combine(instanceRoot, "instance.json");
+            WriteJson(
+                instanceManifestPath,
+                new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    { "schema_version", 1 },
+                    { "managed_by", "com.rice.ai-codedb" },
+                    { "project_identity", projectIdentity },
+                    { "instance_id", instanceId },
+                    { "instance_relative_path", instanceRelativePath },
+                    { "state", "READY" },
+                    { "package_version", target.PackageVersion },
+                    { "payload_version", target.PayloadVersion },
+                    { "payload_sequence", target.PayloadSequence },
+                    { "generation_id", target.GenerationId },
+                    { "generation_relative_path", generationRelativePath },
+                    { "generation_manifest_sha256", generationManifestHash },
+                    { "bootstrap_protocol", target.BootstrapProtocol },
+                    { "worker_relative_path", workerRelativePath },
+                    { "worker_sha256", workerHash },
+                    { "created_at_utc", "2026-08-31T00:00:00.0000000Z" },
+                    { "verified_at_utc", "2026-08-31T00:00:01.0000000Z" }
+                });
+            var instancePointerPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceCurrentRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            WriteJson(
+                instancePointerPath,
+                new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    { "schema_version", 1 },
+                    { "managed_by", "com.rice.ai-codedb" },
+                    { "project_identity", projectIdentity },
+                    { "instance_id", instanceId },
+                    { "instance_relative_path", instanceRelativePath },
+                    { "instance_manifest_sha256", HashFile(instanceManifestPath) },
+                    { "generation_id", target.GenerationId },
+                    { "activated_at_utc", "2026-08-31T00:00:02.0000000Z" }
+                });
+
+            var runtimePath = AICodedbControlContract.GetSupervisorRuntimePath(
+                _projectRoot,
+                runtimeContract.ControlContract);
+            string pipeName;
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
+                    _projectRoot,
+                    runtimePath,
+                    out pipeName),
+                Is.True);
+            var ownerEvidence = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                { "schema_version", 1 },
+                { "pid", int.MaxValue },
+                { "process_start_identity", "638000000000000001" },
+                { "executable_path", Path.Combine(_projectRoot, "current-node.exe") },
+                { "argv_sha256", new string('e', 64) },
+                { "command_line_sha256", new string('f', 64) }
+            };
+            var common = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                { "schema_version", 3 },
+                { "evidence_schema_version", 1 },
+                { "protocol_version", 1 },
+                { "role", "project-local-supervisor" },
+                { "managed_by", "com.rice.ai-codedb" },
+                { "root", AICodedbPaths.NormalizePath(_projectRoot).TrimEnd('/', '\\') },
+                { "project_identity", projectIdentity },
+                { "runtime", runtimePath },
+                { "control_contract_id", runtimeContract.ControlContract.Id },
+                { "control_contract_version", runtimeContract.ControlContract.Version },
+                { "control_contract_schema_version", runtimeContract.ControlContract.SchemaVersion },
+                { "control_contract_sha256", runtimeContract.ControlContract.Sha256 },
+                { "control_namespace", runtimePath },
+                { "pipe_name", "\\\\.\\pipe\\" + pipeName },
+                { "generation_id", target.GenerationId },
+                { "target_generation_id", target.GenerationId },
+                { "selected_generation_id", target.GenerationId },
+                { "selected_instance_id", instanceId },
+                { "runtime_contract_sha256", runtimeContract.Sha256 },
+                { "supervisor_protocol_version", 2 },
+                { "generation_disposition", "CURRENT" },
+                { "lifecycle_id", "unity-bridge" },
+                { "supervisor_id", "unity-bridge" },
+                { "owner_epoch", "current-owner-epoch" },
+                { "owner_evidence", ownerEvidence },
+                { "supervisor_pid", int.MaxValue },
+                { "publication_phase", "listening" },
+                { "owner_started_at_utc", "2026-08-31T00:00:00.0000000Z" }
+            };
+            var state = CloneDocument(common);
+            state["auth_token"] = new string('1', 64);
+            state["desired_state"] = "enabled";
+            state["editor_demand"] = "online";
+            state["readiness_state"] = "starting";
+            state["reason_code"] = "SUPERVISOR_STARTING";
+            state["detail"] = "synthetic current state";
+            state["last_event"] = "";
+            state["last_event_detail"] = "";
+
+            return new EvidenceFixture
+            {
+                RuntimePath = runtimePath,
+                State = state,
+                Lock = CloneDocument(common)
+            };
+        }
+
+        private void PublishEvidence(
+            EvidenceFixture fixture,
+            bool writeState = true,
+            bool writeLock = true)
+        {
+            Directory.CreateDirectory(fixture.RuntimePath);
+            if (writeState)
+                WriteJson(
+                    Path.Combine(fixture.RuntimePath, "supervisor-state.json"),
+                    fixture.State);
+            if (writeLock)
+                WriteJson(
+                    Path.Combine(fixture.RuntimePath, "supervisor.lock"),
+                    fixture.Lock);
+        }
+
+        private void CreateFixtureRoot()
+        {
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "Assets"));
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "Packages"));
+            Directory.CreateDirectory(Path.Combine(_projectRoot, "ProjectSettings"));
+        }
+
+        private void TearDownFixtureRoot()
+        {
+            if (Directory.Exists(_projectRoot))
+                Directory.Delete(_projectRoot, true);
+        }
+
+        private static void AssertInvalid(AICodedbControlContractMigrationStatus status)
+        {
+            Assert.That(
+                status.State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+        }
+
+        private static Dictionary<string, object> CloneDocument(
+            Dictionary<string, object> source)
+        {
+            var result = new Dictionary<string, object>(StringComparer.Ordinal);
+            foreach (var pair in source)
+            {
+                var nested = pair.Value as Dictionary<string, object>;
+                result.Add(
+                    pair.Key,
+                    nested == null ? pair.Value : CloneDocument(nested));
+            }
+            return result;
+        }
+
+        private static void CopyDirectory(string sourceRoot, string targetRoot)
+        {
+            Assert.That(Directory.Exists(sourceRoot), Is.True, sourceRoot);
+            Directory.CreateDirectory(targetRoot);
+            foreach (var sourceDirectory in Directory.GetDirectories(
+                         sourceRoot,
+                         "*",
+                         SearchOption.AllDirectories))
+            {
+                var relative = sourceDirectory.Substring(sourceRoot.Length).TrimStart(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                Directory.CreateDirectory(Path.Combine(targetRoot, relative));
+            }
+            foreach (var sourceFile in Directory.GetFiles(
+                         sourceRoot,
+                         "*",
+                         SearchOption.AllDirectories))
+            {
+                var relative = sourceFile.Substring(sourceRoot.Length).TrimStart(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                var targetFile = Path.Combine(targetRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFile));
+                File.Copy(sourceFile, targetFile, true);
+            }
+        }
+
+        private static string HashFile(string path)
+        {
+            using (var stream = File.OpenRead(path))
+            using (var sha256 = SHA256.Create())
+            {
+                return BitConverter.ToString(sha256.ComputeHash(stream))
+                    .Replace("-", string.Empty)
+                    .ToLowerInvariant();
+            }
+        }
+
+        private static void WriteJson(string path, Dictionary<string, object> value)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            WriteUtf8NoBom(path, SerializeObject(value) + "\n");
+        }
+
+        private static void WriteUtf8NoBom(string path, string value)
+        {
+            File.WriteAllText(path, value, new UTF8Encoding(false));
+        }
+
+        private static string SerializeObject(Dictionary<string, object> value)
+        {
+            var keys = new List<string>(value.Keys);
+            keys.Sort(StringComparer.Ordinal);
+            var builder = new StringBuilder("{");
+            for (var index = 0; index < keys.Count; index++)
+            {
+                if (index > 0)
+                    builder.Append(',');
+                var key = keys[index];
+                builder.Append('"').Append(EscapeJson(key)).Append("\":");
+                builder.Append(SerializeValue(value[key]));
+            }
+            return builder.Append('}').ToString();
+        }
+
+        private static string SerializeValue(object value)
+        {
+            if (value == null)
+                return "null";
+            var text = value as string;
+            if (text != null)
+                return "\"" + EscapeJson(text) + "\"";
+            if (value is bool)
+                return (bool)value ? "true" : "false";
+            if (value is int || value is long)
+                return Convert.ToString(value, CultureInfo.InvariantCulture);
+            var objectValue = value as Dictionary<string, object>;
+            if (objectValue != null)
+                return SerializeObject(objectValue);
+            throw new InvalidOperationException("Unsupported fixture JSON value: " + value.GetType());
+        }
+
+        private static string EscapeJson(string value)
+        {
+            var builder = new StringBuilder(value.Length);
+            foreach (var character in value)
+            {
+                switch (character)
+                {
+                    case '"': builder.Append("\\\""); break;
+                    case '\\': builder.Append("\\\\"); break;
+                    case '\b': builder.Append("\\b"); break;
+                    case '\f': builder.Append("\\f"); break;
+                    case '\n': builder.Append("\\n"); break;
+                    case '\r': builder.Append("\\r"); break;
+                    case '\t': builder.Append("\\t"); break;
+                    default:
+                        if (character < 0x20)
+                        {
+                            builder.Append("\\u").Append(
+                                ((int)character).ToString("x4", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            builder.Append(character);
+                        }
+                        break;
+                }
+            }
+            return builder.ToString();
         }
     }
 
