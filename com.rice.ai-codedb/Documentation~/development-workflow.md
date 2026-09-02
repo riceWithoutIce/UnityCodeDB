@@ -33,8 +33,8 @@ Every task uses these stages in order:
 4. `CHECKPOINT`: record the result, remaining risks, and the next entry point.
 5. `ACCEPTANCE`: perform user-facing or real-environment acceptance only when
    the implementation slice is ready for it.
-6. `HANDOFF`: commit, push, publish, or transfer ownership only after explicit
-   authorization.
+6. `HANDOFF`: commit, push, publish, or transfer ownership only after a human
+   initiates and explicitly authorizes the exact operation.
 
 Do not enter a later stage while an earlier stage still has an open decision
 that can change the implementation.
@@ -61,6 +61,13 @@ have distinct responsibilities:
 `ALIGN` is the pre-dispatch decision boundary, not a post-dispatch ACK phase.
 `CHECKPOINT` is the result boundary for the same frozen outcome; it does not
 create a second approval gate before implementation.
+
+Implementation completion, a passing focused test, or writing a `RESULT` does
+not authorize a commit. A Code session may propose a commit by stating the
+exact files or hunks, message, and expected scope in its `RESULT` or
+`CHECKPOINT`, but it must leave the worktree uncommitted until a human
+explicitly initiates that exact commit operation. Push and publish remain
+separate human-gated operations.
 
 ## Task Card
 
@@ -197,7 +204,10 @@ may not silently enlarge the original task card.
 - Do not add a second source of truth for version, control, or lifecycle policy.
 - Do not commit, push, publish, stop external processes, or mutate global
   configuration during implementation unless that action is explicitly
-  authorized.
+  authorized. Code sessions must never auto-commit when implementation or
+  focused verification ends. A commit proposal is allowed, but the session
+  must not infer authorization from dispatch, the task card, a `RESULT`, or a
+  passing test.
 - Subagents are off by default. Use one only for an independent, bounded task
   after the user approves delegation.
 
@@ -370,12 +380,16 @@ separate tasks unless the current task explicitly declares them in scope.
 Unexecuted gates remain `BLOCKED` or `DEFERRED`; focused tests do not close
 them.
 
-Commit, push, and publish are separate `HANDOFF` actions:
+Commit, push, and publish are separate human-gated `HANDOFF` actions:
 
 1. Recheck status, ownership, diff, and focused evidence.
-2. Obtain explicit authorization for the exact operation.
-3. Perform only that operation.
-4. Verify the resulting commit or remote state.
+2. The Code session may present a proposal for the exact operation, including
+   commit scope and message when applicable.
+3. A human explicitly initiates and authorizes the exact operation. A session
+   may execute it only as the direct response to that request; otherwise it
+   waits for the human to perform it.
+4. Perform only the authorized operation and verify the resulting commit or
+   remote state.
 
 ## Version Overlays
 
