@@ -23,6 +23,21 @@ For the active v0.3 line, the sole product requirement source is
 `Documentation~/v0.3.0-roadmap.md`. Companion documents may clarify an item
 already in that roadmap, but may not expand the active scope.
 
+## AIServer Memory And Wiki Context
+
+AIServer memory and wiki content are contextual references, not the current
+source of truth. They may lag behind the repository, the active task, or the
+user's latest decision. Do not query them routinely during alignment,
+implementation, verification, or handoff.
+
+Run an AIServer memory or wiki query only when the current user explicitly
+requests it or a frozen task card explicitly declares it as required evidence.
+Do not infer permission from a generic request for historical context, a stale
+result, or a prior session summary. When a query is authorized, keep it narrow,
+label the result as memory/wiki-derived, and verify any decision against the
+current repository or other live evidence before acting. Do not repeat an
+unchanged query merely to refresh context.
+
 ## Work Stages
 
 Every task uses these stages in order:

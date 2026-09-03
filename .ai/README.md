@@ -18,6 +18,16 @@ The workflow document remains the CodeDB execution authority. The task
 structure below records task-specific scope and evidence without copying or
 replacing the workflow rules.
 
+## AIServer Context
+
+AIServer memory and wiki results are optional historical context and may be
+stale. Queries are off by default. Perform one only when the current user
+explicitly requests it or a frozen task card names it as required evidence.
+Keep an authorized query narrow, label its result as memory/wiki-derived, and
+verify it against the current repository or live evidence. Do not repeatedly
+query unchanged context or treat a stale result as a scope, test, or release
+decision.
+
 ## Roles And Trust
 
 Roles are logical responsibilities. Session names are aliases for traceability
