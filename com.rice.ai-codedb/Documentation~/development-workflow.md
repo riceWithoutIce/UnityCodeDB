@@ -69,10 +69,37 @@ exact files or hunks, message, and expected scope in its `RESULT` or
 explicitly initiates that exact commit operation. Push and publish remain
 separate human-gated operations.
 
+## Trust And Review Modes
+
+Planner and Coder use a contract-based trust model to avoid repeating low-value
+admission and test work. Trust means that the Coder owns the declared
+implementation evidence; it does not grant authority to change scope, commit,
+publish, or claim release acceptance.
+
+Every task declares one review mode:
+
+- `NORMAL`: documentation, pure logic, or another bounded change with no
+  external process, persistent data, or configuration side effect. Coder's
+  `RESULT` and declared focused tests are the primary implementation evidence;
+  Planner checks consistency and does not rerun unchanged tests. Verifier is
+  optional.
+- `GUARDED`: protocol, serialization, lifecycle, process, configuration/data,
+  Unity EditMode, or a known blocker. Coder still owns implementation evidence,
+  but Verifier performs one targeted, read-only review of the declared risk.
+- `RELEASE`: release, migration, user-data safety, or formal acceptance. An
+  independent Verifier review and the exact acceptance evidence are required.
+
+Trust is escalated to `GUARDED` when scope changes, evidence is missing, a
+result is `PARTIAL`/`BLOCKED`/`DEFERRED`, a test fails beyond the allowed retry,
+or an external process, project, configuration, or persistent data is touched.
+Escalation changes the next review mode; it does not authorize a blind rerun,
+automatic dispatch, or interruption of the active session.
+
 ## Completion Routing
 
 At the end of every terminal task turn, the owning session appends a concise
-completion-routing footer to both its task packet and its user-facing handoff.
+completion-routing footer to the relevant task record and its user-facing
+handoff.
 Terminal states include `COMPLETE`, `PARTIAL`, `BLOCKED`, `DEFERRED`, and
 `INTERRUPTED`.
 
@@ -115,49 +142,95 @@ Next action: decide commit authorization, then route the exact SHA to Verifier
 Human decision or authorization required: commit confirmation
 ```
 
-## Task Card
+## Task Card And File Layout
 
-Before editing, write a short task card containing:
+Create and freeze one short `TASK.md` before `IMPLEMENT`. It is the only
+execution entry point the Coder must read. General workflow rules, budgets, and
+role definitions stay in this document and are not copied into every task.
+
+The minimum `TASK.md` shape is:
 
 ```text
-Task/Slice:
-Single outcome:
-Requirement source:
-In scope:
-Out of scope:
-Existing dirty files:
-Files allowed to change:
-Slice complexity:
-Dispatch mode (default: immediate execution):
-Active-time budget and pause accounting:
-Checkpoint triggers:
-Bounded inspection or extraction plan:
-Definition of done:
-L0 tests (exact commands and filters):
-Directly affected L1 tests (exact commands and filters):
-Budget exceptions:
-EditMode request and authorization:
-User-facing acceptance:
-Real-environment acceptance:
-Forbidden actions:
-Stop conditions:
+# Task: <task-id>
+
+## Metadata
+- Product:
+- Version:
+- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED
+- Planner:
+- Coder:
+- Verifier: optional
+- Review mode: NORMAL | GUARDED | RELEASE
+- Requirement source:
+
+## Objective
+- Single outcome:
+
+## Scope
+- In scope:
+- Out of scope:
+- Allowed files:
+- Protected state:
+- Snapshot binding: optional; only for GUARDED/RELEASE
+
+## Execution
+- Coder actions:
+- Focused tests:
+- EditMode authorization: NOT_REQUESTED | authorized
+- Stop conditions:
+- Escalation triggers:
+
+## Definition Of Done
+- Expected result:
+- Required evidence:
+- Deferred risks:
+
+## Handoff
+- Current task:
+- Current status:
+- Next notification:
+- Next action:
+- Human decision or authorization required:
 ```
 
-The task card is frozen before `IMPLEMENT`. If a new requirement or a new
-behavior appears, stop at a checkpoint and create a new slice instead of
-silently extending the current one.
+Use the following minimal task directory. Do not create empty optional files:
+
+```text
+.ai/tasks/<version>/<task-id>/
+  TASK.md              # required; Planner freezes it
+  RESULT.md            # Coder terminal result or blocking report
+  VERIFICATION.md      # only for GUARDED/RELEASE or an explicit request
+  DECISION.md          # only when a human disposition is needed
+  CHECKPOINT.md        # only for interruption, timeout, budget stop, or recovery
+```
+
+Use `.ai/tasks/shared/<task-id>/` only when the contract intentionally spans
+versions. The task ID is immutable and must not contain a session name. A
+session replacement such as `Coder.2` updates result metadata without rewriting
+the frozen task.
+
+`RESULT.md` contains only the outcome, changed-file list, focused evidence,
+risks/limits, and the same handoff footer. `VERIFICATION.md` contains only the
+review scope, targeted checks, findings, verdict, and handoff. Raw logs,
+generated files, and complete diffs remain outside the task documents.
+
+The task card is frozen before `IMPLEMENT`. If a new requirement or behavior
+appears, stop at a checkpoint and create a new slice instead of silently
+extending the current one.
 
 ## Read-Only Preflight
 
 The beginning of a task is read-only and bounded:
 
-- Check `git status`, branch, `HEAD`, the latest diff, and the relevant roadmap
-  section.
-- Classify every existing change as owned by the current task or pre-existing.
-- Search the named files and their direct references before expanding the
-  search surface.
-- Prefer line-ranged reads and symbol searches over dumping complete large
-  files or generated output.
+- By default, run one `git status --short --branch`. Read `HEAD` only when the
+  task's review mode or snapshot binding requires it.
+- Do not run a full `git diff`, full history scan, or repository-wide file dump
+  as routine admission work. If scope must be checked, use one targeted command
+  restricted to the task's allowed files.
+- Read `TASK.md` once, then search only the named files and their direct
+  references before expanding the surface.
+- Prefer line-ranged reads and symbol searches over dumping complete large files
+  or generated output.
 - Resolve scope, ownership, and acceptance language before editing.
 
 Existing dirty worktree changes are preserved. They are not reset, checked out,
@@ -177,6 +250,9 @@ excerpts.
 - When repeated extraction is justified, reuse an existing bounded helper or
   make one small reusable extractor. Do not create one-off full dumps merely to
   avoid selecting evidence.
+- `git diff` is not a routine evidence source. When explicitly needed, restrict
+  it to the named allowlist and capture only the relevant summary or check
+  result once.
 
 ## Slice Sizing
 
@@ -277,6 +353,12 @@ or the number of nearby tests.
 Regression tests must be justified by the actual diff or by a known failure
 path. Shared directory membership, similar names, or a general desire for
 confidence are not sufficient reasons to add coverage.
+
+Review mode controls duplicate validation: `NORMAL` accepts the Coder's
+bounded result without a second run of unchanged tests; `GUARDED` adds one
+targeted Verifier review; `RELEASE` adds independent acceptance evidence. A
+passing Coder test never substitutes for a required Unity, consumer, or release
+gate.
 
 If a broader set is proposed, record:
 
@@ -384,8 +466,9 @@ Keep the active context small and resumable:
 - Bound every inspection command; narrow it when output is truncated.
 - Do not repeat the complete repository history after an interruption.
 - Send a concise progress update at meaningful milestones, not a full log.
-- Produce a checkpoint after each slice and before the context budget is
-  exhausted.
+- Produce a `RESULT` after a terminal slice. Produce a `CHECKPOINT` only when
+  an interruption, timeout, budget stop, contradiction, or recovery trigger
+  occurs.
 - Stop and checkpoint after the first context compaction or when a second
   independent behavior enters the task.
 
@@ -428,7 +511,8 @@ them.
 
 Commit, push, and publish are separate human-gated `HANDOFF` actions:
 
-1. Recheck status, ownership, diff, and focused evidence.
+1. Recheck status, ownership, and focused evidence with commands restricted to
+   the authorized files; do not produce a full repository diff.
 2. The Code session may present a proposal for the exact operation, including
    commit scope and message when applicable.
 3. A human explicitly initiates and authorizes the exact operation. A session
