@@ -2723,6 +2723,293 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ControlContractMigration_ConsecutiveScheduledTicksStayQuiescentButExplicitTriggerReadmits()
+        {
+            var next = 0d;
+            var admissionCount = 1;
+            const string recordedFingerprint = "unchanged-machine-evidence";
+
+            if (AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(1d, ref next, false, true))
+                admissionCount++;
+            if (AICodedbEditorLifecycle.ShouldTriggerPrerequisiteRecheck(
+                    recordedFingerprint,
+                    recordedFingerprint))
+                admissionCount++;
+            if (AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(31d, ref next, false, true))
+                admissionCount++;
+            if (AICodedbEditorLifecycle.ShouldTriggerPrerequisiteRecheck(
+                    recordedFingerprint,
+                    recordedFingerprint))
+                admissionCount++;
+
+            Assert.That(admissionCount, Is.EqualTo(1));
+            Assert.That(next, Is.Zero);
+            if (AICodedbEditorLifecycle.ShouldAllowMigrationAdmissionTrigger(false, true))
+                admissionCount++;
+            Assert.That(admissionCount, Is.EqualTo(2));
+
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldTriggerPrerequisiteRecheck(
+                    recordedFingerprint,
+                    "changed-machine-evidence"),
+                Is.True,
+                "A machine-evidence change must be able to request one explicit fresh admission.");
+        }
+
+        [Test]
+        public void ControlContractMigration_ScheduledSuppressionDoesNotAffectOtherNeedsAttentionRecovery()
+        {
+            var next = 0d;
+
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(1d, ref next, false, false),
+                Is.True);
+            Assert.That(next, Is.GreaterThan(1d));
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldAllowMigrationAdmissionTrigger(true, false),
+                Is.True);
+        }
+
+        [TestCase(AICodedbControlContractMigrationState.Missing)]
+        [TestCase(AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbControlContractMigrationState.CompatibleStale)]
+        public void ControlContractMigration_UsableStatesPreserveAutomaticConvergenceWithoutAdmissionDryRun(
+            AICodedbControlContractMigrationState state)
+        {
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+            var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
+                CreateMigrationStatus(state),
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("CURRENT");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.False);
+            Assert.That(probeCount, Is.Zero);
+            Assert.That(admissionResult, Is.Null);
+        }
+
+        [TestCase(AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
+        [TestCase(AICodedbControlContractMigrationState.InvalidOrAmbiguous)]
+        public void ControlContractMigration_ColdStartMissingPrerequisiteTakesPriorityWithoutReinstall(
+            AICodedbControlContractMigrationState state)
+        {
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+            var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
+                CreateMigrationStatus(state),
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("MISSING");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.True);
+            Assert.That(probeCount, Is.EqualTo(1));
+            Assert.That(admissionResult, Is.Not.Null);
+            Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.MissingPrerequisite));
+            Assert.That(productStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Missing));
+            Assert.That(productStatus.AttentionReason, Is.EqualTo(AICodedbProductAttentionReason.None));
+            Assert.That(productStatus.RequiresReinstall, Is.False);
+            Assert.That(productStatus.Detail, Does.Contain("fixture prerequisite is missing"));
+            Assert.That(productStatus.DiagnosticDetail, Is.EqualTo("migration diagnostic"));
+        }
+
+        [TestCase(
+            AICodedbControlContractMigrationState.ObsoleteReinstallRequired,
+            AICodedbProductAttentionReason.ControlContractReinstallRequired,
+            true)]
+        [TestCase(
+            AICodedbControlContractMigrationState.InvalidOrAmbiguous,
+            AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
+            false)]
+        public void ControlContractMigration_ExplicitCurrentPrerequisiteMapsBlockedState(
+            AICodedbControlContractMigrationState state,
+            AICodedbProductAttentionReason expectedReason,
+            bool expectedReinstall)
+        {
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+            var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
+                CreateMigrationStatus(state),
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("CURRENT");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.True);
+            Assert.That(probeCount, Is.EqualTo(1));
+            Assert.That(admissionResult, Is.Not.Null);
+            Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(productStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(productStatus.AttentionReason, Is.EqualTo(expectedReason));
+            Assert.That(productStatus.RequiresReinstall, Is.EqualTo(expectedReinstall));
+            Assert.That(productStatus.Detail, Is.EqualTo("migration detail"));
+            Assert.That(productStatus.DiagnosticDetail, Is.EqualTo("migration diagnostic"));
+        }
+
+        [Test]
+        public void ControlContractMigration_UntrustworthyPrerequisiteEvidenceFailsClosedWithoutReinstall()
+        {
+            var cases = new[]
+            {
+                new KeyValuePair<string, AICodedbCommandResult>("null", null),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "failed",
+                    new AICodedbCommandResult(4, PrerequisiteOutput("CURRENT"), "fixture failure", false)),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "timed-out",
+                    new AICodedbCommandResult(0, PrerequisiteOutput("CURRENT"), string.Empty, true)),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "malformed",
+                    Result(PrerequisiteOutput("CURRENTLY"))),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "malformed-command",
+                    Result(PrerequisiteOutput("CURRENT") + "\n[COMMAND_RESULT] {not-json")),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "unknown",
+                    Result(PrerequisiteOutput("UNKNOWN"))),
+                new KeyValuePair<string, AICodedbCommandResult>(
+                    "ambiguous",
+                    Result(PrerequisiteOutput("CURRENT")
+                           + "\n[PRODUCT_LAYER PREREQUISITE] MISSING - conflicting fixture"))
+            };
+
+            foreach (var testCase in cases)
+            {
+                var probeCount = 0;
+                AICodedbProductStatus productStatus;
+                AICodedbCommandResult admissionResult;
+                var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                    CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
+                    CreateMigrationStatus(AICodedbControlContractMigrationState.ObsoleteReinstallRequired),
+                    () =>
+                    {
+                        probeCount++;
+                        return testCase.Value;
+                    },
+                    out productStatus,
+                    out admissionResult);
+
+                Assert.That(blocked, Is.True, testCase.Key);
+                Assert.That(probeCount, Is.EqualTo(1), testCase.Key);
+                Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention), testCase.Key);
+                Assert.That(productStatus.AttentionReason, Is.EqualTo(AICodedbProductAttentionReason.None), testCase.Key);
+                Assert.That(productStatus.RequiresReinstall, Is.False, testCase.Key);
+            }
+        }
+
+        [Test]
+        public void ControlContractMigration_UninstalledKeepsInstallSemanticsWithoutAdmissionDryRun()
+        {
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+            var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Uninstalled),
+                CreateMigrationStatus(AICodedbControlContractMigrationState.ObsoleteReinstallRequired),
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("CURRENT");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.True);
+            Assert.That(probeCount, Is.Zero);
+            Assert.That(admissionResult, Is.Null);
+            Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.Uninstalled));
+            Assert.That(productStatus.RequiresReinstall, Is.False);
+        }
+
+        [Test]
+        public void ControlContractMigration_InvalidIntegrationKeepsExistingAttentionWithoutAdmissionDryRun()
+        {
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+            var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Invalid),
+                CreateMigrationStatus(AICodedbControlContractMigrationState.ObsoleteReinstallRequired),
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("CURRENT");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.True);
+            Assert.That(probeCount, Is.Zero);
+            Assert.That(admissionResult, Is.Null);
+            Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(productStatus.Detail, Is.EqualTo("invalid integration"));
+            Assert.That(productStatus.RequiresReinstall, Is.False);
+        }
+
+        private static AICodedbControlContractMigrationStatus CreateMigrationStatus(
+            AICodedbControlContractMigrationState state)
+        {
+            return new AICodedbControlContractMigrationStatus(
+                state,
+                AICodedbControlContract.CreateDefaultIdentity(),
+                "current-runtime",
+                "legacy-runtime",
+                "migration detail",
+                "migration diagnostic");
+        }
+
+        private static AICodedbProjectIntegrationStatus CreateIntegrationStatus(
+            AICodedbProjectIntegrationState state)
+        {
+            return new AICodedbProjectIntegrationStatus(
+                state,
+                state == AICodedbProjectIntegrationState.Invalid
+                    ? AICodedbProjectCleanupState.Invalid
+                    : AICodedbProjectCleanupState.Complete,
+                string.Empty,
+                state == AICodedbProjectIntegrationState.Invalid
+                    ? "invalid integration"
+                    : state == AICodedbProjectIntegrationState.Uninstalled
+                        ? "uninstalled integration"
+                        : "installed integration");
+        }
+
+        private static AICodedbCommandResult PrerequisiteResult(string state)
+        {
+            return Result(PrerequisiteOutput(state));
+        }
+
+        private static string PrerequisiteOutput(string state)
+        {
+            var missing = string.Equals(state, "MISSING", StringComparison.Ordinal);
+            return "[PRODUCT_LAYER PREREQUISITE] " + state + " - "
+                   + (missing ? "fixture prerequisite is missing" : "fixture prerequisite is current") + "\n"
+                   + "[PRODUCT_LAYER INSTALLED] " + (missing ? "BLOCKED" : "CURRENT") + "\n"
+                   + "[PRODUCT_LAYER CONFIGURED] " + (missing ? "BLOCKED" : "CURRENT") + "\n"
+                   + "[PRODUCT_LAYER MCP_AVAILABLE] " + (missing ? "BLOCKED" : "CURRENT") + "\n"
+                   + "[PRODUCT_STATE] " + (missing ? "MISSING_PREREQUISITE" : "READY") + "\n"
+                   + "[PREREQUISITE] "
+                   + (missing ? "fixture prerequisite is missing" : "fixture prerequisite is current");
+        }
+
+        [Test]
         public void MissingPrerequisite_DoesNotSchedulePeriodicBackendInspectionLoop()
         {
             Assert.That(

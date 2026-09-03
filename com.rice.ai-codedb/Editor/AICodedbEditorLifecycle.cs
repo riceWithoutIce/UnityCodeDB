@@ -58,7 +58,11 @@ namespace Rice.AI.Codedb.Editor
         private static string _missingPrerequisiteFingerprint = string.Empty;
         private static AICodedbProductState _lastProductState = AICodedbProductState.Starting;
         private static AICodedbCommandResult _cachedHostStatusResult;
+        private static AICodedbProductStatus _cachedLifecycleProductStatus;
+        private static bool _hasCachedLifecycleProductStatus;
         private static long _cachedHostStatusRevision;
+        private static int _automaticSupervisorStartAllowed;
+        private static int _scheduledMigrationAdmissionBlocked;
         private static int _currentInstanceAvailabilityRecoveryAttempts;
         private static readonly object LeaseIoLock = new object();
         private static readonly object HostStatusCacheLock = new object();
@@ -371,11 +375,16 @@ namespace Rice.AI.Codedb.Editor
                 QueuePrerequisiteRecheck();
                 return;
             }
+            var cachedMigrationAdmissionBlocked =
+                Volatile.Read(ref _scheduledMigrationAdmissionBlocked) != 0;
             if (ShouldQueueScheduledReconcile(
                     EditorApplication.timeSinceStartup,
                     ref _nextReconcileAt,
-                    false))
+                    false,
+                    cachedMigrationAdmissionBlocked))
                 BeginReconcile(false);
+            else if (cachedMigrationAdmissionBlocked)
+                QueuePrerequisiteRecheck();
             QueueLeaseRefresh();
         }
 
@@ -394,13 +403,25 @@ namespace Rice.AI.Codedb.Editor
         internal static bool ShouldQueueScheduledReconcile(
             double now,
             ref double nextReconcileAt,
-            bool maintenanceSuspended)
+            bool maintenanceSuspended,
+            bool cachedMigrationAdmissionBlocked = false)
         {
-            if (maintenanceSuspended || now < nextReconcileAt)
+            if (maintenanceSuspended
+                || !ShouldAllowMigrationAdmissionTrigger(
+                    true,
+                    cachedMigrationAdmissionBlocked)
+                || now < nextReconcileAt)
                 return false;
 
             nextReconcileAt = now + ReconcileRetrySeconds;
             return true;
+        }
+
+        internal static bool ShouldAllowMigrationAdmissionTrigger(
+            bool scheduledTrigger,
+            bool cachedMigrationAdmissionBlocked)
+        {
+            return !scheduledTrigger || !cachedMigrationAdmissionBlocked;
         }
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
@@ -478,6 +499,9 @@ namespace Rice.AI.Codedb.Editor
             if (Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
                 return;
 
+            // Every reconcile epoch must re-establish the read-only control
+            // contract admission before an automatic reconnect can start.
+            Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
             _nextReconcileAt = EditorApplication.timeSinceStartup + ReconcileRetrySeconds;
             try
             {
@@ -548,11 +572,68 @@ namespace Rice.AI.Codedb.Editor
             CancellationToken cancellationToken)
         {
             if (cancellationToken.IsCancellationRequested
-                || !canContinue()
-                || (!force && !BackendNeedsReconcile(context, previousProductState)))
+                || !canContinue())
                 return null;
 
             var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            var migrationStatus = AICodedbControlContractMigrationStore.Read(
+                context.ProjectRoot,
+                context.PackageRoot);
+            if (migrationStatus.BlocksAutomaticStart)
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return null;
+
+            AICodedbProductStatus migrationProductStatus;
+            AICodedbCommandResult migrationAdmissionResult;
+            if (TryResolveControlContractMigrationBlock(
+                    integrationStatus,
+                    migrationStatus,
+                    () =>
+                    {
+                        var result = AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken);
+                        return cancellationToken.IsCancellationRequested || !canContinue()
+                            ? null
+                            : result;
+                    },
+                    out migrationProductStatus,
+                    out migrationAdmissionResult))
+            {
+                var suppressScheduledMigrationAdmission =
+                    integrationStatus.IsValid
+                    && !integrationStatus.IsUninstalled
+                    && migrationProductStatus.State == AICodedbProductState.NeedsAttention;
+                Interlocked.Exchange(
+                    ref _scheduledMigrationAdmissionBlocked,
+                    suppressScheduledMigrationAdmission ? 1 : 0);
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                if (integrationStatus.IsUninstalled || !integrationStatus.IsValid)
+                    DeleteEditorLease();
+                if (migrationProductStatus.State == AICodedbProductState.MissingPrerequisite
+                    || suppressScheduledMigrationAdmission)
+                {
+                    Interlocked.Exchange(
+                        ref _missingPrerequisiteFingerprint,
+                        CaptureMachinePrerequisiteEvidenceFingerprint(context));
+                }
+                else
+                    Interlocked.Exchange(ref _missingPrerequisiteFingerprint, string.Empty);
+                RememberLifecycleProductStatus(migrationProductStatus, migrationAdmissionResult);
+                if (!integrationStatus.IsValid)
+                {
+                    return LifecycleReconcileResult.WithWarning(
+                        AICodedbProductState.NeedsAttention,
+                        "CodeDB project integration desired state is invalid: " + integrationStatus.Detail);
+                }
+                return LifecycleReconcileResult.WithState(migrationProductStatus.State);
+            }
+
+            Interlocked.Exchange(ref _scheduledMigrationAdmissionBlocked, 0);
+            Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 1);
+            if (!force && !BackendNeedsReconcile(context, previousProductState))
+                return null;
+
             if (integrationStatus.State == AICodedbProjectIntegrationState.Invalid)
             {
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
@@ -670,6 +751,131 @@ namespace Rice.AI.Codedb.Editor
             workerResult.ProductState = AICodedbProductState.NeedsAttention;
             workerResult.Warning = "CodeDB selected-instance state is unsupported by the v0.3 Supervisor route.";
             return workerResult;
+        }
+
+        internal static bool TryResolveControlContractMigrationBlock(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbControlContractMigrationStatus migrationStatus,
+            Func<AICodedbCommandResult> prerequisiteAdmissionProbe,
+            out AICodedbProductStatus productStatus,
+            out AICodedbCommandResult admissionResult)
+        {
+            admissionResult = null;
+            if (migrationStatus.IsUsableForAutomaticStart)
+            {
+                productStatus = default(AICodedbProductStatus);
+                return false;
+            }
+
+            if (integrationStatus.IsUninstalled || !integrationStatus.IsValid)
+            {
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, null);
+                return true;
+            }
+
+            admissionResult = prerequisiteAdmissionProbe == null
+                ? null
+                : prerequisiteAdmissionProbe();
+            var prerequisiteStatus = AICodedbProductStatusBuilder.Build(
+                integrationStatus,
+                admissionResult);
+            AICodedbProductLayerState prerequisite;
+            if (!TryReadTrustworthyPrerequisiteEvidence(
+                    admissionResult,
+                    prerequisiteStatus,
+                    out prerequisite))
+            {
+                productStatus = new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    string.IsNullOrWhiteSpace(prerequisiteStatus.Detail)
+                        ? "CodeDB could not verify the current prerequisite state."
+                        : prerequisiteStatus.Detail,
+                    prerequisiteStatus.Command,
+                    AICodedbProductAttentionReason.None,
+                    migrationStatus.DiagnosticDetail);
+                return true;
+            }
+
+            if (prerequisite == AICodedbProductLayerState.Missing)
+            {
+                productStatus = new AICodedbProductStatus(
+                    AICodedbProductState.MissingPrerequisite,
+                    AICodedbProductLayerState.Missing,
+                    prerequisiteStatus.Installed,
+                    prerequisiteStatus.Configured,
+                    prerequisiteStatus.McpAvailable,
+                    prerequisiteStatus.Detail,
+                    prerequisiteStatus.Command,
+                    AICodedbProductAttentionReason.None,
+                    migrationStatus.DiagnosticDetail);
+                return true;
+            }
+
+            var reason = migrationStatus.RequiresReinstall
+                ? AICodedbProductAttentionReason.ControlContractReinstallRequired
+                : AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous;
+            productStatus = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                migrationStatus.Detail,
+                default(AICodedbMaterializerCommandStatus),
+                reason,
+                migrationStatus.DiagnosticDetail);
+            return true;
+        }
+
+        private static bool TryReadTrustworthyPrerequisiteEvidence(
+            AICodedbCommandResult result,
+            AICodedbProductStatus productStatus,
+            out AICodedbProductLayerState prerequisite)
+        {
+            prerequisite = AICodedbProductLayerState.Unknown;
+            if (result == null
+                || result.TimedOut
+                || !result.Succeeded
+                || (productStatus.Command.Present && !productStatus.Command.IsValid))
+            {
+                return false;
+            }
+
+            const string prefix = "[PRODUCT_LAYER PREREQUISITE]";
+            var markerCount = 0;
+            var markerValue = string.Empty;
+            foreach (var line in (result.StandardOutput ?? string.Empty).Split(
+                         new[] { "\r\n", "\n" },
+                         StringSplitOptions.None))
+            {
+                var trimmed = line.Trim();
+                if (!trimmed.StartsWith(prefix, StringComparison.Ordinal))
+                    continue;
+                markerCount++;
+                markerValue = trimmed.Substring(prefix.Length).Trim();
+            }
+
+            if (markerCount != 1)
+                return false;
+            if (IsExactPrerequisiteMarker(markerValue, "CURRENT"))
+                prerequisite = AICodedbProductLayerState.Current;
+            else if (IsExactPrerequisiteMarker(markerValue, "MISSING"))
+                prerequisite = AICodedbProductLayerState.Missing;
+            else
+                return false;
+
+            return productStatus.Prerequisite == prerequisite;
+        }
+
+        private static bool IsExactPrerequisiteMarker(string value, string state)
+        {
+            return string.Equals(value, state, StringComparison.Ordinal)
+                   || string.Equals(value, state + " -", StringComparison.Ordinal)
+                   || value.StartsWith(state + " - ", StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -1099,6 +1305,7 @@ namespace Rice.AI.Codedb.Editor
         {
             if (!_initialized
                 || _quitting
+                || Volatile.Read(ref _automaticSupervisorStartAllowed) == 0
                 || ShouldDeferSupervisorReconnect(
                     EditorApplication.isCompiling,
                     EditorApplication.isUpdating,
@@ -1527,7 +1734,23 @@ namespace Rice.AI.Codedb.Editor
             {
                 result = _cachedHostStatusResult;
                 revision = _cachedHostStatusRevision;
-                return result != null;
+                return result != null && !_hasCachedLifecycleProductStatus;
+            }
+        }
+
+        internal static bool TryGetCachedLifecycleStatus(
+            out AICodedbCommandResult result,
+            out AICodedbProductStatus productStatus,
+            out bool hasProductStatus,
+            out long revision)
+        {
+            lock (HostStatusCacheLock)
+            {
+                result = _cachedHostStatusResult;
+                productStatus = _cachedLifecycleProductStatus;
+                hasProductStatus = _hasCachedLifecycleProductStatus;
+                revision = _cachedHostStatusRevision;
+                return result != null || hasProductStatus;
             }
         }
 
@@ -1569,9 +1792,24 @@ namespace Rice.AI.Codedb.Editor
             lock (HostStatusCacheLock)
             {
                 _cachedHostStatusResult = result;
+                _cachedLifecycleProductStatus = default(AICodedbProductStatus);
+                _hasCachedLifecycleProductStatus = false;
                 _cachedHostStatusRevision++;
             }
             return result;
+        }
+
+        private static void RememberLifecycleProductStatus(
+            AICodedbProductStatus productStatus,
+            AICodedbCommandResult result = null)
+        {
+            lock (HostStatusCacheLock)
+            {
+                _cachedHostStatusResult = result;
+                _cachedLifecycleProductStatus = productStatus;
+                _hasCachedLifecycleProductStatus = true;
+                _cachedHostStatusRevision++;
+            }
         }
 
         private static bool HasPackageFingerprintChanged(string projectIdentity)

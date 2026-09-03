@@ -404,6 +404,13 @@ namespace Rice.AI.Codedb.Editor
         MissingPrerequisite
     }
 
+    internal enum AICodedbProductAttentionReason
+    {
+        None,
+        ControlContractReinstallRequired,
+        ControlContractInvalidOrAmbiguous
+    }
+
     internal readonly struct AICodedbMaterializerCommandStatus
     {
         internal bool Present { get; }
@@ -569,7 +576,12 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbProductLayerState McpAvailable { get; }
         internal AICodedbMaterializerCommandStatus Command { get; }
         internal string Detail { get; }
+        internal string DiagnosticDetail { get; }
+        internal AICodedbProductAttentionReason AttentionReason { get; }
         internal bool IsReady => State == AICodedbProductState.Ready;
+        internal bool RequiresReinstall =>
+            State == AICodedbProductState.NeedsAttention
+            && AttentionReason == AICodedbProductAttentionReason.ControlContractReinstallRequired;
 
         internal AICodedbProductStatus(
             AICodedbProductState state,
@@ -577,7 +589,9 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductLayerState configured,
             AICodedbProductLayerState mcpAvailable,
             string detail,
-            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus))
+            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
+            AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
+            string diagnosticDetail = "")
             : this(
                 state,
                 AICodedbProductLayerState.Unknown,
@@ -585,7 +599,9 @@ namespace Rice.AI.Codedb.Editor
                 configured,
                 mcpAvailable,
                 detail,
-                command)
+                command,
+                attentionReason,
+                diagnosticDetail)
         {
         }
 
@@ -596,7 +612,9 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductLayerState configured,
             AICodedbProductLayerState mcpAvailable,
             string detail,
-            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus))
+            AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
+            AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
+            string diagnosticDetail = "")
         {
             State = state;
             Prerequisite = prerequisite;
@@ -605,6 +623,8 @@ namespace Rice.AI.Codedb.Editor
             McpAvailable = mcpAvailable;
             Command = command;
             Detail = detail ?? string.Empty;
+            DiagnosticDetail = diagnosticDetail ?? string.Empty;
+            AttentionReason = attentionReason;
         }
     }
 

@@ -999,6 +999,17 @@ Assert-True `
 Assert-True `
     -Condition ($heartbeatLeaseIndex -ge 0 -and $heartbeatLeaseIndex -lt $missingPrerequisiteHeartbeatIndex) `
     -Message "Editor heartbeat must keep the lease alive while Play-mode maintenance is suspended."
+Assert-True `
+    -Condition ($editorUpdateFunction.Groups["body"].Value.IndexOf(
+            "_scheduledMigrationAdmissionBlocked",
+            [StringComparison]::Ordinal) -ge 0 -and
+        $editorUpdateFunction.Groups["body"].Value.IndexOf(
+            "ShouldQueueScheduledReconcile(",
+            [StringComparison]::Ordinal) -ge 0 -and
+        $editorUpdateFunction.Groups["body"].Value.IndexOf(
+            "QueuePrerequisiteRecheck()",
+            [StringComparison]::Ordinal) -ge 0) `
+    -Message "Scheduled lifecycle reconciliation must honor the cached blocked-migration gate and retain evidence-change rechecks."
 foreach ($forbiddenMainThreadCall in @(
     "PublishLease(",
     "RefreshEditorLeaseForIntegrationState(",
@@ -1077,6 +1088,51 @@ $reconcileWorkerFunction = [regex]::Match(
     $editorLifecycleSource,
     '(?s)private\s+static\s+LifecycleReconcileResult\s+RunReconcileWorker\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static')
 Assert-True -Condition $reconcileWorkerFunction.Success -Message "Package boundary could not isolate Editor lifecycle reconcile worker."
+Assert-True `
+    -Condition ($reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+            "_scheduledMigrationAdmissionBlocked",
+            [StringComparison]::Ordinal) -ge 0) `
+    -Message "Blocked migration results must publish their scheduled-admission suppression state."
+$integrationReadIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "AICodedbProjectIntegrationStateStore.Read(",
+    [StringComparison]::Ordinal)
+$migrationReadIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "AICodedbControlContractMigrationStore.Read(",
+    [StringComparison]::Ordinal)
+$migrationAdmissionIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "TryResolveControlContractMigrationBlock(",
+    [StringComparison]::Ordinal)
+$prerequisiteAdmissionDryRunMatches = [regex]::Matches(
+    $reconcileWorkerFunction.Groups["body"].Value,
+    'AICodedbHostPayloadMaterializer\.ReadStatus\s*\(\s*context\s*,\s*cancellationToken\s*\)')
+$prerequisiteAdmissionDryRunIndex = if ($prerequisiteAdmissionDryRunMatches.Count -eq 1) {
+    $prerequisiteAdmissionDryRunMatches[0].Index
+} else {
+    -1
+}
+$firstSupervisorCommandIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
+    "RunSupervisorCommand(",
+    [StringComparison]::Ordinal)
+Assert-True `
+    -Condition ($integrationReadIndex -ge 0 -and
+        $migrationReadIndex -gt $integrationReadIndex -and
+        $migrationAdmissionIndex -gt $migrationReadIndex -and
+        $prerequisiteAdmissionDryRunIndex -gt $migrationAdmissionIndex -and
+        $firstSupervisorCommandIndex -gt $migrationAdmissionIndex) `
+    -Message "Editor lifecycle must read integration, classify migration, and apply prerequisite admission before its first Supervisor command."
+Assert-True `
+    -Condition ($prerequisiteAdmissionDryRunMatches.Count -eq 1 -and
+        $firstSupervisorCommandIndex -gt $prerequisiteAdmissionDryRunIndex) `
+    -Message "Blocked migration admission must expose exactly one direct prerequisite DryRun before any Supervisor command."
+$beginReconcileFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+async\s+void\s+BeginReconcile\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+static\s+LifecycleReconcileResult')
+Assert-True -Condition $beginReconcileFunction.Success -Message "Package boundary could not isolate lifecycle reconciliation dispatch."
+Assert-True `
+    -Condition ($beginReconcileFunction.Groups["body"].Value.IndexOf(
+            "_scheduledMigrationAdmissionBlocked",
+            [StringComparison]::Ordinal) -lt 0) `
+    -Message "Explicit and lifecycle reconciliation triggers must bypass only the scheduled blocked-migration suppression gate."
 $supervisorProbeIndex = $reconcileWorkerFunction.Groups["body"].Value.IndexOf(
     'RunSupervisorCommand(context, "materialize", "Probe"',
     [StringComparison]::Ordinal)
@@ -1095,6 +1151,15 @@ Assert-True `
 Assert-True `
     -Condition ($supervisorRecoveryIndex -ge 0 -and $supervisorWatcherIndex -ge 0) `
     -Message "Editor lifecycle must route watcher maintenance through the project-local Supervisor."
+$automaticReconnectFunction = [regex]::Match(
+    $editorLifecycleSource,
+    '(?s)private\s+static\s+void\s+QueueSupervisorReconnect\s*\(.*?\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*internal\s+static\s+bool\s+ShouldDeferSupervisorReconnect')
+Assert-True -Condition $automaticReconnectFunction.Success -Message "Package boundary could not isolate automatic Supervisor reconnect."
+Assert-True `
+    -Condition ($automaticReconnectFunction.Groups["body"].Value.IndexOf(
+            "_automaticSupervisorStartAllowed",
+            [StringComparison]::Ordinal) -ge 0) `
+    -Message "Automatic Supervisor reconnect must remain blocked until migration admission succeeds."
 $actionsSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbActions.cs"))
 $supervisorWatcherCommandFunction = [regex]::Match(
     $actionsSource,
@@ -1125,6 +1190,17 @@ Assert-True `
     -Condition ($supervisorLifecycleSource.IndexOf("IsSupervisorOneShotFallbackAllowed(", [StringComparison]::Ordinal) -ge 0) `
     -Message "Supervisor fallback must be explicitly bounded to reviewed one-shot outage/bootstrap conditions."
 $managerSource = [System.IO.File]::ReadAllText((Join-Path $packageRoot "Editor\AICodedbManagerWindow.cs"))
+Assert-True `
+    -Condition ($managerSource.IndexOf("AICodedbControlContractMigrationStore", [StringComparison]::Ordinal) -lt 0) `
+    -Message "Manager must consume cached migration presentation instead of invoking the classifier."
+foreach ($forbiddenManagerAdmissionCall in @(
+    "TryResolveControlContractMigrationBlock",
+    "AICodedbHostPayloadMaterializer.ReadStatus("
+)) {
+    Assert-True `
+        -Condition ($managerSource.IndexOf($forbiddenManagerAdmissionCall, [StringComparison]::Ordinal) -lt 0) `
+        -Message "Manager must not own migration admission work: $forbiddenManagerAdmissionCall"
+}
 $managerEnableFunction = [regex]::Match(
     $managerSource,
     '(?s)private\s+void\s+OnEnable\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+OnDisable')

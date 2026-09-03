@@ -109,6 +109,19 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "installed");
 
         [Test]
+        public void ManagerSource_DoesNotOwnMigrationClassificationOrAdmissionDryRun()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbManagerWindow.cs"));
+
+            Assert.That(source, Does.Not.Contain("AICodedbControlContractMigrationStore"));
+            Assert.That(source, Does.Not.Contain("TryResolveControlContractMigrationBlock"));
+            Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.ReadStatus("));
+        }
+
+        [Test]
         public void Build_RequiresEveryProductLayerBeforeReady()
         {
             var result = Result(
@@ -190,20 +203,30 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Unavailable));
         }
 
-        [TestCase(AICodedbProductState.Starting, true, false, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.Ready, true, false, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.NeedsAttention, true, false, ExpectedResult = true)]
-        [TestCase(AICodedbProductState.NeedsAttention, false, false, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.Uninstalled, false, false, ExpectedResult = true)]
-        [TestCase(AICodedbProductState.Uninstalled, true, true, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.MissingPrerequisite, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Starting, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Ready, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractReinstallRequired, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, true, true, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.MissingPrerequisite, AICodedbProductAttentionReason.ControlContractReinstallRequired, true, false, ExpectedResult = false)]
         public bool ResolvePrimaryAction_ExposesOnlyOneContextualUserAction(
             AICodedbProductState state,
+            AICodedbProductAttentionReason attentionReason,
             bool reinstallAvailable,
             bool actionInFlight)
         {
-            return AICodedbManagerWindow.ResolvePrimaryAction(
+            var status = new AICodedbProductStatus(
                 state,
+                AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Unknown,
+                string.Empty,
+                default(AICodedbMaterializerCommandStatus),
+                attentionReason);
+            return AICodedbManagerWindow.ResolvePrimaryAction(
+                status,
                 reinstallAvailable,
                 actionInFlight);
         }
@@ -270,7 +293,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.MissingPrerequisite));
             Assert.That(status.Command.ReasonCode, Is.EqualTo("PROVIDER_MISSING"));
             Assert.That(status.Command.MutatedScopes, Is.Empty);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
         }
 
         [Test]
@@ -291,7 +314,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbManagerWindow.ResolveProviderInstallAction(status, true), Is.False);
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
             Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.True);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
         }
 
         [Test]
@@ -315,7 +338,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.True);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(false), Is.True);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(true), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
         }
 
         [Test]
@@ -332,14 +355,14 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
             Assert.That(
                 AICodedbStatusSnapshot.CreateOverallDescription(status),
                 Is.EqualTo("CodeDB is ready for this project. New Codex tasks can use project status and search tools."));
         }
 
         [Test]
-        public void NeedsAttentionDescription_HidesMaterializerInternalsAndGivesOneAction()
+        public void GenericNeedsAttentionDescription_HidesInternalsAndDoesNotPrescribeReinstall()
         {
             var status = new AICodedbProductStatus(
                 AICodedbProductState.NeedsAttention,
@@ -351,9 +374,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             var description = AICodedbStatusSnapshot.CreateOverallDescription(status);
 
             Assert.That(description, Is.EqualTo(
-                "CodeDB could not finish setup for this project. Use Reinstall CodeDB to try again."));
+                "CodeDB could not finish setup for this project. Review diagnostics before choosing a recovery action."));
             Assert.That(description, Does.Not.Contain("PRODUCT_LAYER"));
             Assert.That(description, Does.Not.Contain("pipe"));
+            Assert.That(description, Does.Not.Contain("Reinstall"));
         }
 
         [Test]
@@ -589,6 +613,39 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Error));
         }
 
+        [TestCase(
+            AICodedbProductAttentionReason.ControlContractReinstallRequired,
+            true,
+            "Reinstall required")]
+        [TestCase(
+            AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
+            false,
+            "Review required")]
+        public void CachedMigrationStatus_ControlsReinstallAndPreservesDiagnostics(
+            AICodedbProductAttentionReason attentionReason,
+            bool expectedReinstall,
+            string expectedSummary)
+        {
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "migration detail",
+                default(AICodedbMaterializerCommandStatus),
+                attentionReason,
+                "migration diagnostic");
+            var snapshot = AICodedbStatusSnapshot.CreateCachedStatus("FixtureProject", status);
+
+            Assert.That(snapshot.ProductStatus.AttentionReason, Is.EqualTo(attentionReason));
+            Assert.That(snapshot.ControlContractMigration.Summary, Is.EqualTo(expectedSummary));
+            Assert.That(snapshot.ControlContractMigration.Detail, Is.EqualTo("migration diagnostic"));
+            Assert.That(
+                AICodedbManagerWindow.ResolvePrimaryAction(snapshot.ProductStatus, true, false),
+                Is.EqualTo(expectedReinstall));
+        }
+
         [Test]
         public void UninstalledState_KeepsInstallAsTheOnlyProjectAction()
         {
@@ -607,7 +664,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.Uninstalled));
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status.State, false, false), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, false, false), Is.True);
         }
 
         private static AICodedbCommandResult Result(string output)

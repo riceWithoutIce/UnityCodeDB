@@ -568,15 +568,31 @@ namespace Rice.AI.Codedb.Editor
                 return false;
 
             AICodedbCommandResult cachedResult;
+            AICodedbProductStatus cachedProductStatus;
+            bool hasProductStatus;
             long revision;
-            if (!AICodedbEditorLifecycle.TryGetCachedHostStatusResult(
+            if (!AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
                     out cachedResult,
+                    out cachedProductStatus,
+                    out hasProductStatus,
                     out revision)
-                || cachedResult == null
                 || revision <= _cachedLifecycleStatusRevision)
                 return false;
 
             _cachedLifecycleStatusRevision = revision;
+            if (hasProductStatus)
+            {
+                ApplyStatusSnapshot(
+                    AICodedbStatusSnapshot.CreateCachedStatus(
+                        _executionContext.ProjectDisplayName,
+                        cachedProductStatus),
+                    true,
+                    false);
+                Repaint();
+                return true;
+            }
+            if (cachedResult == null)
+                return false;
             ApplyCachedLifecycleStatusAsync(cachedResult);
             return true;
         }
@@ -1186,7 +1202,7 @@ namespace Rice.AI.Codedb.Editor
                 _statusSnapshot.HostPayloadStatus.State,
                 _statusSnapshot.HostUpgradeStatus.Phase);
             var primaryAction = ResolvePrimaryAction(
-                _statusSnapshot.ProductStatus.State,
+                _statusSnapshot.ProductStatus,
                 reinstallAvailable,
                 _userActionInFlight)
                     || ResolveProviderInstallAction(
@@ -1214,6 +1230,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostPayload);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.CurrentInstance);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.ControlContractMigration);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostGeneration);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderExecutable);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProjectMcpConfig);
@@ -1821,7 +1838,9 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductState.Uninstalled:
                     return "Install CodeDB";
                 case AICodedbProductState.NeedsAttention:
-                    return "Reinstall CodeDB";
+                    return _statusSnapshot.ProductStatus.RequiresReinstall
+                        ? "Reinstall CodeDB"
+                        : string.Empty;
                 case AICodedbProductState.MissingPrerequisite:
                     return IsProviderInstallAvailable(_statusSnapshot.ProductStatus)
                         ? "Configure Dependencies"
@@ -1844,7 +1863,7 @@ namespace Rice.AI.Codedb.Editor
 
             if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
                 RunInstallCodeDBWithConfirmation();
-            else
+            else if (_statusSnapshot != null && _statusSnapshot.ProductStatus.RequiresReinstall)
                 RunReinstallCodeDBWithConfirmation();
         }
 
@@ -1931,15 +1950,15 @@ namespace Rice.AI.Codedb.Editor
         }
 
         internal static bool ResolvePrimaryAction(
-            AICodedbProductState productState,
+            AICodedbProductStatus productStatus,
             bool reinstallAvailable,
             bool actionInFlight)
         {
             if (actionInFlight)
                 return false;
-            if (productState == AICodedbProductState.Uninstalled)
+            if (productStatus.State == AICodedbProductState.Uninstalled)
                 return true;
-            return productState == AICodedbProductState.NeedsAttention && reinstallAvailable;
+            return productStatus.RequiresReinstall && reinstallAvailable;
         }
 
         internal static bool ResolveProviderInstallAction(

@@ -16,6 +16,7 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbCurrentInstanceStatus CurrentInstanceStatus { get; }
         internal AICodedbStatusItem CurrentInstance { get; }
         internal AICodedbStatusItem Cleanup { get; }
+        internal AICodedbStatusItem ControlContractMigration { get; }
         internal AICodedbHostPayloadStatus HostPayloadStatus { get; }
         internal AICodedbStatusItem HostPayload { get; }
         internal AICodedbStatusItem HostGeneration { get; }
@@ -72,6 +73,7 @@ namespace Rice.AI.Codedb.Editor
             ProductStatus = AICodedbProductStatusBuilder.Build(ProjectIntegrationStatus, hostPayloadResult);
             CurrentInstance = CreateCurrentInstanceStatus(CurrentInstanceStatus);
             Cleanup = CreateCleanupStatus(ProjectIntegrationStatus, ProductStatus.State);
+            ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             HostPayload = HostPayloadStatus.ToStatusItem();
             HostUpdatePolicyValue = AICodedbHostUpdatePolicyStore.Read(context.ProjectRoot);
             HostGeneration = CreateHostGenerationStatus(HostGenerationSelection);
@@ -111,6 +113,26 @@ namespace Rice.AI.Codedb.Editor
         private AICodedbStatusSnapshot(
             string projectDisplayName,
             AICodedbProductState displayState)
+            : this(
+                projectDisplayName,
+                displayState,
+                default(AICodedbProductStatus),
+                false)
+        {
+        }
+
+        private AICodedbStatusSnapshot(
+            string projectDisplayName,
+            AICodedbProductStatus productStatus)
+            : this(projectDisplayName, productStatus.State, productStatus, true)
+        {
+        }
+
+        private AICodedbStatusSnapshot(
+            string projectDisplayName,
+            AICodedbProductState displayState,
+            AICodedbProductStatus cachedProductStatus,
+            bool hasCachedProductStatus)
         {
             _context = default(AICodedbEditorExecutionContext);
             var productState = displayState;
@@ -136,7 +158,7 @@ namespace Rice.AI.Codedb.Editor
                         : cachedNeedsAttention
                             ? AICodedbProductLayerState.Blocked
                     : AICodedbProductLayerState.Pending;
-            var detail = cachedReady
+            var fallbackDetail = cachedReady
                 ? "The last verified Ready result is retained while Play mode is active; live checks resume after Play."
                 : cachedMissingPrerequisite
                     ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
@@ -145,6 +167,10 @@ namespace Rice.AI.Codedb.Editor
                 : cachedNeedsAttention
                     ? "The last CodeDB check needs attention; live checks resume in the background."
                 : "Checking project integration in the background.";
+            var detail = hasCachedProductStatus
+                         && !string.IsNullOrWhiteSpace(cachedProductStatus.Detail)
+                ? cachedProductStatus.Detail
+                : fallbackDetail;
             var runtimeRelativePath = cachedReady
                 ? AICodedbProjectSettings.RuntimeRelativePath
                 : string.Empty;
@@ -157,13 +183,15 @@ namespace Rice.AI.Codedb.Editor
                     : AICodedbProjectCleanupState.None,
                 string.Empty,
                 detail);
-            ProductStatus = new AICodedbProductStatus(
-                productState,
-                prerequisiteState,
-                layerState,
-                layerState,
-                layerState,
-                detail);
+            ProductStatus = hasCachedProductStatus
+                ? cachedProductStatus
+                : new AICodedbProductStatus(
+                    productState,
+                    prerequisiteState,
+                    layerState,
+                    layerState,
+                    layerState,
+                    detail);
             CurrentInstanceStatus = cachedReady
                 ? new AICodedbCurrentInstanceStatus(
                     AICodedbCurrentInstanceState.Current,
@@ -190,6 +218,7 @@ namespace Rice.AI.Codedb.Editor
                     "Not checked",
                     "Live cleanup checks resume after Play mode.")
                 : Checking("Background cleanup");
+            ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             RuntimeRootRelativePath = runtimeRelativePath;
             IndexRootRelativePath = cachedReady ? runtimeRelativePath + "/index" : string.Empty;
             TextAdapterRootRelativePath = cachedReady ? runtimeRelativePath + "/adapter/text-index" : string.Empty;
@@ -328,6 +357,18 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductState state)
         {
             return new AICodedbStatusSnapshot(projectDisplayName, state);
+        }
+
+        /// <summary>
+        /// Creates a display-only snapshot from a lifecycle product result.
+        /// The result is already classified on the background worker, so this
+        /// method performs no filesystem, process, or migration inspection.
+        /// </summary>
+        internal static AICodedbStatusSnapshot CreateCachedStatus(
+            string projectDisplayName,
+            AICodedbProductStatus productStatus)
+        {
+            return new AICodedbStatusSnapshot(projectDisplayName, productStatus);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(
@@ -531,7 +572,47 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductState.MissingPrerequisite:
                     return CreateMissingPrerequisiteDescription(status);
                 default:
-                    return "CodeDB could not finish setup for this project. Use Reinstall CodeDB to try again.";
+                    if (status.AttentionReason
+                        == AICodedbProductAttentionReason.ControlContractReinstallRequired)
+                    {
+                        return string.IsNullOrWhiteSpace(status.Detail)
+                            ? "This CodeDB installation needs attention. Reinstall CodeDB once to continue."
+                            : status.Detail;
+                    }
+                    if (status.AttentionReason
+                        == AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous)
+                    {
+                        return string.IsNullOrWhiteSpace(status.Detail)
+                            ? "CodeDB could not safely identify its control state. No project changes were made."
+                            : status.Detail;
+                    }
+                    return "CodeDB could not finish setup for this project. Review diagnostics before choosing a recovery action.";
+            }
+        }
+
+        private static AICodedbStatusItem CreateControlContractMigrationStatus(
+            AICodedbProductStatus status)
+        {
+            var diagnostic = string.IsNullOrWhiteSpace(status.DiagnosticDetail)
+                ? status.Detail
+                : status.DiagnosticDetail;
+            switch (status.AttentionReason)
+            {
+                case AICodedbProductAttentionReason.ControlContractReinstallRequired:
+                    return AICodedbStatusItem.Warning(
+                        "Control contract migration",
+                        "Reinstall required",
+                        diagnostic);
+                case AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous:
+                    return AICodedbStatusItem.Error(
+                        "Control contract migration",
+                        "Review required",
+                        diagnostic);
+                default:
+                    return AICodedbStatusItem.Inactive(
+                        "Control contract migration",
+                        "Not required",
+                        string.Empty);
             }
         }
 
