@@ -15,6 +15,794 @@ $script:InstanceRetiringFileName = "retiring.json"
 $script:InstanceLeaseDirectoryName = "leases"
 $script:InstanceAllowedDirectories = @("config", "index", "adapter", "watch", "leases", "logs", "tmp")
 $script:InstanceOptionalDirectories = @("leases")
+$script:InstanceControlContractSchemaVersion = 1
+$script:InstanceActivationRecordSchemaVersion = 1
+$script:InstanceActivationOperationSchemaVersion = 1
+$script:InstanceActivationRecordMaximumBytes = 64 * 1024
+$script:InstanceActivationOperationMaximumBytes = 1024 * 1024
+$script:InstanceContractNamespaceRelativePath = "$($script:InstanceControlRelativePath)/contracts"
+
+function Assert-InstanceJsonFieldAllowlist {
+    param(
+        [AllowNull()]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Fields,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $null = Assert-JsonObject -Value $Object -Label $Label
+    $allowed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($field in $Fields) { $null = $allowed.Add($field) }
+    $properties = @($Object.PSObject.Properties)
+    if ($properties.Count -ne $allowed.Count) {
+        throw "$Label does not contain the exact field set."
+    }
+    foreach ($property in $properties) {
+        if (-not $allowed.Contains($property.Name)) {
+            throw "$Label contains an unsupported field: $($property.Name)"
+        }
+    }
+}
+
+function Assert-InstanceLowercaseSha256 {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowNull
+    )
+
+    if ($AllowNull -and $null -eq $Value) { return $null }
+    if ($null -eq $Value -or $Value -cnotmatch '^[0-9a-f]{64}$') {
+        throw "$Label must be a lowercase SHA-256."
+    }
+    return $Value
+}
+
+function Assert-InstanceAttemptId {
+    param(
+        [AllowNull()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($null -eq $Value -or $Value -cnotmatch '^[0-9a-f]{32}$') {
+        throw "$Label must be a lowercase 32-hex identity."
+    }
+    return $Value
+}
+
+function Assert-InstanceUtcTimestamp {
+    param(
+        [AllowNull()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    [DateTimeOffset]$parsed = [DateTimeOffset]::MinValue
+    if ([string]::IsNullOrWhiteSpace($Value) -or
+        -not [DateTimeOffset]::TryParse(
+            $Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$parsed) -or
+        $parsed.Offset -ne [TimeSpan]::Zero) {
+        throw "$Label must be an unambiguous UTC timestamp."
+    }
+    return $Value
+}
+
+function Read-InstanceControlContractIdentity {
+    param([Parameter(Mandatory = $true)]$ManifestDocument)
+
+    $property = Get-ExactJsonProperty -Object $ManifestDocument -Name "control_contract" -Label "payload manifest"
+    if ($null -eq $property) {
+        throw "Payload manifest is missing required property: control_contract"
+    }
+    $document = Assert-JsonObject -Value $property.Value -Label "payload control contract"
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $document `
+        -Fields @("id", "version", "schema_version", "sha256") `
+        -Label "payload control contract"
+    $id = Get-RequiredJsonString -Object $document -Name "id" -Label "payload control contract"
+    $version = Get-RequiredJsonInt32 -Object $document -Name "version" -Label "payload control contract"
+    $schemaVersion = Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "payload control contract"
+    $sha256 = Get-RequiredJsonString -Object $document -Name "sha256" -Label "payload control contract"
+    if ($id -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $version -le 0 -or
+        $schemaVersion -ne $script:InstanceControlContractSchemaVersion) {
+        throw "Payload control contract identity is invalid."
+    }
+    $null = Assert-InstanceLowercaseSha256 -Value $sha256 -Label "payload control contract sha256"
+    $canonicalIdentity = @(
+        $script:ManagedBy,
+        "control-contract",
+        $id,
+        $version.ToString([Globalization.CultureInfo]::InvariantCulture),
+        $schemaVersion.ToString([Globalization.CultureInfo]::InvariantCulture)
+    ) -join "`n"
+    $expectedSha256 = Get-TextSha256 -Text $canonicalIdentity
+    if (-not [string]::Equals($sha256, $expectedSha256, [StringComparison]::Ordinal)) {
+        throw "Payload control contract identity hash is invalid."
+    }
+    return [pscustomobject]@{
+        Id = $id
+        Version = $version
+        SchemaVersion = $schemaVersion
+        Sha256 = $sha256
+        CanonicalIdentity = $canonicalIdentity
+    }
+}
+
+function Assert-InstanceControlContractIdentity {
+    param([Parameter(Mandatory = $true)]$ControlContract)
+
+    $id = [string]$ControlContract.Id
+    $version = [int]$ControlContract.Version
+    $schemaVersion = [int]$ControlContract.SchemaVersion
+    $sha256 = [string]$ControlContract.Sha256
+    if ($id -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $version -le 0 -or
+        $schemaVersion -ne $script:InstanceControlContractSchemaVersion) {
+        throw "Control contract identity is invalid."
+    }
+    $null = Assert-InstanceLowercaseSha256 -Value $sha256 -Label "control contract sha256"
+    $canonicalIdentity = @(
+        $script:ManagedBy,
+        "control-contract",
+        $id,
+        $version.ToString([Globalization.CultureInfo]::InvariantCulture),
+        $schemaVersion.ToString([Globalization.CultureInfo]::InvariantCulture)
+    ) -join "`n"
+    if (-not [string]::Equals((Get-TextSha256 -Text $canonicalIdentity), $sha256, [StringComparison]::Ordinal)) {
+        throw "Control contract identity hash is invalid."
+    }
+    return $ControlContract
+}
+
+function ConvertTo-InstanceControlContractDocument {
+    param([Parameter(Mandatory = $true)]$ControlContract)
+
+    $null = Assert-InstanceControlContractIdentity -ControlContract $ControlContract
+    return [pscustomobject][ordered]@{
+        id = [string]$ControlContract.Id
+        version = [int64]$ControlContract.Version
+        schema_version = [int64]$ControlContract.SchemaVersion
+        sha256 = [string]$ControlContract.Sha256
+    }
+}
+
+function Get-InstanceActivationContractPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$ControlContract,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+
+    $null = Assert-InstanceControlContractIdentity -ControlContract $ControlContract
+    $null = Assert-InstanceAttemptId -Value $OperationId -Label "operation_id"
+    $fullProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $fullProjectRoot -PathType Container)) {
+        throw "Activation contract project root is unavailable: $fullProjectRoot"
+    }
+    Assert-NoReparsePoint -Path $fullProjectRoot -Root $fullProjectRoot -Label "activation contract project root"
+    $versionText = $ControlContract.Version.ToString([Globalization.CultureInfo]::InvariantCulture)
+    $contractRootRelativePath = "$($script:InstanceContractNamespaceRelativePath)/$($ControlContract.Id)/v$versionText"
+    $activationRelativePath = "$contractRootRelativePath/activation.json"
+    $operationRelativePath = "$contractRootRelativePath/operation.json"
+    $operationsRelativePath = "$contractRootRelativePath/operations"
+    $operationRootRelativePath = "$operationsRelativePath/$OperationId"
+    $supervisorRelativePath = "$contractRootRelativePath/supervisor"
+    $contractRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $contractRootRelativePath -Label "activation contract root"
+    $activationPath = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $activationRelativePath -Label "activation record"
+    $operationPath = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $operationRelativePath -Label "activation operation journal"
+    $operationRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $operationRootRelativePath -Label "activation operation root"
+    $supervisorRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $supervisorRelativePath -Label "Supervisor contract root"
+    return [pscustomobject]@{
+        ContractRootRelativePath = $contractRootRelativePath
+        ActivationRelativePath = $activationRelativePath
+        OperationRelativePath = $operationRelativePath
+        OperationsRelativePath = $operationsRelativePath
+        OperationRootRelativePath = $operationRootRelativePath
+        SupervisorRelativePath = $supervisorRelativePath
+        ContractRoot = $contractRoot
+        ActivationPath = $activationPath
+        OperationPath = $operationPath
+        OperationRoot = $operationRoot
+        SupervisorRoot = $supervisorRoot
+    }
+}
+
+function New-InstanceActivationAttemptIdentity {
+    $activationEpoch = [guid]::NewGuid().ToString("N")
+    do { $operationId = [guid]::NewGuid().ToString("N") } while ($operationId -ceq $activationEpoch)
+    return [pscustomobject]@{ ActivationEpoch = $activationEpoch; OperationId = $operationId }
+}
+
+function Assert-InstanceActivationAttemptIdentity {
+    param([Parameter(Mandatory = $true)]$Attempt)
+
+    $activationEpoch = Assert-InstanceAttemptId -Value ([string]$Attempt.ActivationEpoch) -Label "activation_epoch"
+    $operationId = Assert-InstanceAttemptId -Value ([string]$Attempt.OperationId) -Label "operation_id"
+    if ([string]::Equals($activationEpoch, $operationId, [StringComparison]::Ordinal)) {
+        throw "activation_epoch and operation_id must be distinct."
+    }
+    return $Attempt
+}
+
+function New-InstanceActivationEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstanceId,
+        [Parameter(Mandatory = $true)][string]$GenerationId,
+        [Parameter(Mandatory = $true)][string]$InstanceManifestSha256,
+        [Parameter(Mandatory = $true)][string]$GenerationManifestSha256,
+        [Parameter(Mandatory = $true)][ValidateSet("CURRENT", "TRUSTED_PREVIOUS", "NEWER", "SEQUENCE_COLLISION", "INVALID")][string]$GenerationDisposition
+    )
+
+    if ($InstanceId -cnotmatch '^[0-9a-f]{32}$') { throw "Activation instance_id is invalid." }
+    if ($GenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$') { throw "Activation generation_id is invalid." }
+    $null = Assert-InstanceLowercaseSha256 -Value $InstanceManifestSha256 -Label "activation instance manifest hash"
+    $null = Assert-InstanceLowercaseSha256 -Value $GenerationManifestSha256 -Label "activation generation manifest hash"
+    return [pscustomobject][ordered]@{
+        instance_id = $InstanceId
+        generation_id = $GenerationId
+        instance_manifest_sha256 = $InstanceManifestSha256
+        generation_manifest_sha256 = $GenerationManifestSha256
+        generation_disposition = $GenerationDisposition
+    }
+}
+
+function Read-InstanceActivationEvidenceDocument {
+    param(
+        [AllowNull()]$Document,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowNull
+    )
+
+    if ($AllowNull -and $null -eq $Document) { return $null }
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $Document `
+        -Fields @("instance_id", "generation_id", "instance_manifest_sha256", "generation_manifest_sha256", "generation_disposition") `
+        -Label $Label
+    $instanceId = Get-RequiredJsonString -Object $Document -Name "instance_id" -Label $Label
+    $generationId = Get-RequiredJsonString -Object $Document -Name "generation_id" -Label $Label
+    $instanceManifestSha256 = Get-RequiredJsonString -Object $Document -Name "instance_manifest_sha256" -Label $Label
+    $generationManifestSha256 = Get-RequiredJsonString -Object $Document -Name "generation_manifest_sha256" -Label $Label
+    $disposition = Get-RequiredJsonString -Object $Document -Name "generation_disposition" -Label $Label
+    return New-InstanceActivationEvidence `
+        -InstanceId $instanceId `
+        -GenerationId $generationId `
+        -InstanceManifestSha256 $instanceManifestSha256 `
+        -GenerationManifestSha256 $generationManifestSha256 `
+        -GenerationDisposition $disposition
+}
+
+function Test-InstanceActivationEvidenceEqual {
+    param(
+        [AllowNull()]$Left,
+        [AllowNull()]$Right
+    )
+
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+    return [string]::Equals([string]$Left.instance_id, [string]$Right.instance_id, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$Left.generation_id, [string]$Right.generation_id, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$Left.instance_manifest_sha256, [string]$Right.instance_manifest_sha256, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$Left.generation_manifest_sha256, [string]$Right.generation_manifest_sha256, [StringComparison]::Ordinal) -and
+        [string]::Equals([string]$Left.generation_disposition, [string]$Right.generation_disposition, [StringComparison]::Ordinal)
+}
+
+function Assert-InstanceActivationRoleSemantics {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [AllowNull()]$Current,
+        [AllowNull()]$LastKnownGood,
+        [AllowNull()][string]$PublicationPhase
+    )
+
+    if (-not [string]::Equals([string]$Candidate.generation_id, [string]$Context.TargetGenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$Candidate.generation_manifest_sha256, [string]$Context.TargetGenerationManifestSha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$Candidate.generation_disposition, "CURRENT", [StringComparison]::Ordinal)) {
+        throw "Activation candidate does not match the trusted current target generation."
+    }
+    foreach ($selection in @($Current, $LastKnownGood)) {
+        if ($null -ne $selection -and $selection.generation_disposition -cnotin @("CURRENT", "TRUSTED_PREVIOUS")) {
+            throw "Activation current/LKG evidence has an unsafe generation disposition."
+        }
+    }
+    if ([string]::Equals($PublicationPhase, "COMMITTED", [StringComparison]::Ordinal) -and
+        ($null -eq $Current -or -not (Test-InstanceActivationEvidenceEqual -Left $Candidate -Right $Current))) {
+        throw "Committed activation must select the complete candidate identity as current."
+    }
+}
+
+function New-InstanceActivationMutationEvidence {
+    param(
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][ValidateSet("Write", "Delete")][string]$Mutation,
+        [AllowNull()][string]$DesiredSha256,
+        [Parameter(Mandatory = $true)][bool]$ExistedBefore,
+        [AllowNull()][string]$PreImageSha256
+    )
+
+    if ($Index -lt 0) { throw "Activation mutation index is invalid." }
+    $normalizedTarget = Assert-InstanceTransactionTarget -Target $Target
+    if ($Mutation -eq "Write") {
+        $null = Assert-InstanceLowercaseSha256 -Value $DesiredSha256 -Label "activation mutation desired hash"
+    } elseif ($null -ne $DesiredSha256) {
+        throw "Activation delete mutation cannot declare desired bytes."
+    }
+    if ($ExistedBefore) {
+        $null = Assert-InstanceLowercaseSha256 -Value $PreImageSha256 -Label "activation mutation pre-image hash"
+    } elseif ($null -ne $PreImageSha256) {
+        throw "Activation mutation cannot declare a pre-image for an absent target."
+    }
+    return [pscustomobject][ordered]@{
+        index = [int64]$Index
+        target = $normalizedTarget
+        mutation = $Mutation.ToLowerInvariant()
+        desired_sha256 = $DesiredSha256
+        existed_before = $ExistedBefore
+        pre_image_sha256 = $PreImageSha256
+    }
+}
+
+function Read-InstanceActivationMutationEvidenceDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][int]$ExpectedIndex
+    )
+
+    $label = "activation mutation evidence"
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $Document `
+        -Fields @("index", "target", "mutation", "desired_sha256", "existed_before", "pre_image_sha256") `
+        -Label $label
+    $index = Get-RequiredJsonInt32 -Object $Document -Name "index" -Label $label
+    $mutationText = Get-RequiredJsonString -Object $Document -Name "mutation" -Label $label
+    $mutation = if ($mutationText -ceq "write") { "Write" } elseif ($mutationText -ceq "delete") { "Delete" } else { throw "Activation mutation kind is invalid." }
+    if ($index -ne $ExpectedIndex) { throw "Activation mutation evidence is not in exact index order." }
+    return New-InstanceActivationMutationEvidence `
+        -Index $index `
+        -Target (Get-RequiredJsonString -Object $Document -Name "target" -Label $label) `
+        -Mutation $mutation `
+        -DesiredSha256 (Get-RequiredJsonNullableString -Object $Document -Name "desired_sha256" -Label $label) `
+        -ExistedBefore (Get-RequiredJsonBoolean -Object $Document -Name "existed_before" -Label $label) `
+        -PreImageSha256 (Get-RequiredJsonNullableString -Object $Document -Name "pre_image_sha256" -Label $label)
+}
+
+function New-InstanceActivationContractContext {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+
+    $contract = Assert-InstanceControlContractIdentity -ControlContract $Manifest.ControlContract
+    $runtimeContractSha256 = Assert-InstanceLowercaseSha256 `
+        -Value ([string]$Manifest.RuntimeContractSha256) `
+        -Label "runtime_contract_sha256"
+    $targetGenerationId = [string]$Manifest.TargetGenerationId
+    if ($targetGenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$') {
+        throw "Trusted Manifest context has no valid current target generation."
+    }
+    $targetGenerationManifestSha256 = Assert-InstanceLowercaseSha256 `
+        -Value ([string]$Manifest.TargetGenerationManifestSha256) `
+        -Label "target generation manifest hash"
+    $paths = Get-InstanceActivationContractPaths `
+        -ProjectRoot $ProjectRoot `
+        -ControlContract $contract `
+        -OperationId $OperationId
+    return [pscustomobject]@{
+        ControlContract = $contract
+        RuntimeContractSha256 = $runtimeContractSha256
+        TargetGenerationId = $targetGenerationId
+        TargetGenerationManifestSha256 = $targetGenerationManifestSha256
+        ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        ProjectIdentity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+        Paths = $paths
+    }
+}
+
+function New-InstanceActivationRecordDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Attempt,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [AllowNull()]$Current,
+        [AllowNull()]$LastKnownGood,
+        [Parameter(Mandatory = $true)][ValidateSet("PREPARED", "ACTIVATING", "COMMITTED")][string]$PublicationPhase,
+        [string]$TimestampUtc = [DateTime]::UtcNow.ToString("o")
+    )
+
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $Attempt
+    $candidateDocument = Read-InstanceActivationEvidenceDocument -Document $Candidate -Label "activation candidate"
+    $currentDocument = Read-InstanceActivationEvidenceDocument -Document $Current -Label "activation current" -AllowNull
+    $lastKnownGoodDocument = Read-InstanceActivationEvidenceDocument -Document $LastKnownGood -Label "activation last-known-good" -AllowNull
+    Assert-InstanceActivationRoleSemantics `
+        -Context $Context `
+        -Candidate $candidateDocument `
+        -Current $currentDocument `
+        -LastKnownGood $lastKnownGoodDocument `
+        -PublicationPhase $PublicationPhase
+    $null = Assert-InstanceUtcTimestamp -Value $TimestampUtc -Label "activation record timestamp"
+    return [pscustomobject][ordered]@{
+        schema_version = [int64]$script:InstanceActivationRecordSchemaVersion
+        managed_by = $script:ManagedBy
+        control_contract = ConvertTo-InstanceControlContractDocument -ControlContract $Context.ControlContract
+        runtime_contract_sha256 = [string]$Context.RuntimeContractSha256
+        project_root = [string]$Context.ProjectRoot
+        project_identity = [string]$Context.ProjectIdentity
+        activation_epoch = [string]$Attempt.ActivationEpoch
+        operation_id = [string]$Attempt.OperationId
+        candidate = $candidateDocument
+        current = $currentDocument
+        last_known_good = $lastKnownGoodDocument
+        publication_phase = $PublicationPhase
+        updated_at_utc = $TimestampUtc
+    }
+}
+
+function New-InstanceActivationOperationDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Attempt,
+        [Parameter(Mandatory = $true)][ValidateSet("INSTALL", "UPGRADE", "REINSTALL")][string]$Action,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [AllowNull()]$PreviousActivationRecordSha256,
+        [Parameter(Mandatory = $true)][ValidateSet("PREPARED", "ACTIVATING", "COMMITTED")][string]$Phase,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Mutations,
+        [string]$TimestampUtc = [DateTime]::UtcNow.ToString("o")
+    )
+
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $Attempt
+    $candidateDocument = Read-InstanceActivationEvidenceDocument -Document $Candidate -Label "activation operation candidate"
+    Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $candidateDocument -Current $null -LastKnownGood $null
+    $null = Assert-InstanceLowercaseSha256 `
+        -Value $PreviousActivationRecordSha256 `
+        -Label "previous activation record hash" `
+        -AllowNull
+    $null = Assert-InstanceUtcTimestamp -Value $TimestampUtc -Label "activation operation timestamp"
+    $orderedMutations = New-Object System.Collections.Generic.List[object]
+    $seenMutationTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    for ($index = 0; $index -lt $Mutations.Count; $index++) {
+        $mutation = Read-InstanceActivationMutationEvidenceDocument -Document $Mutations[$index] -ExpectedIndex $index
+        if (-not $seenMutationTargets.Add([string]$mutation.target)) {
+            throw "Activation operation journal contains a duplicate mutation target."
+        }
+        $orderedMutations.Add($mutation)
+    }
+    return [pscustomobject][ordered]@{
+        schema_version = [int64]$script:InstanceActivationOperationSchemaVersion
+        managed_by = $script:ManagedBy
+        control_contract = ConvertTo-InstanceControlContractDocument -ControlContract $Context.ControlContract
+        runtime_contract_sha256 = [string]$Context.RuntimeContractSha256
+        project_root = [string]$Context.ProjectRoot
+        project_identity = [string]$Context.ProjectIdentity
+        activation_epoch = [string]$Attempt.ActivationEpoch
+        operation_id = [string]$Attempt.OperationId
+        action = $Action
+        candidate = $candidateDocument
+        previous_activation_record_sha256 = $PreviousActivationRecordSha256
+        phase = $Phase
+        updated_at_utc = $TimestampUtc
+        mutations = $orderedMutations.ToArray()
+    }
+}
+
+function Assert-InstanceActivationContractDocumentContext {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $controlDocument = Get-RequiredJsonPropertyValue -Object $Document -Name "control_contract" -Label $Label
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $controlDocument `
+        -Fields @("id", "version", "schema_version", "sha256") `
+        -Label "$Label control contract"
+    if (-not [string]::Equals((Get-RequiredJsonString -Object $controlDocument -Name "id" -Label $Label), [string]$Context.ControlContract.Id, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonInt32 -Object $controlDocument -Name "version" -Label $Label) -ne [int]$Context.ControlContract.Version -or
+        (Get-RequiredJsonInt32 -Object $controlDocument -Name "schema_version" -Label $Label) -ne [int]$Context.ControlContract.SchemaVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $controlDocument -Name "sha256" -Label $Label), [string]$Context.ControlContract.Sha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "runtime_contract_sha256" -Label $Label), [string]$Context.RuntimeContractSha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath((Get-RequiredJsonString -Object $Document -Name "project_root" -Label $Label)).TrimEnd('\', '/'), [string]$Context.ProjectRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "project_identity" -Label $Label), [string]$Context.ProjectIdentity, [StringComparison]::Ordinal)) {
+        throw "$Label does not match its trusted contract or project context."
+    }
+}
+
+function Assert-InstanceActivationRecordDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $label = "activation record"
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $Document `
+        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "candidate", "current", "last_known_good", "publication_phase", "updated_at_utc") `
+        -Label $label
+    if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $label) -ne $script:InstanceActivationRecordSchemaVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal)) {
+        throw "Activation record schema or owner is invalid."
+    }
+    Assert-InstanceActivationContractDocumentContext -Document $Document -Context $Context -Label $label
+    $attempt = [pscustomobject]@{
+        ActivationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $label
+        OperationId = Get-RequiredJsonString -Object $Document -Name "operation_id" -Label $label
+    }
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $attempt
+    $candidate = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "candidate" -Label $label) -Label "activation candidate"
+    $current = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "current" -Label $label) -Label "activation current" -AllowNull
+    $lastKnownGood = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "last_known_good" -Label $label) -Label "activation last-known-good" -AllowNull
+    $phase = Get-RequiredJsonString -Object $Document -Name "publication_phase" -Label $label
+    if ($phase -cnotin @("PREPARED", "ACTIVATING", "COMMITTED")) {
+        throw "Activation record publication phase is invalid."
+    }
+    Assert-InstanceActivationRoleSemantics `
+        -Context $Context `
+        -Candidate $candidate `
+        -Current $current `
+        -LastKnownGood $lastKnownGood `
+        -PublicationPhase $phase
+    $timestamp = Assert-InstanceUtcTimestamp -Value (Get-RequiredJsonString -Object $Document -Name "updated_at_utc" -Label $label) -Label "activation record timestamp"
+    return [pscustomobject]@{
+        Document = $Document
+        Attempt = $attempt
+        Candidate = $candidate
+        Current = $current
+        LastKnownGood = $lastKnownGood
+        Phase = $phase
+        TimestampUtc = $timestamp
+    }
+}
+
+function Assert-InstanceActivationOperationDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $label = "activation operation journal"
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $Document `
+        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "action", "candidate", "previous_activation_record_sha256", "phase", "updated_at_utc", "mutations") `
+        -Label $label
+    if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $label) -ne $script:InstanceActivationOperationSchemaVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal)) {
+        throw "Activation operation journal schema or owner is invalid."
+    }
+    Assert-InstanceActivationContractDocumentContext -Document $Document -Context $Context -Label $label
+    $attempt = [pscustomobject]@{
+        ActivationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $label
+        OperationId = Get-RequiredJsonString -Object $Document -Name "operation_id" -Label $label
+    }
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $attempt
+    $action = Get-RequiredJsonString -Object $Document -Name "action" -Label $label
+    if ($action -cnotin @("INSTALL", "UPGRADE", "REINSTALL")) { throw "Activation operation action is invalid." }
+    $candidate = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "candidate" -Label $label) -Label "activation operation candidate"
+    Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $candidate -Current $null -LastKnownGood $null
+    $previousHash = Get-RequiredJsonNullableString -Object $Document -Name "previous_activation_record_sha256" -Label $label
+    $null = Assert-InstanceLowercaseSha256 -Value $previousHash -Label "previous activation record hash" -AllowNull
+    $phase = Get-RequiredJsonString -Object $Document -Name "phase" -Label $label
+    if ($phase -cnotin @("PREPARED", "ACTIVATING", "COMMITTED")) { throw "Activation operation phase is invalid." }
+    $timestamp = Assert-InstanceUtcTimestamp -Value (Get-RequiredJsonString -Object $Document -Name "updated_at_utc" -Label $label) -Label "activation operation timestamp"
+    $mutationDocuments = Get-RequiredJsonArray -Object $Document -Name "mutations" -Label $label
+    $mutations = New-Object System.Collections.Generic.List[object]
+    $seenMutationTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    for ($index = 0; $index -lt $mutationDocuments.Count; $index++) {
+        $mutation = Read-InstanceActivationMutationEvidenceDocument -Document $mutationDocuments[$index] -ExpectedIndex $index
+        if (-not $seenMutationTargets.Add([string]$mutation.target)) {
+            throw "Activation operation journal contains a duplicate mutation target."
+        }
+        $mutations.Add($mutation)
+    }
+    return [pscustomobject]@{
+        Document = $Document
+        Attempt = $attempt
+        Action = $action
+        Candidate = $candidate
+        PreviousActivationRecordSha256 = $previousHash
+        Phase = $phase
+        TimestampUtc = $timestamp
+        Mutations = $mutations.ToArray()
+    }
+}
+
+function Read-InstanceActivationRecord {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $path = [string]$Context.Paths.ActivationPath
+    Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "activation record"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Activation record is missing or not a regular file." }
+    $json = Read-BoundedJsonDocument -Path $path -Label "activation record" -MaximumBytes $script:InstanceActivationRecordMaximumBytes
+    $validated = Assert-InstanceActivationRecordDocument -Document $json.Document -Context $Context
+    $validated | Add-Member -NotePropertyName Path -NotePropertyValue $path
+    $validated | Add-Member -NotePropertyName Sha256 -NotePropertyValue $json.Sha256
+    $validated | Add-Member -NotePropertyName Text -NotePropertyValue $json.Text
+    return $validated
+}
+
+function Read-InstanceActivationOperation {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $path = [string]$Context.Paths.OperationPath
+    Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "activation operation journal"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Activation operation journal is missing or not a regular file." }
+    $json = Read-BoundedJsonDocument -Path $path -Label "activation operation journal" -MaximumBytes $script:InstanceActivationOperationMaximumBytes
+    $validated = Assert-InstanceActivationOperationDocument -Document $json.Document -Context $Context
+    $validated | Add-Member -NotePropertyName Path -NotePropertyValue $path
+    $validated | Add-Member -NotePropertyName Sha256 -NotePropertyValue $json.Sha256
+    $validated | Add-Member -NotePropertyName Text -NotePropertyValue $json.Text
+    return $validated
+}
+
+function Assert-InstanceActivationDocumentsMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Activation,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if (-not [string]::Equals([string]$Activation.Attempt.ActivationEpoch, [string]$Operation.Attempt.ActivationEpoch, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$Activation.Attempt.OperationId, [string]$Operation.Attempt.OperationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$Activation.Phase, [string]$Operation.Phase, [StringComparison]::Ordinal) -or
+        -not [string]::Equals(
+            (ConvertTo-InstanceJsonText -Value $Activation.Candidate),
+            (ConvertTo-InstanceJsonText -Value $Operation.Candidate),
+            [StringComparison]::Ordinal)) {
+        throw "Activation record and operation journal identities do not match."
+    }
+}
+
+function Publish-InstanceActivationFileIfAbsentOrIdentical {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][int64]$MaximumBytes
+    )
+
+    Assert-NoReparsePoint -Path $Path -Root $ProjectRoot -Label $Label
+    $desiredBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Content)
+    if (Test-Path -LiteralPath $Path) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label is not a regular file." }
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item.Length -le 0 -or $item.Length -gt $MaximumBytes) { throw "$Label size is outside the accepted range." }
+        $existingBytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($existingBytes.Length -le 0 -or $existingBytes.Length -gt $MaximumBytes) { throw "$Label size changed outside the accepted range while it was read." }
+        if ($existingBytes.Length -ne $desiredBytes.Length) { throw "$Label conflicts with the immutable activation attempt." }
+        for ($index = 0; $index -lt $existingBytes.Length; $index++) {
+            if ($existingBytes[$index] -ne $desiredBytes[$index]) { throw "$Label conflicts with the immutable activation attempt." }
+        }
+        return $false
+    }
+    try {
+        Write-DurableUtf8File -Path $Path -Content $Content
+        return $true
+    } catch {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw }
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item.Length -le 0 -or $item.Length -gt $MaximumBytes) { throw "$Label size is outside the accepted range." }
+        $existingBytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($existingBytes.Length -le 0 -or $existingBytes.Length -gt $MaximumBytes) { throw "$Label size changed outside the accepted range while it was read." }
+        if ($existingBytes.Length -ne $desiredBytes.Length) { throw "$Label conflicted during publication." }
+        for ($index = 0; $index -lt $existingBytes.Length; $index++) {
+            if ($existingBytes[$index] -ne $desiredBytes[$index]) { throw "$Label conflicted during publication." }
+        }
+        return $false
+    }
+}
+
+function Assert-FreshInstanceActivationNamespace {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $contractRoot = [string]$Context.Paths.ContractRoot
+    if (-not (Test-Path -LiteralPath $contractRoot)) { return }
+    if (-not (Test-Path -LiteralPath $contractRoot -PathType Container)) {
+        throw "Activation contract namespace is not a directory."
+    }
+    Assert-NoReparsePoint -Path $contractRoot -Root $Context.ProjectRoot -Label "activation contract namespace"
+    foreach ($entry in @(Get-ChildItem -LiteralPath $contractRoot -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $Context.ProjectRoot -Label "activation contract namespace entry"
+        if ($entry.Name -ceq "activation.json" -or $entry.Name -ceq "operation.json") {
+            if ($entry.PSIsContainer) { throw "Activation contract namespace record is not a regular file: $($entry.Name)" }
+            continue
+        }
+        if ($entry.Name -ceq "operations") {
+            if (-not $entry.PSIsContainer) { throw "Activation contract operations root is not a directory." }
+            continue
+        }
+        throw "Activation contract namespace is not fresh: unexpected entry $($entry.Name)"
+    }
+
+    $operationsRoot = Get-InstanceProjectPath `
+        -ProjectRoot $Context.ProjectRoot `
+        -RelativePath $Context.Paths.OperationsRelativePath `
+        -Label "activation operations root"
+    if (-not (Test-Path -LiteralPath $operationsRoot)) { return }
+    if (-not (Test-Path -LiteralPath $operationsRoot -PathType Container)) {
+        throw "Activation contract operations root is not a directory."
+    }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $operationsRoot -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $Context.ProjectRoot -Label "activation operation directory"
+        if (-not $entry.PSIsContainer -or
+            -not [string]::Equals($entry.Name, [string]$Context.Paths.OperationRootRelativePath.Split('/')[-1], [StringComparison]::Ordinal)) {
+            throw "Activation contract namespace is not fresh: unexpected operation entry $($entry.Name)"
+        }
+    }
+    if (Test-Path -LiteralPath $Context.Paths.OperationRoot) {
+        if (-not (Test-Path -LiteralPath $Context.Paths.OperationRoot -PathType Container)) {
+            throw "Activation operation root is not a directory."
+        }
+        if (@(Get-ChildItem -LiteralPath $Context.Paths.OperationRoot -Force).Count -ne 0) {
+            throw "Activation operation root contains unexpected evidence."
+        }
+    }
+}
+
+function Initialize-FreshInstanceActivationContract {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$ActivationDocument,
+        [Parameter(Mandatory = $true)]$OperationDocument
+    )
+
+    $activation = Assert-InstanceActivationRecordDocument -Document $ActivationDocument -Context $Context
+    $operation = Assert-InstanceActivationOperationDocument -Document $OperationDocument -Context $Context
+    Assert-InstanceActivationDocumentsMatch -Activation $activation -Operation $operation
+    if (-not [string]::Equals([string]$activation.Attempt.OperationId, [string]$Context.Paths.OperationRootRelativePath.Split('/')[-1], [StringComparison]::Ordinal)) {
+        throw "Activation attempt operation_id does not match its derived operation directory."
+    }
+    if ($null -ne $operation.PreviousActivationRecordSha256) {
+        throw "Fresh activation contract provisioning cannot replace a previous activation record."
+    }
+
+    $activationText = ConvertTo-InstanceJsonText -Value $ActivationDocument
+    $operationText = ConvertTo-InstanceJsonText -Value $OperationDocument
+    foreach ($path in @($Context.Paths.ContractRoot, $Context.Paths.OperationRoot)) {
+        Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "activation contract directory"
+    }
+    Assert-FreshInstanceActivationNamespace -Context $Context
+    if (Test-Path -LiteralPath $Context.Paths.ActivationPath) {
+        $existingActivation = Read-InstanceActivationRecord -Context $Context
+        if (-not [string]::Equals($existingActivation.Text, $activationText, [StringComparison]::Ordinal)) {
+            throw "Activation record conflicts with the immutable activation attempt."
+        }
+    }
+    if (Test-Path -LiteralPath $Context.Paths.OperationPath) {
+        $existingOperation = Read-InstanceActivationOperation -Context $Context
+        if (-not [string]::Equals($existingOperation.Text, $operationText, [StringComparison]::Ordinal)) {
+            throw "Activation operation journal conflicts with the immutable activation attempt."
+        }
+    }
+    New-Item -ItemType Directory -Force -Path $Context.Paths.ContractRoot | Out-Null
+    Assert-NoReparsePoint -Path $Context.Paths.ContractRoot -Root $Context.ProjectRoot -Label "activation contract root"
+    New-Item -ItemType Directory -Force -Path $Context.Paths.OperationRoot | Out-Null
+    Assert-NoReparsePoint -Path $Context.Paths.OperationRoot -Root $Context.ProjectRoot -Label "activation operation root"
+    Assert-FreshInstanceActivationNamespace -Context $Context
+    $operationCreated = Publish-InstanceActivationFileIfAbsentOrIdentical `
+        -Path $Context.Paths.OperationPath `
+        -Content $operationText `
+        -ProjectRoot $Context.ProjectRoot `
+        -Label "activation operation journal" `
+        -MaximumBytes $script:InstanceActivationOperationMaximumBytes
+    $activationCreated = Publish-InstanceActivationFileIfAbsentOrIdentical `
+        -Path $Context.Paths.ActivationPath `
+        -Content $activationText `
+        -ProjectRoot $Context.ProjectRoot `
+        -Label "activation record" `
+        -MaximumBytes $script:InstanceActivationRecordMaximumBytes
+    $publishedActivation = Read-InstanceActivationRecord -Context $Context
+    $publishedOperation = Read-InstanceActivationOperation -Context $Context
+    Assert-InstanceActivationDocumentsMatch -Activation $publishedActivation -Operation $publishedOperation
+    Assert-FreshInstanceActivationNamespace -Context $Context
+    return [pscustomobject]@{
+        Created = $activationCreated -or $operationCreated
+        Activation = $publishedActivation
+        Operation = $publishedOperation
+        Paths = $Context.Paths
+    }
+}
 
 function ConvertTo-InstanceJsonText {
     param([Parameter(Mandatory = $true)]$Value)

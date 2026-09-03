@@ -16,6 +16,8 @@ param(
 
     [switch]$PayloadContractOnly,
 
+    [switch]$ActivationContractOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -24,8 +26,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -178,6 +180,25 @@ function Assert-Equal {
     if (-not [string]::Equals([string]$Actual, [string]$Expected, [StringComparison]::Ordinal)) {
         throw "$Message Expected '$Expected', got '$Actual'."
     }
+}
+
+function Assert-ThrowsMessage {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [Parameter(Mandatory = $true)][string]$ExpectedMessage,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $actualMessage = $null
+    try {
+        & $Action
+    } catch {
+        $actualMessage = $_.Exception.Message
+    }
+    Assert-True -Condition ($null -ne $actualMessage) -Message "$Label did not fail closed."
+    Assert-True `
+        -Condition ($actualMessage.IndexOf($ExpectedMessage, [StringComparison]::OrdinalIgnoreCase) -ge 0) `
+        -Message "$Label returned an unexpected error: $actualMessage"
 }
 
 function Assert-LfOnlyFile {
@@ -6160,6 +6181,7 @@ function New-SyntheticPayload {
     $manifest = [ordered]@{
         schema_version = 1
         managed_by = "com.rice.ai-codedb"
+        control_contract = $canonicalPayloadManifest.control_contract
         package_version = $PackageVersion
         payload_version = $PayloadVersion
         payload_sequence = $resolvedPayloadSequence
@@ -6172,6 +6194,461 @@ function New-SyntheticPayload {
     }
     Write-Utf8File -Path (Join-Path $Root "payload-manifest.json") -Content (($manifest | ConvertTo-Json -Depth 8) + "`n")
     return $Root
+}
+
+function Invoke-ActivationContractFoundationScenarios {
+    $parseErrors = $null
+    $parseTokens = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath,
+        [ref]$parseTokens,
+        [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message "Materializer source did not parse for focused function loading."
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    $instanceEnginePath = Join-Path $packageRoot "Tools~\codedb-instance-engine.ps1"
+    . $instanceEnginePath
+
+    $script:ManagedBy = "com.rice.ai-codedb"
+    $script:RequestedExitCode = 0
+    $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
+    $script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
+    $script:MarkerRelativePath = $markerRelativePath
+    $script:IntegrationStateRelativePath = "AIWork/.runtime/codedb/payload-materializer/integration-state.json"
+    $script:McpConfigRelativePath = ".codex/config.toml"
+    $script:TargetPrefix = "AIWork/codedb/"
+    $script:AllowedTargetPaths = @{}
+
+    $manifestJson = Read-BoundedJsonDocument `
+        -Path $canonicalPayloadManifestPath `
+        -Label "focused Package runtime contract" `
+        -MaximumBytes (1024 * 1024)
+    $controlContract = Read-InstanceControlContractIdentity -ManifestDocument $manifestJson.Document
+    Assert-Equal -Actual $controlContract.CanonicalIdentity -Expected "com.rice.ai-codedb`ncontrol-contract`nv0.3-control`n1`n1" -Message "PowerShell control-contract canonical identity diverged from C#/Node."
+    Assert-Equal -Actual $controlContract.Sha256 -Expected "7c85ebc534091fcb53d40eedd9eadf869c09caf77fb56a35aeb22e0e8aea09a1" -Message "PowerShell control-contract SHA-256 diverged from C#/Node."
+    Assert-Equal `
+        -Actual $manifestJson.Sha256 `
+        -Expected (Get-FileHash -LiteralPath $canonicalPayloadManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -Message "runtime_contract_sha256 is not derived from the trusted raw manifest bytes."
+    $materializerSource = [System.IO.File]::ReadAllText($materializerPath)
+    Assert-True `
+        -Condition ($materializerSource.IndexOf('Read-InstanceControlContractIdentity -ManifestDocument $document', [StringComparison]::Ordinal) -ge 0 -and
+            $materializerSource.IndexOf('RuntimeContractSha256 = $manifestJson.Sha256', [StringComparison]::Ordinal) -ge 0) `
+        -Message "Read-PayloadManifest is not wired to the strict control identity and raw-byte runtime hash."
+
+    $invalidManifest = [pscustomobject]@{
+        control_contract = [pscustomobject]@{
+            id = "v0.3-control"
+            version = [int64]1
+            schema_version = [int64]1
+            sha256 = $controlContract.Sha256.ToUpperInvariant()
+        }
+    }
+    Assert-ThrowsMessage `
+        -Action { Read-InstanceControlContractIdentity -ManifestDocument $invalidManifest } `
+        -ExpectedMessage "lowercase SHA-256" `
+        -Label "Uppercase manifest control hash"
+    $invalidManifest.control_contract.sha256 = "0" * 64
+    Assert-ThrowsMessage `
+        -Action { Read-InstanceControlContractIdentity -ManifestDocument $invalidManifest } `
+        -ExpectedMessage "identity hash is invalid" `
+        -Label "Mismatched manifest control hash"
+    $invalidManifest.control_contract.sha256 = $controlContract.Sha256
+    $invalidManifest.control_contract | Add-Member -NotePropertyName unsupported -NotePropertyValue "blocked"
+    Assert-ThrowsMessage `
+        -Action { Read-InstanceControlContractIdentity -ManifestDocument $invalidManifest } `
+        -ExpectedMessage "exact field set" `
+        -Label "Expanded manifest control field set"
+
+    $activationRoot = Join-Path $runRoot "activation-contract-fixture"
+    New-TestHost -Root $activationRoot
+    foreach ($legacyRelativePath in @(
+            "AIWork/.runtime/codedb/control/current-instance.json",
+            "AIWork/.runtime/codedb/control/last-known-good-instance.json",
+            "AIWork/.runtime/codedb/control/operation.json")) {
+        Write-Utf8File -Path (Get-PathFromRelative -Root $activationRoot -RelativePath $legacyRelativePath) -Content "{`"legacy_sentinel`":true}`n"
+    }
+    $protectedRelativePaths = @(
+        ".codex/config.toml",
+        "AIWork/.runtime/codedb/control/current-instance.json",
+        "AIWork/.runtime/codedb/control/last-known-good-instance.json",
+        "AIWork/.runtime/codedb/control/operation.json"
+    )
+    $protectedBefore = @{}
+    foreach ($relativePath in $protectedRelativePaths) {
+        $protectedBefore[$relativePath] = (Get-FileHash -LiteralPath (Get-PathFromRelative -Root $activationRoot -RelativePath $relativePath) -Algorithm SHA256).Hash
+    }
+
+    $attempt = [pscustomobject]@{
+        ActivationEpoch = "11111111111111111111111111111111"
+        OperationId = "22222222222222222222222222222222"
+    }
+    $retryAttempt = New-InstanceActivationAttemptIdentity
+    $secondRetryAttempt = New-InstanceActivationAttemptIdentity
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $retryAttempt
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $secondRetryAttempt
+    Assert-True `
+        -Condition (-not [string]::Equals($retryAttempt.ActivationEpoch, $secondRetryAttempt.ActivationEpoch, [StringComparison]::Ordinal) -and
+            -not [string]::Equals($retryAttempt.OperationId, $secondRetryAttempt.OperationId, [StringComparison]::Ordinal)) `
+        -Message "A retry reused an activation epoch or operation id."
+    $targetGenerationId = [string]$canonicalPayloadManifest.generation_id
+    $targetGenerationManifestTarget = "AIWork/.runtime/codedb/host/generations/$targetGenerationId/generation-manifest.json"
+    $targetGenerationManifestEntries = @($canonicalPayloadManifest.files | Where-Object {
+        [string]$_.target -ceq $targetGenerationManifestTarget
+    })
+    Assert-Equal -Actual $targetGenerationManifestEntries.Count -Expected 1 -Message "Canonical payload did not declare exactly one current generation manifest."
+    $targetGenerationManifestSha256 = [string]$targetGenerationManifestEntries[0].sha256
+    $manifest = [pscustomobject]@{
+        ControlContract = $controlContract
+        RuntimeContractSha256 = $manifestJson.Sha256
+        TargetGenerationId = $targetGenerationId
+        TargetGenerationManifestSha256 = $targetGenerationManifestSha256
+    }
+    $context = New-InstanceActivationContractContext `
+        -Manifest $manifest `
+        -ProjectRoot $activationRoot `
+        -OperationId $attempt.OperationId
+    Assert-Equal -Actual $context.Paths.ActivationRelativePath -Expected "AIWork/.runtime/codedb/control/contracts/v0.3-control/v1/activation.json" -Message "Activation record path diverged from the contract identity."
+    Assert-Equal -Actual $context.Paths.OperationRelativePath -Expected "AIWork/.runtime/codedb/control/contracts/v0.3-control/v1/operation.json" -Message "Operation journal path diverged from the contract identity."
+    Assert-Equal -Actual $context.Paths.OperationRootRelativePath -Expected "AIWork/.runtime/codedb/control/contracts/v0.3-control/v1/operations/22222222222222222222222222222222" -Message "Operation evidence path diverged from the attempt identity."
+    Assert-Equal -Actual $context.Paths.SupervisorRelativePath -Expected "AIWork/.runtime/codedb/control/contracts/v0.3-control/v1/supervisor" -Message "Supervisor path diverged from C#/Node routing."
+
+    $candidate = New-InstanceActivationEvidence `
+        -InstanceId "33333333333333333333333333333333" `
+        -GenerationId $targetGenerationId `
+        -InstanceManifestSha256 ("a" * 64) `
+        -GenerationManifestSha256 $targetGenerationManifestSha256 `
+        -GenerationDisposition "CURRENT"
+    $current = New-InstanceActivationEvidence `
+        -InstanceId "44444444444444444444444444444444" `
+        -GenerationId "poc.32" `
+        -InstanceManifestSha256 ("c" * 64) `
+        -GenerationManifestSha256 ("d" * 64) `
+        -GenerationDisposition "TRUSTED_PREVIOUS"
+    $lastKnownGood = New-InstanceActivationEvidence `
+        -InstanceId "55555555555555555555555555555555" `
+        -GenerationId "poc.32" `
+        -InstanceManifestSha256 ("e" * 64) `
+        -GenerationManifestSha256 ("f" * 64) `
+        -GenerationDisposition "TRUSTED_PREVIOUS"
+    $mutation = New-InstanceActivationMutationEvidence `
+        -Index 0 `
+        -Target $script:InstanceCurrentRelativePath `
+        -Mutation Write `
+        -DesiredSha256 ("1" * 64) `
+        -ExistedBefore $true `
+        -PreImageSha256 ("2" * 64)
+    $timestamp = "2026-09-03T09:00:00.0000000Z"
+    $activationDocument = New-InstanceActivationRecordDocument `
+        -Context $context `
+        -Attempt $attempt `
+        -Candidate $candidate `
+        -Current $current `
+        -LastKnownGood $lastKnownGood `
+        -PublicationPhase PREPARED `
+        -TimestampUtc $timestamp
+    $operationDocument = New-InstanceActivationOperationDocument `
+        -Context $context `
+        -Attempt $attempt `
+        -Action UPGRADE `
+        -Candidate $candidate `
+        -PreviousActivationRecordSha256 $null `
+        -Phase PREPARED `
+        -Mutations @($mutation) `
+        -TimestampUtc $timestamp
+
+    $missingTargetGenerationManifest = [pscustomobject]@{
+        ControlContract = $controlContract
+        RuntimeContractSha256 = $manifestJson.Sha256
+        TargetGenerationId = $null
+        TargetGenerationManifestSha256 = $targetGenerationManifestSha256
+    }
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationContractContext -Manifest $missingTargetGenerationManifest -ProjectRoot $activationRoot -OperationId $attempt.OperationId } `
+        -ExpectedMessage "no valid current target generation" `
+        -Label "Missing trusted target generation"
+    $missingTargetHashManifest = [pscustomobject]@{
+        ControlContract = $controlContract
+        RuntimeContractSha256 = $manifestJson.Sha256
+        TargetGenerationId = $targetGenerationId
+        TargetGenerationManifestSha256 = $null
+    }
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationContractContext -Manifest $missingTargetHashManifest -ProjectRoot $activationRoot -OperationId $attempt.OperationId } `
+        -ExpectedMessage "target generation manifest hash must be a lowercase SHA-256" `
+        -Label "Missing trusted target generation manifest hash"
+
+    $wrongGenerationCandidate = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $candidate) `
+        -Label "wrong-generation candidate fixture"
+    $wrongGenerationCandidate.generation_id = "poc.999"
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $wrongGenerationCandidate -Current $current -LastKnownGood $lastKnownGood -PublicationPhase PREPARED -TimestampUtc $timestamp } `
+        -ExpectedMessage "does not match the trusted current target generation" `
+        -Label "Non-target activation candidate generation"
+    $wrongGenerationHashCandidate = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $candidate) `
+        -Label "wrong-generation-hash candidate fixture"
+    $wrongGenerationHashCandidate.generation_manifest_sha256 = "9" * 64
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $wrongGenerationHashCandidate -Current $current -LastKnownGood $lastKnownGood -PublicationPhase PREPARED -TimestampUtc $timestamp } `
+        -ExpectedMessage "does not match the trusted current target generation" `
+        -Label "Non-target activation candidate manifest hash"
+    $nonCurrentCandidate = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $candidate) `
+        -Label "non-current candidate fixture"
+    $nonCurrentCandidate.generation_disposition = "NEWER"
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $nonCurrentCandidate -Current $current -LastKnownGood $lastKnownGood -PublicationPhase PREPARED -TimestampUtc $timestamp } `
+        -ExpectedMessage "does not match the trusted current target generation" `
+        -Label "Non-current activation candidate disposition"
+    foreach ($unsafeDisposition in @("NEWER", "SEQUENCE_COLLISION", "INVALID")) {
+        $unsafeCurrent = ConvertFrom-StrictJsonText `
+            -Text (ConvertTo-InstanceJsonText -Value $current) `
+            -Label "unsafe current fixture"
+        $unsafeCurrent.generation_disposition = $unsafeDisposition
+        Assert-ThrowsMessage `
+            -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $candidate -Current $unsafeCurrent -LastKnownGood $lastKnownGood -PublicationPhase PREPARED -TimestampUtc $timestamp } `
+            -ExpectedMessage "current/LKG evidence has an unsafe generation disposition" `
+            -Label "Unsafe current activation disposition $unsafeDisposition"
+        $unsafeLastKnownGood = ConvertFrom-StrictJsonText `
+            -Text (ConvertTo-InstanceJsonText -Value $lastKnownGood) `
+            -Label "unsafe last-known-good fixture"
+        $unsafeLastKnownGood.generation_disposition = $unsafeDisposition
+        Assert-ThrowsMessage `
+            -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $candidate -Current $current -LastKnownGood $unsafeLastKnownGood -PublicationPhase PREPARED -TimestampUtc $timestamp } `
+            -ExpectedMessage "current/LKG evidence has an unsafe generation disposition" `
+            -Label "Unsafe last-known-good activation disposition $unsafeDisposition"
+    }
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $candidate -Current $null -LastKnownGood $lastKnownGood -PublicationPhase COMMITTED -TimestampUtc $timestamp } `
+        -ExpectedMessage "must select the complete candidate identity as current" `
+        -Label "Committed activation without current"
+    $mismatchedCommittedCurrent = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $candidate) `
+        -Label "mismatched committed current fixture"
+    $mismatchedCommittedCurrent.instance_manifest_sha256 = "8" * 64
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $candidate -Current $mismatchedCommittedCurrent -LastKnownGood $lastKnownGood -PublicationPhase COMMITTED -TimestampUtc $timestamp } `
+        -ExpectedMessage "must select the complete candidate identity as current" `
+        -Label "Committed activation with incomplete candidate match"
+    $null = New-InstanceActivationRecordDocument `
+        -Context $context `
+        -Attempt $attempt `
+        -Candidate $candidate `
+        -Current $null `
+        -LastKnownGood $null `
+        -PublicationPhase ACTIVATING `
+        -TimestampUtc $timestamp
+
+    $duplicateMutation = New-InstanceActivationMutationEvidence `
+        -Index 1 `
+        -Target $script:InstanceCurrentRelativePath `
+        -Mutation Write `
+        -DesiredSha256 ("3" * 64) `
+        -ExistedBefore $true `
+        -PreImageSha256 ("4" * 64)
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationOperationDocument -Context $context -Attempt $attempt -Action UPGRADE -Candidate $candidate -PreviousActivationRecordSha256 $null -Phase PREPARED -Mutations @($mutation, $duplicateMutation) -TimestampUtc $timestamp } `
+        -ExpectedMessage "duplicate mutation target" `
+        -Label "Duplicate activation journal mutation target"
+    $nonContiguousMutation = New-InstanceActivationMutationEvidence `
+        -Index 2 `
+        -Target $script:LastKnownGoodPointerRelativePath `
+        -Mutation Write `
+        -DesiredSha256 ("5" * 64) `
+        -ExistedBefore $true `
+        -PreImageSha256 ("6" * 64)
+    Assert-ThrowsMessage `
+        -Action { New-InstanceActivationOperationDocument -Context $context -Attempt $attempt -Action UPGRADE -Candidate $candidate -PreviousActivationRecordSha256 $null -Phase PREPARED -Mutations @($mutation, $nonContiguousMutation) -TimestampUtc $timestamp } `
+        -ExpectedMessage "not in exact index order" `
+        -Label "Non-contiguous activation journal mutation index"
+
+    $first = Initialize-FreshInstanceActivationContract `
+        -Context $context `
+        -ActivationDocument $activationDocument `
+        -OperationDocument $operationDocument
+    Assert-True -Condition $first.Created -Message "Fresh activation contract provisioning did not report creation."
+    Assert-Equal -Actual $first.Activation.Sha256 -Expected (Get-FileHash -LiteralPath $context.Paths.ActivationPath -Algorithm SHA256).Hash.ToLowerInvariant() -Message "Activation record hash evidence mismatch."
+    Assert-Equal -Actual $first.Operation.Sha256 -Expected (Get-FileHash -LiteralPath $context.Paths.OperationPath -Algorithm SHA256).Hash.ToLowerInvariant() -Message "Operation journal hash evidence mismatch."
+    Assert-True -Condition (Test-Path -LiteralPath $context.Paths.OperationRoot -PathType Container) -Message "Exact operation evidence directory was not provisioned."
+    Assert-Equal -Actual @(Get-ChildItem -LiteralPath $context.Paths.OperationRoot -Force).Count -Expected 0 -Message "Fresh operation evidence directory was not empty."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $context.Paths.SupervisorRoot)) -Message "Foundation provisioning created Supervisor state."
+    $contractFiles = @(Get-ChildItem -LiteralPath $context.Paths.ContractRoot -Recurse -Force -File | ForEach-Object {
+        Get-RelativeFilePath -Root $context.Paths.ContractRoot -Path $_.FullName
+    } | Sort-Object)
+    Assert-Equal -Actual ($contractFiles -join "|") -Expected "activation.json|operation.json" -Message "Fresh provisioning wrote outside the two contract records."
+    Assert-True -Condition (-not ([System.IO.File]::ReadAllText($context.Paths.ActivationPath).Contains("READY"))) -Message "Activation foundation emitted reserved READY state."
+    Assert-True -Condition (-not ([System.IO.File]::ReadAllText($context.Paths.OperationPath).Contains("READY"))) -Message "Operation foundation emitted reserved READY state."
+    $snapshotAfterFirst = Get-FileSnapshot -Root $context.Paths.ContractRoot
+    $repeat = Initialize-FreshInstanceActivationContract `
+        -Context $context `
+        -ActivationDocument $activationDocument `
+        -OperationDocument $operationDocument
+    Assert-True -Condition (-not $repeat.Created) -Message "Identical activation contract repeat was not idempotent."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $context.Paths.ContractRoot) -Expected $snapshotAfterFirst -Message "Identical activation contract repeat changed durable evidence."
+    foreach ($relativePath in $protectedRelativePaths) {
+        Assert-Equal `
+            -Actual (Get-FileHash -LiteralPath (Get-PathFromRelative -Root $activationRoot -RelativePath $relativePath) -Algorithm SHA256).Hash `
+            -Expected $protectedBefore[$relativePath] `
+            -Message "Activation foundation changed protected legacy/config input: $relativePath"
+    }
+
+    $assertFreshNamespaceRejects = {
+        param(
+            [Parameter(Mandatory = $true)][string]$Suffix,
+            [Parameter(Mandatory = $true)][scriptblock]$Arrange,
+            [Parameter(Mandatory = $true)][string]$ExpectedMessage
+        )
+
+        $fixtureRoot = Join-Path $runRoot "activation-not-fresh-$Suffix"
+        New-TestHost -Root $fixtureRoot
+        $fixtureContext = New-InstanceActivationContractContext `
+            -Manifest $manifest `
+            -ProjectRoot $fixtureRoot `
+            -OperationId $attempt.OperationId
+        $fixtureActivation = New-InstanceActivationRecordDocument `
+            -Context $fixtureContext `
+            -Attempt $attempt `
+            -Candidate $candidate `
+            -Current $current `
+            -LastKnownGood $lastKnownGood `
+            -PublicationPhase PREPARED `
+            -TimestampUtc $timestamp
+        $fixtureOperation = New-InstanceActivationOperationDocument `
+            -Context $fixtureContext `
+            -Attempt $attempt `
+            -Action UPGRADE `
+            -Candidate $candidate `
+            -PreviousActivationRecordSha256 $null `
+            -Phase PREPARED `
+            -Mutations @($mutation) `
+            -TimestampUtc $timestamp
+        & $Arrange $fixtureContext
+        Assert-ThrowsMessage `
+            -Action { Initialize-FreshInstanceActivationContract -Context $fixtureContext -ActivationDocument $fixtureActivation -OperationDocument $fixtureOperation } `
+            -ExpectedMessage $ExpectedMessage `
+            -Label "Non-fresh activation namespace $Suffix"
+    }
+    & $assertFreshNamespaceRejects `
+        -Suffix "supervisor" `
+        -Arrange {
+            param($fixtureContext)
+            New-Item -ItemType Directory -Force -Path $fixtureContext.Paths.SupervisorRoot | Out-Null
+        } `
+        -ExpectedMessage "namespace is not fresh"
+    & $assertFreshNamespaceRejects `
+        -Suffix "unknown-file" `
+        -Arrange {
+            param($fixtureContext)
+            Write-Utf8File -Path (Join-Path $fixtureContext.Paths.ContractRoot "unknown.json") -Content "{}`n"
+        } `
+        -ExpectedMessage "namespace is not fresh"
+    & $assertFreshNamespaceRejects `
+        -Suffix "unknown-directory" `
+        -Arrange {
+            param($fixtureContext)
+            New-Item -ItemType Directory -Force -Path (Join-Path $fixtureContext.Paths.ContractRoot "unknown") | Out-Null
+        } `
+        -ExpectedMessage "namespace is not fresh"
+    & $assertFreshNamespaceRejects `
+        -Suffix "other-operation" `
+        -Arrange {
+            param($fixtureContext)
+            New-Item `
+                -ItemType Directory `
+                -Force `
+                -Path (Join-Path (Split-Path -Parent $fixtureContext.Paths.OperationRoot) "77777777777777777777777777777777") | Out-Null
+        } `
+        -ExpectedMessage "unexpected operation entry"
+    & $assertFreshNamespaceRejects `
+        -Suffix "nonempty-operation" `
+        -Arrange {
+            param($fixtureContext)
+            Write-Utf8File -Path (Join-Path $fixtureContext.Paths.OperationRoot "evidence.json") -Content "{}`n"
+        } `
+        -ExpectedMessage "contains unexpected evidence"
+
+    $mismatchedOperation = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $operationDocument) `
+        -Label "mismatched operation fixture"
+    $mismatchedOperation.activation_epoch = "66666666666666666666666666666666"
+    Assert-ThrowsMessage `
+        -Action { Initialize-FreshInstanceActivationContract -Context $context -ActivationDocument $activationDocument -OperationDocument $mismatchedOperation } `
+        -ExpectedMessage "identities do not match" `
+        -Label "Cross-record activation epoch mismatch"
+    $readyActivation = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $activationDocument) `
+        -Label "READY activation fixture"
+    $readyActivation.publication_phase = "READY"
+    Assert-ThrowsMessage `
+        -Action { Assert-InstanceActivationRecordDocument -Document $readyActivation -Context $context } `
+        -ExpectedMessage "publication phase is invalid" `
+        -Label "Reserved READY activation phase"
+    $expandedOperation = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $operationDocument) `
+        -Label "expanded operation fixture"
+    $expandedOperation | Add-Member -NotePropertyName unsupported -NotePropertyValue $true
+    Assert-ThrowsMessage `
+        -Action { Assert-InstanceActivationOperationDocument -Document $expandedOperation -Context $context } `
+        -ExpectedMessage "exact field set" `
+        -Label "Expanded operation field set"
+    $badHashOperation = ConvertFrom-StrictJsonText `
+        -Text (ConvertTo-InstanceJsonText -Value $operationDocument) `
+        -Label "bad-hash operation fixture"
+    $badHashOperation.mutations[0].pre_image_sha256 = "A" * 64
+    Assert-ThrowsMessage `
+        -Action { Assert-InstanceActivationOperationDocument -Document $badHashOperation -Context $context } `
+        -ExpectedMessage "lowercase SHA-256" `
+        -Label "Uppercase operation evidence hash"
+    [System.IO.File]::AppendAllText($context.Paths.ActivationPath, "`n", $utf8NoBom)
+    Assert-ThrowsMessage `
+        -Action { Initialize-FreshInstanceActivationContract -Context $context -ActivationDocument $activationDocument -OperationDocument $operationDocument } `
+        -ExpectedMessage "conflicts with the immutable activation attempt" `
+        -Label "Conflicting existing activation record"
+
+    $invalidRoot = Join-Path $runRoot "activation-invalid-fixture"
+    New-TestHost -Root $invalidRoot
+    $invalidContext = New-InstanceActivationContractContext `
+        -Manifest $manifest `
+        -ProjectRoot $invalidRoot `
+        -OperationId $attempt.OperationId
+    Write-Utf8File -Path $invalidContext.Paths.ActivationPath -Content "{"
+    Assert-ThrowsMessage `
+        -Action { Read-InstanceActivationRecord -Context $invalidContext } `
+        -ExpectedMessage "not valid JSON" `
+        -Label "Malformed activation record"
+    Write-Utf8File -Path $invalidContext.Paths.ActivationPath -Content ("x" * ($script:InstanceActivationRecordMaximumBytes + 1))
+    Assert-ThrowsMessage `
+        -Action { Read-InstanceActivationRecord -Context $invalidContext } `
+        -ExpectedMessage "size is outside the accepted range" `
+        -Label "Oversized activation record"
+
+    $redirectRoot = Join-Path $runRoot "activation-redirect-fixture"
+    New-TestHost -Root $redirectRoot
+    $redirectTarget = Join-Path $runRoot "activation-redirect-target"
+    New-Item -ItemType Directory -Force -Path $redirectTarget | Out-Null
+    $contractsRoot = Get-PathFromRelative -Root $redirectRoot -RelativePath "AIWork/.runtime/codedb/control/contracts"
+    New-Item -ItemType Directory -Force -Path $contractsRoot | Out-Null
+    $redirectPath = Join-Path $contractsRoot $controlContract.Id
+    try {
+        New-Item -ItemType Junction -Path $redirectPath -Target $redirectTarget | Out-Null
+        Assert-ThrowsMessage `
+            -Action { Get-InstanceActivationContractPaths -ProjectRoot $redirectRoot -ControlContract $controlContract -OperationId $attempt.OperationId } `
+            -ExpectedMessage "reparse point" `
+            -Label "Redirected activation namespace"
+    } finally {
+        if (Test-Path -LiteralPath $redirectPath) {
+            $redirectItem = Get-Item -LiteralPath $redirectPath -Force
+            Assert-True -Condition (($redirectItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -Message "Activation redirect fixture changed type."
+            [System.IO.Directory]::Delete($redirectPath)
+        }
+    }
+
+    Write-Host "[OK] Versioned activation contract identity, paths, strict records, fresh provisioning, idempotence, and fail-closed boundaries passed."
 }
 
 function Invoke-PayloadManifestContractScenarios {
@@ -7122,6 +7599,14 @@ try {
         Invoke-PayloadManifestContractScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused payload manifest contract acceptance modified package source files."
         Write-Host "[OK] Focused payload manifest contract scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($ActivationContractOnly) {
+        Invoke-ActivationContractFoundationScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation contract acceptance modified package source files."
+        Write-Host "[OK] Focused activation contract foundation scenarios passed."
         $fixturePassed = $true
         return
     }

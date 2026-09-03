@@ -794,6 +794,17 @@ function Get-TextSha256 {
     }
 }
 
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return (($sha256.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Get-PayloadContentIdentitySha256 {
     param([Parameter(Mandatory = $true)]$Manifest)
 
@@ -1214,7 +1225,12 @@ function Read-BoundedJsonDocument {
     if ($null -eq $document -or $document.GetType() -ne [System.Management.Automation.PSCustomObject]) {
         Throw-MaterializerError -Message "$Label must contain one JSON object." -ExitCode 2
     }
-    return [pscustomobject]@{ Text = $text; Document = $document }
+    return [pscustomobject]@{
+        Text = $text
+        Bytes = $bytes
+        Sha256 = Get-BytesSha256 -Bytes $bytes
+        Document = $document
+    }
 }
 
 function Assert-UnityProjectRoot {
@@ -1330,6 +1346,7 @@ function Read-PayloadManifest {
 
     $manifestJson = Read-BoundedJsonDocument -Path $manifestPath -Label "payload manifest" -MaximumBytes (1024 * 1024)
     $document = $manifestJson.Document
+    $controlContract = Read-InstanceControlContractIdentity -ManifestDocument $document
 
     $schemaVersion = Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "payload manifest"
     $managedBy = Get-RequiredJsonString -Object $document -Name "managed_by" -Label "payload manifest"
@@ -1461,13 +1478,23 @@ function Read-PayloadManifest {
         $targetMap[$target] = $model
     }
 
+    $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
+    $targetGenerationManifestSha256 = if ($targetMap.ContainsKey($generationManifestTarget)) {
+        [string]$targetMap[$generationManifestTarget].Sha256
+    } else {
+        $null
+    }
     $manifest = [pscustomobject]@{
         SchemaVersion = $schemaVersion
         ManagedBy = $managedBy
+        ControlContract = $controlContract
+        RuntimeContractSha256 = $manifestJson.Sha256
         PackageVersion = $packageVersion
         PayloadVersion = $payloadVersion
         PayloadSequence = $payloadSequence
         GenerationId = $generationId
+        TargetGenerationId = $generationId
+        TargetGenerationManifestSha256 = $targetGenerationManifestSha256
         BootstrapProtocol = $bootstrapProtocol
         BootstrapTransitions = $bootstrapTransitions.ToArray()
         CurrentPointerTarget = $currentPointerTarget
@@ -1475,12 +1502,11 @@ function Read-PayloadManifest {
         RetiredTargetMap = $retiredTargetMap
         Root = $fullRoot
         ManifestPath = $manifestPath
-        ManifestSha256 = Get-FileSha256 -Path $manifestPath
+        ManifestSha256 = $manifestJson.Sha256
         Files = @($files | Sort-Object Target)
         SourceMap = $sourceMap
         TargetMap = $targetMap
     }
-    $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
     $usesGenerationContract = $targetMap.ContainsKey($generationManifestTarget) -or
         $targetMap.ContainsKey($script:CurrentPointerRelativePath)
     $manifest | Add-Member -NotePropertyName UsesGenerationContract -NotePropertyValue $usesGenerationContract
