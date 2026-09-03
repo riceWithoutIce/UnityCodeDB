@@ -88,6 +88,15 @@ Assert-True `
     -Condition ($supervisorLauncherSource.IndexOf('AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(context.ProjectRoot, supervisorScript);', [StringComparison]::Ordinal) -lt 0) `
     -Message "Project Supervisor launcher still rejects legitimate UPM packages resolved outside the Unity project."
 
+foreach ($requiredSupervisorLauncherRoutingBoundary in @(
+    'AICodedbPackageRuntimeContractStore.Read(packageRoot)',
+    'runtimeContract.ControlContract',
+    'AICodedbControlContract.GetSupervisorRuntimePath('
+)) {
+    Assert-True -Condition ($supervisorLauncherSource.IndexOf($requiredSupervisorLauncherRoutingBoundary, [StringComparison]::Ordinal) -ge 0) -Message "Project Supervisor launcher is missing Package-derived control routing: $requiredSupervisorLauncherRoutingBoundary"
+}
+Assert-True -Condition ($supervisorLauncherSource.IndexOf('AICodedbProjectSettings.InstanceControlRelativePath', [StringComparison]::Ordinal) -lt 0) -Message "Project Supervisor launcher still references the fixed control namespace."
+
 $supervisorBridgePath = Join-Path $packageRoot "Editor\AICodedbSupervisorBridge.cs"
 Assert-True -Condition (Test-Path -LiteralPath $supervisorBridgePath -PathType Leaf) -Message "Project Supervisor bridge is missing."
 $supervisorBridgeSource = [System.IO.File]::ReadAllText($supervisorBridgePath)
@@ -97,6 +106,27 @@ Assert-True `
 Assert-True `
     -Condition ($supervisorBridgeSource.IndexOf('"handoff_queued"', [StringComparison]::Ordinal) -ge 0) `
     -Message "Project Supervisor bridge does not consume the Supervisor handoff disposition."
+
+foreach ($requiredSupervisorBridgeRoutingBoundary in @(
+    'AICodedbPackageRuntimeContractStore.Read(context.PackageRoot)',
+    'runtimeContract.ControlContract',
+    'AICodedbSupervisorLauncher.GetSupervisorStatePath(',
+    'AICodedbSupervisorLauncher.GetSupervisorRuntimePath(',
+    '"control_namespace"'
+)) {
+    Assert-True -Condition ($supervisorBridgeSource.IndexOf($requiredSupervisorBridgeRoutingBoundary, [StringComparison]::Ordinal) -ge 0) -Message "Project Supervisor bridge is missing Package-derived control routing: $requiredSupervisorBridgeRoutingBoundary"
+}
+Assert-True -Condition ($supervisorBridgeSource.IndexOf('AICodedbProjectSettings.InstanceControlRelativePath', [StringComparison]::Ordinal) -lt 0) -Message "Project Supervisor bridge still references the fixed control namespace."
+
+$supervisorSource = [System.IO.File]::ReadAllText($supervisorScriptPath)
+foreach ($requiredSupervisorNodeRoutingBoundary in @(
+    'readControlContract(value, "Package runtime contract")',
+    'getSupervisorRuntimePath(root, runtimeContract.controlContract)',
+    'Supervisor runtime does not match the Package-derived control namespace.',
+    'control_namespace: context.controlNamespace'
+)) {
+    Assert-True -Condition ($supervisorSource.IndexOf($requiredSupervisorNodeRoutingBoundary, [StringComparison]::Ordinal) -ge 0) -Message "Project Supervisor Node route is missing Package-derived control routing: $requiredSupervisorNodeRoutingBoundary"
+}
 
 $expectedTopLevel = @(
     ".gitattributes",

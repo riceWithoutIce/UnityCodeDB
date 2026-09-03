@@ -296,7 +296,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_UsesCanonicalPipeIdentityAndRecognizesExactV1Handoff()
         {
             var root = "G" + @":\RiceProgram\Test\Test";
-            var runtime = root + @"\AIWork\.runtime\codedb\control\supervisor";
+            var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
 
             Assert.That(
                 AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
@@ -304,7 +307,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     runtime,
                     out var canonical),
                 Is.True);
-            Assert.That(canonical, Is.EqualTo("codedb-supervisor-0ca345c1003467dd849d"));
+            Assert.That(canonical, Is.EqualTo("codedb-supervisor-8ef262de0ef456d71b2b"));
             Assert.That(
                 AICodedbSupervisorProtocol.TryGetLegacySupervisorPipeName(
                     root,
@@ -484,8 +487,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_StatusHandshakeRequiresIdentityAndReportsCoreReady()
         {
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
-            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
             var response = SupervisorStatusResponse(
                 root,
                 runtime,
@@ -519,15 +524,14 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_StatusHandshakeBlocksWrongProjectIdentity()
         {
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
-            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var wrongRoot = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "OtherProject");
-            var wrongRuntime = Path.Combine(
-                wrongRoot,
-                "instances",
-                "current",
-                "watch",
-                "coordinator");
             var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var wrongRuntime = AICodedbControlContract.GetSupervisorRuntimePath(
+                wrongRoot,
+                contract.ControlContract);
             var response = SupervisorStatusResponse(
                 wrongRoot,
                 wrongRuntime,
@@ -614,8 +618,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_ReadyWithoutProviderHandshakeIsBlocked()
         {
             var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
-            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
             var response = SupervisorStatusResponse(root, runtime, contract, null);
 
             var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
@@ -636,8 +642,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_RunningOperationCannotReportReady()
         {
             var root = _projectRoot;
-            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
             var response = SupervisorStatusResponse(
                     root,
                     runtime,
@@ -668,8 +676,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void SupervisorProtocol_LegacyCommandModelCannotMasqueradeAsCurrent()
         {
             var root = _projectRoot;
-            var runtime = Path.Combine(root, "instances", "current", "watch", "coordinator");
             var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
             var response = SupervisorStatusResponse(
                     root,
                     runtime,
@@ -695,13 +705,9 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorProtocol_LegacyHandoffWaitsForAdmittedMaintenance()
         {
+            var legacyRuntime = AICodedbControlContract.GetLegacySupervisorRuntimePath(_projectRoot);
             var statePath = Path.Combine(
-                _projectRoot,
-                "AIWork",
-                ".runtime",
-                "codedb",
-                "control",
-                "supervisor",
+                legacyRuntime,
                 "legacy-drain-state.json");
             Directory.CreateDirectory(Path.GetDirectoryName(statePath));
             WriteUtf8NoBom(
@@ -884,12 +890,13 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorLauncher_UsesProjectControlSupervisorRuntime()
         {
+            var runtimeContract = ReadPackageRuntimeContract();
             Assert.That(
                 AICodedbSupervisorLauncher.GetSupervisorStatePath(_projectRoot),
                 Is.EqualTo(AICodedbPaths.NormalizePath(Path.Combine(
-                    _projectRoot,
-                    AICodedbProjectSettings.InstanceControlRelativePath,
-                    "supervisor",
+                    AICodedbControlContract.GetSupervisorRuntimePath(
+                        _projectRoot,
+                        runtimeContract.ControlContract),
                     "supervisor-state.json"))));
         }
 
@@ -905,10 +912,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             var unrelatedScript = Path.Combine(
                 unrelatedRoot,
                 "codedb-project-supervisor.mjs");
-            var runtime = Path.Combine(
+            var runtimeContract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
                 _projectRoot,
-                AICodedbProjectSettings.InstanceControlRelativePath,
-                "supervisor");
+                runtimeContract.ControlContract);
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(supervisorScript));
@@ -3207,6 +3214,11 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"runtime_contract_sha256\":\"" + contract.Sha256 + "\","
                    + "\"generation_disposition\":\"CURRENT\","
                    + "\"runtime\":\"" + JsonPath(runtime) + "\","
+                   + "\"control_contract_id\":\"" + contract.ControlContract.Id + "\","
+                   + "\"control_contract_version\":" + contract.ControlContract.Version + ","
+                   + "\"control_contract_schema_version\":" + contract.ControlContract.SchemaVersion + ","
+                   + "\"control_contract_sha256\":\"" + contract.ControlContract.Sha256 + "\","
+                   + "\"control_namespace\":\"" + JsonPath(runtime) + "\","
                    + "\"coordinator_pid\":1234,"
                    + "\"lifecycle_id\":null,"
                    + "\"desired_state\":\"enabled\","

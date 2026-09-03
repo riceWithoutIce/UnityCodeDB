@@ -47,6 +47,28 @@ const TARGET_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned current stable
 const PREVIOUS_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned previous stable wrapper\n";
 const TARGET_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(TARGET_STABLE_WRAPPER_CONTENT, "utf8"));
 const PREVIOUS_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(PREVIOUS_STABLE_WRAPPER_CONTENT, "utf8"));
+const CONTROL_CONTRACT = Object.freeze({
+  id: "v0.3-control",
+  version: 1,
+  schemaVersion: 1,
+  sha256: hashBytes(Buffer.from([
+    "com.rice.ai-codedb",
+    "control-contract",
+    "v0.3-control",
+    "1",
+    "1"
+  ].join("\n"), "utf8"))
+});
+const CONTROL_NAMESPACE_RELATIVE_PATH = [
+  "AIWork",
+  ".runtime",
+  "codedb",
+  "control",
+  "contracts",
+  CONTROL_CONTRACT.id,
+  `v${CONTROL_CONTRACT.version}`,
+  "supervisor"
+].join("/");
 
 function mkdir(directory) { fs.mkdirSync(directory, { recursive: true }); }
 function write(file, text) { mkdir(path.dirname(file)); fs.writeFileSync(file, text, "utf8"); }
@@ -68,7 +90,8 @@ function expectedSupervisorPipe(projectRoot, runtime) {
 function createFixture(selected = TARGET) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codedb-supervisor-contract-"));
   const runtimeRoot = path.join(root, "AIWork", ".runtime", "codedb");
-  const runtime = path.join(runtimeRoot, "control", "supervisor");
+  const runtime = path.join(root, ...CONTROL_NAMESPACE_RELATIVE_PATH.split("/"));
+  const legacyRuntime = path.join(runtimeRoot, "control", "supervisor");
   const packageRoot = path.join(root, "synthetic-package");
   const payloadRoot = path.join(packageRoot, "Payload~");
   const packageGenerationRoot = path.join(payloadRoot, "Generations", selected.generationId);
@@ -131,6 +154,12 @@ function createFixture(selected = TARGET) {
   const contract = {
     schema_version: 1,
     managed_by: "com.rice.ai-codedb",
+    control_contract: {
+      id: CONTROL_CONTRACT.id,
+      version: CONTROL_CONTRACT.version,
+      schema_version: CONTROL_CONTRACT.schemaVersion,
+      sha256: CONTROL_CONTRACT.sha256
+    },
     package_version: TARGET.packageVersion,
     payload_version: TARGET.payloadVersion,
     payload_sequence: TARGET.payloadSequence,
@@ -214,6 +243,7 @@ function createFixture(selected = TARGET) {
   return {
     root,
     runtime,
+    legacyRuntime,
     packageRoot,
     payloadRoot,
     packageGenerationRoot,
@@ -454,6 +484,58 @@ async function verifyStableDefaultIdentity() {
   }
 }
 
+async function verifyLegacyAndMismatchedRuntimeRejectedWithoutMutation() {
+  const fixture = createFixture(TARGET);
+  try {
+    const legacy = await runSupervisor(
+      fixture,
+      "status",
+      {},
+      true,
+      ["--runtime", fixture.legacyRuntime]);
+    assert.notEqual(legacy.status, 0);
+    assert.match(legacy.stderr, /Package-derived control namespace|control namespace/i);
+    assert.equal(fs.existsSync(fixture.runtime), false);
+    assert.equal(fs.existsSync(fixture.legacyRuntime), false);
+
+    const mismatchedRuntime = path.join(
+      fixture.root,
+      "AIWork",
+      ".runtime",
+      "codedb",
+      "control",
+      "contracts",
+      "other-contract",
+      "v1",
+      "supervisor");
+    const mismatched = await runSupervisor(
+      fixture,
+      "status",
+      {},
+      true,
+      ["--runtime", mismatchedRuntime]);
+    assert.notEqual(mismatched.status, 0);
+    assert.match(mismatched.stderr, /Package-derived control namespace|control namespace/i);
+    assert.equal(fs.existsSync(mismatchedRuntime), false);
+
+    // Daemon validation must fail before its error-evidence writer is allowed
+    // to touch the caller-supplied legacy path.
+    const daemon = await runSupervisor(
+      fixture,
+      "daemon",
+      {},
+      true,
+      ["--runtime", fixture.legacyRuntime]);
+    assert.notEqual(daemon.status, 0);
+    assert.match(daemon.stderr, /Package-derived control namespace|control namespace/i);
+    assert.equal(
+      fs.existsSync(path.join(fixture.legacyRuntime, "supervisor-error.json")),
+      false);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
 function requestPipe(pipeName, authToken, request) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(pipeName);
@@ -622,6 +704,12 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(supervisorState.schema_version, 3);
     assert.equal(supervisorState.protocol_version, 1);
     assert.equal(supervisorState.project_identity, projectIdentity(fixture.root));
+    assert.equal(supervisorState.control_contract_id, CONTROL_CONTRACT.id);
+    assert.equal(supervisorState.control_contract_version, CONTROL_CONTRACT.version);
+    assert.equal(supervisorState.control_contract_schema_version, CONTROL_CONTRACT.schemaVersion);
+    assert.equal(supervisorState.control_contract_sha256, CONTROL_CONTRACT.sha256);
+    assert.equal(supervisorState.control_namespace, fixture.runtime);
+    assert.equal(supervisorState.runtime, fixture.runtime);
     assert.equal(supervisorState.target_generation_id, TARGET.generationId);
     assert.equal(supervisorState.selected_generation_id, selected.generationId);
     assert.equal(supervisorState.selected_instance_id, fixture.instanceId);
@@ -650,6 +738,7 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(status.status.readiness_state, "core_ready");
     assert.equal(status.status.supervisor_schema_version, 3);
     assert.equal(status.status.generation_disposition, expectedDisposition);
+    assert.equal(status.status.control_namespace, fixture.runtime);
 
     const query = await requestPipe(
       supervisorState.pipe_name,
@@ -1175,11 +1264,12 @@ async function main() {
   assert.equal(
     expectedSupervisorPipe(
       ["G:", "RiceProgram", "Test", "Test"].join("\\"),
-      ["G:", "RiceProgram", "Test", "Test", "AIWork", ".runtime", "codedb", "control", "supervisor"].join("\\")),
-    "\\\\.\\pipe\\codedb-supervisor-0ca345c1003467dd849d");
+      ["G:", "RiceProgram", "Test", "Test", ...CONTROL_NAMESPACE_RELATIVE_PATH.split("/")].join("\\")),
+    "\\\\.\\pipe\\codedb-supervisor-8ef262de0ef456d71b2b");
   await verifyHappyPath(TARGET, "CURRENT");
   await verifyHappyPath(PREVIOUS, "TRUSTED_PREVIOUS");
   await verifyStableDefaultIdentity();
+  await verifyLegacyAndMismatchedRuntimeRejectedWithoutMutation();
   await verifyOwnerEvidenceAndSingleStarter();
   await verifyProvenStaleOwnerTakeover();
   await verifyPidReuseIsAmbiguousAndNeverStopped();

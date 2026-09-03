@@ -46,6 +46,7 @@ const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM", "EEXI
 const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
 
 const { command, options } = parseArgs(process.argv.slice(2));
+let validatedDaemonContext = null;
 
 async function main() {
   try {
@@ -67,9 +68,9 @@ async function main() {
     }
     throw new Error("Usage: codedb-project-supervisor.mjs <start|daemon|status|stop> --root <path> --runtime <path> ...");
   } catch (error) {
-    if (command === "daemon" && options.runtime) {
+    if (command === "daemon" && validatedDaemonContext) {
       try {
-        writeJson(path.join(path.resolve(options.runtime), ERROR_NAME), {
+        writeJson(validatedDaemonContext.errorPath, {
           schema_version: 1,
           created_at_utc: new Date().toISOString(),
           message: error instanceof Error ? error.message : String(error)
@@ -101,6 +102,52 @@ function parseArgs(args) {
   return parsed;
 }
 
+function getSupervisorRuntimePath(projectRoot, controlContract) {
+  if (!controlContract
+      || !/^[A-Za-z0-9._-]{1,64}$/.test(controlContract.id)
+      || !Number.isSafeInteger(controlContract.version)
+      || controlContract.version <= 0) {
+    throw new Error("Package control contract identity is invalid.");
+  }
+  return path.join(
+    projectRoot,
+    "AIWork",
+    ".runtime",
+    "codedb",
+    "control",
+    "contracts",
+    controlContract.id,
+    `v${controlContract.version}`,
+    "supervisor");
+}
+
+function readControlContract(manifest, label) {
+  const controlContract = manifest.control_contract;
+  requireObject(controlContract, `${label}.control_contract`);
+  const id = requiredString(controlContract, "id", "Package control contract");
+  const version = requiredInteger(controlContract, "version", "Package control contract");
+  const schemaVersion = requiredInteger(
+    controlContract,
+    "schema_version",
+    "Package control contract");
+  const sha256 = requiredHash(controlContract, "sha256", "Package control contract");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(id)
+      || version <= 0
+      || schemaVersion !== 1) {
+    throw new Error("Package control contract identity is invalid.");
+  }
+  const canonicalIdentity = [
+    "com.rice.ai-codedb",
+    "control-contract",
+    id,
+    String(version),
+    String(schemaVersion)
+  ].join("\n");
+  if (hashBytes(Buffer.from(canonicalIdentity, "utf8")) !== sha256)
+    throw new Error("Package control contract identity hash is invalid.");
+  return { id, version, schemaVersion, sha256 };
+}
+
 function buildContext(raw) {
   for (const key of ["root", "runtime", "packageRoot"]) {
     if (!raw[key]) {
@@ -109,19 +156,19 @@ function buildContext(raw) {
   }
   const root = realDirectory(raw.root, "project root");
   const runtime = path.resolve(raw.runtime);
-  const expectedSupervisorRuntime = path.join(root, "AIWork", ".runtime", "codedb", "control", "supervisor");
-  if (!pathsEqual(runtime, expectedSupervisorRuntime))
-    throw new Error("Supervisor runtime does not match the reviewed project control path.");
-  assertNoRedirectedAncestors(root, runtime, "Supervisor runtime");
   const packageRoot = realDirectory(raw.packageRoot, "Package root");
   const payloadRoot = path.join(packageRoot, "Payload~");
   assertReviewedPath(packageRoot, payloadRoot, "Package payload root", "directory");
+  const runtimeContract = readPackageRuntimeContract(payloadRoot);
+  const controlNamespace = getSupervisorRuntimePath(root, runtimeContract.controlContract);
+  if (!pathsEqual(runtime, controlNamespace))
+    throw new Error("Supervisor runtime does not match the Package-derived control namespace.");
+  assertNoRedirectedAncestors(root, runtime, "Supervisor runtime");
   const materializerScript = path.join(packageRoot, "Tools~", "materialize-codedb-host-payload.ps1");
   assertReviewedPath(packageRoot, materializerScript, "Package materializer script", "file");
   const provider = raw.provider ? path.resolve(raw.provider) : "";
   if (provider && !isFile(provider)) throw new Error("Provider executable was not found.");
   const identity = createProjectIdentity(root);
-  const runtimeContract = readPackageRuntimeContract(payloadRoot);
   const selectedInstance = readSelectedInstance(root, runtimeContract);
   const coordinatorScript = path.join(selectedInstance.generationRoot, "coordinator", "codedb-watch-coordinator.mjs");
   const watchManager = path.join(selectedInstance.generationRoot, "scripts", "manage-codedb-project-watch.ps1");
@@ -162,6 +209,8 @@ function buildContext(raw) {
     eventPath: path.join(runtime, EVENT_NAME),
     errorPath: path.join(runtime, ERROR_NAME),
     packageRoot,
+    controlContract: runtimeContract.controlContract,
+    controlNamespace,
     coordinatorScript,
     coordinatorRuntime,
     materializerScript,
@@ -502,6 +551,11 @@ function ownerRecordFingerprint(value) {
     value.owner_evidence?.argv_sha256,
     value.owner_evidence?.command_line_sha256,
     value.pipe_name,
+    value.control_contract_id,
+    value.control_contract_version,
+    value.control_contract_schema_version,
+    value.control_contract_sha256,
+    value.control_namespace,
     value.selected_instance_id,
     value.selected_generation_id,
     value.runtime_contract_sha256
@@ -646,6 +700,11 @@ function createOwnerLockRecord(context, evidence) {
     root: context.root,
     project_identity: context.projectIdentity,
     runtime: context.runtime,
+    control_contract_id: context.controlContract.id,
+    control_contract_version: context.controlContract.version,
+    control_contract_schema_version: context.controlContract.schemaVersion,
+    control_contract_sha256: context.controlContract.sha256,
+    control_namespace: context.controlNamespace,
     pipe_name: context.pipeName,
     generation_id: context.selectedGenerationId,
     target_generation_id: context.targetGenerationId,
@@ -673,6 +732,11 @@ function validateSupervisorOwnerRecord(context, value, label) {
       || !pathsEqual(value.root, context.root)
       || value.project_identity !== context.projectIdentity
       || !pathsEqual(value.runtime, context.runtime)
+      || value.control_contract_id !== context.controlContract.id
+      || value.control_contract_version !== context.controlContract.version
+      || value.control_contract_schema_version !== context.controlContract.schemaVersion
+      || value.control_contract_sha256 !== context.controlContract.sha256
+      || !pathsEqual(value.control_namespace, context.controlNamespace)
       || value.pipe_name !== context.pipeName
       || value.generation_id !== context.selectedGenerationId
       || value.target_generation_id !== context.targetGenerationId
@@ -810,6 +874,11 @@ async function runStatus(raw) {
     root: context.root,
     project_identity: context.projectIdentity,
     runtime: context.runtime,
+    control_contract_id: context.controlContract.id,
+    control_contract_version: context.controlContract.version,
+    control_contract_schema_version: context.controlContract.schemaVersion,
+    control_contract_sha256: context.controlContract.sha256,
+    control_namespace: context.controlNamespace,
     target_generation_id: context.targetGenerationId,
     selected_generation_id: context.selectedGenerationId,
     runtime_contract_sha256: context.runtimeContractSha256,
@@ -833,11 +902,20 @@ async function runStop(raw) {
   }
   const response = await requestPipe(inspection.state, { command: "shutdown" }, IPC_TIMEOUT_MS);
   if (response && !response.ok) throw new Error(response.error || "Supervisor refused shutdown.");
-  print("STOPPED", { action: "stopped", runtime: context.runtime });
+  print("STOPPED", {
+    action: "stopped",
+    runtime: context.runtime,
+    control_contract_id: context.controlContract.id,
+    control_contract_version: context.controlContract.version,
+    control_contract_schema_version: context.controlContract.schemaVersion,
+    control_contract_sha256: context.controlContract.sha256,
+    control_namespace: context.controlNamespace
+  });
 }
 
 async function runDaemon(raw) {
   const context = buildContext(raw);
+  validatedDaemonContext = context;
   fs.mkdirSync(context.runtime, { recursive: true });
   const ownerEvidence = getCurrentProcessEvidence(context, "daemon");
   const lock = await acquireSupervisorLock(context, ownerEvidence);
@@ -1221,6 +1299,11 @@ function createInitialState(context, ownerEvidence) {
     root: context.root,
     project_identity: context.projectIdentity,
     runtime: context.runtime,
+    control_contract_id: context.controlContract.id,
+    control_contract_version: context.controlContract.version,
+    control_contract_schema_version: context.controlContract.schemaVersion,
+    control_contract_sha256: context.controlContract.sha256,
+    control_namespace: context.controlNamespace,
     pipe_name: context.pipeName,
     generation_id: context.selectedGenerationId,
     target_generation_id: context.targetGenerationId,
@@ -1250,7 +1333,7 @@ function publicStatus(state, coordinatorStatus) {
   return {
     // Keep the Bridge-facing status shape compatible with the reviewed
     // coordinator status contract while the durable Supervisor state has its
-    // own schema and lives under control/supervisor.
+    // own schema and lives under the Package-derived control namespace.
     schema_version: 2,
     supervisor_schema_version: STATE_SCHEMA_VERSION,
     protocol_version: PROTOCOL_VERSION,
@@ -1258,6 +1341,11 @@ function publicStatus(state, coordinatorStatus) {
     root: state.root,
     project_identity: state.project_identity,
     runtime: state.runtime,
+    control_contract_id: state.control_contract_id,
+    control_contract_version: state.control_contract_version,
+    control_contract_schema_version: state.control_contract_schema_version,
+    control_contract_sha256: state.control_contract_sha256,
+    control_namespace: state.control_namespace,
     pipe_name: state.pipe_name,
     generation_id: state.generation_id,
     target_generation_id: state.target_generation_id,
@@ -2035,6 +2123,12 @@ function authenticatedStatusMatches(state, status) {
     && status.owner_epoch === state.owner_epoch
     && status.supervisor_pid === state.supervisor_pid
     && status.project_identity === state.project_identity
+    && status.runtime === state.runtime
+    && status.control_contract_id === state.control_contract_id
+    && status.control_contract_version === state.control_contract_version
+    && status.control_contract_schema_version === state.control_contract_schema_version
+    && status.control_contract_sha256 === state.control_contract_sha256
+    && status.control_namespace === state.control_namespace
     && status.selected_instance_id === state.selected_instance_id
     && status.selected_generation_id === state.selected_generation_id
     && status.runtime_contract_sha256 === state.runtime_contract_sha256
@@ -2051,7 +2145,12 @@ function validateSupervisorState(context, state) {
       || state.role !== "project-local-supervisor"
       || !pathsEqual(state.root, context.root)
       || state.project_identity !== context.projectIdentity
-      || state.runtime !== context.runtime
+      || !pathsEqual(state.runtime, context.runtime)
+      || state.control_contract_id !== context.controlContract.id
+      || state.control_contract_version !== context.controlContract.version
+      || state.control_contract_schema_version !== context.controlContract.schemaVersion
+      || state.control_contract_sha256 !== context.controlContract.sha256
+      || !pathsEqual(state.control_namespace, context.controlNamespace)
       || state.generation_id !== context.selectedGenerationId
       || state.target_generation_id !== context.targetGenerationId
       || state.selected_generation_id !== context.selectedGenerationId
@@ -2234,6 +2333,7 @@ function readPackageRuntimeContract(payloadRoot) {
       || bootstrapProtocol < 1) {
     throw new Error("Package runtime contract identity or protocol is invalid.");
   }
+  const controlContract = readControlContract(value, "Package runtime contract");
   const packageFiles = requiredArray(value, "files", "Package runtime contract");
   const seenTargets = new Set();
   let stableWrapperSha256 = null;
@@ -2300,6 +2400,7 @@ function readPackageRuntimeContract(payloadRoot) {
     payloadSequence,
     generationId,
     bootstrapProtocol,
+    controlContract,
     stableWrapperSha256,
     transitions
   };

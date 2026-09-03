@@ -37,16 +37,38 @@ namespace Rice.AI.Codedb.Editor
 
         internal static string GetSupervisorRuntimePath(string projectRoot)
         {
-            return AICodedbPaths.NormalizePath(Path.Combine(
+            return GetSupervisorRuntimePath(
                 projectRoot,
-                AICodedbProjectSettings.InstanceControlRelativePath,
-                "supervisor"));
+                AICodedbPackageRuntimeContractStore.Read(AICodedbPaths.PackageRootPath)
+                    .ControlContract);
+        }
+
+        internal static string GetSupervisorRuntimePath(
+            string projectRoot,
+            AICodedbControlContractIdentity controlContract)
+        {
+            if (!controlContract.IsValid)
+                throw new InvalidOperationException("Package control contract identity is invalid.");
+
+            return AICodedbControlContract.GetSupervisorRuntimePath(
+                projectRoot,
+                controlContract);
         }
 
         internal static string GetSupervisorStatePath(string projectRoot)
         {
+            return GetSupervisorStatePath(
+                projectRoot,
+                AICodedbPackageRuntimeContractStore.Read(AICodedbPaths.PackageRootPath)
+                    .ControlContract);
+        }
+
+        internal static string GetSupervisorStatePath(
+            string projectRoot,
+            AICodedbControlContractIdentity controlContract)
+        {
             return AICodedbPaths.NormalizePath(Path.Combine(
-                GetSupervisorRuntimePath(projectRoot),
+                GetSupervisorRuntimePath(projectRoot, controlContract),
                 "supervisor-state.json"));
         }
 
@@ -81,7 +103,10 @@ namespace Rice.AI.Codedb.Editor
                         false);
                 }
 
-                var runtime = GetSupervisorRuntimePath(context.ProjectRoot);
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
+                var runtime = GetSupervisorRuntimePath(
+                    context.ProjectRoot,
+                    runtimeContract.ControlContract);
                 ValidateLaunchRoots(
                     context.ProjectRoot,
                     packageRoot,
