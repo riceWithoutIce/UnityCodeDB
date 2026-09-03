@@ -49,6 +49,53 @@ trusts the Coder's bounded result and avoids rerunning unchanged tests;
 acceptance evidence. Trust never authorizes scope expansion, commit, push, or
 release claims.
 
+## Session Profiles
+
+The versioned logical profile catalog is
+`.ai/workflows/codedb-workflow-v1/profile-map.md`. Task cards reference a
+profile key rather than a thread ID:
+
+```text
+v0.3.coder.standard
+v0.3.verifier.standard
+v0.3.coder.deep
+v0.3.verifier.deep
+```
+
+`standard` uses `gpt-5.6-sol/high`; `deep` currently uses `gpt-5.6-sol/max`
+as a provisional trial setting. Each profile has capacity `1` and manual-only
+provisioning. A busy, unknown, or missing binding is `DEFERRED`/`BLOCKED`; the
+router does not create, duplicate, interrupt, or silently downgrade a session.
+Profile selection does not grant Unity, test expansion, commit, push, or release
+authority. Actual thread bindings and live status are runtime data, not task
+identity.
+
+## Unity Safety
+
+Coder and Verifier sessions never create a Unity project, launch Unity, or run
+Unity validation in a hidden or background process. The standard validation
+project and a task card do not authorize a Unity run; an explicit request must
+name the project, criterion, command/filter, wait limit, and cleanup owner.
+
+When Unity MCP is unavailable or a required MCP call fails, the session stops
+that evidence path, preserves the original error, and notifies the human. It
+does not retry in the background, switch endpoints, create a substitute
+project, or relabel a direct probe as Unity/MCP evidence. The gate is recorded
+as `BLOCKED` or `DEFERRED`.
+
+## Test Scope
+
+Every `TASK.md` names its `L0` tests, directly affected `L1` tests, explicitly
+unrun tests, and the rationale for the boundary. A focused batch is one named
+filter or one tightly coupled harness for the same behavior, not a full
+repository suite.
+
+By default, Coder runs at most one `L0` batch and one `Affected L1` batch.
+Verifier runs at most one targeted read-only review batch and does not rerun
+unchanged Coder tests. A concrete failure may receive one corrected retry;
+additional batches require an authorized task-card exception, and a second
+independent behavior or blocker requires a checkpoint or new task.
+
 ## Task Flow
 
 ```text
@@ -117,6 +164,8 @@ the task documents.
 - Coder:
 - Verifier: optional
 - Review mode: NORMAL | GUARDED | RELEASE
+- Execution profile: <profile-id from the session profile map>
+- Session policy: REUSE_ONLY | MANUAL_PROVISION
 - Requirement source:
 
 ## Objective
@@ -135,6 +184,7 @@ the task documents.
 - EditMode authorization: NOT_REQUESTED | authorized
 - Stop conditions:
 - Escalation triggers:
+- Model escalation: none | request-only | human-approved
 
 ## Definition Of Done
 - Expected result:
@@ -164,6 +214,8 @@ workflow rather than being duplicated in every task.
   explicitly initiate the exact commit operation; push and publish require
   separate confirmation.
 - Implementation commits must not silently include administrative task files.
+- The logical session profile map is versioned; volatile thread bindings and live
+  status stay outside frozen task identity and are not copied into task cards.
 - Routine `git diff`, full history scans, and repeated status checks are not
   required. Use a targeted Git check only when the task's review mode or an
   explicitly requested commit requires it.

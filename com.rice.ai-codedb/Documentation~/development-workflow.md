@@ -84,6 +84,41 @@ exact files or hunks, message, and expected scope in its `RESULT` or
 explicitly initiates that exact commit operation. Push and publish remain
 separate human-gated operations.
 
+## Session Profile Routing
+
+Each task selects one logical execution profile before dispatch. The versioned
+profile catalog is `.ai/workflows/codedb-workflow-v1/profile-map.md`. It is a
+routing catalog, not a second requirements source and not permission to create
+or modify a session.
+
+- Use a `standard` profile for a bounded task with a known behavior, named files,
+  and a focused evidence plan.
+- Use a `deep` profile for cross-layer contracts, unresolved ambiguity,
+  conflicting evidence, P0 risk, or formal release review.
+- The profile level does not expand file scope, test scope, Unity permission,
+  commit authority, or release authority.
+- The routing owner resolves the profile to an existing session binding. A
+  future wrapper may automate this lookup, but the current management session
+  remains the routing owner.
+- Before dispatch, perform one bounded check that the selected binding is idle
+  and its workspace/snapshot is compatible. After dispatch, follow the normal
+  no-poll, no-wait, no-duplicate rule.
+- Profile capacity is a hard limit. If the selected binding is busy, unknown,
+  missing, or incompatible, record `DEFERRED` or `BLOCKED` and notify the human.
+  Do not create a new session, interrupt the active one, silently downgrade, or
+  route the task to a different role.
+- Session creation, replacement, and any profile rebind are manual provisioning
+  actions. An automation, if added later, must be reuse-only and must not create
+  a session on a routing failure.
+- A profile change during an active task requires a checkpoint and explicit
+  human approval before a new turn. The Coder or Verifier may request an
+  escalation but may not silently switch itself.
+- The Coder -> Planner -> Verifier -> Planner/User chain remains unchanged;
+  Verifier does not dispatch repairs directly to Coder.
+- `RESULT.md` or `VERIFICATION.md` records the actual model and reasoning effort
+  used. A mismatch is reported to the routing owner and is not a reason for a
+  blind rerun.
+
 ## Trust And Review Modes
 
 Planner and Coder use a contract-based trust model to avoid repeating low-value
@@ -176,6 +211,8 @@ The minimum `TASK.md` shape is:
 - Coder:
 - Verifier: optional
 - Review mode: NORMAL | GUARDED | RELEASE
+- Execution profile: <profile-id from the session profile map>
+- Session policy: REUSE_ONLY | MANUAL_PROVISION
 - Requirement source:
 
 ## Objective
@@ -194,6 +231,7 @@ The minimum `TASK.md` shape is:
 - EditMode authorization: NOT_REQUESTED | authorized
 - Stop conditions:
 - Escalation triggers:
+- Model escalation: none | request-only | human-approved
 
 ## Definition Of Done
 - Expected result:
@@ -345,6 +383,16 @@ may not silently enlarge the original task card.
   focused verification ends. A commit proposal is allowed, but the session
   must not infer authorization from dispatch, the task card, a `RESULT`, or a
   passing test.
+- Coder and Verifier sessions must never create a Unity project, launch a
+  Unity Editor, or run a Unity validation process in the background or hidden
+  from the human. A task card or the presence of the standard validation
+  project is not authorization. Unity may start only under the explicit
+  EditMode/acceptance request defined below.
+- If Unity MCP is unavailable, a connection fails, or the required MCP
+  surface cannot be used, stop that Unity evidence path, preserve the original
+  error, and notify the human. Do not retry in the background, switch to an
+  unreviewed endpoint, create a substitute project, or present a direct probe
+  as Unity/MCP evidence. Classify the gate as `BLOCKED` or `DEFERRED`.
 - Subagents are off by default. Use one only for an independent, bounded task
   after the user approves delegation.
 
@@ -364,6 +412,33 @@ or the number of nearby tests.
 3. `Full regression` is not the default. It requires an explicit release gate,
    a user request, or a shared/public contract change whose impact cannot be
    bounded statically.
+
+### Test Plan And Batch Boundaries
+
+Before `IMPLEMENT`, every `TASK.md` declares the test boundary:
+
+```text
+L0 tests:
+Affected L1 tests:
+Explicitly not run:
+Test rationale:
+```
+
+A focused test batch is one named filter or one tightly coupled harness
+invocation for the same behavior. It is not an entire repository suite or a
+collection of unrelated neighboring tests.
+
+The default budget for one implementation slice is:
+
+- Coder: at most one `L0` batch and one `Affected L1` batch;
+- Verifier: at most one targeted, read-only review batch, with no rerun of
+  unchanged Coder tests.
+
+A concrete failure may justify one corrected retry of the same logical check,
+subject to the retry budget below. A second independent behavior or blocker
+closes the current test window and requires a checkpoint or a new slice. Any
+additional batch must be recorded with the `Additional tests` fields below
+and authorized before it runs.
 
 Regression tests must be justified by the actual diff or by a known failure
 path. Shared directory membership, similar names, or a general desire for
@@ -398,6 +473,14 @@ Creating a Unity project or starting a Unity process is forbidden during normal
 implementation. Only a separately declared and explicitly authorized
 acceptance request may start an existing project or process, with the project
 path, exact criterion, maximum wait, and cleanup ownership recorded below.
+
+The prohibition applies equally to Coder and Verifier. Neither role may use a
+hidden/background Unity process to obtain unrequested evidence. When an
+authorized Unity MCP call is unavailable or fails, the role must stop the MCP
+path and notify the human; it must not perform automatic reconnects, alternate
+endpoint attempts, or substitute a direct Unity/CLI probe. The failed gate is
+reported as `BLOCKED` or `DEFERRED` with the original error and no release
+claim.
 
 ### Standard Development Validation Project
 
