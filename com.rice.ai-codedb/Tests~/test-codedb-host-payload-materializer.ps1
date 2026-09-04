@@ -20,6 +20,8 @@ param(
 
     [switch]$ActivationTransactionOnly,
 
+    [switch]$ActivationRetirementOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -28,8 +30,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -6795,6 +6797,358 @@ function Invoke-ActivationTransactionScenarios {
     Write-Host "[OK] Versioned candidate-to-activation transaction covered pre-selection candidate failure, PREPARED/ACTIVATING/COMMITTED phases, rollback recovery, idempotent retry, conflict rejection, and protected old-state retention."
 }
 
+function Start-RetirementLeaseHolder {
+    $holderPath = Join-Path $runRoot ("retirement-lease-holder-" + [guid]::NewGuid().ToString("N") + ".ps1")
+    Write-Utf8File -Path $holderPath -Content @'
+Write-Output "READY"
+$null = [Console]::In.ReadLine()
+exit 0
+'@
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powershellPath
+    $startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$holderPath`""
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $null = $process.Start()
+    if (-not [string]::Equals($process.StandardOutput.ReadLine(), "READY", [StringComparison]::Ordinal)) {
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.Dispose()
+        throw "Fixture retirement lease holder did not become ready. $errorText"
+    }
+    return $process
+}
+
+function Stop-RetirementLeaseHolder {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    if (-not $Process.HasExited) {
+        $Process.StandardInput.WriteLine("close")
+        $Process.StandardInput.Close()
+        if (-not $Process.WaitForExit(10000)) {
+            throw "Fixture retirement lease holder did not exit normally after stdin closed."
+        }
+    }
+    Assert-Equal -Actual $Process.ExitCode -Expected 0 -Message "Fixture retirement lease holder did not exit normally."
+}
+
+function Invoke-ActivationRetirementScenarios {
+    $parseErrors = $null
+    $parseTokens = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath,
+        [ref]$parseTokens,
+        [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message "Materializer source did not parse for focused activation retirement loading."
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    . (Join-Path $packageRoot "Tools~\codedb-instance-engine.ps1")
+    $script:ManagedBy = "com.rice.ai-codedb"
+    $script:RequestedExitCode = 0
+    $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
+    $script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
+    $script:MarkerRelativePath = $markerRelativePath
+    $script:IntegrationStateRelativePath = "AIWork/.runtime/codedb/payload-materializer/integration-state.json"
+    $script:McpConfigRelativePath = ".codex/config.toml"
+    $script:TargetPrefix = "AIWork/codedb/"
+    $script:AllowedTargetPaths = @{
+        "AIWork/codedb/wrapper/codedb-project-wrapper.mjs" = $true
+    }
+
+    $manifestJson = Read-BoundedJsonDocument `
+        -Path $canonicalPayloadManifestPath `
+        -Label "focused activation retirement Package manifest" `
+        -MaximumBytes (1024 * 1024)
+    $retirementManifest = [pscustomobject]@{
+        ControlContract = Read-InstanceControlContractIdentity -ManifestDocument $manifestJson.Document
+        RuntimeContractSha256 = $manifestJson.Sha256
+        TargetGenerationId = $generationId
+        TargetGenerationManifestSha256 = (Get-FileHash -LiteralPath (Get-CanonicalPayloadSourcePath -TargetRelativePath ($generationTargetPrefix + "generation-manifest.json")) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $sentinelRelativePath = "AIWork/codedb/retirement-unrelated.sentinel"
+    $prepareCommittedRetirement = {
+        param([bool]$RetainInitialHolder = $false)
+
+        $prior = Install-TrustedPreviousInstanceFixture
+        if (-not $RetainInitialHolder) {
+            Remove-Item -LiteralPath $prior.InstanceLeasePath -Force
+            Remove-Item -LiteralPath $prior.GenerationLeasePath -Force
+        }
+        Write-Utf8File `
+            -Path (Get-PathFromRelative -Root $hostRoot -RelativePath $sentinelRelativePath) `
+            -Content "retirement unrelated sentinel`n"
+        $activationResult = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $activationResult -ExitCode 0 -Label "Versioned retirement activation"
+        Assert-StructuredCommandResult -Result $activationResult -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "Versioned retirement activation"
+        $selection = Get-TestCurrentInstanceSelection -Root $hostRoot
+        $contractRoot = Get-InstanceActivationContractRoot -Manifest $retirementManifest -ProjectRoot $hostRoot
+        $contractState = Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot
+        Assert-Equal -Actual $contractState.Operation.Phase -Expected "COMMITTED" -Message "Retirement fixture activation did not commit."
+        Assert-True -Condition ($null -ne $contractState.RetirementIntent) -Message "Committed activation did not publish a retirement intent."
+        Assert-Equal -Actual ([string]$contractState.RetirementIntent.RetiredInstance.instance_id) -Expected $prior.InstanceId -Message "Retirement intent selected the wrong old instance."
+        Assert-Equal -Actual ([string]$contractState.RetirementIntent.SelectedInstance.instance_id) -Expected ([string]$selection.Selection.instance_id) -Message "Retirement intent selected identity diverged from current."
+        return [pscustomobject]@{
+            Prior = $prior
+            Selection = $selection
+            ContractRoot = $contractRoot
+            ContractState = $contractState
+        }
+    }
+
+    # Exercise the only transitional state accepted by recovery: the exact
+    # candidate and retired identities are durable while the PREPARED journal
+    # still has no retirement reference.
+    $interruptedPrevious = Install-TrustedPreviousInstanceFixture
+    Remove-Item -LiteralPath $interruptedPrevious.InstanceLeasePath -Force
+    Remove-Item -LiteralPath $interruptedPrevious.GenerationLeasePath -Force
+    $interruptedSelectionBefore = Get-ByteSnapshot -Path $interruptedPrevious.SelectionPath
+    $previousIntentBindingInterruption = $env:CODEDB_TEST_INTERRUPT_RETIREMENT_INTENT_BINDING
+    try {
+        $env:CODEDB_TEST_INTERRUPT_RETIREMENT_INTENT_BINDING = "1"
+        $interrupted = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    } finally {
+        $env:CODEDB_TEST_INTERRUPT_RETIREMENT_INTENT_BINDING = $previousIntentBindingInterruption
+    }
+    Assert-Result -Result $interrupted -ExitCode 88 -Label "Interrupted retirement intent publication"
+    Assert-True `
+        -Condition ($interrupted.Text.Contains("Injected POC process interruption after durable retirement intent before PREPARED journal binding.")) `
+        -Message "Interrupted retirement intent publication did not preserve its fault evidence."
+    $interruptedContractRoot = Get-InstanceActivationContractRoot -Manifest $retirementManifest -ProjectRoot $hostRoot
+    $interruptedOperationPath = Join-Path $interruptedContractRoot "operation.json"
+    $interruptedOperationDocument = Get-Content -LiteralPath $interruptedOperationPath -Raw | ConvertFrom-Json
+    $interruptedContext = New-InstanceActivationContractContext `
+        -Manifest $retirementManifest `
+        -ProjectRoot $hostRoot `
+        -OperationId ([string]$interruptedOperationDocument.operation_id)
+    $interruptedActivation = Read-InstanceActivationRecord -Context $interruptedContext
+    $interruptedOperation = Read-InstanceActivationOperation -Context $interruptedContext
+    Assert-Equal -Actual $interruptedActivation.Phase -Expected "PREPARED" -Message "Interrupted activation did not remain PREPARED."
+    Assert-Equal -Actual $interruptedOperation.Phase -Expected "PREPARED" -Message "Interrupted operation did not remain PREPARED."
+    Assert-True -Condition ($null -eq $interruptedOperation.RetirementIntentRelativePath) -Message "Interrupted PREPARED journal unexpectedly bound an intent path."
+    Assert-True -Condition ($null -eq $interruptedOperation.RetirementIntentSha256) -Message "Interrupted PREPARED journal unexpectedly bound an intent hash."
+    Assert-True -Condition (Test-Path -LiteralPath $interruptedContext.Paths.RetirementIntentPath -PathType Leaf) -Message "Retirement intent was not durable before the injected interruption."
+    $interruptedIntent = Read-InstanceRetirementIntent -Context $interruptedContext
+    Assert-True `
+        -Condition (Test-InstanceActivationEvidenceEqual -Left $interruptedIntent.SelectedInstance -Right $interruptedOperation.Candidate) `
+        -Message "Interrupted intent selected identity diverged from the authoritative candidate."
+    Assert-True `
+        -Condition (Test-InstanceActivationEvidenceEqual -Left $interruptedIntent.RetiredInstance -Right $interruptedActivation.Current) `
+        -Message "Interrupted intent retired identity diverged from the PREPARED current instance."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $interruptedPrevious.SelectionPath) -Expected $interruptedSelectionBefore -Message "Interrupted intent publication changed current selection."
+    Assert-ThrowsMessage `
+        -Action { Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot } `
+        -ExpectedMessage "orphaned retirement intent" `
+        -Label "Ordinary reader rejects unbound retirement intent"
+    $interruptedCandidateRoot = Get-PathFromRelative `
+        -Root $hostRoot `
+        -RelativePath ("AIWork/.runtime/codedb/instances/" + $interruptedIntent.SelectedInstance.instance_id)
+    $interruptedCandidateBeforeRecovery = Get-FileSnapshot -Root $interruptedCandidateRoot
+
+    $recoveredInterruption = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $recoveredInterruption -ExitCode 0 -Label "Recovery after interrupted retirement intent publication"
+    Assert-StructuredCommandResult `
+        -Result $recoveredInterruption `
+        -Action "UPGRADE" `
+        -Outcome "UPGRADED" `
+        -CleanupState "PENDING" `
+        -Label "Recovery after interrupted retirement intent publication"
+    Assert-Equal `
+        -Actual (Get-FileSnapshot -Root $interruptedCandidateRoot) `
+        -Expected $interruptedCandidateBeforeRecovery `
+        -Message "Recovery changed the preserved interrupted candidate instance."
+    $interruptedCandidateControlPath = Get-PathFromRelative `
+        -Root $hostRoot `
+        -RelativePath ("AIWork/.runtime/codedb/control/retired-instances/" + $interruptedIntent.SelectedInstance.instance_id + ".json")
+    Assert-True `
+        -Condition (-not (Test-Path -LiteralPath $interruptedCandidateControlPath)) `
+        -Message "Recovery minted unbound mechanical retirement authority for the interrupted candidate."
+    $recoveredSelection = Get-TestCurrentInstanceSelection -Root $hostRoot
+    Assert-True `
+        -Condition (-not [string]::Equals([string]$recoveredSelection.Selection.instance_id, [string]$interruptedPrevious.InstanceId, [StringComparison]::Ordinal)) `
+        -Message "Recovery did not allow the next Upgrade to select a new candidate."
+    $recoveredContractState = Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot
+    Assert-Equal -Actual $recoveredContractState.Operation.Phase -Expected "COMMITTED" -Message "Recovery did not leave a committed replacement activation."
+    Assert-True -Condition ($null -ne $recoveredContractState.RetirementIntent) -Message "Recovery replacement activation lost its retirement intent."
+    Write-Host "[OK] Exact PREPARED intent-publication interruption remains orphan-rejected to ordinary readers and is recovered only from matching contract and instance identities."
+
+    $noHolder = & $prepareCommittedRetirement
+    $intentPath = [string]$noHolder.ContractState.RetirementIntent.Path
+    $operationPath = [string]$noHolder.ContractState.Operation.Path
+    $intentSnapshot = Get-ByteSnapshot -Path $intentPath
+    $operationBytes = [System.IO.File]::ReadAllBytes($operationPath)
+    $missingIntentPath = Join-Path $runRoot ("missing-retirement-intent-" + [guid]::NewGuid().ToString("N") + ".json")
+    [System.IO.File]::Move($intentPath, $missingIntentPath)
+    try {
+        Assert-ThrowsMessage `
+            -Action { Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot } `
+            -ExpectedMessage "retirement evidence" `
+            -Label "Missing committed retirement intent"
+    } finally {
+        [System.IO.File]::Move($missingIntentPath, $intentPath)
+    }
+    $mismatchedOperation = Get-Content -LiteralPath $operationPath -Raw | ConvertFrom-Json
+    $mismatchedOperation.retirement_intent_sha256 = "0" * 64
+    Write-Utf8File -Path $operationPath -Content (($mismatchedOperation | ConvertTo-Json -Depth 16) + "`n")
+    try {
+        Assert-ThrowsMessage `
+            -Action { Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot } `
+            -ExpectedMessage "identities do not match" `
+            -Label "Mismatched retirement intent hash"
+    } finally {
+        [System.IO.File]::WriteAllBytes($operationPath, $operationBytes)
+    }
+    $orphanedOperation = Get-Content -LiteralPath $operationPath -Raw | ConvertFrom-Json
+    $orphanedOperation.retirement_intent_path = $null
+    $orphanedOperation.retirement_intent_sha256 = $null
+    Write-Utf8File -Path $operationPath -Content (($orphanedOperation | ConvertTo-Json -Depth 16) + "`n")
+    try {
+        Assert-ThrowsMessage `
+            -Action { Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot } `
+            -ExpectedMessage "orphaned retirement intent" `
+            -Label "Orphaned retirement intent"
+    } finally {
+        [System.IO.File]::WriteAllBytes($operationPath, $operationBytes)
+    }
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $intentPath) -Expected $intentSnapshot -Message "Fail-closed intent checks changed immutable retirement evidence."
+
+    $unrelatedInstanceRoot = Get-PathFromRelative -Root $hostRoot -RelativePath ("AIWork/.runtime/codedb/instances/" + ("e" * 32))
+    Write-Utf8File -Path (Join-Path $unrelatedInstanceRoot "unowned.sentinel") -Content "unbound instance sentinel`n"
+    $selectionBeforeCleanup = Get-ByteSnapshot -Path $noHolder.Selection.Path
+    $sentinelPath = Get-PathFromRelative -Root $hostRoot -RelativePath $sentinelRelativePath
+    $sentinelBeforeCleanup = Get-ByteSnapshot -Path $sentinelPath
+    $cleanup = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $cleanup -ExitCode 0 -Label "No-holder intent-bound retirement"
+    Assert-StructuredCommandResult -Result $cleanup -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "No-holder intent-bound retirement"
+    Assert-True -Condition (-not (Test-Path -LiteralPath $noHolder.Prior.InstanceRoot)) -Message "No-holder retirement retained the intent-bound old instance."
+    Assert-True -Condition (Test-Path -LiteralPath $unrelatedInstanceRoot -PathType Container) -Message "Intent-bound retirement deleted an arbitrary non-current instance."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $noHolder.Selection.Path) -Expected $selectionBeforeCleanup -Message "Retirement changed current selection."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $sentinelPath) -Expected $sentinelBeforeCleanup -Message "Retirement changed an unrelated sentinel."
+    $auditState = Get-InstanceActivationContractState -Manifest $retirementManifest -ProjectRoot $hostRoot
+    Assert-Equal -Actual ([string]$auditState.RetirementIntent.Sha256) -Expected ([string]$noHolder.ContractState.RetirementIntent.Sha256) -Message "Completed retirement changed immutable audit evidence."
+    $repeatCleanup = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $repeatCleanup -ExitCode 0 -Label "Repeated intent-bound retirement"
+    Assert-StructuredCommandResult -Result $repeatCleanup -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "Repeated intent-bound retirement"
+
+    $holderFixture = & $prepareCommittedRetirement $true
+    Assert-True -Condition (Test-Path -LiteralPath $holderFixture.Prior.InstanceRoot -PathType Container) -Message "Activation waited for or deleted a live previous holder."
+    Assert-True -Condition (Test-Path -LiteralPath $holderFixture.Prior.InstanceLeasePath -PathType Leaf) -Message "Activation changed the live previous-instance lease."
+    Remove-Item -LiteralPath $holderFixture.Prior.InstanceLeasePath -Force
+    Remove-Item -LiteralPath $holderFixture.Prior.GenerationLeasePath -Force
+    $holder = $null
+    $holderClosedNormally = $false
+    try {
+        $holder = Start-RetirementLeaseHolder
+        $holderStartUtc = $holder.StartTime.ToUniversalTime()
+        $holderStartMilliseconds = ([DateTimeOffset]::new($holderStartUtc)).ToUnixTimeMilliseconds().ToString([Globalization.CultureInfo]::InvariantCulture)
+        $holderStartTicks = $holderStartUtc.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        $holderSelectionBefore = Get-ByteSnapshot -Path $holderFixture.Selection.Path
+        $holderSentinelPath = Get-PathFromRelative -Root $hostRoot -RelativePath $sentinelRelativePath
+        $holderSentinelBefore = Get-ByteSnapshot -Path $holderSentinelPath
+        try {
+
+        $writeMcpLease = {
+            $leaseId = "mcp-$($holder.Id)-$([guid]::NewGuid().ToString('N'))"
+            $leasePath = Join-Path $holderFixture.Prior.InstanceRoot "leases\$leaseId.json"
+            $lease = [ordered]@{
+                schema_version = 1; instance_lease_version = 1; managed_by = "com.rice.ai-codedb"; owner = "mcp"
+                instance_id = $holderFixture.Prior.InstanceId; generation_id = $holderFixture.Prior.GenerationId
+                lease_id = $leaseId; pid = $holder.Id; process_start_identity = $holderStartMilliseconds
+                project_root = [System.IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/'); project_identity = Get-TestProjectIdentity -Root $hostRoot
+                created_at_utc = [DateTime]::UtcNow.AddSeconds(-1).ToString("o"); heartbeat_at_utc = [DateTime]::UtcNow.ToString("o")
+            }
+            Write-Utf8File -Path $leasePath -Content (($lease | ConvertTo-Json -Depth 6) + "`n")
+            return $leasePath
+        }.GetNewClosure()
+        $mcpLeasePath = & $writeMcpLease
+        $mcpBefore = Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot
+        $mcpPending = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $mcpPending -ExitCode 0 -Label "Live MCP retirement"
+        Assert-StructuredCommandResult -Result $mcpPending -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "Live MCP retirement"
+        Assert-True -Condition (-not $holder.HasExited) -Message "Retirement stopped the live MCP fixture holder."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot) -Expected $mcpBefore -Message "Live MCP retirement changed the retained instance."
+        Remove-Item -LiteralPath $mcpLeasePath -Force
+
+        $editorLeaseRoot = Join-Path $holderFixture.Prior.InstanceRoot "watch\lifecycle\editor-leases"
+        $editorLeasePath = Join-Path $editorLeaseRoot "retirement-editor.json"
+        $editorLease = [ordered]@{
+            schema_version = 1; managed_by = "com.rice.ai-codedb"; session_id = "retirement-editor"; editor_pid = $holder.Id
+            process_start_ticks = $holderStartTicks; project_root = [System.IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/')
+            project_identity = Get-TestProjectIdentity -Root $hostRoot; created_at_utc = [DateTime]::UtcNow.ToString("o"); heartbeat_at_utc = [DateTime]::UtcNow.ToString("o")
+        }
+        Write-Utf8File -Path $editorLeasePath -Content (($editorLease | ConvertTo-Json -Depth 6) + "`n")
+        $editorBefore = Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot
+        $editorPending = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $editorPending -ExitCode 0 -Label "Live Editor retirement"
+        Assert-StructuredCommandResult -Result $editorPending -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "Live Editor retirement"
+        Assert-True -Condition (-not $holder.HasExited) -Message "Retirement stopped the live Editor fixture holder."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot) -Expected $editorBefore -Message "Live Editor retirement changed the retained instance."
+        Remove-Item -LiteralPath $editorLeasePath -Force
+
+        $coordinatorPath = Join-Path $holderFixture.Prior.InstanceRoot "watch\coordinator\coordinator-state.json"
+        $coordinator = [ordered]@{
+            schema_version = 2; generation_id = $holderFixture.Prior.GenerationId; root = [System.IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/')
+            runtime = [System.IO.Path]::GetFullPath((Split-Path -Parent $coordinatorPath)); started_at_utc = [DateTime]::UtcNow.ToString("o")
+            coordinator_pid = $holder.Id; lifecycle_id = "retirement-coordinator"
+        }
+        Write-Utf8File -Path $coordinatorPath -Content (($coordinator | ConvertTo-Json -Depth 6) + "`n")
+        $coordinatorBefore = Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot
+        $coordinatorPending = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $coordinatorPending -ExitCode 0 -Label "Live Coordinator retirement"
+        Assert-StructuredCommandResult -Result $coordinatorPending -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "Live Coordinator retirement"
+        Assert-True -Condition (-not $holder.HasExited) -Message "Retirement stopped the live Coordinator fixture holder."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot) -Expected $coordinatorBefore -Message "Live Coordinator retirement changed the retained instance."
+        Remove-Item -LiteralPath $coordinatorPath -Force
+
+        $invalidLeasePath = Join-Path $holderFixture.Prior.InstanceRoot ("leases\mcp-$($holder.Id)-$([guid]::NewGuid().ToString('N')).json")
+        Write-Utf8File -Path $invalidLeasePath -Content "{}`n"
+        $invalidBefore = Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot
+        $invalidPending = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $invalidPending -ExitCode 0 -Label "Invalid holder evidence retirement"
+        Assert-StructuredCommandResult -Result $invalidPending -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "Invalid holder evidence retirement"
+        Assert-Equal -Actual (Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot) -Expected $invalidBefore -Message "Invalid holder evidence was changed or deleted."
+        Remove-Item -LiteralPath $invalidLeasePath -Force
+
+        $ambiguousLeasePath = & $writeMcpLease
+        $ambiguousBefore = Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot
+        $ambiguousPending = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot -TestProcessIdentityUnavailableForPid $holder.Id
+        Assert-Result -Result $ambiguousPending -ExitCode 0 -Label "Ambiguous holder identity retirement"
+        Assert-StructuredCommandResult -Result $ambiguousPending -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "Ambiguous holder identity retirement"
+        Assert-True -Condition (-not $holder.HasExited) -Message "Retirement stopped an ambiguously identified fixture holder."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $holderFixture.Prior.InstanceRoot) -Expected $ambiguousBefore -Message "Ambiguous holder evidence was changed or deleted."
+
+        } finally {
+            if ($null -ne $holder -and -not $holder.HasExited) {
+                Stop-RetirementLeaseHolder -Process $holder
+                $holderClosedNormally = $true
+            }
+        }
+        $drained = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $drained -ExitCode 0 -Label "Naturally drained retirement"
+        Assert-StructuredCommandResult -Result $drained -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "Naturally drained retirement"
+        Assert-True -Condition (-not (Test-Path -LiteralPath $holderFixture.Prior.InstanceRoot)) -Message "Natural holder drain did not retire the old instance."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $holderFixture.Selection.Path) -Expected $holderSelectionBefore -Message "Holder-aware retirement changed current selection."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $holderSentinelPath) -Expected $holderSentinelBefore -Message "Holder-aware retirement changed an unrelated sentinel."
+    } finally {
+        if ($null -ne $holder) {
+            if (-not $holder.HasExited) {
+                Stop-RetirementLeaseHolder -Process $holder
+                $holderClosedNormally = $true
+            }
+            $holder.Dispose()
+        }
+    }
+    Assert-True -Condition $holderClosedNormally -Message "Fixture retirement lease holder was not normally reclaimed in finally."
+    Write-Host "[OK] Versioned retirement intents fail closed, preserve live/invalid/ambiguous holders, drain naturally, reclaim stale evidence, and delete only the intent-bound instance."
+    Write-Host "[OK] Fixture retirement lease holder exited normally without cleanup stopping it."
+}
+
 function Invoke-PayloadManifestContractScenarios {
     $targetRelativePath = "AIWork/codedb/codedbignore.example"
     $payloadRoot = New-SyntheticPayload `
@@ -7759,6 +8113,14 @@ try {
         Invoke-ActivationTransactionScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation transaction acceptance modified package source files."
         Write-Host "[OK] Focused activation transaction scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($ActivationRetirementOnly) {
+        Invoke-ActivationRetirementScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation retirement acceptance modified package source files."
+        Write-Host "[OK] Focused versioned lease-aware retirement scenarios passed."
         $fixturePassed = $true
         return
     }

@@ -3110,7 +3110,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void ReadyCurrentInstance_WithPendingCleanup_DoesNotRunFullConvergence()
+        public void ReadyCurrentInstance_WithPendingCleanup_SelectsThrottledRetirementOnly()
         {
             Assert.That(
                 AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
@@ -3118,8 +3118,50 @@ namespace Rice.AI.Codedb.Editor.Tests
                     true,
                     AICodedbProductState.Ready,
                     AICodedbProjectCleanupState.Pending),
+                Is.True,
+                "Pending retirement must enter bounded convergence without redeploying current.");
+            var ready = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Installed,
+                    AICodedbProjectCleanupState.Pending,
+                    string.Empty,
+                    "installed"),
+                Result("[PRODUCT_LAYER PREREQUISITE] CURRENT\n"
+                       + "[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                       + "[PRODUCT_LAYER CONFIGURED] CURRENT\n"
+                       + "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n"
+                       + "[PRODUCT_STATE] READY"));
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceState.Current,
+                    ready,
+                    AICodedbProjectCleanupState.Pending),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Retire));
+
+            var nextReconcileAt = 0d;
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(
+                    30d,
+                    ref nextReconcileAt,
+                    false),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(
+                    31d,
+                    ref nextReconcileAt,
+                    false),
                 Is.False,
-                "Retired cleanup must not redeploy an otherwise Ready current instance.");
+                "A pending retirement must not form an immediate reconcile loop.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(
+                    60d,
+                    ref nextReconcileAt,
+                    false,
+                    false,
+                    true),
+                Is.False,
+                "An in-flight retirement must remain single-flight.");
+            Assert.That(nextReconcileAt, Is.EqualTo(90d), "An in-flight retirement must retain periodic backoff.");
             Assert.That(
                 AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
                     true,
@@ -3127,6 +3169,28 @@ namespace Rice.AI.Codedb.Editor.Tests
                     AICodedbProductState.Ready,
                     AICodedbProjectCleanupState.Complete),
                 Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceState.Current,
+                    ready,
+                    AICodedbProjectCleanupState.Complete),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.None));
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldQueueScheduledReconcile(
+                    60d,
+                    ref nextReconcileAt,
+                    true),
+                Is.False,
+                "Play/compile/update maintenance boundaries must defer retirement scheduling.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldDeferReconcile(true, false, false),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldDeferReconcile(false, true, false),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldDeferReconcile(false, false, true),
+                Is.True);
         }
 
         [Test]
@@ -3156,6 +3220,19 @@ namespace Rice.AI.Codedb.Editor.Tests
                     AICodedbProjectCleanupState.Pending),
                 Is.False,
                 "An invalid selected instance remains fail-closed instead of being replaced automatically.");
+            var blocked = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Invalid,
+                    AICodedbProjectCleanupState.Invalid,
+                    string.Empty,
+                    "invalid"),
+                Result(string.Empty));
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceState.Invalid,
+                    blocked,
+                    AICodedbProjectCleanupState.Pending),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
         }
 
         [Test]

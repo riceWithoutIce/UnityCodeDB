@@ -18,8 +18,10 @@ $script:InstanceOptionalDirectories = @("leases")
 $script:InstanceControlContractSchemaVersion = 1
 $script:InstanceActivationRecordSchemaVersion = 1
 $script:InstanceActivationOperationSchemaVersion = 1
+$script:InstanceRetirementIntentSchemaVersion = 1
 $script:InstanceActivationRecordMaximumBytes = 64 * 1024
 $script:InstanceActivationOperationMaximumBytes = 1024 * 1024
+$script:InstanceRetirementIntentMaximumBytes = 128 * 1024
 $script:InstanceContractNamespaceRelativePath = "$($script:InstanceControlRelativePath)/contracts"
 
 function Assert-InstanceJsonFieldAllowlist {
@@ -188,11 +190,14 @@ function Get-InstanceActivationContractPaths {
     $operationRelativePath = "$contractRootRelativePath/operation.json"
     $operationsRelativePath = "$contractRootRelativePath/operations"
     $operationRootRelativePath = "$operationsRelativePath/$OperationId"
+    $retirementsRelativePath = "$contractRootRelativePath/retirements"
+    $retirementIntentRelativePath = "$retirementsRelativePath/$OperationId.json"
     $supervisorRelativePath = "$contractRootRelativePath/supervisor"
     $contractRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $contractRootRelativePath -Label "activation contract root"
     $activationPath = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $activationRelativePath -Label "activation record"
     $operationPath = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $operationRelativePath -Label "activation operation journal"
     $operationRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $operationRootRelativePath -Label "activation operation root"
+    $retirementIntentPath = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $retirementIntentRelativePath -Label "instance retirement intent"
     $supervisorRoot = Get-InstanceProjectPath -ProjectRoot $fullProjectRoot -RelativePath $supervisorRelativePath -Label "Supervisor contract root"
     return [pscustomobject]@{
         ContractRootRelativePath = $contractRootRelativePath
@@ -200,11 +205,14 @@ function Get-InstanceActivationContractPaths {
         OperationRelativePath = $operationRelativePath
         OperationsRelativePath = $operationsRelativePath
         OperationRootRelativePath = $operationRootRelativePath
+        RetirementsRelativePath = $retirementsRelativePath
+        RetirementIntentRelativePath = $retirementIntentRelativePath
         SupervisorRelativePath = $supervisorRelativePath
         ContractRoot = $contractRoot
         ActivationPath = $activationPath
         OperationPath = $operationPath
         OperationRoot = $operationRoot
+        RetirementIntentPath = $retirementIntentPath
         SupervisorRoot = $supervisorRoot
     }
 }
@@ -285,6 +293,97 @@ function Test-InstanceActivationEvidenceEqual {
         [string]::Equals([string]$Left.instance_manifest_sha256, [string]$Right.instance_manifest_sha256, [StringComparison]::Ordinal) -and
         [string]::Equals([string]$Left.generation_manifest_sha256, [string]$Right.generation_manifest_sha256, [StringComparison]::Ordinal) -and
         [string]::Equals([string]$Left.generation_disposition, [string]$Right.generation_disposition, [StringComparison]::Ordinal)
+}
+
+function New-InstanceRetirementIntentDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Attempt,
+        [Parameter(Mandatory = $true)]$SelectedInstance,
+        [Parameter(Mandatory = $true)]$RetiredInstance,
+        [string]$TimestampUtc = [DateTime]::UtcNow.ToString("o")
+    )
+
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $Attempt
+    $selected = Read-InstanceActivationEvidenceDocument -Document $SelectedInstance -Label "retirement selected instance"
+    $retired = Read-InstanceActivationEvidenceDocument -Document $RetiredInstance -Label "retirement retired instance"
+    Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $selected -Current $selected -LastKnownGood $null -PublicationPhase COMMITTED
+    if ($retired.generation_disposition -cnotin @("CURRENT", "TRUSTED_PREVIOUS") -or
+        [string]::Equals([string]$selected.instance_id, [string]$retired.instance_id, [StringComparison]::Ordinal)) {
+        throw "Retirement intent does not identify a distinct trusted previous instance."
+    }
+    $null = Assert-InstanceUtcTimestamp -Value $TimestampUtc -Label "retirement intent timestamp"
+    return [pscustomobject][ordered]@{
+        schema_version = [int64]$script:InstanceRetirementIntentSchemaVersion
+        managed_by = $script:ManagedBy
+        control_contract = ConvertTo-InstanceControlContractDocument -ControlContract $Context.ControlContract
+        runtime_contract_sha256 = [string]$Context.RuntimeContractSha256
+        project_root = [string]$Context.ProjectRoot
+        project_identity = [string]$Context.ProjectIdentity
+        activation_epoch = [string]$Attempt.ActivationEpoch
+        operation_id = [string]$Attempt.OperationId
+        selected_instance = $selected
+        retired_instance = $retired
+        created_at_utc = $TimestampUtc
+    }
+}
+
+function Assert-InstanceRetirementIntentDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $label = "instance retirement intent"
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $Document `
+        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "selected_instance", "retired_instance", "created_at_utc") `
+        -Label $label
+    if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $label) -ne $script:InstanceRetirementIntentSchemaVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal)) {
+        throw "Instance retirement intent schema or owner is invalid."
+    }
+    Assert-InstanceActivationContractDocumentContext -Document $Document -Context $Context -Label $label
+    $attempt = [pscustomobject]@{
+        ActivationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $label
+        OperationId = Get-RequiredJsonString -Object $Document -Name "operation_id" -Label $label
+    }
+    $null = Assert-InstanceActivationAttemptIdentity -Attempt $attempt
+    if (-not [string]::Equals([string]$attempt.OperationId, [string]$Context.Paths.RetirementIntentRelativePath.Split('/')[-1].Replace('.json', ''), [StringComparison]::Ordinal)) {
+        throw "Instance retirement intent does not match its derived operation path."
+    }
+    $selected = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "selected_instance" -Label $label) -Label "retirement selected instance"
+    $retired = Read-InstanceActivationEvidenceDocument -Document (Get-RequiredJsonPropertyValue -Object $Document -Name "retired_instance" -Label $label) -Label "retirement retired instance"
+    Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $selected -Current $selected -LastKnownGood $null -PublicationPhase COMMITTED
+    if ($retired.generation_disposition -cnotin @("CURRENT", "TRUSTED_PREVIOUS") -or
+        [string]::Equals([string]$selected.instance_id, [string]$retired.instance_id, [StringComparison]::Ordinal)) {
+        throw "Retirement intent does not identify a distinct trusted previous instance."
+    }
+    $timestamp = Assert-InstanceUtcTimestamp -Value (Get-RequiredJsonString -Object $Document -Name "created_at_utc" -Label $label) -Label "retirement intent timestamp"
+    return [pscustomobject]@{
+        Document = $Document
+        Attempt = $attempt
+        SelectedInstance = $selected
+        RetiredInstance = $retired
+        TimestampUtc = $timestamp
+    }
+}
+
+function Read-InstanceRetirementIntent {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $path = [string]$Context.Paths.RetirementIntentPath
+    Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "instance retirement intent"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Instance retirement intent is missing or not a regular file."
+    }
+    $json = Read-BoundedJsonDocument -Path $path -Label "instance retirement intent" -MaximumBytes $script:InstanceRetirementIntentMaximumBytes
+    $validated = Assert-InstanceRetirementIntentDocument -Document $json.Document -Context $Context
+    $validated | Add-Member -NotePropertyName Path -NotePropertyValue $path
+    $validated | Add-Member -NotePropertyName RelativePath -NotePropertyValue ([string]$Context.Paths.RetirementIntentRelativePath)
+    $validated | Add-Member -NotePropertyName Sha256 -NotePropertyValue $json.Sha256
+    $validated | Add-Member -NotePropertyName Text -NotePropertyValue $json.Text
+    return $validated
 }
 
 function Assert-InstanceActivationRoleSemantics {
@@ -447,6 +546,8 @@ function New-InstanceActivationOperationDocument {
         [Parameter(Mandatory = $true)][ValidateSet("INSTALL", "UPGRADE", "REINSTALL")][string]$Action,
         [Parameter(Mandatory = $true)]$Candidate,
         [AllowNull()]$PreviousActivationRecordSha256,
+        [AllowNull()]$RetirementIntentRelativePath,
+        [AllowNull()]$RetirementIntentSha256,
         [Parameter(Mandatory = $true)][ValidateSet("PREPARED", "ACTIVATING", "COMMITTED")][string]$Phase,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Mutations,
         [string]$TimestampUtc = [DateTime]::UtcNow.ToString("o")
@@ -459,6 +560,16 @@ function New-InstanceActivationOperationDocument {
         -Value $PreviousActivationRecordSha256 `
         -Label "previous activation record hash" `
         -AllowNull
+    if (($null -eq $RetirementIntentRelativePath) -ne ($null -eq $RetirementIntentSha256)) {
+        throw "Activation operation retirement intent reference is incomplete."
+    }
+    if ($null -ne $RetirementIntentRelativePath) {
+        $normalizedIntentPath = ConvertTo-SafeRelativePath -Path ([string]$RetirementIntentRelativePath) -Label "retirement intent reference"
+        if (-not [string]::Equals($normalizedIntentPath, [string]$Context.Paths.RetirementIntentRelativePath, [StringComparison]::Ordinal)) {
+            throw "Activation operation retirement intent path is not derived from operation_id."
+        }
+        $null = Assert-InstanceLowercaseSha256 -Value $RetirementIntentSha256 -Label "retirement intent hash"
+    }
     $null = Assert-InstanceUtcTimestamp -Value $TimestampUtc -Label "activation operation timestamp"
     $orderedMutations = New-Object System.Collections.Generic.List[object]
     $seenMutationTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -481,6 +592,8 @@ function New-InstanceActivationOperationDocument {
         action = $Action
         candidate = $candidateDocument
         previous_activation_record_sha256 = $PreviousActivationRecordSha256
+        retirement_intent_path = $RetirementIntentRelativePath
+        retirement_intent_sha256 = $RetirementIntentSha256
         phase = $Phase
         updated_at_utc = $TimestampUtc
         mutations = $orderedMutations.ToArray()
@@ -565,7 +678,7 @@ function Assert-InstanceActivationOperationDocument {
     $label = "activation operation journal"
     Assert-InstanceJsonFieldAllowlist `
         -Object $Document `
-        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "action", "candidate", "previous_activation_record_sha256", "phase", "updated_at_utc", "mutations") `
+        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "action", "candidate", "previous_activation_record_sha256", "retirement_intent_path", "retirement_intent_sha256", "phase", "updated_at_utc", "mutations") `
         -Label $label
     if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $label) -ne $script:InstanceActivationOperationSchemaVersion -or
         -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal)) {
@@ -583,6 +696,18 @@ function Assert-InstanceActivationOperationDocument {
     Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $candidate -Current $null -LastKnownGood $null
     $previousHash = Get-RequiredJsonNullableString -Object $Document -Name "previous_activation_record_sha256" -Label $label
     $null = Assert-InstanceLowercaseSha256 -Value $previousHash -Label "previous activation record hash" -AllowNull
+    $retirementIntentRelativePath = Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_path" -Label $label
+    $retirementIntentSha256 = Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_sha256" -Label $label
+    if (($null -eq $retirementIntentRelativePath) -ne ($null -eq $retirementIntentSha256)) {
+        throw "Activation operation retirement intent reference is incomplete."
+    }
+    if ($null -ne $retirementIntentRelativePath) {
+        $normalizedIntentPath = ConvertTo-SafeRelativePath -Path $retirementIntentRelativePath -Label "retirement intent reference"
+        if (-not [string]::Equals($normalizedIntentPath, [string]$Context.Paths.RetirementIntentRelativePath, [StringComparison]::Ordinal)) {
+            throw "Activation operation retirement intent path is not derived from operation_id."
+        }
+        $null = Assert-InstanceLowercaseSha256 -Value $retirementIntentSha256 -Label "retirement intent hash"
+    }
     $phase = Get-RequiredJsonString -Object $Document -Name "phase" -Label $label
     if ($phase -cnotin @("PREPARED", "ACTIVATING", "COMMITTED")) { throw "Activation operation phase is invalid." }
     $timestamp = Assert-InstanceUtcTimestamp -Value (Get-RequiredJsonString -Object $Document -Name "updated_at_utc" -Label $label) -Label "activation operation timestamp"
@@ -602,6 +727,8 @@ function Assert-InstanceActivationOperationDocument {
         Action = $action
         Candidate = $candidate
         PreviousActivationRecordSha256 = $previousHash
+        RetirementIntentRelativePath = $retirementIntentRelativePath
+        RetirementIntentSha256 = $retirementIntentSha256
         Phase = $phase
         TimestampUtc = $timestamp
         Mutations = $mutations.ToArray()
@@ -708,8 +835,8 @@ function Assert-FreshInstanceActivationNamespace {
             if ($entry.PSIsContainer) { throw "Activation contract namespace record is not a regular file: $($entry.Name)" }
             continue
         }
-        if ($entry.Name -ceq "operations") {
-            if (-not $entry.PSIsContainer) { throw "Activation contract operations root is not a directory." }
+        if ($entry.Name -in @("operations", "retirements")) {
+            if (-not $entry.PSIsContainer) { throw "Activation contract child namespace is not a directory: $($entry.Name)" }
             continue
         }
         throw "Activation contract namespace is not fresh: unexpected entry $($entry.Name)"
@@ -736,6 +863,21 @@ function Assert-FreshInstanceActivationNamespace {
         }
         if (@(Get-ChildItem -LiteralPath $Context.Paths.OperationRoot -Force).Count -ne 0) {
             throw "Activation operation root contains unexpected evidence."
+        }
+    }
+    $retirementsRoot = Get-InstanceProjectPath `
+        -ProjectRoot $Context.ProjectRoot `
+        -RelativePath $Context.Paths.RetirementsRelativePath `
+        -Label "instance retirements root"
+    if (Test-Path -LiteralPath $retirementsRoot) {
+        if (-not (Test-Path -LiteralPath $retirementsRoot -PathType Container)) {
+            throw "Instance retirements root is not a directory."
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath $retirementsRoot -Force)) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $Context.ProjectRoot -Label "instance retirement intent"
+            if ($entry.PSIsContainer -or -not [string]::Equals($entry.Name, "$($Context.Paths.OperationRootRelativePath.Split('/')[-1]).json", [StringComparison]::Ordinal)) {
+                throw "Activation contract namespace is not fresh: unexpected retirement entry $($entry.Name)"
+            }
         }
     }
 }
@@ -834,22 +976,35 @@ function Assert-InstanceActivationContractNamespace {
             if ($entry.PSIsContainer) { throw "Activation contract namespace record is not a regular file: $($entry.Name)" }
             continue
         }
-        if ($entry.Name -ceq "operations") {
-            if (-not $entry.PSIsContainer) { throw "Activation contract operations root is not a directory." }
+        if ($entry.Name -in @("operations", "retirements")) {
+            if (-not $entry.PSIsContainer) { throw "Activation contract child namespace is not a directory: $($entry.Name)" }
             continue
         }
         throw "Activation contract namespace contains unexpected entry: $($entry.Name)"
     }
     $operationsRoot = Join-Path $ContractRoot "operations"
-    if (-not (Test-Path -LiteralPath $operationsRoot)) { return }
-    if (-not (Test-Path -LiteralPath $operationsRoot -PathType Container)) {
-        throw "Activation contract operations root is not a directory."
+    if (Test-Path -LiteralPath $operationsRoot) {
+        if (-not (Test-Path -LiteralPath $operationsRoot -PathType Container)) {
+            throw "Activation contract operations root is not a directory."
+        }
+        Assert-NoReparsePoint -Path $operationsRoot -Root $ProjectRoot -Label "activation operations root"
+        foreach ($entry in @(Get-ChildItem -LiteralPath $operationsRoot -Force)) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "activation operation directory"
+            if (-not $entry.PSIsContainer -or $entry.Name -cnotmatch '^[0-9a-f]{32}$') {
+                throw "Activation contract operations root contains unexpected entry: $($entry.Name)"
+            }
+        }
     }
-    Assert-NoReparsePoint -Path $operationsRoot -Root $ProjectRoot -Label "activation operations root"
-    foreach ($entry in @(Get-ChildItem -LiteralPath $operationsRoot -Force)) {
-        Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "activation operation directory"
-        if (-not $entry.PSIsContainer -or $entry.Name -cnotmatch '^[0-9a-f]{32}$') {
-            throw "Activation contract operations root contains unexpected entry: $($entry.Name)"
+    $retirementsRoot = Join-Path $ContractRoot "retirements"
+    if (-not (Test-Path -LiteralPath $retirementsRoot)) { return }
+    if (-not (Test-Path -LiteralPath $retirementsRoot -PathType Container)) {
+        throw "Instance retirements root is not a directory."
+    }
+    Assert-NoReparsePoint -Path $retirementsRoot -Root $ProjectRoot -Label "instance retirements root"
+    foreach ($entry in @(Get-ChildItem -LiteralPath $retirementsRoot -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "instance retirement intent"
+        if ($entry.PSIsContainer -or $entry.Name -cnotmatch '^[0-9a-f]{32}\.json$') {
+            throw "Instance retirements root contains unexpected entry: $($entry.Name)"
         }
     }
 }
@@ -908,12 +1063,208 @@ function Get-InstanceActivationContractState {
     if (-not $operationDirectoryCardinalityIsValid) {
         throw "Activation contract operation evidence does not match the authoritative operation_id."
     }
+    $retirementsRoot = Join-Path $contractRoot "retirements"
+    $retirementEntries = @(
+        if (Test-Path -LiteralPath $retirementsRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $retirementsRoot -Force
+        }
+    )
+    $retirementIntent = $null
+    if ($null -eq $operation.RetirementIntentRelativePath) {
+        if ($retirementEntries.Count -ne 0) {
+            throw "Activation contract contains an orphaned retirement intent."
+        }
+    } else {
+        if ($retirementEntries.Count -ne 1 -or
+            -not [string]::Equals($retirementEntries[0].Name, "$operationId.json", [StringComparison]::Ordinal)) {
+            throw "Activation contract retirement evidence does not match the authoritative operation_id."
+        }
+        $retirementIntent = Read-InstanceRetirementIntent -Context $context
+        if (-not [string]::Equals([string]$retirementIntent.RelativePath, [string]$operation.RetirementIntentRelativePath, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$retirementIntent.Sha256, [string]$operation.RetirementIntentSha256, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$retirementIntent.Attempt.ActivationEpoch, [string]$operation.Attempt.ActivationEpoch, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$retirementIntent.Attempt.OperationId, [string]$operation.Attempt.OperationId, [StringComparison]::Ordinal) -or
+            -not (Test-InstanceActivationEvidenceEqual -Left $retirementIntent.SelectedInstance -Right $operation.Candidate)) {
+            throw "Activation operation and retirement intent identities do not match."
+        }
+        if ($operation.Phase -ne "COMMITTED" -and
+            $null -ne $activation.Current -and
+            -not (Test-InstanceActivationEvidenceEqual -Left $retirementIntent.RetiredInstance -Right $activation.Current)) {
+            throw "Uncommitted retirement intent does not match the previous current instance."
+        }
+    }
     return [pscustomobject]@{
         Context = $context
         Activation = $activation
         Operation = $operation
+        RetirementIntent = $retirementIntent
         ContractRoot = $contractRoot
     }
+}
+
+function Assert-InstanceActivationRecoveryOperationRoot {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $operationRoot = [string]$Context.Paths.OperationRoot
+    Assert-NoReparsePoint -Path $operationRoot -Root $ProjectRoot -Label "activation recovery operation root"
+    if (-not (Test-Path -LiteralPath $operationRoot -PathType Container)) {
+        throw "Activation recovery operation root is missing."
+    }
+    $children = @(Get-ChildItem -LiteralPath $operationRoot -Force)
+    if ($children.Count -ne 2) {
+        throw "Activation recovery operation root contains unexpected evidence."
+    }
+    foreach ($childName in @("stage", "backup")) {
+        $child = @($children | Where-Object { [string]::Equals($_.Name, $childName, [StringComparison]::Ordinal) })
+        if ($child.Count -ne 1 -or -not $child[0].PSIsContainer) {
+            throw "Activation recovery operation root contains unexpected evidence: $childName"
+        }
+        Assert-NoReparsePoint -Path $child[0].FullName -Root $operationRoot -Label "activation recovery operation directory"
+        foreach ($entry in @(Get-ChildItem -LiteralPath $child[0].FullName -Force)) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $child[0].FullName -Label "activation recovery operation evidence"
+            $expectedNamePattern = if ($childName -ceq "stage") { '^\d{4}\.new$' } else { '^\d{4}\.bak$' }
+            if ($entry.PSIsContainer -or $entry.Name -notmatch $expectedNamePattern) {
+                throw "Activation recovery operation root contains unexpected evidence: $($entry.Name)"
+            }
+            $item = Get-Item -LiteralPath $entry.FullName -Force
+            if ($item.Length -le 0 -or $item.Length -gt $script:InstanceActivationOperationMaximumBytes) {
+                throw "Activation recovery operation evidence size is outside the accepted range: $($entry.Name)"
+            }
+        }
+    }
+    $stageEntries = @(Get-ChildItem -LiteralPath (Join-Path $operationRoot "stage") -Force)
+    if ($stageEntries.Count -eq 0) {
+        throw "Activation recovery operation root contains no staged activation evidence."
+    }
+}
+
+function Get-InstanceActivationContractRecoveryState {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $contractRoot = Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if (-not (Test-Path -LiteralPath $contractRoot -PathType Container)) {
+        throw "Activation recovery contract namespace is unavailable."
+    }
+    Assert-InstanceActivationContractNamespace -ContractRoot $contractRoot -ProjectRoot $ProjectRoot
+    $activationPath = Join-Path $contractRoot "activation.json"
+    $operationPath = Join-Path $contractRoot "operation.json"
+    if (-not (Test-Path -LiteralPath $activationPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $operationPath -PathType Leaf)) {
+        throw "Activation recovery requires both contract records."
+    }
+
+    $operationJson = Read-BoundedJsonDocument `
+        -Path $operationPath `
+        -Label "activation operation journal" `
+        -MaximumBytes $script:InstanceActivationOperationMaximumBytes
+    $operationId = Get-RequiredJsonString -Object $operationJson.Document -Name "operation_id" -Label "activation operation journal"
+    $context = New-InstanceActivationContractContext `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -OperationId $operationId
+    $activation = Read-InstanceActivationRecord -Context $context
+    $operation = Read-InstanceActivationOperation -Context $context
+    Assert-InstanceActivationDocumentsMatch -Activation $activation -Operation $operation
+    if ($activation.Phase -cne "PREPARED" -or $operation.Phase -cne "PREPARED" -or
+        $null -ne $operation.RetirementIntentRelativePath -or
+        $null -ne $operation.RetirementIntentSha256) {
+        throw "Activation recovery state is not the unbound PREPARED retirement publication window."
+    }
+
+    $operationsRoot = Join-Path $contractRoot "operations"
+    $operationDirectories = @(
+        if (Test-Path -LiteralPath $operationsRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $operationsRoot -Force
+        }
+    )
+    if ($operationDirectories.Count -ne 1 -or
+        -not $operationDirectories[0].PSIsContainer -or
+        -not [string]::Equals($operationDirectories[0].Name, $operationId, [StringComparison]::Ordinal)) {
+        throw "Activation recovery operation evidence does not match the authoritative operation_id."
+    }
+    Assert-InstanceActivationRecoveryOperationRoot -Context $context -ProjectRoot $ProjectRoot
+
+    $retirementsRoot = Join-Path $contractRoot "retirements"
+    $retirementEntries = @(
+        if (Test-Path -LiteralPath $retirementsRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $retirementsRoot -Force
+        }
+    )
+    if ($retirementEntries.Count -ne 1 -or
+        $retirementEntries[0].PSIsContainer -or
+        -not [string]::Equals($retirementEntries[0].Name, "$operationId.json", [StringComparison]::Ordinal)) {
+        throw "Activation recovery retirement evidence does not match the authoritative operation_id."
+    }
+    $retirementIntent = Read-InstanceRetirementIntent -Context $context
+    if (-not [string]::Equals([string]$retirementIntent.Attempt.ActivationEpoch, [string]$activation.Attempt.ActivationEpoch, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$retirementIntent.Attempt.OperationId, [string]$activation.Attempt.OperationId, [StringComparison]::Ordinal) -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $retirementIntent.SelectedInstance -Right $operation.Candidate) -or
+        $null -eq $activation.Current -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $retirementIntent.RetiredInstance -Right $activation.Current)) {
+        throw "Activation recovery retirement intent identities do not match the PREPARED attempt."
+    }
+
+    $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $currentEvidence = New-InstanceActivationEvidence `
+        -InstanceId $current.InstanceId `
+        -GenerationId $current.Generation.GenerationId `
+        -InstanceManifestSha256 (Get-FileSha256 -Path $current.ManifestPath) `
+        -GenerationManifestSha256 (Get-RequiredJsonString -Object $current.Manifest -Name "generation_manifest_sha256" -Label "current instance manifest") `
+        -GenerationDisposition $current.GenerationDisposition
+    if (-not (Test-InstanceActivationEvidenceEqual -Left $currentEvidence -Right $retirementIntent.RetiredInstance)) {
+        throw "Activation recovery current selection does not match the retired identity."
+    }
+
+    $retiredRelativePath = "$($script:InstancesRelativePath)/$($retirementIntent.RetiredInstance.instance_id)"
+    $retiredRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $retiredRelativePath -Label "activation recovery retired instance"
+    $retired = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $retiredRoot
+    $retiredEvidence = New-InstanceActivationEvidence `
+        -InstanceId $retired.InstanceId `
+        -GenerationId $retired.Generation.GenerationId `
+        -InstanceManifestSha256 (Get-FileSha256 -Path $retired.ManifestPath) `
+        -GenerationManifestSha256 (Get-RequiredJsonString -Object $retired.Manifest -Name "generation_manifest_sha256" -Label "activation recovery retired instance manifest") `
+        -GenerationDisposition $retired.Generation.Disposition
+    if (-not (Test-InstanceActivationEvidenceEqual -Left $retiredEvidence -Right $retirementIntent.RetiredInstance)) {
+        throw "Activation recovery retired instance closure does not match the intent identity."
+    }
+
+    $candidateRelativePath = "$($script:InstancesRelativePath)/$($retirementIntent.SelectedInstance.instance_id)"
+    $candidateRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $candidateRelativePath -Label "activation recovery candidate instance"
+    $candidate = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $candidateRoot
+    $candidateEvidence = New-InstanceActivationEvidence `
+        -InstanceId $candidate.InstanceId `
+        -GenerationId $candidate.Generation.GenerationId `
+        -InstanceManifestSha256 (Get-FileSha256 -Path $candidate.ManifestPath) `
+        -GenerationManifestSha256 (Get-RequiredJsonString -Object $candidate.Manifest -Name "generation_manifest_sha256" -Label "activation recovery candidate instance manifest") `
+        -GenerationDisposition $candidate.Generation.Disposition
+    if (-not (Test-InstanceActivationEvidenceEqual -Left $candidateEvidence -Right $retirementIntent.SelectedInstance)) {
+        throw "Activation recovery candidate closure does not match the intent identity."
+    }
+
+    return [pscustomobject]@{
+        Context = $context
+        Activation = $activation
+        Operation = $operation
+        RetirementIntent = $retirementIntent
+        ContractRoot = $contractRoot
+        RecoveryCandidate = $candidate
+    }
+}
+
+function Invoke-TestRetirementIntentBindingInterruption {
+    if (-not $PocFixture -or
+        -not [string]::Equals([string]$env:CODEDB_TEST_INTERRUPT_RETIREMENT_INTENT_BINDING, "1", [StringComparison]::Ordinal)) {
+        return
+    }
+    [Console]::Error.WriteLine("Injected POC process interruption after durable retirement intent before PREPARED journal binding.")
+    [Console]::Error.Flush()
+    [Environment]::Exit(88)
 }
 
 function New-InstanceActivationSelectionEvidence {
@@ -1038,6 +1389,9 @@ function Remove-InstanceActivationContractAttempt {
 
     Remove-Item -LiteralPath $ContractState.Activation.Path -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ContractState.Operation.Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $ContractState.RetirementIntent) {
+        Remove-Item -LiteralPath $ContractState.RetirementIntent.Path -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -LiteralPath $ContractState.Context.Paths.OperationRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -1048,7 +1402,20 @@ function Invoke-InstanceActivationContractRecovery {
         [Parameter(Mandatory = $true)][string]$StageRoot
     )
 
-    $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $state = $null
+    $ordinaryStateError = $null
+    try {
+        $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    } catch {
+        $ordinaryStateError = $_.Exception.Message
+        try {
+            $state = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot
+        } catch {
+            throw $ordinaryStateError
+        }
+        Write-Host "[RECOVERY] Accepted the strictly validated unbound PREPARED retirement publication window."
+        Write-Host "[RECOVERY] Preserving the verified interrupted candidate without minting retirement authority or stopping a holder."
+    }
     if ($null -eq $state) { return $false }
     Write-Host "[RECOVERY] Found versioned activation $($state.Operation.Attempt.OperationId) in phase $($state.Operation.Phase)."
     if ($state.Operation.Phase -eq "PREPARED") {
@@ -1108,6 +1475,10 @@ function Publish-InstanceActivationTransaction {
     $candidateEvidence = New-InstanceActivationCandidateEvidence -Candidate $Candidate -Context $context
     $currentEvidence = New-InstanceActivationSelectionEvidence -Instance $PreviousInstance -Context $context
     $lastKnownGoodEvidence = New-InstanceActivationSelectionEvidence -Instance $PreviousLastKnownGood -Context $context
+    $retirementIntent = $null
+    $retirementIntentCreated = $false
+    $retirementIntentRelativePath = $null
+    $retirementIntentSha256 = $null
     $preparedActivation = New-InstanceActivationRecordDocument `
         -Context $context `
         -Attempt $attempt `
@@ -1147,19 +1518,49 @@ function Publish-InstanceActivationTransaction {
                 -ExistedBefore $_.ExistedBefore `
                 -PreImageSha256 $_.OriginalSha256
         })
+        if ($null -ne $PreviousInstance) {
+            $retirementIntent = New-InstanceRetirementIntentDocument `
+                -Context $context `
+                -Attempt $attempt `
+                -SelectedInstance $candidateEvidence `
+                -RetiredInstance $currentEvidence
+            $retirementIntentText = ConvertTo-InstanceJsonText -Value $retirementIntent
+            $retirementsRoot = Split-Path -Parent $context.Paths.RetirementIntentPath
+            New-Item -ItemType Directory -Force -Path $retirementsRoot | Out-Null
+            Assert-NoReparsePoint -Path $retirementsRoot -Root $ProjectRoot -Label "instance retirements root"
+            $retirementIntentCreated = Publish-InstanceActivationFileIfAbsentOrIdentical `
+                -Path $context.Paths.RetirementIntentPath `
+                -Content $retirementIntentText `
+                -ProjectRoot $ProjectRoot `
+                -Label "instance retirement intent" `
+                -MaximumBytes $script:InstanceRetirementIntentMaximumBytes
+            $publishedRetirementIntent = Read-InstanceRetirementIntent -Context $context
+            $retirementIntentRelativePath = [string]$publishedRetirementIntent.RelativePath
+            $retirementIntentSha256 = [string]$publishedRetirementIntent.Sha256
+            Invoke-TestRetirementIntentBindingInterruption
+        }
         $preparedOperationWithMutations = New-InstanceActivationOperationDocument `
             -Context $context `
             -Attempt $attempt `
             -Action $ActionName.ToUpperInvariant() `
             -Candidate $candidateEvidence `
             -PreviousActivationRecordSha256 $null `
+            -RetirementIntentRelativePath $retirementIntentRelativePath `
+            -RetirementIntentSha256 $retirementIntentSha256 `
             -Phase PREPARED `
             -Mutations $mutations
-        Publish-InstanceActivationContractPair `
-            -Context $context `
-            -ActivationDocument $preparedActivation `
-            -OperationDocument $preparedOperationWithMutations `
-            -StageRoot $StageRoot
+        try {
+            Publish-InstanceActivationContractPair `
+                -Context $context `
+                -ActivationDocument $preparedActivation `
+                -OperationDocument $preparedOperationWithMutations `
+                -StageRoot $StageRoot
+        } catch {
+            if ($retirementIntentCreated) {
+                Remove-Item -LiteralPath $context.Paths.RetirementIntentPath -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
 
         $activatingActivation = New-InstanceActivationRecordDocument `
             -Context $context `
@@ -1174,6 +1575,8 @@ function Publish-InstanceActivationTransaction {
             -Action $ActionName.ToUpperInvariant() `
             -Candidate $candidateEvidence `
             -PreviousActivationRecordSha256 $null `
+            -RetirementIntentRelativePath $retirementIntentRelativePath `
+            -RetirementIntentSha256 $retirementIntentSha256 `
             -Phase ACTIVATING `
             -Mutations $mutations
         Publish-InstanceActivationContractPair `
@@ -1229,6 +1632,8 @@ function Publish-InstanceActivationTransaction {
                 -Action $ActionName.ToUpperInvariant() `
                 -Candidate $candidateEvidence `
                 -PreviousActivationRecordSha256 $null `
+                -RetirementIntentRelativePath $retirementIntentRelativePath `
+                -RetirementIntentSha256 $retirementIntentSha256 `
                 -Phase COMMITTED `
                 -Mutations $mutations
             Publish-InstanceActivationContractPair `
@@ -1254,6 +1659,7 @@ function Publish-InstanceActivationTransaction {
             CandidateEvidence = $candidateEvidence
             Context = $context
             Attempt = $attempt
+            RetirementIntent = $retirementIntent
         }
     } catch {
         throw
@@ -2892,6 +3298,176 @@ function Remove-ValidatedRetiredInstance {
     }
 }
 
+function Get-IntentBoundRetiredInstanceEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$ContractState,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Manifest
+    )
+
+    if ($ContractState.Operation.Phase -ne "COMMITTED" -or $null -eq $ContractState.RetirementIntent) {
+        throw "Versioned retirement requires one committed activation intent."
+    }
+    $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $currentEvidence = New-InstanceActivationSelectionEvidence -Instance $current -Context $ContractState.Context
+    if (-not (Test-InstanceActivationEvidenceEqual -Left $currentEvidence -Right $ContractState.RetirementIntent.SelectedInstance)) {
+        throw "Committed retirement intent does not match current selection."
+    }
+    $retiredIdentity = $ContractState.RetirementIntent.RetiredInstance
+    $retiredRelativePath = "$($script:InstancesRelativePath)/$($retiredIdentity.instance_id)"
+    $retiredRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $retiredRelativePath -Label "intent-bound retired instance"
+    if (-not (Test-Path -LiteralPath $retiredRoot)) {
+        return [pscustomobject]@{ Current = $current; Retired = $null; RetiredRoot = $retiredRoot }
+    }
+    $retired = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $retiredRoot
+    if (-not [string]::Equals([string]$retired.InstanceId, [string]$retiredIdentity.instance_id, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-FileSha256 -Path $retired.ManifestPath), [string]$retiredIdentity.instance_manifest_sha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$retired.Generation.GenerationId, [string]$retiredIdentity.generation_id, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $retired.Manifest -Name "generation_manifest_sha256" -Label "intent-bound retired instance manifest"), [string]$retiredIdentity.generation_manifest_sha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$retired.Generation.Disposition, [string]$retiredIdentity.generation_disposition, [StringComparison]::Ordinal)) {
+        throw "Intent-bound retired instance closure does not match the immutable retirement identity."
+    }
+    return [pscustomobject]@{ Current = $current; Retired = $retired; RetiredRoot = $retiredRoot }
+}
+
+function Get-InstanceRetirementHolderEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $leases = Get-InstanceLeaseEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    $editorLeases = Get-InstanceEditorLeaseEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    $coordinator = Get-InstanceCoordinatorEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    return [pscustomobject]@{
+        Clear = $leases.Invalid.Count -eq 0 -and
+            $editorLeases.Invalid.Count -eq 0 -and
+            $coordinator.State -ne "INVALID" -and
+            $leases.Live.Count -eq 0 -and
+            $editorLeases.Live.Count -eq 0 -and
+            $coordinator.State -ne "LIVE"
+        Stale = @($leases.Stale + $editorLeases.Stale)
+    }
+}
+
+function Publish-IntentBoundRetirementFence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Manifest
+    )
+
+    $retiredControlPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstanceRetiredRelativePath)/$($Evidence.InstanceId).json" -Label "intent-bound retired instance control"
+    $manifestSha256 = Get-FileSha256 -Path $Evidence.ManifestPath
+    if (-not (Test-Path -LiteralPath $retiredControlPath)) {
+        $controlMarker = [ordered]@{
+            schema_version = 1
+            managed_by = $script:ManagedBy
+            project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+            instance_id = $Evidence.InstanceId
+            generation_id = $Evidence.Generation.GenerationId
+            instance_manifest_sha256 = $manifestSha256
+            created_at_utc = [DateTime]::UtcNow.ToString("o")
+        }
+        Publish-InstanceAtomicText -Path $retiredControlPath -Content (ConvertTo-InstanceJsonText -Value $controlMarker) -StageRoot (Join-Path $Evidence.InstanceRoot "tmp")
+    } else {
+        $controls = @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest | Where-Object {
+            [string]::Equals($_.InstanceId, $Evidence.InstanceId, [StringComparison]::Ordinal)
+        })
+        if ($controls.Count -ne 1 -or
+            -not [string]::Equals([string]$controls[0].ManifestSha256, $manifestSha256, [StringComparison]::Ordinal)) {
+            throw "Intent-bound retirement control conflicts with the retired instance."
+        }
+    }
+    $retiringPath = Join-Path $Evidence.InstanceRoot $script:InstanceRetiringFileName
+    if (-not (Test-Path -LiteralPath $retiringPath)) {
+        $marker = [ordered]@{
+            schema_version = 1
+            managed_by = $script:ManagedBy
+            project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+            instance_id = $Evidence.InstanceId
+            created_at_utc = [DateTime]::UtcNow.ToString("o")
+        }
+        Publish-InstanceAtomicText -Path $retiringPath -Content (ConvertTo-InstanceJsonText -Value $marker) -StageRoot (Join-Path $Evidence.InstanceRoot "tmp")
+    }
+}
+
+function Remove-IntentBoundRetiredInstance {
+    param(
+        [Parameter(Mandatory = $true)]$ContractState,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Manifest
+    )
+
+    $bound = Get-IntentBoundRetiredInstanceEvidence -ContractState $ContractState -ProjectRoot $ProjectRoot -Manifest $Manifest
+    if ($null -eq $bound.Retired) { return $true }
+    $holders = Get-InstanceRetirementHolderEvidence -Evidence $bound.Retired -ProjectRoot $ProjectRoot
+    if (-not $holders.Clear) { return $false }
+
+    Publish-IntentBoundRetirementFence -Evidence $bound.Retired -ProjectRoot $ProjectRoot -Manifest $Manifest
+    $recheckedState = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $recheckedState -or
+        -not [string]::Equals([string]$recheckedState.RetirementIntent.Sha256, [string]$ContractState.RetirementIntent.Sha256, [StringComparison]::Ordinal)) {
+        throw "Retirement authority changed after the mechanical fence was published."
+    }
+    $rechecked = Get-IntentBoundRetiredInstanceEvidence -ContractState $recheckedState -ProjectRoot $ProjectRoot -Manifest $Manifest
+    $holders = Get-InstanceRetirementHolderEvidence -Evidence $rechecked.Retired -ProjectRoot $ProjectRoot
+    if (-not $holders.Clear) { return $false }
+    foreach ($stale in @($holders.Stale)) {
+        Remove-Item -LiteralPath $stale.Path -Force -ErrorAction Stop
+    }
+
+    $finalState = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $finalState -or
+        -not [string]::Equals([string]$finalState.RetirementIntent.Sha256, [string]$ContractState.RetirementIntent.Sha256, [StringComparison]::Ordinal)) {
+        throw "Retirement authority changed immediately before deletion."
+    }
+    $final = Get-IntentBoundRetiredInstanceEvidence -ContractState $finalState -ProjectRoot $ProjectRoot -Manifest $Manifest
+    $finalHolders = Get-InstanceRetirementHolderEvidence -Evidence $final.Retired -ProjectRoot $ProjectRoot
+    if (-not $finalHolders.Clear -or $finalHolders.Stale.Count -ne 0) { return $false }
+    Remove-Item -LiteralPath $final.Retired.InstanceRoot -Recurse -Force -ErrorAction Stop
+    $controlPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstanceRetiredRelativePath)/$($final.Retired.InstanceId).json" -Label "intent-bound retired instance control"
+    Remove-Item -LiteralPath $controlPath -Force -ErrorAction SilentlyContinue
+    Add-MaterializerMutationScope -Scope "instance_cleanup"
+    return $true
+}
+
+function Get-VersionedInstanceRetirementCleanupState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [switch]$PerformCleanup
+    )
+
+    try {
+        $contractState = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $controls = @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest)
+        if ($null -eq $contractState -or $contractState.Operation.Phase -ne "COMMITTED") { return "PENDING" }
+        if ($null -eq $contractState.RetirementIntent) {
+            return $(if ($controls.Count -eq 0) { "COMPLETE" } else { "PENDING" })
+        }
+        $retiredId = [string]$contractState.RetirementIntent.RetiredInstance.instance_id
+        if (@($controls | Where-Object { -not [string]::Equals($_.InstanceId, $retiredId, [StringComparison]::Ordinal) }).Count -gt 0) {
+            return "PENDING"
+        }
+        $bound = Get-IntentBoundRetiredInstanceEvidence -ContractState $contractState -ProjectRoot $ProjectRoot -Manifest $Manifest
+        if ($null -eq $bound.Retired) {
+            foreach ($control in @($controls | Where-Object { [string]::Equals($_.InstanceId, $retiredId, [StringComparison]::Ordinal) })) {
+                if (-not [string]::Equals([string]$control.ManifestSha256, [string]$contractState.RetirementIntent.RetiredInstance.instance_manifest_sha256, [StringComparison]::Ordinal)) {
+                    return "PENDING"
+                }
+                if ($PerformCleanup) { Remove-Item -LiteralPath $control.Path -Force -ErrorAction Stop }
+            }
+            return "COMPLETE"
+        }
+        if (-not $PerformCleanup) { return "PENDING" }
+        return $(if (Remove-IntentBoundRetiredInstance -ContractState $contractState -ProjectRoot $ProjectRoot -Manifest $Manifest) { "COMPLETE" } else { "PENDING" })
+    } catch {
+        Write-Warning "Versioned instance retirement remains pending: $($_.Exception.Message)"
+        return "PENDING"
+    }
+}
+
 function Get-InstanceCleanupState {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -3024,31 +3600,33 @@ function Get-CombinedInstanceCleanupState {
         [switch]$PerformCleanup
     )
 
-    $instanceState = Get-InstanceCleanupState `
+    $instanceState = Get-VersionedInstanceRetirementCleanupState `
         -ProjectRoot $ProjectRoot `
         -Manifest $Manifest `
-        -CurrentInstance $CurrentInstance `
         -PerformCleanup:$PerformCleanup
     $legacyState = "COMPLETE"
     $requestedExitCodeBeforeCleanup = $script:RequestedExitCode
-    try {
-        $plan = Get-MaterializationPlan `
-            -Manifest $Manifest `
-            -MarkerPath $MarkerPath `
-            -ProjectRoot $ProjectRoot
-        $legacyCleanup = Invoke-AutomaticGenerationCleanup `
-            -Manifest $Manifest `
-            -ProjectRoot $ProjectRoot `
-            -Lock $Lock `
-            -Plan $plan
-        $legacyState = [string]$legacyCleanup.CleanupState
-    } catch {
-        # Retirement is best effort after a verified instance is selected. A
-        # fail-closed legacy validator may set the process exit code before it
-        # throws; retain the successful activation result and surface PENDING.
-        $script:RequestedExitCode = $requestedExitCodeBeforeCleanup
+    if ($instanceState -eq "PENDING") {
         $legacyState = "PENDING"
-        Write-Warning "Legacy execution closure cleanup remains pending: $($_.Exception.Message)"
+    } else {
+        try {
+            $plan = Get-MaterializationPlan `
+                -Manifest $Manifest `
+                -MarkerPath $MarkerPath `
+                -ProjectRoot $ProjectRoot
+            $legacyCleanup = Invoke-AutomaticGenerationCleanup `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -Lock $Lock `
+                -Plan $plan
+            $legacyState = [string]$legacyCleanup.CleanupState
+        } catch {
+            # Legacy cleanup remains mechanically separate and starts only
+            # after the intent-bound instance is no longer a generation owner.
+            $script:RequestedExitCode = $requestedExitCodeBeforeCleanup
+            $legacyState = "PENDING"
+            Write-Warning "Legacy execution closure cleanup remains pending: $($_.Exception.Message)"
+        }
     }
     if ($instanceState -eq "PENDING" -or $legacyState -eq "PENDING") {
         return "PENDING"
@@ -3168,12 +3746,24 @@ function Invoke-InstanceConvergence {
             (Get-RequiredJsonInt32 -Object $previous.Manifest -Name "payload_sequence" -Label "current instance manifest") -eq $Manifest.PayloadSequence) {
             $currentReadiness = Get-InstanceCurrentReadiness -Manifest $Manifest -ProjectRoot $ProjectRoot -CurrentInstance $previous -LiveProbe
             if ($currentReadiness.Ready) {
-                # Activation owns selection; retirement and lease-aware cleanup
-                # remain deferred until the later retirement slice.
-                $cleanupState = if ($desiredLocked.CleanupState -in @("COMPLETE", "PENDING")) {
-                    $desiredLocked.CleanupState
-                } else {
-                    "PENDING"
+                $cleanupState = $desiredLocked.CleanupState
+                if ($cleanupState -eq "PENDING") {
+                    Invoke-TestAutomaticCleanupStateCapturedSignal
+                    $cleanupState = Get-CombinedInstanceCleanupState `
+                        -ProjectRoot $ProjectRoot `
+                        -Manifest $Manifest `
+                        -Lock $lock `
+                        -MarkerPath $MarkerPath `
+                        -CurrentInstance $previous `
+                        -PerformCleanup
+                    if ($desiredLocked.CleanupState -ne $cleanupState) {
+                        Update-InstanceDesiredCleanupState `
+                            -ProjectRoot $ProjectRoot `
+                            -Lock $lock `
+                            -DesiredState "INSTALLED" `
+                            -StateId $desiredLocked.StateId `
+                            -CleanupState $cleanupState
+                    }
                 }
                 Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
                 Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
@@ -3182,7 +3772,12 @@ function Invoke-InstanceConvergence {
                 Write-Host "[PRODUCT_STATE] READY"
                 Write-Host "[RESULT] READY"
                 Write-Host "[CLEANUP_STATE] $cleanupState"
-                Set-MaterializerCommandOutcome -Outcome "CONVERGED" -ReasonCode "INSTANCE_CURRENT" -CleanupState $cleanupState -NextAction "No action required."
+                $nextAction = if ($cleanupState -eq "PENDING") {
+                    "No action is required; the retired instance will be cleaned after authenticated holders drain."
+                } else {
+                    "No action required."
+                }
+                Set-MaterializerCommandOutcome -Outcome "CONVERGED" -ReasonCode "INSTANCE_CURRENT" -CleanupState $cleanupState -NextAction $nextAction
                 return
             }
             Write-Host "[CONVERGENCE] Current instance requires replacement: $($currentReadiness.Reason)"
@@ -3533,7 +4128,7 @@ function Write-InstanceProductStatus {
         Write-Host "[DETAIL] $($readiness.Reason)"
     }
     Write-Host "[INSTANCE] $($current.InstanceId)"
-    $cleanupState = Get-InstanceCleanupState -ProjectRoot $ProjectRoot -Manifest $Manifest -CurrentInstance $current
+    $cleanupState = Get-VersionedInstanceRetirementCleanupState -ProjectRoot $ProjectRoot -Manifest $Manifest
     if ($desired.CleanupState -eq "PENDING") {
         $cleanupState = "PENDING"
     }

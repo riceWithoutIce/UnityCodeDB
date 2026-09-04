@@ -381,7 +381,8 @@ namespace Rice.AI.Codedb.Editor
                     EditorApplication.timeSinceStartup,
                     ref _nextReconcileAt,
                     false,
-                    cachedMigrationAdmissionBlocked))
+                    cachedMigrationAdmissionBlocked,
+                    Volatile.Read(ref _reconcileInFlight) != 0))
                 BeginReconcile(false);
             else if (cachedMigrationAdmissionBlocked)
                 QueuePrerequisiteRecheck();
@@ -404,7 +405,8 @@ namespace Rice.AI.Codedb.Editor
             double now,
             ref double nextReconcileAt,
             bool maintenanceSuspended,
-            bool cachedMigrationAdmissionBlocked = false)
+            bool cachedMigrationAdmissionBlocked = false,
+            bool reconcileInFlight = false)
         {
             if (maintenanceSuspended
                 || !ShouldAllowMigrationAdmissionTrigger(
@@ -414,7 +416,7 @@ namespace Rice.AI.Codedb.Editor
                 return false;
 
             nextReconcileAt = now + ReconcileRetrySeconds;
-            return true;
+            return !reconcileInFlight;
         }
 
         internal static bool ShouldAllowMigrationAdmissionTrigger(
@@ -709,7 +711,21 @@ namespace Rice.AI.Codedb.Editor
             {
                 var convergencePlan = ResolveCurrentInstanceConvergencePlan(
                     currentInstance.State,
-                    productStatus);
+                    productStatus,
+                    integrationStatus.CleanupState);
+                if (convergencePlan == AICodedbCurrentInstanceConvergencePlan.Retire)
+                {
+                    var retirementResult = RememberHostStatusResult(
+                        RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
+                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, retirementResult);
+                    workerResult.ProductState = productStatus.State;
+                    if (productStatus.State == AICodedbProductState.Ready)
+                        RefreshEditorLeaseForIntegrationState(context);
+                    else
+                        workerResult.Warning =
+                            $"CodeDB automatic retired-instance convergence failed: {retirementResult.GetSummary()} {retirementResult.StandardError}".Trim();
+                    return workerResult;
+                }
                 if (convergencePlan == AICodedbCurrentInstanceConvergencePlan.Deploy)
                 {
                     Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
@@ -1014,12 +1030,13 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProjectCleanupState cleanupState)
         {
             // A Ready current instance remains usable while retired instances
-            // wait for their owners to drain. Cleanup must not redeploy the
-            // current instance or start a full convergence loop.
-            _ = cleanupState;
+            // wait for their owners to drain. PENDING requests only the
+            // bounded retirement branch; it never redeploys current.
             if (!currentInstancePresent)
                 return true;
-            return currentInstanceIsCurrent && productState != AICodedbProductState.Ready;
+            return currentInstanceIsCurrent
+                   && (productState != AICodedbProductState.Ready
+                       || cleanupState == AICodedbProjectCleanupState.Pending);
         }
 
         internal static AICodedbCurrentInstanceConvergencePlan ResolveCurrentInstanceConvergencePlan(
@@ -1040,13 +1057,26 @@ namespace Rice.AI.Codedb.Editor
             AICodedbCurrentInstanceState currentInstanceState,
             AICodedbProductStatus productStatus)
         {
+            return ResolveCurrentInstanceConvergencePlan(
+                currentInstanceState,
+                productStatus,
+                AICodedbProjectCleanupState.Complete);
+        }
+
+        internal static AICodedbCurrentInstanceConvergencePlan ResolveCurrentInstanceConvergencePlan(
+            AICodedbCurrentInstanceState currentInstanceState,
+            AICodedbProductStatus productStatus,
+            AICodedbProjectCleanupState cleanupState)
+        {
             if (currentInstanceState == AICodedbCurrentInstanceState.Missing
                 || currentInstanceState == AICodedbCurrentInstanceState.TrustedPrevious)
                 return AICodedbCurrentInstanceConvergencePlan.Deploy;
             if (currentInstanceState != AICodedbCurrentInstanceState.Current)
                 return AICodedbCurrentInstanceConvergencePlan.Blocked;
             if (productStatus.State == AICodedbProductState.Ready)
-                return AICodedbCurrentInstanceConvergencePlan.None;
+                return cleanupState == AICodedbProjectCleanupState.Pending
+                    ? AICodedbCurrentInstanceConvergencePlan.Retire
+                    : AICodedbCurrentInstanceConvergencePlan.None;
             if (productStatus.Prerequisite != AICodedbProductLayerState.Current)
                 return AICodedbCurrentInstanceConvergencePlan.Blocked;
 
@@ -2796,6 +2826,7 @@ namespace Rice.AI.Codedb.Editor
         internal enum AICodedbCurrentInstanceConvergencePlan
         {
             None,
+            Retire,
             Deploy,
             RecoverAvailability,
             Blocked
