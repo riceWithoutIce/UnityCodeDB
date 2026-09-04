@@ -317,9 +317,9 @@ function New-InstanceActivationMutationEvidence {
         [Parameter(Mandatory = $true)][int]$Index,
         [Parameter(Mandatory = $true)][string]$Target,
         [Parameter(Mandatory = $true)][ValidateSet("Write", "Delete")][string]$Mutation,
-        [AllowNull()][string]$DesiredSha256,
+        [AllowNull()]$DesiredSha256,
         [Parameter(Mandatory = $true)][bool]$ExistedBefore,
-        [AllowNull()][string]$PreImageSha256
+        [AllowNull()]$PreImageSha256
     )
 
     if ($Index -lt 0) { throw "Activation mutation index is invalid." }
@@ -801,6 +801,462 @@ function Initialize-FreshInstanceActivationContract {
         Activation = $publishedActivation
         Operation = $publishedOperation
         Paths = $Context.Paths
+    }
+}
+
+function Get-InstanceActivationContractRoot {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $paths = Get-InstanceActivationContractPaths `
+        -ProjectRoot $ProjectRoot `
+        -ControlContract $Manifest.ControlContract `
+        -OperationId ("0" * 32)
+    return $paths.ContractRoot
+}
+
+function Assert-InstanceActivationContractNamespace {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContractRoot,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $ContractRoot)) { return }
+    if (-not (Test-Path -LiteralPath $ContractRoot -PathType Container)) {
+        throw "Activation contract namespace is not a directory."
+    }
+    Assert-NoReparsePoint -Path $ContractRoot -Root $ProjectRoot -Label "activation contract namespace"
+    foreach ($entry in @(Get-ChildItem -LiteralPath $ContractRoot -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "activation contract namespace entry"
+        if ($entry.Name -in @("activation.json", "operation.json")) {
+            if ($entry.PSIsContainer) { throw "Activation contract namespace record is not a regular file: $($entry.Name)" }
+            continue
+        }
+        if ($entry.Name -ceq "operations") {
+            if (-not $entry.PSIsContainer) { throw "Activation contract operations root is not a directory." }
+            continue
+        }
+        throw "Activation contract namespace contains unexpected entry: $($entry.Name)"
+    }
+    $operationsRoot = Join-Path $ContractRoot "operations"
+    if (-not (Test-Path -LiteralPath $operationsRoot)) { return }
+    if (-not (Test-Path -LiteralPath $operationsRoot -PathType Container)) {
+        throw "Activation contract operations root is not a directory."
+    }
+    Assert-NoReparsePoint -Path $operationsRoot -Root $ProjectRoot -Label "activation operations root"
+    foreach ($entry in @(Get-ChildItem -LiteralPath $operationsRoot -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "activation operation directory"
+        if (-not $entry.PSIsContainer -or $entry.Name -cnotmatch '^[0-9a-f]{32}$') {
+            throw "Activation contract operations root contains unexpected entry: $($entry.Name)"
+        }
+    }
+}
+
+function Get-InstanceActivationContractState {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $contractRoot = Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if (-not (Test-Path -LiteralPath $contractRoot)) { return $null }
+    Assert-InstanceActivationContractNamespace -ContractRoot $contractRoot -ProjectRoot $ProjectRoot
+    $activationPath = Join-Path $contractRoot "activation.json"
+    $operationPath = Join-Path $contractRoot "operation.json"
+    $hasActivation = Test-Path -LiteralPath $activationPath
+    $hasOperation = Test-Path -LiteralPath $operationPath
+    if ($hasActivation -ne $hasOperation) {
+        throw "Activation contract namespace contains only one contract record."
+    }
+    $operationsRoot = Join-Path $contractRoot "operations"
+    $operationDirectories = @(
+        if (Test-Path -LiteralPath $operationsRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $operationsRoot -Force
+        }
+    )
+    if (-not $hasActivation) {
+        if ($operationDirectories.Count -ne 0) {
+            throw "Activation contract namespace contains orphaned operation evidence."
+        }
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $operationPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $activationPath -PathType Leaf)) {
+        throw "Activation contract records are not regular files."
+    }
+    $operationJson = Read-BoundedJsonDocument `
+        -Path $operationPath `
+        -Label "activation operation journal" `
+        -MaximumBytes $script:InstanceActivationOperationMaximumBytes
+    $operationId = Get-RequiredJsonString -Object $operationJson.Document -Name "operation_id" -Label "activation operation journal"
+    $context = New-InstanceActivationContractContext `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -OperationId $operationId
+    $activation = Read-InstanceActivationRecord -Context $context
+    $operation = Read-InstanceActivationOperation -Context $context
+    Assert-InstanceActivationDocumentsMatch -Activation $activation -Operation $operation
+    $hasMatchingOperationDirectory = $operationDirectories.Count -eq 1 -and
+        [string]::Equals($operationDirectories[0].Name, $operationId, [StringComparison]::Ordinal)
+    $operationDirectoryCardinalityIsValid = if ($operation.Phase -ceq "COMMITTED") {
+        $operationDirectories.Count -eq 0 -or $hasMatchingOperationDirectory
+    } else {
+        $hasMatchingOperationDirectory
+    }
+    if (-not $operationDirectoryCardinalityIsValid) {
+        throw "Activation contract operation evidence does not match the authoritative operation_id."
+    }
+    return [pscustomobject]@{
+        Context = $context
+        Activation = $activation
+        Operation = $operation
+        ContractRoot = $contractRoot
+    }
+}
+
+function New-InstanceActivationSelectionEvidence {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$Instance,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    if ($null -eq $Instance) { return $null }
+    $generationManifestSha256 = Get-RequiredJsonString `
+        -Object $Instance.Manifest `
+        -Name "generation_manifest_sha256" `
+        -Label "selected instance generation manifest"
+    return New-InstanceActivationEvidence `
+        -InstanceId $Instance.InstanceId `
+        -GenerationId $Instance.Generation.GenerationId `
+        -InstanceManifestSha256 $Instance.ManifestSha256 `
+        -GenerationManifestSha256 $generationManifestSha256 `
+        -GenerationDisposition $Instance.Generation.Disposition
+}
+
+function New-InstanceActivationCandidateEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    return New-InstanceActivationEvidence `
+        -InstanceId $Candidate.InstanceId `
+        -GenerationId $Context.TargetGenerationId `
+        -InstanceManifestSha256 $Candidate.ManifestSha256 `
+        -GenerationManifestSha256 $Context.TargetGenerationManifestSha256 `
+        -GenerationDisposition "CURRENT"
+}
+
+function Publish-InstanceActivationContractPair {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$ActivationDocument,
+        [Parameter(Mandatory = $true)]$OperationDocument,
+        [Parameter(Mandatory = $true)][string]$StageRoot
+    )
+
+    $activation = Assert-InstanceActivationRecordDocument -Document $ActivationDocument -Context $Context
+    $operation = Assert-InstanceActivationOperationDocument -Document $OperationDocument -Context $Context
+    Assert-InstanceActivationDocumentsMatch -Activation $activation -Operation $operation
+    $activationText = ConvertTo-InstanceJsonText -Value $ActivationDocument
+    $operationText = ConvertTo-InstanceJsonText -Value $OperationDocument
+    $activationPath = [string]$Context.Paths.ActivationPath
+    $operationPath = [string]$Context.Paths.OperationPath
+    $oldActivation = if (Test-Path -LiteralPath $activationPath -PathType Leaf) { [System.IO.File]::ReadAllBytes($activationPath) } else { $null }
+    $oldOperation = if (Test-Path -LiteralPath $operationPath -PathType Leaf) { [System.IO.File]::ReadAllBytes($operationPath) } else { $null }
+    try {
+        Publish-InstanceAtomicText -Path $activationPath -Content $activationText -StageRoot $StageRoot
+        Publish-InstanceAtomicText -Path $operationPath -Content $operationText -StageRoot $StageRoot
+    } catch {
+        $publicationError = $_.Exception.Message
+        $restoreError = $null
+        try {
+            foreach ($restore in @(
+                    [pscustomobject]@{ Path = $activationPath; Bytes = $oldActivation },
+                    [pscustomobject]@{ Path = $operationPath; Bytes = $oldOperation })) {
+                if ($null -eq $restore.Bytes) {
+                    Remove-Item -LiteralPath $restore.Path -Force -ErrorAction SilentlyContinue
+                } else {
+                    $restoreStage = Join-Path $StageRoot ("activation-contract-restore-$([guid]::NewGuid().ToString('N')).tmp")
+                    try {
+                        Write-DurableBytesFile -Path $restoreStage -Bytes $restore.Bytes
+                        Publish-TransactionFile -StagePath $restoreStage -TargetPath $restore.Path
+                    } finally {
+                        Remove-Item -LiteralPath $restoreStage -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        } catch {
+            $restoreError = $_.Exception.Message
+        }
+        if ($null -ne $restoreError) {
+            throw "Activation contract pair publication failed and rollback was not proven: $publicationError; $restoreError"
+        }
+        throw $publicationError
+    }
+}
+
+function Get-InstanceActivationTransactionEntriesFromContract {
+    param(
+        [Parameter(Mandatory = $true)]$ContractState,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $operationRoot = [string]$ContractState.Context.Paths.OperationRoot
+    Assert-NoReparsePoint -Path $operationRoot -Root $ProjectRoot -Label "activation operation root"
+    if (-not (Test-Path -LiteralPath $operationRoot -PathType Container)) {
+        throw "Activation operation evidence directory is missing."
+    }
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($mutation in @($ContractState.Operation.Mutations)) {
+        $index = [int]$mutation.index
+        $target = Assert-InstanceTransactionTarget -Target ([string]$mutation.target)
+        $targetPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $target -Label "instance transaction target"
+        $stagePath = if ($mutation.mutation -ceq "write") { Join-Path $operationRoot ("stage\{0:D4}.new" -f $index) } else { $null }
+        $backupPath = Join-Path $operationRoot ("backup\{0:D4}.bak" -f $index)
+        if ($null -ne $stagePath) { Assert-NoReparsePoint -Path $stagePath -Root $operationRoot -Label "activation operation stage" }
+        Assert-NoReparsePoint -Path $backupPath -Root $operationRoot -Label "activation operation backup"
+        $entries.Add([pscustomobject]@{
+            Index = $index
+            Target = $target
+            TargetPath = $targetPath
+            Mutation = if ($mutation.mutation -ceq "write") { "Write" } else { "Delete" }
+            DesiredSha256 = $mutation.desired_sha256
+            StagePath = $stagePath
+            ExistedBefore = [bool]$mutation.existed_before
+            OriginalSha256 = $mutation.pre_image_sha256
+            BackupPath = $backupPath
+        })
+    }
+    return $entries.ToArray()
+}
+
+function Remove-InstanceActivationContractAttempt {
+    param([Parameter(Mandatory = $true)]$ContractState)
+
+    Remove-Item -LiteralPath $ContractState.Activation.Path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ContractState.Operation.Path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ContractState.Context.Paths.OperationRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-InstanceActivationContractRecovery {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StageRoot
+    )
+
+    $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $state) { return $false }
+    Write-Host "[RECOVERY] Found versioned activation $($state.Operation.Attempt.OperationId) in phase $($state.Operation.Phase)."
+    if ($state.Operation.Phase -eq "PREPARED") {
+        Remove-InstanceActivationContractAttempt -ContractState $state
+        Write-Host "[RECOVERY] Removed an unstarted versioned activation attempt."
+        return $true
+    }
+    if ($state.Operation.Phase -eq "COMMITTED") {
+        $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $selectedEvidence = New-InstanceActivationSelectionEvidence -Instance $selected -Context $state.Context
+        if (-not (Test-InstanceActivationEvidenceEqual -Left $selectedEvidence -Right $state.Operation.Candidate)) {
+            throw "Committed versioned activation does not match current selection."
+        }
+        Remove-Item -LiteralPath $state.Context.Paths.OperationRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[RECOVERY] Finalized committed versioned activation evidence."
+        return $true
+    }
+
+    $entries = Get-InstanceActivationTransactionEntriesFromContract `
+        -ContractState $state `
+        -ProjectRoot $ProjectRoot
+    $rollbackError = $null
+    foreach ($entry in @($entries | Sort-Object Index -Descending)) {
+        try { Restore-InstanceTransactionEntry -Entry $entry -ProjectRoot $ProjectRoot -AllowUnpublished }
+        catch { $rollbackError = $_.Exception.Message; break }
+    }
+    if ($null -ne $rollbackError) {
+        throw "Versioned activation recovery could not prove rollback: $rollbackError"
+    }
+    Remove-InstanceActivationContractAttempt -ContractState $state
+    Write-Host "[RECOVERY] Versioned activation rolled back before selecting a new current instance."
+    return $true
+}
+
+function Publish-InstanceActivationTransaction {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [AllowNull()]$PreviousInstance,
+        [AllowNull()]$PreviousLastKnownGood,
+        [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName,
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [AllowNull()][string]$UninstallStateId,
+        [AllowNull()][scriptblock]$VerifyBeforeCommit
+    )
+
+    $existing = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -ne $existing) {
+        throw "A versioned activation contract already exists and cannot be overwritten by a new attempt."
+    }
+    $attempt = New-InstanceActivationAttemptIdentity
+    $context = New-InstanceActivationContractContext `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -OperationId $attempt.OperationId
+    $candidateEvidence = New-InstanceActivationCandidateEvidence -Candidate $Candidate -Context $context
+    $currentEvidence = New-InstanceActivationSelectionEvidence -Instance $PreviousInstance -Context $context
+    $lastKnownGoodEvidence = New-InstanceActivationSelectionEvidence -Instance $PreviousLastKnownGood -Context $context
+    $preparedActivation = New-InstanceActivationRecordDocument `
+        -Context $context `
+        -Attempt $attempt `
+        -Candidate $candidateEvidence `
+        -Current $currentEvidence `
+        -LastKnownGood $lastKnownGoodEvidence `
+        -PublicationPhase PREPARED
+    $preparedOperation = New-InstanceActivationOperationDocument `
+        -Context $context `
+        -Attempt $attempt `
+        -Action $ActionName.ToUpperInvariant() `
+        -Candidate $candidateEvidence `
+        -PreviousActivationRecordSha256 $null `
+        -Phase PREPARED `
+        -Mutations @()
+    Initialize-FreshInstanceActivationContract `
+        -Context $context `
+        -ActivationDocument $preparedActivation `
+        -OperationDocument $preparedOperation | Out-Null
+
+    try {
+        $activation = Get-InstanceActivationEntries `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -Candidate $Candidate `
+            -OperationRoot $context.Paths.OperationRoot `
+            -ActionName $ActionName `
+            -PreviousInstance $PreviousInstance `
+            -UninstallStateId $UninstallStateId `
+            -RetainPreviousInstance
+        $mutations = @($activation.Entries | ForEach-Object {
+            New-InstanceActivationMutationEvidence `
+                -Index $_.Index `
+                -Target $_.Target `
+                -Mutation $_.Mutation `
+                -DesiredSha256 $_.DesiredSha256 `
+                -ExistedBefore $_.ExistedBefore `
+                -PreImageSha256 $_.OriginalSha256
+        })
+        $preparedOperationWithMutations = New-InstanceActivationOperationDocument `
+            -Context $context `
+            -Attempt $attempt `
+            -Action $ActionName.ToUpperInvariant() `
+            -Candidate $candidateEvidence `
+            -PreviousActivationRecordSha256 $null `
+            -Phase PREPARED `
+            -Mutations $mutations
+        Publish-InstanceActivationContractPair `
+            -Context $context `
+            -ActivationDocument $preparedActivation `
+            -OperationDocument $preparedOperationWithMutations `
+            -StageRoot $StageRoot
+
+        $activatingActivation = New-InstanceActivationRecordDocument `
+            -Context $context `
+            -Attempt $attempt `
+            -Candidate $candidateEvidence `
+            -Current $currentEvidence `
+            -LastKnownGood $lastKnownGoodEvidence `
+            -PublicationPhase ACTIVATING
+        $activatingOperation = New-InstanceActivationOperationDocument `
+            -Context $context `
+            -Attempt $attempt `
+            -Action $ActionName.ToUpperInvariant() `
+            -Candidate $candidateEvidence `
+            -PreviousActivationRecordSha256 $null `
+            -Phase ACTIVATING `
+            -Mutations $mutations
+        Publish-InstanceActivationContractPair `
+            -Context $context `
+            -ActivationDocument $activatingActivation `
+            -OperationDocument $activatingOperation `
+            -StageRoot $StageRoot
+
+        $publishedEntries = New-Object System.Collections.Generic.List[object]
+        try {
+            foreach ($entry in @($activation.Entries)) {
+                Assert-NoReparsePoint -Path $entry.TargetPath -Root $ProjectRoot -Label "instance activation target"
+                if ($entry.ExistedBefore) {
+                    if (-not (Test-Path -LiteralPath $entry.TargetPath -PathType Leaf) -or
+                        -not [string]::Equals((Get-FileSha256 -Path $entry.TargetPath), [string]$entry.OriginalSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Instance activation target changed after preflight: $($entry.Target)"
+                    }
+                } elseif (Test-Path -LiteralPath $entry.TargetPath) {
+                    throw "Instance activation target appeared after preflight: $($entry.Target)"
+                }
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $entry.TargetPath) | Out-Null
+                if ($entry.Mutation -eq "Write") {
+                    if ($entry.ExistedBefore) {
+                        [System.IO.File]::Replace($entry.StagePath, $entry.TargetPath, $entry.BackupPath, $true)
+                        if (-not [string]::Equals((Get-FileSha256 -Path $entry.BackupPath), [string]$entry.OriginalSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw "Instance activation replacement pre-image verification failed: $($entry.Target)"
+                        }
+                    } else {
+                        [System.IO.File]::Move($entry.StagePath, $entry.TargetPath)
+                    }
+                    if (-not [string]::Equals((Get-FileSha256 -Path $entry.TargetPath), [string]$entry.DesiredSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Instance activation publication verification failed: $($entry.Target)"
+                    }
+                } elseif ($entry.ExistedBefore) {
+                    [System.IO.File]::Copy($entry.TargetPath, $entry.BackupPath, $true)
+                    [System.IO.File]::Delete($entry.TargetPath)
+                }
+                $publishedEntries.Add($entry)
+                Add-MaterializerMutationScope -Scope "instance_activation"
+                Invoke-TestFaultAfterMutation
+            }
+            if ($null -ne $VerifyBeforeCommit) { & $VerifyBeforeCommit }
+            $committedActivation = New-InstanceActivationRecordDocument `
+                -Context $context `
+                -Attempt $attempt `
+                -Candidate $candidateEvidence `
+                -Current $candidateEvidence `
+                -LastKnownGood $candidateEvidence `
+                -PublicationPhase COMMITTED
+            $committedOperation = New-InstanceActivationOperationDocument `
+                -Context $context `
+                -Attempt $attempt `
+                -Action $ActionName.ToUpperInvariant() `
+                -Candidate $candidateEvidence `
+                -PreviousActivationRecordSha256 $null `
+                -Phase COMMITTED `
+                -Mutations $mutations
+            Publish-InstanceActivationContractPair `
+                -Context $context `
+                -ActivationDocument $committedActivation `
+                -OperationDocument $committedOperation `
+                -StageRoot $StageRoot
+            Remove-Item -LiteralPath $context.Paths.OperationRoot -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {
+            $originalError = $_.Exception.Message
+            $rollbackError = $null
+            foreach ($entry in @($publishedEntries | Sort-Object Index -Descending)) {
+                try { Restore-InstanceTransactionEntry -Entry $entry -ProjectRoot $ProjectRoot }
+                catch { $rollbackError = $_.Exception.Message; break }
+            }
+            if ($null -ne $rollbackError) {
+                throw "Instance activation failed and rollback was not proven: $originalError; $rollbackError"
+            }
+            throw $originalError
+        }
+        return [pscustomobject]@{
+            StateId = $activation.StateId
+            CandidateEvidence = $candidateEvidence
+            Context = $context
+            Attempt = $attempt
+        }
+    } catch {
+        throw
     }
 }
 
@@ -1795,7 +2251,8 @@ function Get-InstanceActivationEntries {
         [Parameter(Mandatory = $true)][string]$OperationRoot,
         [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName,
         [AllowNull()]$PreviousInstance,
-        [AllowNull()][string]$UninstallStateId
+        [AllowNull()][string]$UninstallStateId,
+        [switch]$RetainPreviousInstance
     )
 
     $entries = New-Object System.Collections.Generic.List[object]
@@ -1832,7 +2289,8 @@ function Get-InstanceActivationEntries {
     }
 
     $stateId = [guid]::NewGuid().ToString("N")
-    $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "INSTALLED" -StateId $stateId -CleanupState "COMPLETE"
+    $cleanupState = if ($RetainPreviousInstance -and $null -ne $PreviousInstance) { "PENDING" } else { "COMPLETE" }
+    $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "INSTALLED" -StateId $stateId -CleanupState $cleanupState
     $desiredBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
     Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
     $legacyIntegrationPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:IntegrationStateRelativePath -Label "legacy integration state"
@@ -2694,6 +3152,7 @@ function Invoke-InstanceConvergence {
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $null = Assert-MachinePrerequisiteForAction -Manifest $Manifest -ActionName $ActionName
+        $null = Invoke-InstanceActivationContractRecovery -Manifest $Manifest -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredLocked = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($ActionName -eq "Install" -and $desiredLocked.DesiredState -ne "UNINSTALLED") {
@@ -2709,16 +3168,12 @@ function Invoke-InstanceConvergence {
             (Get-RequiredJsonInt32 -Object $previous.Manifest -Name "payload_sequence" -Label "current instance manifest") -eq $Manifest.PayloadSequence) {
             $currentReadiness = Get-InstanceCurrentReadiness -Manifest $Manifest -ProjectRoot $ProjectRoot -CurrentInstance $previous -LiveProbe
             if ($currentReadiness.Ready) {
-                $cleanupState = Get-CombinedInstanceCleanupState `
-                    -ProjectRoot $ProjectRoot `
-                    -Manifest $Manifest `
-                    -Lock $lock `
-                    -MarkerPath $MarkerPath `
-                    -CurrentInstance $previous `
-                    -PerformCleanup
-                $stateId = if ($desiredLocked.StateId -match '^[0-9a-f]{32}$') { $desiredLocked.StateId } else { [guid]::NewGuid().ToString("N") }
-                if (-not $desiredLocked.Present -or $desiredLocked.Legacy -or $desiredLocked.CleanupState -ne $cleanupState) {
-                    Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "INSTALLED" -StateId $stateId -CleanupState $cleanupState
+                # Activation owns selection; retirement and lease-aware cleanup
+                # remain deferred until the later retirement slice.
+                $cleanupState = if ($desiredLocked.CleanupState -in @("COMPLETE", "PENDING")) {
+                    $desiredLocked.CleanupState
+                } else {
+                    "PENDING"
                 }
                 Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
                 Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
@@ -2754,16 +3209,11 @@ function Invoke-InstanceConvergence {
 
         Set-MaterializerCommandPhase -Phase "CANDIDATE"
         $candidate = New-VerifiedInstanceCandidate -Manifest $Manifest -ProjectRoot $ProjectRoot -GenerationRoot $generationRoot -PreviousInstance $previous
-        $operationRoot = Join-Path $candidate.InstanceRoot ("tmp\operation-$([guid]::NewGuid().ToString('N'))")
-        New-Item -ItemType Directory -Path $operationRoot | Out-Null
-        $activation = Get-InstanceActivationEntries `
+        $previousLastKnownGood = Get-ValidatedCurrentInstance `
             -Manifest $Manifest `
             -ProjectRoot $ProjectRoot `
-            -Candidate $candidate `
-            -OperationRoot $operationRoot `
-            -ActionName $ActionName `
-            -PreviousInstance $previous `
-            -UninstallStateId $(if ($ActionName -eq "Install") { $desiredLocked.StateId } else { $null })
+            -LastKnownGood `
+            -AllowMissing
         if ($ActionName -eq "Install") {
             Invoke-TestInstallAfterRepairHandshake
         }
@@ -2779,26 +3229,19 @@ function Invoke-InstanceConvergence {
             $stateVerification = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
             if ($stateVerification.DesiredState -ne "INSTALLED") { throw "Activated desired state is not INSTALLED." }
         }.GetNewClosure()
-        Publish-InstanceOperation `
+        $activation = Publish-InstanceActivationTransaction `
+            -Manifest $Manifest `
             -ProjectRoot $ProjectRoot `
+            -Candidate $candidate `
+            -PreviousInstance $previous `
+            -PreviousLastKnownGood $previousLastKnownGood `
             -ActionName $ActionName `
-            -CandidateInstanceId $candidate.InstanceId `
-            -Entries $activation.Entries `
             -StageRoot $lock.Root `
-            -OperationRoot $operationRoot `
+            -UninstallStateId $(if ($ActionName -eq "Install") { $desiredLocked.StateId } else { $null }) `
             -VerifyBeforeCommit $verification
 
         $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
-        $cleanupState = Get-CombinedInstanceCleanupState `
-            -ProjectRoot $ProjectRoot `
-            -Manifest $Manifest `
-            -Lock $lock `
-            -MarkerPath $MarkerPath `
-            -CurrentInstance $selected `
-            -PerformCleanup
-        if ($cleanupState -ne "COMPLETE") {
-            Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "INSTALLED" -StateId $activation.StateId -CleanupState $cleanupState
-        }
+        $cleanupState = if ($null -ne $previous) { "PENDING" } else { "COMPLETE" }
         $outcome = switch ($ActionName) { "Install" { "INSTALLED" }; "Reinstall" { "REINSTALLED" }; default { "UPGRADED" } }
         Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
         Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"

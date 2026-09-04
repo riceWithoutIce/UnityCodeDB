@@ -18,6 +18,8 @@ param(
 
     [switch]$ActivationContractOnly,
 
+    [switch]$ActivationTransactionOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -26,8 +28,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -6651,6 +6653,148 @@ function Invoke-ActivationContractFoundationScenarios {
     Write-Host "[OK] Versioned activation contract identity, paths, strict records, fresh provisioning, idempotence, and fail-closed boundaries passed."
 }
 
+function Invoke-ActivationTransactionScenarios {
+    $parseErrors = $null
+    $parseTokens = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath,
+        [ref]$parseTokens,
+        [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message "Materializer source did not parse for focused activation transaction loading."
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    $instanceEnginePath = Join-Path $packageRoot "Tools~\codedb-instance-engine.ps1"
+    . $instanceEnginePath
+    Assert-True `
+        -Condition ($null -ne (Get-Command -Name Read-InstanceControlContractIdentity -CommandType Function -ErrorAction SilentlyContinue)) `
+        -Message "Activation transaction fixture did not load the instance engine contract helpers."
+    $script:ManagedBy = "com.rice.ai-codedb"
+    $script:RequestedExitCode = 0
+    $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
+    $script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
+    $script:MarkerRelativePath = $markerRelativePath
+    $script:IntegrationStateRelativePath = "AIWork/.runtime/codedb/payload-materializer/integration-state.json"
+    $script:McpConfigRelativePath = ".codex/config.toml"
+    $script:TargetPrefix = "AIWork/codedb/"
+    $script:AllowedTargetPaths = @{
+        "AIWork/codedb/wrapper/codedb-project-wrapper.mjs" = $true
+    }
+
+    $prior = Install-TrustedPreviousInstanceFixture
+    $selectionPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $selectionBefore = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    $oldInstanceRoot = Get-PathFromRelative -Root $hostRoot -RelativePath ([string]$selectionBefore.instance_relative_path)
+    $externalSentinelRelativePath = "AIWork/codedb/legacy-external-mcp.sentinel"
+    Write-Utf8File `
+        -Path (Get-PathFromRelative -Root $hostRoot -RelativePath $externalSentinelRelativePath) `
+        -Content "external MCP and legacy state sentinel`n"
+
+    $protectedRelativePaths = @(
+        ".codex/config.toml",
+        "AIWork/.runtime/codedb/host/current.json",
+        "AIWork/.runtime/codedb/control/current-instance.json",
+        "AIWork/.runtime/codedb/control/last-known-good-instance.json",
+        "AIWork/.runtime/codedb/control/desired-state.json",
+        "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
+        $externalSentinelRelativePath
+    )
+    $protectedBefore = Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $protectedRelativePaths
+    $oldInstanceBefore = Get-FileSnapshot -Root $oldInstanceRoot
+    $oldGenerationBefore = Get-FileSnapshot -Root $prior.GenerationRoot
+    $legacyOperationPath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/operation.json"
+    $canonicalManifestJson = Read-BoundedJsonDocument `
+        -Path $canonicalPayloadManifestPath `
+        -Label "focused activation transaction Package manifest" `
+        -MaximumBytes (1024 * 1024)
+    $controlContract = Read-InstanceControlContractIdentity -ManifestDocument $canonicalManifestJson.Document
+    $activationManifest = [pscustomobject]@{
+        ControlContract = $controlContract
+        RuntimeContractSha256 = (Get-FileHash -LiteralPath $canonicalPayloadManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        TargetGenerationId = $generationId
+        TargetGenerationManifestSha256 = (Get-FileHash -LiteralPath (Get-CanonicalPayloadSourcePath -TargetRelativePath ($generationTargetPrefix + "generation-manifest.json")) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $contractRoot = Get-InstanceActivationContractRoot -Manifest $activationManifest -ProjectRoot $hostRoot
+
+    $candidateFailure = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot -TestFailInstanceCandidate
+    Assert-Result -Result $candidateFailure -ExitCode 6 -Label "Versioned candidate verification failure"
+    Assert-True -Condition ($candidateFailure.Text.Contains("Injected candidate verification failure before activation.")) -Message "Candidate failure did not occur before activation contract publication."
+    Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $protectedRelativePaths) -Expected $protectedBefore -Message "Candidate verification failure changed protected selection state."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $oldInstanceRoot) -Expected $oldInstanceBefore -Message "Candidate verification failure changed the old selected instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $oldGenerationBefore -Message "Candidate verification failure changed the old generation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $contractRoot)) -Message "Candidate verification failure published a versioned activation contract."
+
+    $activationAction = "Upgrade"
+    $activationFailure = Invoke-Materializer -Action $activationAction -PayloadRoot $canonicalPayloadRoot -TestFailAfterMutation 1
+    Assert-Result -Result $activationFailure -ExitCode 6 -Label "Versioned activation failure rollback"
+    Assert-True `
+        -Condition ($activationFailure.Text.Contains(("Instance {0} failed without selecting an unverified candidate." -f $activationAction))) `
+        -Message "Activation failure did not fail closed before selection."
+    $activationFailureText = [string]$activationFailure.Text
+    $injectedMutationFaultReached = $activationFailureText.IndexOf(
+        "Injected POC failure after mutation 1.",
+        [StringComparison]::Ordinal) -ge 0
+    Write-Host "[DIAGNOSTIC] activationFailure.Text BEGIN"
+    Write-Host $activationFailureText
+    Write-Host "[DIAGNOSTIC] activationFailure.Text END"
+    Write-Host "[DIAGNOSTIC] Injected POC failure after mutation 1 reached: $injectedMutationFaultReached"
+    Assert-True `
+        -Condition $injectedMutationFaultReached `
+        -Message "Activation failure did not reach the injected mutation fault after mutation 1. Actual activationFailure.Text: $activationFailureText"
+    Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $protectedRelativePaths) -Expected $protectedBefore -Message "Activation failure changed protected selection state."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $oldInstanceRoot) -Expected $oldInstanceBefore -Message "Activation failure changed the old selected instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $oldGenerationBefore -Message "Activation failure changed the old generation."
+    Assert-True -Condition (Test-Path -LiteralPath $contractRoot -PathType Container) -Message "Activation failure left no durable versioned recovery contract."
+    $activatingOperationPath = Join-Path $contractRoot "operation.json"
+    $activatingOperation = Get-Content -LiteralPath $activatingOperationPath -Raw | ConvertFrom-Json
+    $activatingActivation = Get-Content -LiteralPath (Join-Path $contractRoot "activation.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$activatingOperation.phase) -Expected "ACTIVATING" -Message "Activation failure did not retain the ACTIVATING journal phase."
+    Assert-Equal -Actual ([string]$activatingActivation.publication_phase) -Expected "ACTIVATING" -Message "Activation failure did not retain the ACTIVATING record phase."
+    Assert-True -Condition (@($activatingOperation.mutations).Count -gt 0) -Message "Activation journal did not retain mutation evidence."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $legacyOperationPath)) -Message "Versioned activation created an independently authoritative legacy operation journal."
+
+    $recovered = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $recovered -ExitCode 0 -Label "Versioned activation recovery and commit"
+    Assert-True -Condition ($recovered.Text.Contains("[RECOVERY] Versioned activation rolled back before selecting a new current instance.")) -Message "Versioned activation recovery did not roll back the interrupted attempt."
+    Assert-True -Condition ($recovered.Text.Contains("[RESULT] UPGRADED")) -Message "Recovered activation did not commit the new candidate."
+    $committedActivationPath = Join-Path $contractRoot "activation.json"
+    $committedOperationPath = Join-Path $contractRoot "operation.json"
+    $committedActivation = Get-Content -LiteralPath $committedActivationPath -Raw | ConvertFrom-Json
+    $committedOperation = Get-Content -LiteralPath $committedOperationPath -Raw | ConvertFrom-Json
+    $selectedAfterCommit = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$committedActivation.publication_phase) -Expected "COMMITTED" -Message "Committed activation record did not reach COMMITTED."
+    Assert-Equal -Actual ([string]$committedOperation.phase) -Expected "COMMITTED" -Message "Committed activation journal did not reach COMMITTED."
+    Assert-Equal -Actual ([string]$committedActivation.operation_id) -Expected ([string]$committedOperation.operation_id) -Message "Committed activation and operation ids diverged."
+    Assert-Equal -Actual ([string]$committedActivation.activation_epoch) -Expected ([string]$committedOperation.activation_epoch) -Message "Committed activation and operation epochs diverged."
+    Assert-Equal -Actual ([string]$committedOperation.candidate.instance_id) -Expected ([string]$selectedAfterCommit.instance_id) -Message "Committed journal candidate does not match current selection."
+    Assert-Equal -Actual ([string]$committedOperation.candidate.generation_id) -Expected $generationId -Message "Committed journal selected the wrong generation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $contractRoot ("operations\" + [string]$committedOperation.operation_id)))) -Message "Committed activation retained low-level operation evidence after commit."
+    Assert-True -Condition (Test-Path -LiteralPath $oldInstanceRoot -PathType Container) -Message "Activation commit deleted the old selected instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $oldInstanceRoot) -Expected $oldInstanceBefore -Message "Activation commit changed the old selected instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $oldGenerationBefore -Message "Activation commit changed the old generation."
+    Assert-True -Condition (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $externalSentinelRelativePath) -PathType Leaf) -Message "Activation commit deleted the external MCP/legacy sentinel."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $legacyOperationPath)) -Message "Committed versioned activation published a legacy journal."
+
+    $committedOperationTextBeforeRepeat = Get-Content -LiteralPath $committedOperationPath -Raw
+    $repeat = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $repeat -ExitCode 0 -Label "Identical versioned activation retry"
+    Assert-True -Condition ($repeat.Text.Contains("[RESULT] READY")) -Message "Identical activation retry did not converge the existing current instance."
+    $selectedAfterRepeat = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$selectedAfterRepeat.instance_id) -Expected ([string]$selectedAfterCommit.instance_id) -Message "Identical activation retry replaced the committed current instance."
+    Assert-Equal -Actual (Get-Content -LiteralPath $committedOperationPath -Raw) -Expected $committedOperationTextBeforeRepeat -Message "Identical activation retry changed the committed journal."
+
+    $conflictingOperation = Get-Content -LiteralPath $committedOperationPath -Raw | ConvertFrom-Json
+    $conflictingOperation.activation_epoch = "f" * 32
+    Write-Utf8File -Path $committedOperationPath -Content (($conflictingOperation | ConvertTo-Json -Depth 16) + "`n")
+    Assert-ThrowsMessage `
+        -Action { Get-InstanceActivationContractState -Manifest $activationManifest -ProjectRoot $hostRoot } `
+        -ExpectedMessage "identities do not match" `
+        -Label "Conflicting versioned activation journal"
+    Write-Host "[OK] Versioned candidate-to-activation transaction covered pre-selection candidate failure, PREPARED/ACTIVATING/COMMITTED phases, rollback recovery, idempotent retry, conflict rejection, and protected old-state retention."
+}
+
 function Invoke-PayloadManifestContractScenarios {
     $targetRelativePath = "AIWork/codedb/codedbignore.example"
     $payloadRoot = New-SyntheticPayload `
@@ -7607,6 +7751,14 @@ try {
         Invoke-ActivationContractFoundationScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation contract acceptance modified package source files."
         Write-Host "[OK] Focused activation contract foundation scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($ActivationTransactionOnly) {
+        Invoke-ActivationTransactionScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation transaction acceptance modified package source files."
+        Write-Host "[OK] Focused activation transaction scenarios passed."
         $fixturePassed = $true
         return
     }
