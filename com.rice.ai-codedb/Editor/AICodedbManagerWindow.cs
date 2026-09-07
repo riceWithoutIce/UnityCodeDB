@@ -1869,16 +1869,22 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunReinstallCodeDBWithConfirmation()
         {
+            var cachedProductStatus = _statusSnapshot.ProductStatus;
             ConfirmAndRunReinstallCodeDB(
                 () => EditorUtility.DisplayDialog(
                     ReinstallCodeDBConfirmationTitle,
                     ReinstallCodeDBConfirmationMessage,
                     "Reinstall CodeDB",
                     "Cancel"),
-                () => RunUserActionAsync("Reinstall CodeDB", AICodedbActions.RunReinstallCodeDBAsync));
+                confirmedProjectMutation => RunUserActionAsync(
+                    "Reinstall CodeDB",
+                    () => AICodedbActions.RunReinstallCodeDBAsync(
+                        cachedProductStatus,
+                        confirmedProjectMutation),
+                    false));
         }
 
-        internal static bool ConfirmAndRunReinstallCodeDB(Func<bool> confirm, Action reinstall)
+        internal static bool ConfirmAndRunReinstallCodeDB(Func<bool> confirm, Action<bool> reinstall)
         {
             if (confirm == null)
                 throw new ArgumentNullException(nameof(confirm));
@@ -1887,7 +1893,7 @@ namespace Rice.AI.Codedb.Editor
             if (!confirm())
                 return false;
 
-            reinstall();
+            reinstall(true);
             return true;
         }
 
@@ -2190,25 +2196,35 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunUserActionAsync(
             string title,
-            Func<Task<AICodedbCommandResult>> action)
+            Func<Task<AICodedbCommandResult>> action,
+            bool requestReconcileAfterAction = true)
         {
             if (action == null)
                 return;
 
-            RunUserActionAsync(title, progressLine => action());
+            RunUserActionAsync(
+                title,
+                progressLine => action(),
+                requestReconcileAfterAction);
         }
 
         private async void RunUserActionAsync(
             string title,
-            Func<Action<string>, Task<AICodedbCommandResult>> action)
+            Func<Action<string>, Task<AICodedbCommandResult>> action,
+            bool requestReconcileAfterAction = true)
         {
-            await RunUserActionAsync(title, action, null);
+            await RunUserActionAsync(
+                title,
+                action,
+                null,
+                requestReconcileAfterAction);
         }
 
         private async Task RunUserActionAsync(
             string title,
             Func<Action<string>, Task<AICodedbCommandResult>> action,
-            Func<AICodedbCommandResult, Task<AICodedbCommandResult>> continueOnMainThread)
+            Func<AICodedbCommandResult, Task<AICodedbCommandResult>> continueOnMainThread,
+            bool requestReconcileAfterAction = true)
         {
             if (_userActionInFlight || action == null)
                 return;
@@ -2267,7 +2283,8 @@ namespace Rice.AI.Codedb.Editor
                 EditorApplication.timeSinceStartup);
             _userActionInFlight = false;
             ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
-            AICodedbEditorLifecycle.RequestReconcile();
+            if (requestReconcileAfterAction)
+                AICodedbEditorLifecycle.RequestReconcile();
             Repaint();
         }
 

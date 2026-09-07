@@ -199,21 +199,84 @@ namespace Rice.AI.Codedb.Editor
             return result;
         }
 
-        internal static AICodedbCommandResult RunReinstallCodeDB()
+        internal static bool IsExplicitReinstallAdmissionAllowed(
+            AICodedbProductStatus cachedProductStatus,
+            AICodedbProjectIntegrationStatus currentIntegrationStatus,
+            AICodedbControlContractMigrationStatus currentMigrationStatus,
+            bool confirmedProjectMutation)
         {
-            var result = AICodedbHostPayloadMaterializer.RunReinstall();
-            AICodedbEditorLifecycle.RequestReconcile();
-            return result;
+            return confirmedProjectMutation
+                   && cachedProductStatus.RequiresReinstall
+                   && cachedProductStatus.Prerequisite == AICodedbProductLayerState.Current
+                   && currentIntegrationStatus.State == AICodedbProjectIntegrationState.Installed
+                   && currentMigrationStatus.State
+                   == AICodedbControlContractMigrationState.ObsoleteReinstallRequired;
         }
 
-        internal static async Task<AICodedbCommandResult> RunReinstallCodeDBAsync()
+        internal static async Task<AICodedbCommandResult> RunReinstallCodeDBAsync(
+            AICodedbProductStatus cachedProductStatus,
+            bool confirmedProjectMutation)
         {
-            var result = await RunSupervisorCommandWithFallbackAsync(
-                "Reinstall",
-                true,
-                () => AICodedbHostPayloadMaterializer.RunReinstallAsync());
-            AICodedbEditorLifecycle.RequestReconcile();
-            return result;
+            if (!confirmedProjectMutation)
+                return ReinstallAdmissionRejected("Reinstall requires explicit project mutation confirmation.");
+            if (!cachedProductStatus.RequiresReinstall
+                || cachedProductStatus.Prerequisite != AICodedbProductLayerState.Current)
+            {
+                return ReinstallAdmissionRejected(
+                    "The cached CodeDB state does not admit Reinstall. Refresh the Manager before trying again.");
+            }
+
+            var context = AICodedbPaths.CaptureExecutionContext();
+            var currentAdmission = await Task.Run(() =>
+            {
+                var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+                var migrationStatus = AICodedbControlContractMigrationStore.Read(
+                    context.ProjectRoot,
+                    context.PackageRoot);
+                return IsExplicitReinstallAdmissionAllowed(
+                    cachedProductStatus,
+                    integrationStatus,
+                    migrationStatus,
+                    confirmedProjectMutation);
+            });
+            if (!currentAdmission)
+            {
+                return ReinstallAdmissionRejected(
+                    "The current project or control-contract state no longer admits Reinstall. Refresh the Manager before trying again.");
+            }
+
+            return await RunSingleConfirmedReinstallCommandAsync(
+                confirmedProjectMutation,
+                () => RunSupervisorCommandWithFallbackAsync(
+                    "Reinstall",
+                    confirmedProjectMutation,
+                    () => AICodedbHostPayloadMaterializer.RunReinstallAsync(
+                        confirmedProjectMutation)),
+                AICodedbEditorLifecycle.RequestReconcile);
+        }
+
+        internal static async Task<AICodedbCommandResult> RunSingleConfirmedReinstallCommandAsync(
+            bool confirmedProjectMutation,
+            Func<Task<AICodedbCommandResult>> command,
+            Action requestReconcile)
+        {
+            if (!confirmedProjectMutation)
+                return ReinstallAdmissionRejected("Reinstall requires explicit project mutation confirmation.");
+            if (command == null)
+                throw new ArgumentNullException(nameof(command));
+            if (requestReconcile == null)
+                throw new ArgumentNullException(nameof(requestReconcile));
+
+            var result = await command();
+            if (result != null && result.Succeeded)
+                requestReconcile();
+            return result ?? ReinstallAdmissionRejected(
+                "The Reinstall command returned no result; no automatic retry was requested.");
+        }
+
+        private static AICodedbCommandResult ReinstallAdmissionRejected(string detail)
+        {
+            return new AICodedbCommandResult(4, string.Empty, detail, false);
         }
 
         private static async Task<AICodedbCommandResult> RunSupervisorCommandWithFallbackAsync(

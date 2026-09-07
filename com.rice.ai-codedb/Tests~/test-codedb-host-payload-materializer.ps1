@@ -22,6 +22,8 @@ param(
 
     [switch]$ActivationRetirementOnly,
 
+    [switch]$ControlContractReinstallOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -30,8 +32,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $ControlContractReinstallOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, ControlContractReinstallOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -7149,6 +7151,216 @@ function Invoke-ActivationRetirementScenarios {
     Write-Host "[OK] Fixture retirement lease holder exited normally without cleanup stopping it."
 }
 
+function Write-AuthenticatedObsoleteControlContractFixture {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root).Replace('\', '/').TrimEnd('/')
+    $runtimePath = ($normalizedRoot + "/AIWork/.runtime/codedb/control/supervisor")
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $projectDigest = $sha256.ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($normalizedRoot.ToLowerInvariant()))
+        $projectIdentity = "sha256:" + ([System.BitConverter]::ToString($projectDigest)).Replace("-", "").ToLowerInvariant()
+        $pipeDigest = $sha256.ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes(
+                $normalizedRoot.ToLowerInvariant() + "`n" + $runtimePath.ToLowerInvariant()))
+        $pipeName = "codedb-supervisor-" + ([System.BitConverter]::ToString($pipeDigest)).Replace("-", "").ToLowerInvariant().Substring(0, 20)
+    } finally {
+        $sha256.Dispose()
+    }
+
+    $ownerEvidence = [ordered]@{
+        schema_version = 1
+        pid = 2147483000
+        process_start_identity = "638000000000000000"
+        executable_path = Join-Path $Root "legacy-node.exe"
+        argv_sha256 = "b" * 64
+        command_line_sha256 = "c" * 64
+    }
+    $common = [ordered]@{
+        schema_version = 3
+        evidence_schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        role = "project-local-supervisor"
+        root = $normalizedRoot
+        project_identity = $projectIdentity
+        runtime = $runtimePath
+        pipe_name = "\\.\pipe\$pipeName"
+        generation_id = $generationId
+        target_generation_id = $generationId
+        selected_generation_id = $generationId
+        selected_instance_id = "0123456789abcdef0123456789abcdef"
+        runtime_contract_sha256 = "a" * 64
+        supervisor_protocol_version = 2
+        generation_disposition = "CURRENT"
+        lifecycle_id = "legacy-lifecycle"
+        supervisor_id = "legacy-supervisor"
+        owner_epoch = "legacy-owner-epoch"
+        owner_evidence = $ownerEvidence
+        supervisor_pid = 2147483000
+        publication_phase = "listening"
+        owner_started_at_utc = "2026-08-31T00:00:00.0000000Z"
+    }
+    $state = [ordered]@{}
+    $lock = [ordered]@{}
+    foreach ($entry in $common.GetEnumerator()) {
+        $state[$entry.Key] = $entry.Value
+        $lock[$entry.Key] = $entry.Value
+    }
+    $state.protocol_version = 1
+    $state.auth_token = "d" * 64
+    $state.desired_state = "enabled"
+    $state.editor_demand = "online"
+    $state.readiness_state = "starting"
+    $state.reason_code = "SUPERVISOR_STARTING"
+    $state.detail = "authenticated obsolete fixture"
+    $state.last_event = ""
+    $state.last_event_detail = ""
+    $state.started_at_utc = "2026-08-31T00:00:01.0000000Z"
+    $state.operation = $null
+    $state.event_sequence = 0
+    $state.coordinator_status = $null
+    $state.updated_at_utc = "2026-08-31T00:00:01.0000000Z"
+
+    $nativeRuntimePath = $runtimePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    $statePath = Join-Path $nativeRuntimePath "supervisor-state.json"
+    $lockPath = Join-Path $nativeRuntimePath "supervisor.lock"
+    Write-Utf8File -Path $statePath -Content (($state | ConvertTo-Json -Depth 8) + "`n")
+    Write-Utf8File -Path $lockPath -Content (($lock | ConvertTo-Json -Depth 8) + "`n")
+    return [pscustomobject]@{
+        RuntimePath = $nativeRuntimePath
+        StatePath = $statePath
+        LockPath = $lockPath
+    }
+}
+
+function Invoke-ControlContractReinstallFixtureRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Current", "ObsoleteReinstallRequired", "InvalidOrAmbiguous")]
+        [string]$MigrationState,
+        [Parameter(Mandatory = $true)][bool]$ConfirmedProjectMutation,
+        [switch]$TestFailInstanceCandidate
+    )
+
+    if (-not $ConfirmedProjectMutation -or $MigrationState -cne "ObsoleteReinstallRequired") {
+        return [pscustomobject]@{ Invoked = $false; Result = $null }
+    }
+
+    $invokeArguments = @{
+        Action = "Reinstall"
+        PayloadRoot = $canonicalPayloadRoot
+    }
+    if ($TestFailInstanceCandidate) {
+        $invokeArguments.TestFailInstanceCandidate = $true
+    }
+    return [pscustomobject]@{
+        Invoked = $true
+        Result = Invoke-Materializer @invokeArguments
+    }
+}
+
+function Invoke-ControlContractReinstallScenarios {
+    if (Test-Path -LiteralPath $hostRoot) {
+        Remove-Item -LiteralPath $hostRoot -Recurse -Force
+    }
+    New-TestHost -Root $hostRoot
+    $legacy = Write-AuthenticatedObsoleteControlContractFixture -Root $hostRoot
+    $unrelatedPath = Get-PathFromRelative `
+        -Root $hostRoot `
+        -RelativePath "AIWork/codedb/reinstall-unrelated.sentinel"
+    Write-Utf8File -Path $unrelatedPath -Content "reinstall unrelated sentinel`n"
+    $legacyBefore = Get-FileSnapshot -Root $legacy.RuntimePath
+    $unrelatedBefore = Get-ByteSnapshot -Path $unrelatedPath
+    $projectBeforeRefusal = Get-FileSnapshot -Root $hostRoot
+
+    $unconfirmed = Invoke-ControlContractReinstallFixtureRequest `
+        -MigrationState ObsoleteReinstallRequired `
+        -ConfirmedProjectMutation $false
+    Assert-True -Condition (-not $unconfirmed.Invoked) -Message "Unconfirmed obsolete input invoked Reinstall."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBeforeRefusal -Message "Unconfirmed obsolete input changed the project."
+
+    $ambiguous = Invoke-ControlContractReinstallFixtureRequest `
+        -MigrationState InvalidOrAmbiguous `
+        -ConfirmedProjectMutation $true
+    Assert-True -Condition (-not $ambiguous.Invoked) -Message "Invalid or ambiguous input invoked Reinstall."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBeforeRefusal -Message "Invalid or ambiguous input changed the project."
+
+    $selectionPath = Get-PathFromRelative `
+        -Root $hostRoot `
+        -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $candidateFailure = Invoke-ControlContractReinstallFixtureRequest `
+        -MigrationState ObsoleteReinstallRequired `
+        -ConfirmedProjectMutation $true `
+        -TestFailInstanceCandidate
+    Assert-True -Condition $candidateFailure.Invoked -Message "Confirmed obsolete candidate failure did not invoke Reinstall."
+    Assert-Result -Result $candidateFailure.Result -ExitCode 6 -Label "Confirmed obsolete candidate failure"
+    Assert-True `
+        -Condition ($candidateFailure.Result.Text.Contains("[PHASE CANDIDATE_VERIFY] READY") -and $candidateFailure.Result.Text.Contains("Injected candidate verification failure before activation.")) `
+        -Message "Candidate failure did not prove verification before activation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $selectionPath)) -Message "Failed candidate was selected before verification completed."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacy.RuntimePath) -Expected $legacyBefore -Message "Candidate failure changed authenticated obsolete evidence."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $unrelatedPath) -Expected $unrelatedBefore -Message "Candidate failure changed the unrelated sentinel."
+
+    $reinstall = Invoke-ControlContractReinstallFixtureRequest `
+        -MigrationState ObsoleteReinstallRequired `
+        -ConfirmedProjectMutation $true
+    Assert-True -Condition $reinstall.Invoked -Message "Confirmed obsolete input did not invoke Reinstall."
+    Assert-Result -Result $reinstall.Result -ExitCode 0 -Label "Confirmed obsolete Reinstall"
+    Assert-StructuredCommandResult `
+        -Result $reinstall.Result `
+        -Action "REINSTALL" `
+        -Outcome "REINSTALLED" `
+        -CleanupState "COMPLETE" `
+        -Label "Confirmed obsolete Reinstall"
+    $candidateEvidenceIndex = $reinstall.Result.Text.IndexOf("[PHASE CANDIDATE_VERIFY] READY", [StringComparison]::Ordinal)
+    $completionIndex = $reinstall.Result.Text.IndexOf("[RESULT] REINSTALLED", [StringComparison]::Ordinal)
+    Assert-True -Condition ($candidateEvidenceIndex -ge 0 -and $completionIndex -gt $candidateEvidenceIndex) -Message "Reinstall did not verify the candidate before publishing completion."
+    Assert-True -Condition ($reinstall.Result.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Reinstall did not prove the current prerequisite."
+
+    $selected = Get-TestCurrentInstanceSelection -Root $hostRoot
+    Assert-TestStableInstanceWrapper -Root $hostRoot
+    $contractRoot = Get-PathFromRelative `
+        -Root $hostRoot `
+        -RelativePath ("AIWork/.runtime/codedb/control/contracts/{0}/v{1}" -f [string]$canonicalPayloadManifest.control_contract.id, [int]$canonicalPayloadManifest.control_contract.version)
+    $activationPath = Join-Path $contractRoot "activation.json"
+    $operationPath = Join-Path $contractRoot "operation.json"
+    $activation = Get-Content -LiteralPath $activationPath -Raw | ConvertFrom-Json
+    $operation = Get-Content -LiteralPath $operationPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$activation.publication_phase) -Expected "COMMITTED" -Message "Reinstall activation did not commit."
+    Assert-Equal -Actual ([string]$operation.phase) -Expected "COMMITTED" -Message "Reinstall operation did not commit."
+    Assert-Equal -Actual ([string]$operation.action) -Expected "REINSTALL" -Message "Reinstall operation recorded the wrong action."
+    Assert-Equal -Actual ([string]$operation.candidate.instance_id) -Expected ([string]$selected.Selection.instance_id) -Message "Committed Reinstall candidate does not match current selection."
+    $selectionBeforeRepeat = Get-ByteSnapshot -Path $selectionPath
+    $contractBeforeRepeat = Get-FileSnapshot -Root $contractRoot
+    $activationBeforeRepeat = Get-ByteSnapshot -Path $activationPath
+    $operationBeforeRepeat = Get-ByteSnapshot -Path $operationPath
+    $legacyBeforeRepeat = Get-FileSnapshot -Root $legacy.RuntimePath
+    $unrelatedBeforeRepeat = Get-ByteSnapshot -Path $unrelatedPath
+    $postCommitHasCurrentContract = `
+        ([string]$activation.publication_phase -ceq "COMMITTED") -and `
+        ([string]$operation.phase -ceq "COMMITTED") -and `
+        ([string]$operation.action -ceq "REINSTALL") -and `
+        ([string]$operation.candidate.instance_id -ceq [string]$selected.Selection.instance_id)
+    $postCommitMigrationState = if ($postCommitHasCurrentContract) { "Current" } else { "InvalidOrAmbiguous" }
+    Assert-Equal -Actual $postCommitMigrationState -Expected "Current" -Message "Committed Reinstall did not replace obsolete admission with the current control contract."
+
+    $repeat = Invoke-ControlContractReinstallFixtureRequest `
+        -MigrationState $postCommitMigrationState `
+        -ConfirmedProjectMutation $true
+    Assert-True -Condition (-not $repeat.Invoked) -Message "Repeated confirmed Reinstall invoked materialization after migration became current."
+    Assert-Equal -Actual $repeat.Result -Expected $null -Message "Repeated confirmed Reinstall returned a materializer result after admission rejection."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $selectionPath) -Expected $selectionBeforeRepeat -Message "Repeated confirmed Reinstall changed the current selection."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $contractRoot) -Expected $contractBeforeRepeat -Message "Repeated confirmed Reinstall created or changed activation contract evidence."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $activationPath) -Expected $activationBeforeRepeat -Message "Repeated confirmed Reinstall changed activation.json."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $operationPath) -Expected $operationBeforeRepeat -Message "Repeated confirmed Reinstall changed operation.json."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacy.RuntimePath) -Expected $legacyBeforeRepeat -Message "Repeated confirmed Reinstall changed authenticated obsolete evidence."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $unrelatedPath) -Expected $unrelatedBeforeRepeat -Message "Repeated confirmed Reinstall changed the unrelated sentinel."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacy.RuntimePath) -Expected $legacyBefore -Message "Successful Reinstall changed authenticated obsolete evidence."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $unrelatedPath) -Expected $unrelatedBefore -Message "Successful Reinstall changed the unrelated sentinel."
+    Write-Host "[OK] Explicit obsolete-contract Reinstall rejected unconfirmed and ambiguous admission, verified its candidate before selection, retried after pre-commit failure, committed one current instance, rejected a repeated confirmed request after migration became current, and preserved selection/contract/legacy/unrelated bytes."
+}
+
 function Invoke-PayloadManifestContractScenarios {
     $targetRelativePath = "AIWork/codedb/codedbignore.example"
     $payloadRoot = New-SyntheticPayload `
@@ -8121,6 +8333,14 @@ try {
         Invoke-ActivationRetirementScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation retirement acceptance modified package source files."
         Write-Host "[OK] Focused versioned lease-aware retirement scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($ControlContractReinstallOnly) {
+        Invoke-ControlContractReinstallScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused control-contract Reinstall acceptance modified package source files."
+        Write-Host "[OK] Focused obsolete control-contract explicit Reinstall scenarios passed."
         $fixturePassed = $true
         return
     }

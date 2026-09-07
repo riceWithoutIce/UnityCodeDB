@@ -173,14 +173,17 @@ namespace Rice.AI.Codedb.Editor
             return RunAsync(AICodedbHostPayloadAction.Install, true, MutationTimeoutMilliseconds);
         }
 
-        internal static AICodedbCommandResult RunReinstall()
+        internal static AICodedbCommandResult RunReinstall(bool confirmedProjectMutation)
         {
-            return Run(AICodedbHostPayloadAction.Reinstall, true, true);
+            return Run(AICodedbHostPayloadAction.Reinstall, confirmedProjectMutation, true);
         }
 
-        internal static Task<AICodedbCommandResult> RunReinstallAsync()
+        internal static Task<AICodedbCommandResult> RunReinstallAsync(bool confirmedProjectMutation)
         {
-            return RunAsync(AICodedbHostPayloadAction.Reinstall, true, MutationTimeoutMilliseconds);
+            return RunAsync(
+                AICodedbHostPayloadAction.Reinstall,
+                confirmedProjectMutation,
+                MutationTimeoutMilliseconds);
         }
 
         internal static string[] BuildScriptArguments(

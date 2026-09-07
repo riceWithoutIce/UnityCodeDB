@@ -5,6 +5,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor.PackageManager;
 
@@ -119,6 +120,30 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(source, Does.Not.Contain("AICodedbControlContractMigrationStore"));
             Assert.That(source, Does.Not.Contain("TryResolveControlContractMigrationBlock"));
             Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.ReadStatus("));
+        }
+
+        [Test]
+        public void ActionsSource_RechecksCurrentReinstallEvidenceOnAWorker()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbActions.cs"));
+            var start = source.IndexOf(
+                "RunReinstallCodeDBAsync(",
+                StringComparison.Ordinal);
+            var end = source.IndexOf(
+                "RunSingleConfirmedReinstallCommandAsync(",
+                start + 1,
+                StringComparison.Ordinal);
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            Assert.That(end, Is.GreaterThan(start));
+            var body = source.Substring(start, end - start);
+
+            Assert.That(body, Does.Contain("await Task.Run("));
+            Assert.That(body, Does.Contain("AICodedbProjectIntegrationStateStore.Read("));
+            Assert.That(body, Does.Contain("AICodedbControlContractMigrationStore.Read("));
+            Assert.That(body, Does.Not.Contain("AICodedbHostPayloadMaterializer.ReadStatus"));
         }
 
         [Test]
@@ -2423,6 +2448,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostPayloadAction.Remove, true)]
         [TestCase(AICodedbHostPayloadAction.Uninstall, true)]
         [TestCase(AICodedbHostPayloadAction.Install, true)]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, true)]
         public void BuildScriptArguments_HaveNoVersionControlOrAuthorizationArguments(
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation)
@@ -2457,6 +2483,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostPayloadAction.Remove)]
         [TestCase(AICodedbHostPayloadAction.Uninstall)]
         [TestCase(AICodedbHostPayloadAction.Install)]
+        [TestCase(AICodedbHostPayloadAction.Reinstall)]
         public void BuildScriptArguments_ProjectMutationsRequireConfirmation(
             AICodedbHostPayloadAction action)
         {
@@ -2569,6 +2596,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [TestCase(AICodedbHostPayloadAction.Uninstall, "Uninstall")]
         [TestCase(AICodedbHostPayloadAction.Install, "Install")]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, "Reinstall")]
         public void BuildScriptArguments_ProjectIntegrationActionsUseExactConfirmedContract(
             AICodedbHostPayloadAction action,
             string actionName)
@@ -2832,6 +2860,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var confirmationCount = 0;
             var reinstallCount = 0;
+            var confirmedProjectMutation = false;
 
             var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
                 () =>
@@ -2839,28 +2868,212 @@ namespace Rice.AI.Codedb.Editor.Tests
                     confirmationCount++;
                     return false;
                 },
-                () => reinstallCount++);
+                confirmed =>
+                {
+                    reinstallCount++;
+                    confirmedProjectMutation = confirmed;
+                });
 
             Assert.That(ran, Is.False);
             Assert.That(confirmationCount, Is.EqualTo(1));
             Assert.That(reinstallCount, Is.Zero);
+            Assert.That(confirmedProjectMutation, Is.False);
         }
 
         [Test]
         public void ReinstallCodeDB_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
         {
             var reinstallCount = 0;
+            var confirmedProjectMutation = false;
 
             var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
                 () => true,
-                () => reinstallCount++);
+                confirmed =>
+                {
+                    reinstallCount++;
+                    confirmedProjectMutation = confirmed;
+                });
 
             Assert.That(ran, Is.True);
             Assert.That(reinstallCount, Is.EqualTo(1));
+            Assert.That(confirmedProjectMutation, Is.True);
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationTitle, Is.EqualTo("Reinstall CodeDB"));
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("fresh project-local instance"));
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("unrelated MCP content"));
             Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("External MCP clients and unrelated processes are never terminated"));
+        }
+
+        [Test]
+        public void ReinstallCodeDB_AdmissionRequiresExactCachedAndCurrentEvidence()
+        {
+            var cached = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "obsolete",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.ControlContractReinstallRequired);
+            var installed = new AICodedbProjectIntegrationStatus(
+                AICodedbProjectIntegrationState.Installed,
+                AICodedbProjectCleanupState.None,
+                string.Empty,
+                "installed");
+            var uninstalled = new AICodedbProjectIntegrationStatus(
+                AICodedbProjectIntegrationState.Uninstalled,
+                AICodedbProjectCleanupState.Complete,
+                "uninstalled-state",
+                "uninstalled");
+            var invalidIntegration = new AICodedbProjectIntegrationStatus(
+                AICodedbProjectIntegrationState.Invalid,
+                AICodedbProjectCleanupState.Invalid,
+                string.Empty,
+                "invalid");
+            var obsolete = new AICodedbControlContractMigrationStatus(
+                AICodedbControlContractMigrationState.ObsoleteReinstallRequired,
+                AICodedbControlContract.CreateDefaultIdentity(),
+                "current",
+                "legacy",
+                "obsolete",
+                "authenticated");
+            var ambiguous = new AICodedbControlContractMigrationStatus(
+                AICodedbControlContractMigrationState.InvalidOrAmbiguous,
+                AICodedbControlContract.CreateDefaultIdentity(),
+                "current",
+                "legacy",
+                "ambiguous",
+                "invalid");
+            var missingPrerequisite = new AICodedbProductStatus(
+                AICodedbProductState.MissingPrerequisite,
+                AICodedbProductLayerState.Missing,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "missing",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.ControlContractReinstallRequired);
+            var genericAttention = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "attention");
+
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    cached,
+                    installed,
+                    obsolete,
+                    true),
+                Is.True);
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    cached,
+                    installed,
+                    obsolete,
+                    false),
+                Is.False,
+                "Confirmation must not be inferred from the cached reason.");
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    missingPrerequisite,
+                    installed,
+                    obsolete,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    genericAttention,
+                    installed,
+                    obsolete,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    cached,
+                    uninstalled,
+                    obsolete,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    cached,
+                    invalidIntegration,
+                    obsolete,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                    cached,
+                    installed,
+                    ambiguous,
+                    true),
+                Is.False);
+        }
+
+        [Test]
+        public void ReinstallCodeDB_OneConfirmedCommandRequestsOneReconcileOnlyAfterSuccess()
+        {
+            var commandCount = 0;
+            var reconcileCount = 0;
+            var success = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
+                    true,
+                    () =>
+                    {
+                        commandCount++;
+                        return Task.FromResult(new AICodedbCommandResult(
+                            0,
+                            "success",
+                            string.Empty,
+                            false));
+                    },
+                    () => reconcileCount++)
+                .GetAwaiter()
+                .GetResult();
+
+            Assert.That(success.Succeeded, Is.True);
+            Assert.That(commandCount, Is.EqualTo(1));
+            Assert.That(reconcileCount, Is.EqualTo(1));
+
+            commandCount = 0;
+            reconcileCount = 0;
+            var unconfirmed = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
+                    false,
+                    () =>
+                    {
+                        commandCount++;
+                        return Task.FromResult(new AICodedbCommandResult(
+                            0,
+                            "unexpected",
+                            string.Empty,
+                            false));
+                    },
+                    () => reconcileCount++)
+                .GetAwaiter()
+                .GetResult();
+            Assert.That(unconfirmed.Succeeded, Is.False);
+            Assert.That(commandCount, Is.Zero);
+            Assert.That(reconcileCount, Is.Zero);
+
+            var failure = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
+                    true,
+                    () =>
+                    {
+                        commandCount++;
+                        return Task.FromResult(new AICodedbCommandResult(
+                            4,
+                            string.Empty,
+                            "blocked",
+                            false));
+                    },
+                    () => reconcileCount++)
+                .GetAwaiter()
+                .GetResult();
+            Assert.That(failure.Succeeded, Is.False);
+            Assert.That(commandCount, Is.EqualTo(1));
+            Assert.That(reconcileCount, Is.Zero);
         }
 
         [Test]

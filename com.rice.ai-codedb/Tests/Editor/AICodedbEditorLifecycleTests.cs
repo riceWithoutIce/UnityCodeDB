@@ -250,6 +250,28 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void SupervisorProtocol_ReinstallSerializesOnlyExplicitMutationConfirmation()
+        {
+            var unconfirmed = AICodedbSupervisorProtocol.BuildCommandRequest(
+                "token",
+                "request-reinstall-unconfirmed",
+                "materialize",
+                "Reinstall",
+                null,
+                false);
+            var confirmed = AICodedbSupervisorProtocol.BuildCommandRequest(
+                "token",
+                "request-reinstall-confirmed",
+                "materialize",
+                "Reinstall",
+                null,
+                true);
+
+            Assert.That(unconfirmed, Does.Not.Contain("confirmed_project_mutation"));
+            Assert.That(confirmed, Does.Contain("\"confirmed_project_mutation\":true"));
+        }
+
+        [Test]
         public void SupervisorProtocol_RejectsUnsafeOrNonWindowsPipeIdentities()
         {
             string pipeName;
@@ -856,6 +878,20 @@ namespace Rice.AI.Codedb.Editor.Tests
                     null,
                     true);
                 Assert.That(confirmedInstall.OneShotFallbackAuthorized, Is.True);
+
+                var unconfirmedReinstall = bridge.SendCommand(
+                    _projectRoot,
+                    "materialize",
+                    "Reinstall");
+                Assert.That(unconfirmedReinstall.OneShotFallbackAuthorized, Is.False);
+
+                var confirmedReinstall = bridge.SendCommand(
+                    _projectRoot,
+                    "materialize",
+                    "Reinstall",
+                    null,
+                    true);
+                Assert.That(confirmedReinstall.OneShotFallbackAuthorized, Is.True);
 
                 var watcher = bridge.SendCommand(
                     _projectRoot,
@@ -2961,6 +2997,17 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
             Assert.That(productStatus.Detail, Is.EqualTo("invalid integration"));
             Assert.That(productStatus.RequiresReinstall, Is.False);
+        }
+
+        [Test]
+        public void LifecycleSource_NeverIssuesAutomaticReinstall()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbEditorLifecycle.cs"));
+
+            Assert.That(source, Does.Not.Contain("\"Reinstall\""));
         }
 
         private static AICodedbControlContractMigrationStatus CreateMigrationStatus(
