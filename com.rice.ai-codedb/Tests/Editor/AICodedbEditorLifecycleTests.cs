@@ -336,7 +336,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     runtime,
                     out var legacy),
                 Is.True);
-            Assert.That(legacy, Is.EqualTo("codedb-supervisor-f08a16463cf35b32cdab"));
+            Assert.That(legacy, Is.EqualTo("codedb-supervisor-928a30ffe326434cc56f"));
             Assert.That(
                 AICodedbSupervisorProtocol.IsExpectedSupervisorPipeName(
                     canonical,
@@ -508,7 +508,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorProtocol_StatusHandshakeRequiresIdentityAndReportsCoreReady()
         {
-            var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
+            var root = _projectRoot;
             var contract = ReadPackageRuntimeContract();
             var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
                 root,
@@ -535,7 +535,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.ProviderState, Is.EqualTo("ready"));
             Assert.That(snapshot.DesiredState, Is.EqualTo("enabled"));
             Assert.That(snapshot.EditorDemand, Is.EqualTo("online"));
-            Assert.That(snapshot.SupervisorSchemaVersion, Is.EqualTo(2));
+            Assert.That(snapshot.SupervisorSchemaVersion, Is.EqualTo(3));
             Assert.That(snapshot.TargetGenerationId, Is.EqualTo(contract.Target.GenerationId));
             Assert.That(snapshot.SelectedGenerationId, Is.EqualTo(contract.Target.GenerationId));
             Assert.That(snapshot.RuntimeContractSha256, Is.EqualTo(contract.Sha256));
@@ -545,8 +545,11 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorProtocol_StatusHandshakeBlocksWrongProjectIdentity()
         {
-            var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
-            var wrongRoot = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "OtherProject");
+            var root = _projectRoot;
+            var wrongRoot = Path.Combine(_projectRoot, "OtherProject");
+            Directory.CreateDirectory(Path.Combine(wrongRoot, "Assets"));
+            Directory.CreateDirectory(Path.Combine(wrongRoot, "Packages"));
+            Directory.CreateDirectory(Path.Combine(wrongRoot, "ProjectSettings"));
             var contract = ReadPackageRuntimeContract();
             var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
                 root,
@@ -639,7 +642,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void SupervisorProtocol_ReadyWithoutProviderHandshakeIsBlocked()
         {
-            var root = Path.Combine(Path.GetTempPath(), "CodeDB-Bridge-Fixture", "FixtureProject");
+            var root = _projectRoot;
             var contract = ReadPackageRuntimeContract();
             var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
                 root,

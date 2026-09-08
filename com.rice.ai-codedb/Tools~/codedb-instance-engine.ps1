@@ -1399,9 +1399,15 @@ function Invoke-InstanceActivationContractRecovery {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$StageRoot
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName,
+        [AllowNull()][string]$FreshInstallUninstallStateId,
+        [Parameter(Mandatory = $true)][ref]$RetainedPreviousInstance,
+        [Parameter(Mandatory = $true)][ref]$SupersededContractState
     )
 
+    $RetainedPreviousInstance.Value = $null
+    $SupersededContractState.Value = $null
     $state = $null
     $ordinaryStateError = $null
     try {
@@ -1424,6 +1430,63 @@ function Invoke-InstanceActivationContractRecovery {
         return $true
     }
     if ($state.Operation.Phase -eq "COMMITTED") {
+        if ($ActionName -eq "Install" -and -not [string]::IsNullOrWhiteSpace($FreshInstallUninstallStateId)) {
+            $desiredState = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+            if (-not $desiredState.Present -or
+                $desiredState.Legacy -or
+                $desiredState.DesiredState -ne "UNINSTALLED" -or
+                $desiredState.CleanupState -notin @("PENDING", "COMPLETE") -or
+                -not [string]::Equals($desiredState.StateId, $FreshInstallUninstallStateId, [StringComparison]::Ordinal)) {
+                throw "Fresh Install cannot supersede committed activation evidence without the exact authenticated UNINSTALLED desired state."
+            }
+            $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+            $lastKnownGood = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
+            if ($null -ne $current -or $null -ne $lastKnownGood) {
+                throw "Fresh Install cannot supersede committed activation evidence while a selected instance remains."
+            }
+            $retiredInstanceRoot = Get-InstanceProjectPath `
+                -ProjectRoot $ProjectRoot `
+                -RelativePath "$($script:InstancesRelativePath)/$($state.Operation.Candidate.instance_id)" `
+                -Label "retired committed instance root"
+            if ($desiredState.CleanupState -eq "PENDING") {
+                if ($null -ne $state.RetirementIntent) {
+                    throw "Pending fresh Install cannot replace a committed contract that already owns retirement evidence."
+                }
+                $retiredInstanceItem = $null
+                try {
+                    $retiredInstanceItem = Get-Item -LiteralPath $retiredInstanceRoot -Force -ErrorAction Stop
+                } catch [System.Management.Automation.ItemNotFoundException] {
+                    $retiredInstanceItem = $null
+                } catch {
+                    throw "Pending fresh Install could not prove the retained instance path state: $($_.Exception.Message)"
+                }
+                if ($null -eq $retiredInstanceItem) {
+                    $SupersededContractState.Value = $state
+                    Write-Host "[RECOVERY] Confirmed the committed pending-Uninstall instance is absent while preserving the remaining cleanup closure."
+                    return $true
+                }
+                $retainedPrevious = Get-ValidatedRetiredInstance `
+                    -ProjectRoot $ProjectRoot `
+                    -Manifest $Manifest `
+                    -InstanceRoot $retiredInstanceRoot
+                $retainedPrevious | Add-Member -NotePropertyName InstanceRelativePath -NotePropertyValue "$($script:InstancesRelativePath)/$($retainedPrevious.InstanceId)"
+                $retainedPrevious | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Get-FileSha256 -Path $retainedPrevious.ManifestPath)
+                $retainedEvidence = New-InstanceActivationSelectionEvidence -Instance $retainedPrevious -Context $state.Context
+                if (-not (Test-InstanceActivationEvidenceEqual -Left $retainedEvidence -Right $state.Operation.Candidate)) {
+                    throw "Pending fresh Install retained instance does not match committed activation evidence."
+                }
+                $RetainedPreviousInstance.Value = $retainedPrevious
+                $SupersededContractState.Value = $state
+                Write-Host "[RECOVERY] Retained the authenticated pending-Uninstall closure for the next activation transaction."
+                return $true
+            }
+            if (Test-Path -LiteralPath $retiredInstanceRoot) {
+                throw "Completed fresh Install cannot supersede activation evidence while its retired instance remains."
+            }
+            Remove-InstanceActivationContractAttempt -ContractState $state
+            Write-Host "[RECOVERY] Superseded completed activation evidence for the exact explicit fresh Install transition."
+            return $true
+        }
         $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         $selectedEvidence = New-InstanceActivationSelectionEvidence -Instance $selected -Context $state.Context
         if (-not (Test-InstanceActivationEvidenceEqual -Left $selectedEvidence -Right $state.Operation.Candidate)) {
@@ -3730,17 +3793,51 @@ function Invoke-InstanceConvergence {
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $null = Assert-MachinePrerequisiteForAction -Manifest $Manifest -ActionName $ActionName
-        $null = Invoke-InstanceActivationContractRecovery -Manifest $Manifest -ProjectRoot $ProjectRoot -StageRoot $lock.Root
+        $freshInstallUninstallStateId = if ($ActionName -eq "Install" -and
+            $desiredBefore.Present -and
+            -not $desiredBefore.Legacy -and
+            $desiredBefore.DesiredState -eq "UNINSTALLED" -and
+            $desiredBefore.CleanupState -in @("PENDING", "COMPLETE")) {
+            $desiredBefore.StateId
+        } else {
+            $null
+        }
+        $retainedPreviousInstance = $null
+        $supersededContractState = $null
+        $activationRecoveryParameters = @{
+            Manifest = $Manifest
+            ProjectRoot = $ProjectRoot
+            StageRoot = $lock.Root
+            ActionName = $ActionName
+            RetainedPreviousInstance = [ref]$retainedPreviousInstance
+            SupersededContractState = [ref]$supersededContractState
+        }
+        if (-not [string]::IsNullOrWhiteSpace($freshInstallUninstallStateId)) {
+            $activationRecoveryParameters.FreshInstallUninstallStateId = $freshInstallUninstallStateId
+        }
+        $null = Invoke-InstanceActivationContractRecovery @activationRecoveryParameters
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredLocked = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        if ($ActionName -eq "Install" -and $desiredLocked.DesiredState -ne "UNINSTALLED") {
+        $pendingInstallHandoff = $null -ne $supersededContractState
+        $expectedInstallCleanupState = if ($pendingInstallHandoff) { "PENDING" } else { "COMPLETE" }
+        if ($ActionName -eq "Install" -and
+            ($desiredLocked.DesiredState -ne "UNINSTALLED" -or
+             -not $desiredLocked.Present -or
+             $desiredLocked.Legacy -or
+             $desiredLocked.CleanupState -ne $expectedInstallCleanupState -or
+             [string]::IsNullOrWhiteSpace($freshInstallUninstallStateId) -or
+             -not [string]::Equals($desiredLocked.StateId, $freshInstallUninstallStateId, [StringComparison]::Ordinal))) {
             throw "Install desired state changed while waiting for the project operation lock."
         }
         if ($ActionName -ne "Install" -and $desiredLocked.DesiredState -eq "UNINSTALLED") {
             throw "$ActionName was cancelled because the project became UNINSTALLED while waiting for the lock."
         }
 
-        $previous = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $selectedPrevious = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if ($pendingInstallHandoff -and $null -ne $selectedPrevious) {
+            throw "Pending fresh Install cannot retain an old closure while a current selection exists."
+        }
+        $previous = if ($null -ne $retainedPreviousInstance) { $retainedPreviousInstance } else { $selectedPrevious }
         if ($ActionName -eq "Upgrade" -and $null -ne $previous -and
             [string]::Equals([string]$previous.GenerationDisposition, "CURRENT", [StringComparison]::Ordinal) -and
             (Get-RequiredJsonInt32 -Object $previous.Manifest -Name "payload_sequence" -Label "current instance manifest") -eq $Manifest.PayloadSequence) {
@@ -3811,6 +3908,58 @@ function Invoke-InstanceConvergence {
             -AllowMissing
         if ($ActionName -eq "Install") {
             Invoke-TestInstallAfterRepairHandshake
+        }
+        if ($pendingInstallHandoff) {
+            $desiredBeforeActivation = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+            if (-not $desiredBeforeActivation.Present -or
+                $desiredBeforeActivation.Legacy -or
+                $desiredBeforeActivation.DesiredState -ne "UNINSTALLED" -or
+                $desiredBeforeActivation.CleanupState -ne "PENDING" -or
+                -not [string]::Equals($desiredBeforeActivation.StateId, $freshInstallUninstallStateId, [StringComparison]::Ordinal)) {
+                throw "Pending fresh Install state changed before activation."
+            }
+            $contractBeforeActivation = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+            if ($null -eq $contractBeforeActivation -or
+                $contractBeforeActivation.Operation.Phase -ne "COMMITTED" -or
+                $null -ne $contractBeforeActivation.RetirementIntent -or
+                -not [string]::Equals($contractBeforeActivation.Activation.Sha256, $supersededContractState.Activation.Sha256, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($contractBeforeActivation.Operation.Sha256, $supersededContractState.Operation.Sha256, [StringComparison]::Ordinal)) {
+                throw "Pending fresh Install committed activation authority changed before handoff."
+            }
+            $currentBeforeActivation = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+            $lastKnownGoodBeforeActivation = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
+            if ($null -ne $currentBeforeActivation -or $null -ne $lastKnownGoodBeforeActivation) {
+                throw "Pending fresh Install selection changed before activation."
+            }
+            if ($null -ne $retainedPreviousInstance) {
+                $retainedBeforeActivation = Get-ValidatedRetiredInstance `
+                    -ProjectRoot $ProjectRoot `
+                    -Manifest $Manifest `
+                    -InstanceRoot $retainedPreviousInstance.InstanceRoot
+                $retainedBeforeActivation | Add-Member -NotePropertyName InstanceRelativePath -NotePropertyValue $retainedPreviousInstance.InstanceRelativePath
+                $retainedBeforeActivation | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Get-FileSha256 -Path $retainedBeforeActivation.ManifestPath)
+                $retainedEvidenceBeforeActivation = New-InstanceActivationSelectionEvidence -Instance $retainedBeforeActivation -Context $contractBeforeActivation.Context
+                if (-not (Test-InstanceActivationEvidenceEqual -Left $retainedEvidenceBeforeActivation -Right $contractBeforeActivation.Operation.Candidate)) {
+                    throw "Pending fresh Install retained closure changed before activation."
+                }
+            } else {
+                $absentInstanceRoot = Get-InstanceProjectPath `
+                    -ProjectRoot $ProjectRoot `
+                    -RelativePath "$($script:InstancesRelativePath)/$($contractBeforeActivation.Operation.Candidate.instance_id)" `
+                    -Label "absent retired committed instance root"
+                $absentInstanceItem = $null
+                try {
+                    $absentInstanceItem = Get-Item -LiteralPath $absentInstanceRoot -Force -ErrorAction Stop
+                } catch [System.Management.Automation.ItemNotFoundException] {
+                    $absentInstanceItem = $null
+                } catch {
+                    throw "Pending fresh Install could not recheck the absent instance path: $($_.Exception.Message)"
+                }
+                if ($null -ne $absentInstanceItem) {
+                    throw "Pending fresh Install absent instance variant changed before activation."
+                }
+            }
+            Remove-InstanceActivationContractAttempt -ContractState $contractBeforeActivation
         }
         Set-MaterializerCommandPhase -Phase "ACTIVATION"
         $verification = {

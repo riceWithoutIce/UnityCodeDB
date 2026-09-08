@@ -5702,11 +5702,33 @@ function Invoke-UninstallAcceptanceScenarios {
     Assert-True -Condition ($installedAfter.Contains("[$targetTable.tools.codedb_text_search]")) -Message "Install changed the target tools descendant."
     Assert-True -Condition ($installedAfter.Contains('command = "node"')) -Message "Install did not restore managed MCP keys."
     Assert-Equal -Actual $installedAfter -Expected $installedConfig -Message "Install did not restore the exact pre-Uninstall target namespace bytes."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path (Join-Path $uninstallHostRoot "Assets\BusinessSentinel.txt")) -Expected $businessBefore -Message "Install changed a business file."
+
+    $installedSelectionBytes = [System.IO.File]::ReadAllBytes($instanceCurrentPath)
+    $installedSelectionSha256 = (Get-FileHash -LiteralPath $instanceCurrentPath -Algorithm SHA256).Hash
+    $activationContractRoot = Get-PathFromRelative `
+        -Root $uninstallHostRoot `
+        -RelativePath ("AIWork/.runtime/codedb/control/contracts/{0}/v{1}" -f [string]$canonicalPayloadManifest.control_contract.id, [int]$canonicalPayloadManifest.control_contract.version)
+    $activationContractBeforeMissingSelection = Get-FileSnapshot -Root $activationContractRoot
+    Remove-Item -LiteralPath $instanceCurrentPath -Force
+    $projectBeforeMissingSelectionRefusal = Get-FileSnapshot -Root $uninstallHostRoot
+    try {
+        $missingSelectionUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+        Assert-Result -Result $missingSelectionUpgrade -ExitCode 6 -Label "Installed missing-selection refusal"
+        Assert-True -Condition ($missingSelectionUpgrade.Text.Contains("Current CodeDB instance selection is missing.")) -Message "Ordinary installed recovery did not fail closed on a missing current selection."
+        Assert-True -Condition (-not (Test-Path -LiteralPath $instanceCurrentPath)) -Message "Rejected missing-selection recovery synthesized a current selection."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $activationContractRoot) -Expected $activationContractBeforeMissingSelection -Message "Rejected missing-selection recovery changed committed activation evidence."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $projectBeforeMissingSelectionRefusal -Message "Rejected missing-selection recovery changed the project."
+    } finally {
+        [System.IO.File]::WriteAllBytes($instanceCurrentPath, $installedSelectionBytes)
+    }
+    Assert-Equal -Actual (Get-FileHash -LiteralPath $instanceCurrentPath -Algorithm SHA256).Hash -Expected $installedSelectionSha256 -Message "Missing-selection regression fixture did not restore current selection bytes."
+
     $repeatInstallBefore = Get-FileSnapshot -Root $uninstallHostRoot
     $repeatInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $repeatInstall -ExitCode 4 -Label "Installed-state Install refusal"
     Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $repeatInstallBefore -Message "Refused repeated Install changed the project."
-    Write-Host "[OK] Complete Uninstall, repeated Uninstall, suppression, and fresh Install converged without changing user-owned MCP content."
+    Write-Host "[OK] Complete Uninstall, repeated Uninstall, suppression, fresh Install recovery, and ordinary missing-selection refusal preserved user-owned MCP content."
 
     $childFirstText = @(
         "# child-first sentinel",
@@ -5844,11 +5866,17 @@ function Invoke-UninstallAcceptanceScenarios {
     Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Cleanup/Install interleaving terminated the external owner process."
     Write-Host "[OK] Cleanup held one lock from MCP removal through Host cleanup; waiting Install restored Host only after cleanup completed."
 
+    $installBoundaryPreviousSelection = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
+    $installBoundaryPreviousInstanceRoot = Join-Path $instancesRoot ([string]$installBoundaryPreviousSelection.instance_id)
     $installBoundaryLease = New-TestGenerationLease -Owner "mcp" -Root $uninstallHostRoot
     $installBoundaryUninstall = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $installBoundaryUninstall -ExitCode 0 -Label "Install-boundary pending Uninstall"
     Assert-True -Condition ($installBoundaryUninstall.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Install-boundary fixture did not retain an external closure."
-    Remove-Item -LiteralPath $installBoundaryLease -Force
+    Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install-boundary fixture did not remove the holder-free prior instance."
+    $installBoundaryLeaseBefore = Get-ByteSnapshot -Path $installBoundaryLease
+    $installBoundaryGenerationBefore = Get-FileSnapshot -Root $generationRoot
+    $installBoundaryRetirementsRoot = Join-Path $activationContractRoot "retirements"
+    $installBoundaryRetirementsBefore = Get-FileSnapshot -Root $installBoundaryRetirementsRoot
     $installReadyName = "RiceAICodeDBInstallReady$([guid]::NewGuid().ToString('N'))"
     $installContinueName = "RiceAICodeDBInstallContinue$([guid]::NewGuid().ToString('N'))"
     $installReady = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $installReadyName)
@@ -5863,11 +5891,31 @@ function Invoke-UninstallAcceptanceScenarios {
             -TargetProjectRoot $uninstallHostRoot `
             -ReadyEventName $installReadyName `
             -ContinueEventName $installContinueName
-        Assert-True -Condition $installReady.WaitOne(30000) -Message "Install did not pause between candidate verification and atomic activation."
+        $installReadyObserved = $installReady.WaitOne(30000)
+        if (-not $installReadyObserved) {
+            $installExitedAtWaitFailure = $installInvocation.Process.HasExited
+            $installReadySignaledAfterWait = $installReady.WaitOne(0)
+            $installContinueSignaledAtWaitFailure = $installContinue.WaitOne(0)
+            if ($installExitedAtWaitFailure) {
+                $installInvocation.Process.WaitForExit()
+                $installExitCode = $installInvocation.Process.ExitCode
+                $installStdout = [string]$installInvocation.StdoutTask.Result
+                $installStderr = [string]$installInvocation.StderrTask.Result
+                $installInvocation.Process.Dispose()
+                $installInvocation = $null
+                Assert-True -Condition $false -Message "Install did not pause between candidate verification and atomic activation.`nchild_status=exited`nready_wait_result=False`nready_event_signaled_after_wait=$installReadySignaledAfterWait`ncontinue_event_signaled_at_wait_failure=$installContinueSignaledAtWaitFailure`nexit_code=$installExitCode`nstdout_begin`n$installStdout`nstdout_end`nstderr_begin`n$installStderr`nstderr_end"
+            }
+
+            Assert-True -Condition $false -Message "Install did not pause between candidate verification and atomic activation.`nchild_status=running`nprocess_id=$($installInvocation.Process.Id)`nhas_exited_at_wait_failure=False`nready_wait_result=False`nready_event_signaled_after_wait=$installReadySignaledAfterWait`ncontinue_event_signaled_at_wait_failure=$installContinueSignaledAtWaitFailure"
+        }
         Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message "Install candidate unexpectedly published a legacy marker before activation."
         $installBoundaryState = [System.IO.File]::ReadAllText($desiredStatePath, $utf8NoBom) | ConvertFrom-Json
         Assert-Equal -Actual ([string]$installBoundaryState.desired_state) -Expected "UNINSTALLED" -Message "Install changed desired state before atomic activation."
         Assert-True -Condition (-not (Test-Path -LiteralPath $instanceCurrentPath)) -Message "Install selected the candidate before its activation boundary."
+        Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install candidate verification recreated the absent prior instance."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $installBoundaryLease) -Expected $installBoundaryLeaseBefore -Message "Install candidate verification changed the retained generation lease."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $generationRoot) -Expected $installBoundaryGenerationBefore -Message "Install candidate verification changed the retained generation."
+        Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Install candidate verification terminated the generation lease owner."
         $obsoleteCleanupInvocation = Start-AsyncMaterializerInvocation `
             -Action "Upgrade" `
             -PayloadRoot $canonicalPayloadRoot `
@@ -5900,8 +5948,15 @@ function Invoke-UninstallAcceptanceScenarios {
     Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message "Obsolete cleanup caused Install to publish a legacy marker."
     Assert-True -Condition (Test-Path -LiteralPath $generationRoot -PathType Container) -Message "Obsolete cleanup deleted the installed generation after activation."
     Assert-True -Condition (Test-Path -LiteralPath $instanceCurrentPath -PathType Leaf) -Message "Obsolete cleanup deleted the selected instance after Install."
+    $installBoundaryCurrentSelection = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
+    Assert-True -Condition (-not [string]::Equals([string]$installBoundaryCurrentSelection.instance_id, [string]$installBoundaryPreviousSelection.instance_id, [StringComparison]::Ordinal)) -Message "Pending-Uninstall Install reused the retained instance identity."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install or obsolete cleanup recreated the absent prior instance."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $installBoundaryLease) -Expected $installBoundaryLeaseBefore -Message "Install or obsolete cleanup changed the retained generation lease."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $generationRoot) -Expected $installBoundaryGenerationBefore -Message "Install or obsolete cleanup changed the retained generation."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $installBoundaryRetirementsRoot) -Expected $installBoundaryRetirementsBefore -Message "Install minted retirement authority for the absent prior instance."
     Assert-Equal -Actual ([System.IO.File]::ReadAllText($configPath, $utf8NoBom)) -Expected $installedConfig -Message "Install/cleanup interleaving changed restored MCP namespace bytes."
     Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Install/cleanup interleaving terminated the external owner process."
+    Remove-Item -LiteralPath $installBoundaryLease -Force
     Write-Host "[OK] Install held one lock through candidate activation and desired-state transition; the waiting old cleanup exited without deleting the selected instance or MCP state."
 
     $watcherManager = Get-PathFromRelative `

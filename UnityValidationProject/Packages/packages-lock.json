@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "com.rice.ai-codedb": {
-      "version": "file:../com.rice.ai-codedb",
+      "version": "file:../../com.rice.ai-codedb",
       "depth": 0,
       "source": "local",
       "dependencies": {}
