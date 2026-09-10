@@ -56,6 +56,8 @@ namespace Rice.AI.Codedb.Editor
         internal string SelectedGenerationId { get; }
         internal string RuntimeContractSha256 { get; }
         internal string GenerationDisposition { get; }
+        internal int SupervisorProcessId { get; }
+        internal string SelectedInstanceId { get; }
         internal DateTimeOffset ObservedAtUtc { get; }
 
         internal bool IsConnected => ConnectionState == AICodedbSupervisorConnectionState.Connected;
@@ -86,7 +88,9 @@ namespace Rice.AI.Codedb.Editor
             string targetGenerationId = "",
             string selectedGenerationId = "",
             string runtimeContractSha256 = "",
-            string generationDisposition = "")
+            string generationDisposition = "",
+            int supervisorProcessId = 0,
+            string selectedInstanceId = "")
         {
             ConnectionState = connectionState;
             ProtocolVersion = protocolVersion;
@@ -109,6 +113,8 @@ namespace Rice.AI.Codedb.Editor
             SelectedGenerationId = selectedGenerationId ?? string.Empty;
             RuntimeContractSha256 = runtimeContractSha256 ?? string.Empty;
             GenerationDisposition = generationDisposition ?? string.Empty;
+            SupervisorProcessId = supervisorProcessId;
+            SelectedInstanceId = selectedInstanceId ?? string.Empty;
             ObservedAtUtc = DateTimeOffset.UtcNow;
         }
 
@@ -215,7 +221,9 @@ namespace Rice.AI.Codedb.Editor
             string targetGenerationId,
             string selectedGenerationId,
             string runtimeContractSha256,
-            string generationDisposition)
+            string generationDisposition,
+            int supervisorProcessId,
+            string selectedInstanceId)
         {
             return new AICodedbSupervisorSnapshot(
                 AICodedbSupervisorConnectionState.Connected,
@@ -238,7 +246,9 @@ namespace Rice.AI.Codedb.Editor
                 targetGenerationId,
                 selectedGenerationId,
                 runtimeContractSha256,
-                generationDisposition);
+                generationDisposition,
+                supervisorProcessId,
+                selectedInstanceId);
         }
     }
 
@@ -802,6 +812,7 @@ namespace Rice.AI.Codedb.Editor
             internal string AuthToken { get; }
             internal string TargetGenerationId { get; }
             internal string SelectedGenerationId { get; }
+            internal string SelectedInstanceId { get; }
             internal string RuntimeContractSha256 { get; }
             internal AICodedbControlContractIdentity ControlContract { get; }
             internal string GenerationDisposition { get; }
@@ -818,6 +829,7 @@ namespace Rice.AI.Codedb.Editor
                 string authToken,
                 string targetGenerationId,
                 string selectedGenerationId,
+                string selectedInstanceId,
                 string runtimeContractSha256,
                 AICodedbControlContractIdentity controlContract,
                 string generationDisposition,
@@ -833,6 +845,7 @@ namespace Rice.AI.Codedb.Editor
                 AuthToken = authToken;
                 TargetGenerationId = targetGenerationId;
                 SelectedGenerationId = selectedGenerationId;
+                SelectedInstanceId = selectedInstanceId ?? string.Empty;
                 RuntimeContractSha256 = runtimeContractSha256;
                 ControlContract = controlContract;
                 GenerationDisposition = generationDisposition;
@@ -900,8 +913,11 @@ namespace Rice.AI.Codedb.Editor
             string command,
             string action = null,
             string expectedLifecycleId = null,
-            bool confirmedProjectMutation = false)
+            bool confirmedProjectMutation = false,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
+            if (cancellationToken.IsCancellationRequested)
+                return Task.FromCanceled<AICodedbSupervisorCommandResponse>(cancellationToken);
             if (string.IsNullOrWhiteSpace(projectRoot))
             {
                 return Task.FromResult(new AICodedbSupervisorCommandResponse(
@@ -923,7 +939,8 @@ namespace Rice.AI.Codedb.Editor
                     action,
                     expectedLifecycleId,
                     confirmedProjectMutation,
-                    CancellationToken.None));
+                    cancellationToken),
+                cancellationToken);
         }
 
         /// <summary>
@@ -1068,6 +1085,10 @@ namespace Rice.AI.Codedb.Editor
             string projectRoot,
             CancellationToken cancellationToken)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Process);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
             try
             {
@@ -1084,6 +1105,7 @@ namespace Rice.AI.Codedb.Editor
                         "No current CodeDB instance is selected.");
                 }
 
+                AICodedbLifecycleEvidence.RecordSupervisorEnsure(!stateExistedBeforeLaunch);
                 var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
                         context,
                         cancellationToken)
@@ -1173,7 +1195,9 @@ namespace Rice.AI.Codedb.Editor
                     identity.RuntimeContractSha256,
                     identity.GenerationDisposition,
                     identity.Runtime,
-                    identity.ControlContract);
+                    identity.ControlContract,
+                    identity.SelectedInstanceId,
+                    identity.SupervisorProcessId);
             }
             catch (OperationCanceledException)
             {
@@ -1501,6 +1525,7 @@ namespace Rice.AI.Codedb.Editor
                 authToken,
                 targetGenerationId,
                 selectedGenerationId,
+                selectedInstanceId,
                 runtimeContractSha256,
                 runtimeContract.ControlContract,
                 generationDisposition,
@@ -1595,6 +1620,9 @@ namespace Rice.AI.Codedb.Editor
             CancellationToken cancellationToken,
             bool startIfMissing = true)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
             try
             {
                 var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
@@ -1685,6 +1713,8 @@ namespace Rice.AI.Codedb.Editor
                                 startIfMissing));
                     }
 
+                    AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Process);
+                    AICodedbLifecycleEvidence.RecordSupervisorEnsure(!stateExistedBeforeLaunch);
                     var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
                             context,
                             cancellationToken)
@@ -1781,7 +1811,9 @@ namespace Rice.AI.Codedb.Editor
                         identity.RuntimeContractSha256,
                         identity.GenerationDisposition,
                         identity.Runtime,
-                        identity.ControlContract);
+                        identity.ControlContract,
+                        identity.SelectedInstanceId,
+                        identity.SupervisorProcessId);
                     eventName = AICodedbStrictJson.GetOptionalNullableString(status, "last_event", "CodeDB Supervisor command status") ?? string.Empty;
                     eventSequence = AICodedbStrictJson.GetOptionalNullableInt32(status, "event_sequence", "CodeDB Supervisor command status") ?? 0;
                 }
@@ -1998,7 +2030,9 @@ namespace Rice.AI.Codedb.Editor
                 identity.RuntimeContractSha256,
                 identity.GenerationDisposition,
                 identity.Runtime,
-                identity.ControlContract);
+                identity.ControlContract,
+                identity.SelectedInstanceId,
+                identity.SupervisorProcessId);
             lock (_gate)
             {
                 if (!_disposed)
@@ -2422,7 +2456,9 @@ namespace Rice.AI.Codedb.Editor
             string expectedRuntimeContractSha256,
             string expectedGenerationDisposition,
             string expectedRuntime,
-            AICodedbControlContractIdentity expectedControlContract)
+            AICodedbControlContractIdentity expectedControlContract,
+            string expectedSelectedInstanceId = null,
+            int expectedSupervisorProcessId = 0)
         {
             var response = AICodedbStrictJson.ParseObject(responseLine, "CodeDB Supervisor response");
             if (!AICodedbStrictJson.GetRequiredBoolean(response, "ok", "CodeDB Supervisor response"))
@@ -2506,6 +2542,26 @@ namespace Rice.AI.Codedb.Editor
                 status,
                 "selected_generation_id",
                 "CodeDB Supervisor status");
+            var selectedInstanceId = AICodedbStrictJson.GetRequiredString(
+                status,
+                "selected_instance_id",
+                "CodeDB Supervisor status");
+            var supervisorProcessId = AICodedbStrictJson.GetRequiredInt32(
+                status,
+                "supervisor_pid",
+                "CodeDB Supervisor status");
+            Guid parsedSelectedInstanceId;
+            if (supervisorProcessId <= 0
+                || !Guid.TryParseExact(selectedInstanceId, "N", out parsedSelectedInstanceId)
+                || !string.Equals(
+                    selectedInstanceId,
+                    selectedInstanceId.ToLowerInvariant(),
+                    StringComparison.Ordinal))
+            {
+                return AICodedbSupervisorSnapshot.Blocked(
+                    "SUPERVISOR_IDENTITY_MISMATCH",
+                    "The Supervisor status contains an invalid process or selected-instance identity.");
+            }
             var runtimeContractSha256 = AICodedbStrictJson.GetRequiredString(
                 status,
                 "runtime_contract_sha256",
@@ -2567,7 +2623,10 @@ namespace Rice.AI.Codedb.Editor
                     controlContractSha256,
                     expectedControlContract.Sha256,
                     StringComparison.OrdinalIgnoreCase)
-                || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, expectedControlNamespace))
+                || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, expectedControlNamespace)
+                || (!string.IsNullOrWhiteSpace(expectedSelectedInstanceId)
+                    && !string.Equals(selectedInstanceId, expectedSelectedInstanceId, StringComparison.Ordinal))
+                || (expectedSupervisorProcessId > 0 && supervisorProcessId != expectedSupervisorProcessId))
             {
                 return AICodedbSupervisorSnapshot.Blocked(
                     "SUPERVISOR_IDENTITY_MISMATCH",
@@ -2709,7 +2768,9 @@ namespace Rice.AI.Codedb.Editor
                 targetGenerationId,
                 selectedGenerationId,
                 runtimeContractSha256,
-                generationDisposition);
+                generationDisposition,
+                supervisorProcessId,
+                selectedInstanceId);
         }
     }
 }

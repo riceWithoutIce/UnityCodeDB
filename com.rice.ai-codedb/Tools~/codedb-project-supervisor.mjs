@@ -1227,10 +1227,16 @@ async function runDaemon(raw) {
       if (!["DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install"].includes(action)) {
         return { ok: false, error_code: "INVALID_ARGUMENT", error: "Unsupported materializer action." };
       }
+      const runAdmittedMaterializer = action === "Probe" || action === "Upgrade"
+        ? async (value) => {
+            await ensureCoordinator(context, value);
+            return runMaterializer(context, action, request, value);
+          }
+        : (value) => runMaterializer(context, action, request, value);
       return admitMaintenance(
         `materialize:${action}`,
         request,
-        (value) => runMaterializer(context, action, request, value));
+        runAdmittedMaterializer);
     }
     if (name === "shutdown") {
       if (shuttingDown) return { ok: true, status: publicStatus(state, coordinatorStatus) };

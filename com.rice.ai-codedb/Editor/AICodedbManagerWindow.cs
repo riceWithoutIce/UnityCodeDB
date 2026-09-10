@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -105,6 +106,9 @@ namespace Rice.AI.Codedb.Editor
         private bool _watcherStatusLoaded;
         private bool _watcherRefreshScheduled;
         private bool _hostStatusRefreshInFlight;
+        private int _hostStatusRefreshGeneration;
+        private int _windowStatusGeneration;
+        private CancellationTokenSource _windowStatusCancellation;
         private long _cachedLifecycleStatusRevision = -1;
         private bool _watcherStatusRefreshInFlight;
         private bool _userActionInFlight;
@@ -136,41 +140,50 @@ namespace Rice.AI.Codedb.Editor
 
         internal static void Open(AICodedbManagerTab tab)
         {
-            var window = GetWindow<AICodedbManagerWindow>(false, "CodeDB Manager");
-            window.ApplyWindowTitle();
-            window.minSize = new Vector2(900f, 460f);
-            window._selectedTab = (int)tab;
-            window.Show();
-            window.BeginStatusRefresh();
-            if (tab == AICodedbManagerTab.Index)
-                window.ScheduleWatcherStatusRefresh();
-            window.Repaint();
+            using (AICodedbLifecycleEvidence.BeginCallback(AICodedbLifecycleCallbackKind.ManagerOpen))
+            {
+                AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.Open);
+                var window = GetWindow<AICodedbManagerWindow>(false, "CodeDB Manager");
+                window.ApplyWindowTitle();
+                window.minSize = new Vector2(900f, 460f);
+                window._selectedTab = (int)tab;
+                window.Show();
+                window.BeginStatusRefresh();
+                window.Repaint();
+            }
         }
 
         private void OnEnable()
         {
-            _executionContext = AICodedbPaths.CaptureExecutionContext();
-            ApplyWindowTitle();
-            _activitySidebarWidth = EditorPrefs.GetFloat(
-                ActivitySidebarWidthPrefsKey,
-                AICodedbManagerLayout.ActivityDefaultWidth);
-            _activityPanel = new AICodedbActivityPanel();
-            _userActionStatus = new AICodedbUserActionStatus();
-            _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
-            _watcherStatusLoaded = false;
-            EditorApplication.update -= ObserveTransientHostStatus;
-            EditorApplication.update += ObserveTransientHostStatus;
-            EditorApplication.playModeStateChanged -= OnManagerPlayModeStateChanged;
-            EditorApplication.playModeStateChanged += OnManagerPlayModeStateChanged;
-            RefreshStatus();
-            if (IsPlayModeDisplaySuspended())
-                SchedulePlayModeRestore();
-            _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + 1d;
-            BeginStatusRefresh();
+            using (AICodedbLifecycleEvidence.BeginCallback(AICodedbLifecycleCallbackKind.ManagerEnable))
+            {
+                ResetWindowStatusLifetime();
+                AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.Enable);
+                _executionContext = AICodedbPaths.CaptureExecutionContext();
+                ApplyWindowTitle();
+                _activitySidebarWidth = EditorPrefs.GetFloat(
+                    ActivitySidebarWidthPrefsKey,
+                    AICodedbManagerLayout.ActivityDefaultWidth);
+                _activityPanel = new AICodedbActivityPanel();
+                _userActionStatus = new AICodedbUserActionStatus();
+                _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
+                _watcherStatusLoaded = false;
+                EditorApplication.update -= ObserveTransientHostStatus;
+                EditorApplication.update += ObserveTransientHostStatus;
+                EditorApplication.playModeStateChanged -= OnManagerPlayModeStateChanged;
+                EditorApplication.playModeStateChanged += OnManagerPlayModeStateChanged;
+                RefreshStatus();
+                if (IsPlayModeDisplaySuspended())
+                    SchedulePlayModeRestore();
+                _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + 1d;
+                BeginStatusRefresh();
+            }
         }
 
         private void OnDisable()
         {
+            AICodedbLifecycleEvidence.RecordManagerClosed();
+            CancelWindowStatusLifetime();
             EditorApplication.update -= ObserveTransientHostStatus;
             EditorApplication.playModeStateChanged -= OnManagerPlayModeStateChanged;
             if (_watcherRefreshScheduled)
@@ -181,18 +194,65 @@ namespace Rice.AI.Codedb.Editor
             _playModeRestoreScheduled = false;
         }
 
+        private void ResetWindowStatusLifetime()
+        {
+            CancelWindowStatusLifetime();
+            _windowStatusCancellation = new CancellationTokenSource();
+            _cachedLifecycleStatusRevision = -1;
+        }
+
+        private void CancelWindowStatusLifetime()
+        {
+            unchecked
+            {
+                _windowStatusGeneration++;
+            }
+            var cancellation = _windowStatusCancellation;
+            _windowStatusCancellation = null;
+            if (cancellation != null)
+            {
+                cancellation.Cancel();
+                // The captured token can still be consumed by Bridge and
+                // snapshot workers after OnDisable returns. Let the detached
+                // source be collected with those workers instead of disposing
+                // their cancellation registration boundary prematurely.
+            }
+            _hostStatusRefreshInFlight = false;
+            _hostStatusRefreshGeneration = _windowStatusGeneration;
+        }
+
+        private bool TryCaptureWindowStatusLifetime(
+            out int generation,
+            out CancellationToken cancellationToken)
+        {
+            generation = _windowStatusGeneration;
+            var cancellation = _windowStatusCancellation;
+            if (cancellation == null || cancellation.IsCancellationRequested)
+            {
+                cancellationToken = new CancellationToken(true);
+                return false;
+            }
+
+            cancellationToken = cancellation.Token;
+            return true;
+        }
+
         private void OnGUI()
         {
-            // Domain Reload can recreate the IMGUI window before the
-            // play-mode callback has published its SessionState handoff. The
-            // restore is display-only and makes every repaint self-healing.
-            if (IsPlayModeDisplaySuspended())
-                RestoreReadySnapshotForPlayMode();
-            if (_statusSnapshot == null)
-                RefreshStatus();
+            using (AICodedbLifecycleEvidence.BeginCallback(AICodedbLifecycleCallbackKind.ManagerGui))
+            {
+                AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.Repaint);
+                // Domain Reload can recreate the IMGUI window before the
+                // play-mode callback has published its SessionState handoff. The
+                // restore is display-only and makes every repaint self-healing.
+                if (IsPlayModeDisplaySuspended())
+                    RestoreReadySnapshotForPlayMode();
+                if (_statusSnapshot == null)
+                    RefreshStatus();
 
-            DrawHeader();
-            DrawBodyLayout();
+                DrawHeader();
+                DrawBodyLayout();
+            }
         }
 
         private void DrawBodyLayout()
@@ -262,11 +322,18 @@ namespace Rice.AI.Codedb.Editor
                 {
                     _statusSnapshot = AICodedbStatusSnapshot.CreateCachedState(
                         _executionContext.ProjectDisplayName,
-                        persistedState);
+                        persistedState,
+                        AICodedbEditorLifecycle.IsReconcileInFlight);
                 }
             }
-            _statusSnapshot = _statusSnapshot
-                ?? AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName);
+            if (_statusSnapshot == null)
+            {
+                _statusSnapshot = AICodedbEditorLifecycle.IsReconcileInFlight
+                    ? AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName)
+                    : AICodedbStatusSnapshot.CreateCachedState(
+                        _executionContext.ProjectDisplayName,
+                        AICodedbProductState.Starting);
+            }
             // A cached Ready snapshot is still a verified observation. Record
             // it before Play can trigger a domain reload, even when the
             // lifecycle worker's most recent result is still Starting.
@@ -283,6 +350,9 @@ namespace Rice.AI.Codedb.Editor
                 return;
             }
             var initializeDisclosures = _statusSnapshot == null;
+            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.Hash);
+            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.FullStatus);
             _statusSnapshot = AICodedbStatusSnapshot.Refresh(hostPayloadResult);
             ApplyStatusSnapshot(_statusSnapshot, true, initializeDisclosures);
         }
@@ -311,15 +381,11 @@ namespace Rice.AI.Codedb.Editor
                 && !EditorApplication.isUpdating
                 && !IsPlayModeDisplaySuspended())
             {
-                _transientStatusRefreshPending = false;
-                // Play-mode resume is owned by the lifecycle worker. Do not
-                // launch a second materializer from the Manager's update
-                // callback; that duplicates backend startup and can race the
-                // worker's post-Play recovery. The request only schedules the
-                // existing background pass, whose cached result is consumed
-                // above on a later editor frame.
-                AICodedbEditorLifecycle.RequestBackgroundStatusObservation();
-                TryApplyCachedLifecycleStatus();
+                // Play-mode resume is owned by the lifecycle worker. Manager
+                // update ticks remain cache-only and retry the in-memory read
+                // after a bounded delay instead of requesting backend work.
+                _nextTransientStatusRefreshAt =
+                    EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
                 return;
             }
 
@@ -348,21 +414,27 @@ namespace Rice.AI.Codedb.Editor
                 return;
 
             _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRefreshSeconds;
-            AICodedbEditorLifecycle.RequestBackgroundStatusObservation();
         }
 
         private async void RefreshTransientHostStatusAsync()
         {
-            if (_hostStatusRefreshInFlight)
+            if (_hostStatusRefreshInFlight
+                || !TryCaptureWindowStatusLifetime(
+                    out var windowStatusGeneration,
+                    out var cancellationToken))
                 return;
             _hostStatusRefreshInFlight = true;
+            _hostStatusRefreshGeneration = windowStatusGeneration;
+            AICodedbLifecycleEvidence.RecordManagerStatusRefreshStarted();
+            var disposition = AICodedbManagerStatusRefreshDisposition.Failed;
             var playModeStatusGeneration = _playModeStatusGeneration;
             try
             {
                 var result = await AICodedbEditorLifecycle.RunSupervisorCommandAsync(
                     "materialize",
                     "Probe",
-                    false);
+                    false,
+                    cancellationToken);
                 if (result != null
                     && AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(result))
                 {
@@ -378,11 +450,22 @@ namespace Rice.AI.Codedb.Editor
                         "The project Supervisor returned no status response; fallback was not authorized.",
                         false);
                 }
-                var snapshot = await AICodedbStatusSnapshot.RefreshAsync(_executionContext, result);
-                if (this == null || _userActionInFlight)
+                var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
+                    _executionContext,
+                    result,
+                    cancellationToken);
+                if (this == null
+                    || _userActionInFlight
+                    || windowStatusGeneration != _windowStatusGeneration
+                    || cancellationToken.IsCancellationRequested)
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
                     return;
-
+                }
                 if (!ShouldApplyStatusRefreshResult(
+                        windowStatusGeneration,
+                        _windowStatusGeneration,
+                        cancellationToken.IsCancellationRequested,
                         playModeStatusGeneration,
                         _playModeStatusGeneration,
                         IsPlayModeDisplaySuspended()))
@@ -394,6 +477,7 @@ namespace Rice.AI.Codedb.Editor
                         _transientStatusRefreshPending = true;
                         _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
                     }
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
                     return;
                 }
 
@@ -415,6 +499,7 @@ namespace Rice.AI.Codedb.Editor
                     _transientStatusRefreshAttempts++;
                     _transientStatusRefreshPending = true;
                     _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
+                    disposition = AICodedbManagerStatusRefreshDisposition.Completed;
                     return;
                 }
 
@@ -448,6 +533,7 @@ namespace Rice.AI.Codedb.Editor
                     _transientStatusRefreshAttempts++;
                     _transientStatusRefreshPending = true;
                     _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRetrySeconds;
+                    disposition = AICodedbManagerStatusRefreshDisposition.Completed;
                     return;
                 }
 
@@ -455,6 +541,11 @@ namespace Rice.AI.Codedb.Editor
                 _transientStatusRefreshPending = false;
                 ApplyStatusSnapshot(snapshot, true, false);
                 Repaint();
+                disposition = AICodedbManagerStatusRefreshDisposition.Completed;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
             }
             catch (Exception exception)
             {
@@ -463,7 +554,14 @@ namespace Rice.AI.Codedb.Editor
             }
             finally
             {
-                _hostStatusRefreshInFlight = false;
+                if (windowStatusGeneration != _windowStatusGeneration
+                    || cancellationToken.IsCancellationRequested)
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+                }
+                AICodedbLifecycleEvidence.RecordManagerStatusRefreshFinished(disposition);
+                if (_hostStatusRefreshGeneration == windowStatusGeneration)
+                    _hostStatusRefreshInFlight = false;
             }
         }
 
@@ -490,27 +588,64 @@ namespace Rice.AI.Codedb.Editor
 
         private async Task RefreshStatusAsync(AICodedbCommandResult hostPayloadResult)
         {
-            var playModeStatusGeneration = _playModeStatusGeneration;
-            var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
-                _executionContext,
-                hostPayloadResult);
-            if (this == null)
-                return;
-            if (!ShouldApplyStatusRefreshResult(
-                    playModeStatusGeneration,
-                    _playModeStatusGeneration,
-                    IsPlayModeDisplaySuspended()))
+            if (!TryCaptureWindowStatusLifetime(
+                    out var windowStatusGeneration,
+                    out var cancellationToken))
             {
-                if (IsPlayModeDisplaySuspended())
-                    RestoreReadySnapshotForPlayMode();
-                else
-                {
-                    _transientStatusRefreshPending = true;
-                    _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
-                }
                 return;
             }
-            ApplyStatusSnapshot(snapshot, true, false);
+
+            AICodedbLifecycleEvidence.RecordManagerStatusRefreshStarted();
+            var disposition = AICodedbManagerStatusRefreshDisposition.Failed;
+            var playModeStatusGeneration = _playModeStatusGeneration;
+            try
+            {
+                var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
+                    _executionContext,
+                    hostPayloadResult,
+                    cancellationToken);
+                if (this == null
+                    || windowStatusGeneration != _windowStatusGeneration
+                    || cancellationToken.IsCancellationRequested)
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+                    return;
+                }
+                if (!ShouldApplyStatusRefreshResult(
+                        windowStatusGeneration,
+                        _windowStatusGeneration,
+                        cancellationToken.IsCancellationRequested,
+                        playModeStatusGeneration,
+                        _playModeStatusGeneration,
+                        IsPlayModeDisplaySuspended()))
+                {
+                    if (IsPlayModeDisplaySuspended())
+                        RestoreReadySnapshotForPlayMode();
+                    else
+                    {
+                        _transientStatusRefreshPending = true;
+                        _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
+                    }
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+                    return;
+                }
+
+                ApplyStatusSnapshot(snapshot, true, false);
+                disposition = AICodedbManagerStatusRefreshDisposition.Completed;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+            }
+            finally
+            {
+                if (windowStatusGeneration != _windowStatusGeneration
+                    || cancellationToken.IsCancellationRequested)
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+                }
+                AICodedbLifecycleEvidence.RecordManagerStatusRefreshFinished(disposition);
+            }
         }
 
         private void BeginStatusRefresh(bool force = false)
@@ -552,16 +687,19 @@ namespace Rice.AI.Codedb.Editor
             {
                 _transientStatusRefreshPending = true;
                 _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
+                AICodedbLifecycleEvidence.RecordManagerStatusRequest(true);
                 AICodedbEditorLifecycle.RequestBackgroundStatusObservation(true);
                 TryApplyCachedLifecycleStatus();
                 return;
             }
 
+            AICodedbLifecycleEvidence.RecordManagerStatusRequest(true);
             RefreshTransientHostStatusAsync();
         }
 
         private bool TryApplyCachedLifecycleStatus()
         {
+            AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.CacheRead);
             if (_hostStatusRefreshInFlight
                 || IsPlayModeDisplaySuspended()
                 || string.IsNullOrWhiteSpace(_executionContext.ProjectRoot))
@@ -585,7 +723,8 @@ namespace Rice.AI.Codedb.Editor
                 ApplyStatusSnapshot(
                     AICodedbStatusSnapshot.CreateCachedStatus(
                         _executionContext.ProjectDisplayName,
-                        cachedProductStatus),
+                        cachedProductStatus,
+                        AICodedbEditorLifecycle.IsReconcileInFlight),
                     true,
                     false);
                 Repaint();
@@ -600,27 +739,46 @@ namespace Rice.AI.Codedb.Editor
         private async void ApplyCachedLifecycleStatusAsync(
             AICodedbCommandResult cachedResult)
         {
-            if (_hostStatusRefreshInFlight || cachedResult == null)
+            if (_hostStatusRefreshInFlight
+                || cachedResult == null
+                || !TryCaptureWindowStatusLifetime(
+                    out var windowStatusGeneration,
+                    out var cancellationToken))
                 return;
 
             _hostStatusRefreshInFlight = true;
+            _hostStatusRefreshGeneration = windowStatusGeneration;
+            AICodedbLifecycleEvidence.RecordManagerStatusRefreshStarted();
+            var disposition = AICodedbManagerStatusRefreshDisposition.Failed;
             var playModeStatusGeneration = _playModeStatusGeneration;
             try
             {
                 var snapshot = await AICodedbStatusSnapshot.RefreshAsync(
                     _executionContext,
-                    cachedResult);
+                    cachedResult,
+                    cancellationToken);
                 if (this == null
                     || !ShouldApplyStatusRefreshResult(
+                        windowStatusGeneration,
+                        _windowStatusGeneration,
+                        cancellationToken.IsCancellationRequested,
                         playModeStatusGeneration,
                         _playModeStatusGeneration,
                         IsPlayModeDisplaySuspended()))
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
                     return;
+                }
 
                 ApplyStatusSnapshot(snapshot, true, false);
                 _transientStatusRefreshPending = false;
                 _transientStatusRefreshAttempts = 0;
                 Repaint();
+                disposition = AICodedbManagerStatusRefreshDisposition.Completed;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
             }
             catch (Exception exception)
             {
@@ -629,7 +787,14 @@ namespace Rice.AI.Codedb.Editor
             }
             finally
             {
-                _hostStatusRefreshInFlight = false;
+                if (windowStatusGeneration != _windowStatusGeneration
+                    || cancellationToken.IsCancellationRequested)
+                {
+                    disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
+                }
+                AICodedbLifecycleEvidence.RecordManagerStatusRefreshFinished(disposition);
+                if (_hostStatusRefreshGeneration == windowStatusGeneration)
+                    _hostStatusRefreshInFlight = false;
             }
         }
 
@@ -782,6 +947,22 @@ namespace Rice.AI.Codedb.Editor
         {
             return requestGeneration == currentGeneration
                    && !isPlayingOrWillChangePlaymode;
+        }
+
+        internal static bool ShouldApplyStatusRefreshResult(
+            int requestWindowGeneration,
+            int currentWindowGeneration,
+            bool cancellationRequested,
+            int requestPlayModeGeneration,
+            int currentPlayModeGeneration,
+            bool isPlayingOrWillChangePlaymode)
+        {
+            return requestWindowGeneration == currentWindowGeneration
+                   && !cancellationRequested
+                   && ShouldApplyStatusRefreshResult(
+                       requestPlayModeGeneration,
+                       currentPlayModeGeneration,
+                       isPlayingOrWillChangePlaymode);
         }
 
         private static AICodedbStatusSnapshot TryGetCachedReadySnapshot(string projectRoot)
@@ -1093,10 +1274,12 @@ namespace Rice.AI.Codedb.Editor
             var nextTab = GUILayout.Toolbar(_selectedTab, TabNames, GUILayout.Height(28f));
             if (nextTab != _selectedTab)
             {
-                _selectedTab = nextTab;
-                _scrollPosition = Vector2.zero;
-                if (_selectedTab == (int)AICodedbManagerTab.Index && !_watcherStatusLoaded)
-                    ScheduleWatcherStatusRefresh();
+                using (AICodedbLifecycleEvidence.BeginCallback(AICodedbLifecycleCallbackKind.ManagerTabChanged))
+                {
+                    AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.TabChange);
+                    _selectedTab = nextTab;
+                    _scrollPosition = Vector2.zero;
+                }
             }
             EditorGUILayout.Space(6f);
         }
@@ -2360,6 +2543,7 @@ namespace Rice.AI.Codedb.Editor
         {
             if (_watcherRefreshScheduled)
                 return;
+            AICodedbLifecycleEvidence.RecordManagerWatcherStatusRequest();
             _watcherRefreshScheduled = true;
             EditorApplication.delayCall += RefreshWatcherStatusDelayed;
         }
@@ -2573,11 +2757,13 @@ namespace Rice.AI.Codedb.Editor
 
         private void SelectTab(AICodedbManagerTab tab)
         {
-            _selectedTab = (int)tab;
-            _scrollPosition = Vector2.zero;
-            if (tab == AICodedbManagerTab.Index && !_watcherStatusLoaded)
-                ScheduleWatcherStatusRefresh();
-            Repaint();
+            using (AICodedbLifecycleEvidence.BeginCallback(AICodedbLifecycleCallbackKind.ManagerTabChanged))
+            {
+                AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.TabChange);
+                _selectedTab = (int)tab;
+                _scrollPosition = Vector2.zero;
+                Repaint();
+            }
         }
 
         private string GetHeaderTitle()

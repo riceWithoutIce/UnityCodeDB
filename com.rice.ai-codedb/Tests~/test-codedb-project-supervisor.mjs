@@ -268,7 +268,9 @@ function createFixture(selected = TARGET) {
     lifecycleId,
     selected,
     coordinatorServer: null,
-    coordinatorStopRequested: false
+    coordinatorStopRequested: false,
+    coordinatorReadyPath: null,
+    coordinatorStatusRequests: 0
   };
 }
 
@@ -426,6 +428,64 @@ function writeSlowProbeMaterializer(fixture, counterPath) {
     "  Start-Sleep -Milliseconds 2400",
     "}",
     "Write-Output '[PASS] synthetic slow materializer'",
+    "exit 0",
+    ""
+  ].join("\r\n"));
+}
+
+function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materializerCounterPath, failureGatePath) {
+  const quote = (value) => String(value).replace(/'/g, "''");
+  const scriptQuote = (value) => JSON.stringify(String(value));
+  const coordinatorScriptContent = [
+    "import fs from 'node:fs';",
+    `const counterPath = ${scriptQuote(startCounterPath)};`,
+    `const readyPath = ${scriptQuote(fixture.coordinatorReadyPath)};`,
+    `const failureGatePath = ${scriptQuote(failureGatePath)};`,
+    "const count = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, 'utf8')) : 0;",
+    "fs.writeFileSync(counterPath, String(count + 1), 'utf8');",
+    "if (fs.existsSync(failureGatePath)) {",
+    "  fs.rmSync(failureGatePath, { force: true });",
+    "  process.stderr.write('synthetic coordinator start failure');",
+    "  process.exit(4);",
+    "}",
+    "fs.writeFileSync(readyPath, 'ready', 'utf8');",
+    "process.stdout.write('[PASS] synthetic coordinator start\\n');",
+    ""
+  ].join("\r\n");
+  write(fixture.coordinatorScript, coordinatorScriptContent);
+  write(
+    path.join(fixture.packageGenerationRoot, "coordinator", "codedb-watch-coordinator.mjs"),
+    coordinatorScriptContent);
+  for (const generationRoot of [fixture.packageGenerationRoot, fixture.projectGenerationRoot]) {
+    const manifestPath = path.join(generationRoot, "generation-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const entry = manifest.files.find((value) => value.path === "coordinator/codedb-watch-coordinator.mjs");
+    assert.ok(entry, "Synthetic coordinator manifest entry is missing.");
+    entry.sha256 = hashFile(path.join(generationRoot, "coordinator", "codedb-watch-coordinator.mjs"));
+    json(manifestPath, manifest);
+  }
+  const projectGenerationManifestPath = path.join(
+    fixture.projectGenerationRoot,
+    "generation-manifest.json");
+  const instanceManifestPath = path.join(fixture.instanceRoot, "instance.json");
+  const instanceManifest = JSON.parse(fs.readFileSync(instanceManifestPath, "utf8"));
+  instanceManifest.generation_manifest_sha256 = hashFile(projectGenerationManifestPath);
+  json(instanceManifestPath, instanceManifest);
+  const selection = JSON.parse(fs.readFileSync(fixture.selectionPath, "utf8"));
+  selection.instance_manifest_sha256 = hashFile(instanceManifestPath);
+  json(fixture.selectionPath, selection);
+  write(fixture.materializerScript, [
+    "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
+    `if ($Action -eq 'Probe' -or $Action -eq 'Upgrade') {`,
+    `  if (-not (Test-Path -LiteralPath '${quote(fixture.coordinatorReadyPath)}')) {`,
+    "    Write-Error 'synthetic coordinator was not ensured before materializer'",
+    "    exit 9",
+    "  }",
+    `  $counterPath = '${quote(materializerCounterPath)}'`,
+    "  $count = if (Test-Path -LiteralPath $counterPath) { [int][IO.File]::ReadAllText($counterPath) } else { 0 }",
+    "  [IO.File]::WriteAllText($counterPath, [string]($count + 1))",
+    "}",
+    "Write-Output '[PASS] synthetic readmission materializer'",
     "exit 0",
     ""
   ].join("\r\n"));
@@ -594,6 +654,12 @@ async function startCoordinator(fixture) {
       }
       if (request.command === "stop") fixture.coordinatorStopRequested = true;
       const status = JSON.parse(fs.readFileSync(fixture.coordinatorStatePath, "utf8"));
+      if (request.command === "status") {
+        fixture.coordinatorStatusRequests += 1;
+        if (fixture.coordinatorReadyPath) {
+          status.provider_state = fs.existsSync(fixture.coordinatorReadyPath) ? "ready" : "starting";
+        }
+      }
       socket.end(`${JSON.stringify({
         ok: true,
         status,
@@ -1104,6 +1170,83 @@ async function verifyMissingChildEvidenceBlocksBlindRetry() {
   }
 }
 
+async function verifyRecordedChildAlreadyAbsentFailsClosed() {
+  const fixture = createFixture(TARGET);
+  try {
+    const counterPath = path.join(fixture.root, "absent-recorded-child-retry-count.txt");
+    const operationId = crypto.randomUUID().replaceAll("-", "");
+    const absentPid = 2147483647;
+    assert.equal(
+      isProcessAlive({ pid: absentPid, exitCode: null }),
+      false,
+      "The reserved fixture PID must be absent before recovery starts.");
+    writeSlowProbeMaterializer(fixture, counterPath);
+    json(path.join(fixture.runtime, "operation.json"), {
+      schema_version: 1,
+      managed_by: "com.rice.ai-codedb",
+      operation_id: operationId,
+      key: JSON.stringify(["materialize:Probe", "Probe", false, "", false, false, "", 0, ""]),
+      request_id: "recorded-child-already-absent",
+      name: "materialize:Probe",
+      lane: "maintenance",
+      state: "running",
+      phase: "child_running",
+      owner_epoch: crypto.randomUUID().replaceAll("-", ""),
+      project_identity: projectIdentity(fixture.root),
+      root: fixture.root,
+      runtime: fixture.runtime,
+      selected_instance_id: fixture.instanceId,
+      selected_generation_id: TARGET.generationId,
+      runtime_contract_sha256: fixture.contractSha256,
+      child: {
+        schema_version: 1,
+        pid: absentPid,
+        process_start_identity: "1",
+        executable_path: path.resolve(process.execPath),
+        argv_sha256: "a".repeat(64),
+        command_line_sha256: "b".repeat(64),
+        command: process.execPath,
+        normalized_argv: ["synthetic-absent-child"]
+      },
+      started_at_utc: new Date().toISOString()
+    });
+
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const state = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    const terminal = await waitForOperation(
+      state.pipe_name,
+      state.auth_token,
+      operationId);
+
+    assert.equal(terminal.pending, false);
+    assert.equal(terminal.ok, false);
+    assert.match(
+      terminal.error,
+      /child is no longer present and its result could not be authenticated/i);
+    assert.equal(
+      fs.existsSync(counterPath),
+      false,
+      "An absent recorded child must never launch a replacement materializer.");
+    assert.ok(
+      fixture.coordinatorStatusRequests > 0,
+      "Coordinator status must be established before persisted operation recovery.");
+    const durable = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "operation.json"),
+      "utf8"));
+    assert.equal(durable.operation_id, operationId);
+    assert.equal(durable.state, "failed");
+    assert.match(
+      durable.error,
+      /child is no longer present and its result could not be authenticated/i);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
 async function verifyCoordinatorOfflineRetirement() {
   const fixture = createFixture(TARGET);
   try {
@@ -1118,6 +1261,84 @@ async function verifyCoordinatorOfflineRetirement() {
       true,
       "A Supervisor whose previously healthy coordinator is gone must retire without another Unity callback.");
     assert.equal(fixture.coordinatorStopRequested, false);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifyCoordinatorReadmissionBeforeMaterializer() {
+  const fixture = createFixture(TARGET);
+  const startCounterPath = path.join(fixture.root, "coordinator-start-count.txt");
+  const materializerCounterPath = path.join(fixture.root, "readmission-materializer-count.txt");
+  const failureGatePath = path.join(fixture.root, "coordinator-failure-gate.txt");
+  const initialSupervisorPid = { value: 0 };
+  try {
+    fixture.coordinatorReadyPath = path.join(fixture.root, "coordinator-ready.marker");
+    write(failureGatePath, "fail-first\n");
+    writeCoordinatorReadmissionFixture(
+      fixture,
+      startCounterPath,
+      materializerCounterPath,
+      failureGatePath);
+    await startCoordinator(fixture);
+    const coordinatorOwner = fixture.coordinatorServer;
+
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const statePath = path.join(fixture.runtime, "supervisor-state.json");
+    assert.equal(await waitForPath(statePath), true);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    initialSupervisorPid.value = state.supervisor_pid;
+    assert.equal(isProcessAlive({ pid: state.supervisor_pid, exitCode: null }), true);
+    assert.equal(fs.readFileSync(startCounterPath, "utf8"), "1");
+    assert.equal(fs.existsSync(fixture.coordinatorReadyPath), false);
+
+    const probe = await requestPipe(
+      state.pipe_name,
+      state.auth_token,
+      { command: "materialize", action: "Probe", request_id: "coordinator-readmission-probe" });
+    assert.equal(probe.pending, true);
+    const probeResult = await waitForOperation(state.pipe_name, state.auth_token, probe.operation_id);
+    assert.equal(probeResult.ok, true, probeResult.error || "Probe re-admission failed.");
+    assert.equal(fs.readFileSync(startCounterPath, "utf8"), "2");
+    assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "1");
+    assert.equal(fs.existsSync(fixture.coordinatorReadyPath), true);
+    assert.equal(fixture.coordinatorServer, coordinatorOwner);
+
+    fs.rmSync(fixture.coordinatorReadyPath, { force: true });
+    const upgrade = await requestPipe(
+      state.pipe_name,
+      state.auth_token,
+      { command: "materialize", action: "Upgrade", request_id: "coordinator-readmission-upgrade" });
+    assert.equal(upgrade.pending, true);
+    const upgradeResult = await waitForOperation(state.pipe_name, state.auth_token, upgrade.operation_id);
+    assert.equal(upgradeResult.ok, true, upgradeResult.error || "Upgrade re-admission failed.");
+    assert.equal(fs.readFileSync(startCounterPath, "utf8"), "3");
+    assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "2");
+    assert.equal(fs.existsSync(fixture.coordinatorReadyPath), true);
+    assert.equal(fixture.coordinatorServer, coordinatorOwner);
+
+    fs.rmSync(fixture.coordinatorReadyPath, { force: true });
+    write(failureGatePath, "fail-next\n");
+    const failedProbe = await requestPipe(
+      state.pipe_name,
+      state.auth_token,
+      { command: "materialize", action: "Probe", request_id: "coordinator-readmission-failure" });
+    assert.equal(failedProbe.pending, true);
+    const failedResult = await waitForOperation(
+      state.pipe_name,
+      state.auth_token,
+      failedProbe.operation_id);
+    assert.equal(failedResult.ok, false);
+    assert.match(failedResult.error, /synthetic coordinator start failure/);
+    assert.equal(fs.readFileSync(startCounterPath, "utf8"), "4");
+    assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "2");
+    assert.equal(fixture.coordinatorServer, coordinatorOwner);
+    assert.equal(
+      JSON.parse(fs.readFileSync(statePath, "utf8")).supervisor_pid,
+      initialSupervisorPid.value,
+      "Coordinator re-admission must not create a duplicate outer Supervisor owner.");
+    assert.ok(fixture.coordinatorStatusRequests >= 4, "Each re-admission must inspect coordinator status.");
   } finally {
     await cleanupFixture(fixture);
   }
@@ -1266,6 +1487,16 @@ async function main() {
       ["G:", "RiceProgram", "Test", "Test"].join("\\"),
       ["G:", "RiceProgram", "Test", "Test", ...CONTROL_NAMESPACE_RELATIVE_PATH.split("/")].join("\\")),
     "\\\\.\\pipe\\codedb-supervisor-8ef262de0ef456d71b2b");
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "coordinator-readmission") {
+    await verifyCoordinatorReadmissionBeforeMaterializer();
+    console.log("[PASS] Supervisor coordinator re-admission precedes Probe/Upgrade materialization and blocks materializer on ensure failure.");
+    return;
+  }
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "recorded-child-absent") {
+    await verifyRecordedChildAlreadyAbsentFailsClosed();
+    console.log("[PASS] Supervisor fails closed when a durably recorded operation child is already absent.");
+    return;
+  }
   await verifyHappyPath(TARGET, "CURRENT");
   await verifyHappyPath(PREVIOUS, "TRUSTED_PREVIOUS");
   await verifyStableDefaultIdentity();
@@ -1276,6 +1507,7 @@ async function main() {
   await verifyAsynchronousMaterializerOperation();
   await verifyOperationReattachesAfterSupervisorLoss();
   await verifyMissingChildEvidenceBlocksBlindRetry();
+  await verifyRecordedChildAlreadyAbsentFailsClosed();
   await verifyCoordinatorOfflineRetirement();
   await verifyActivationHandoff();
   await verifySyntheticContractTargetBump();

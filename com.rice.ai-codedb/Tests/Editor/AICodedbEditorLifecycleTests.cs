@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -78,6 +79,211 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "A quitting Editor must not publish a new heartbeat.");
         }
 
+        [TestCase(false, false, false, ExpectedResult = true)]
+        [TestCase(true, true, true, ExpectedResult = true)]
+        [TestCase(true, true, false, ExpectedResult = false)]
+        [TestCase(true, false, true, ExpectedResult = false)]
+        public bool CoordinatorAdmission_RequiresCurrentPrerequisiteAndPublishedLease(
+            bool independentPrerequisiteRead,
+            bool prerequisiteCurrent,
+            bool editorLeasePublished)
+        {
+            return AICodedbEditorLifecycle.ShouldAttemptCoordinatorAdmission(
+                independentPrerequisiteRead,
+                prerequisiteCurrent,
+                editorLeasePublished);
+        }
+
+        [TestCase(
+            false,
+            true,
+            true,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] BROKEN",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Unknown,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.ResultAbsent)]
+        [TestCase(
+            true,
+            true,
+            true,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] BROKEN",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Unknown,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.CommandTimedOut)]
+        [TestCase(
+            true,
+            false,
+            true,
+            false,
+            "no prerequisite marker",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Unknown,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.CommandEnvelopeInvalid)]
+        [TestCase(
+            true,
+            false,
+            false,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] CURRENT\n[PRODUCT_LAYER PREREQUISITE] MISSING",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Unknown,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.MarkerCardinalityInvalid)]
+        [TestCase(
+            true,
+            false,
+            false,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] PARTIAL",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Unknown,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.MarkerMalformed)]
+        [TestCase(
+            true,
+            false,
+            false,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] CURRENT",
+            AICodedbProductLayerState.Missing,
+            AICodedbProductLayerState.Current,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.MarkerProductStatusMismatch)]
+        [TestCase(
+            true,
+            false,
+            false,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] CURRENT - sanitized detail",
+            AICodedbProductLayerState.Current,
+            AICodedbProductLayerState.Current,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.TrustworthyCurrent)]
+        [TestCase(
+            true,
+            false,
+            false,
+            false,
+            "[PRODUCT_LAYER PREREQUISITE] MISSING - sanitized detail",
+            AICodedbProductLayerState.Missing,
+            AICodedbProductLayerState.Missing,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.TrustworthyMissing)]
+        public AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition PrerequisiteEvidence_ClassifiesSanitizedReasonWithoutChangingAdmission(
+            bool resultPresent,
+            bool timedOut,
+            bool commandEnvelopePresent,
+            bool commandEnvelopeValid,
+            string standardOutput,
+            AICodedbProductLayerState productStatusPrerequisite,
+            AICodedbProductLayerState expectedPrerequisite)
+        {
+            AICodedbProductLayerState prerequisite;
+            var disposition = AICodedbEditorLifecycle.ClassifyIndependentPrerequisiteEvidence(
+                resultPresent,
+                timedOut,
+                commandEnvelopePresent,
+                commandEnvelopeValid,
+                standardOutput,
+                productStatusPrerequisite,
+                out prerequisite);
+
+            Assert.That(prerequisite, Is.EqualTo(expectedPrerequisite));
+            var prerequisiteCurrent =
+                disposition == AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.TrustworthyCurrent;
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldAttemptCoordinatorAdmission(
+                    true,
+                    prerequisiteCurrent,
+                    true),
+                Is.EqualTo(prerequisiteCurrent),
+                "Every untrustworthy or missing prerequisite classification must remain fail-closed.");
+            return disposition;
+        }
+
+        [Test]
+        public void PrerequisiteEvidence_PersistsOnlySanitizedDispositionCode()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+
+            evidence.RecordPrerequisiteEvidenceDisposition(
+                AICodedbEditorLifecycle.AICodedbPrerequisiteEvidenceDisposition.MarkerMalformed);
+            var document = evidence.Capture("prerequisite_attribution");
+
+            Assert.That(document.prerequisite_evidence_disposition, Is.EqualTo("MarkerMalformed"));
+            Assert.That(document.prerequisite_evidence_disposition, Does.Not.Contain("PRODUCT_LAYER"));
+            Assert.That(document.prerequisite_evidence_disposition, Does.Not.Contain("\\"));
+            Assert.That(document.prerequisite_evidence_disposition, Does.Not.Contain("/"));
+        }
+
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.Current,
+            true,
+            true,
+            true,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.TrustedPrevious,
+            true,
+            true,
+            true,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.Current,
+            true,
+            true,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.Missing,
+            false,
+            false,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.Invalid,
+            true,
+            false,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbCurrentInstanceState.Current,
+            true,
+            false,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceIneligible)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Uninstalled,
+            AICodedbCurrentInstanceState.Current,
+            true,
+            true,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.IntegrationNotEligible)]
+        [TestCase(
+            AICodedbProjectIntegrationState.Invalid,
+            AICodedbCurrentInstanceState.Current,
+            true,
+            true,
+            false,
+            ExpectedResult = AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.IntegrationNotEligible)]
+        public AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition CoordinatorAdmission_ClassifiesLeaseTargetBeforePublication(
+            AICodedbProjectIntegrationState integrationState,
+            AICodedbCurrentInstanceState currentInstanceState,
+            bool currentInstancePresent,
+            bool canPublishEditorLease,
+            bool leasePublished)
+        {
+            return AICodedbEditorLifecycle.ClassifyEditorLeasePublication(
+                integrationState,
+                currentInstanceState,
+                currentInstancePresent,
+                canPublishEditorLease,
+                leasePublished);
+        }
+
         [Test]
         public void LifecycleInitialization_DoesNotRequirePreselectedLeasePath()
         {
@@ -89,6 +295,17 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbEditorLifecycle.ShouldInitializeLifecycle(true),
                 Is.False,
                 "A quitting editor must not start new lifecycle work.");
+        }
+
+        [Test]
+        public void EditorQuitLeaseHandoff_UsesAtomicTakeWithoutFilesystemWork()
+        {
+            var leasePath = "fixture-lease.json";
+
+            var taken = AICodedbEditorLifecycle.TakeEditorLeasePathForDeletion(ref leasePath);
+
+            Assert.That(taken, Is.EqualTo("fixture-lease.json"));
+            Assert.That(leasePath, Is.Empty);
         }
 
         [TestCase(false, false, false, false, ExpectedResult = false)]
@@ -536,10 +753,21 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.DesiredState, Is.EqualTo("enabled"));
             Assert.That(snapshot.EditorDemand, Is.EqualTo("online"));
             Assert.That(snapshot.SupervisorSchemaVersion, Is.EqualTo(3));
+            Assert.That(snapshot.SupervisorProcessId, Is.EqualTo(1234));
+            Assert.That(snapshot.SelectedInstanceId, Is.EqualTo("0123456789abcdef0123456789abcdef"));
             Assert.That(snapshot.TargetGenerationId, Is.EqualTo(contract.Target.GenerationId));
             Assert.That(snapshot.SelectedGenerationId, Is.EqualTo(contract.Target.GenerationId));
             Assert.That(snapshot.RuntimeContractSha256, Is.EqualTo(contract.Sha256));
             Assert.That(snapshot.GenerationDisposition, Is.EqualTo("CURRENT"));
+
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            evidence.RecordSupervisorObservation(snapshot);
+            evidence.RecordSupervisorObservation(snapshot);
+            var continuity = evidence.Capture("same_supervisor");
+            Assert.That(continuity.supervisor_observation_count, Is.EqualTo(2));
+            Assert.That(continuity.supervisor_identity_change_count, Is.EqualTo(0));
+            Assert.That(continuity.supervisor_pid, Is.EqualTo(1234));
+            Assert.That(continuity.selected_instance_id, Is.EqualTo("0123456789abcdef0123456789abcdef"));
         }
 
         [Test]
@@ -575,6 +803,266 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
             Assert.That(snapshot.IsCoreReady, Is.False);
             Assert.That(snapshot.ReasonCode, Is.EqualTo("SUPERVISOR_IDENTITY_MISMATCH"));
+        }
+
+        [Test]
+        public void LifecycleEvidence_CapturesBoundedCallbacksWorkAndContinuityFields()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            evidence.RecordCallback(AICodedbLifecycleCallbackKind.ManagerGui, 1);
+            evidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem, Thread.CurrentThread.ManagedThreadId);
+            evidence.RecordDomainReload();
+            evidence.RecordPlayTransition();
+            evidence.RecordManagerObservation(AICodedbManagerObservationKind.CacheRead);
+
+            var document = evidence.Capture("cold_start");
+
+            Assert.That(document.schema_version, Is.EqualTo(1));
+            Assert.That(document.callback_names, Does.Contain("ManagerGui"));
+            Assert.That(document.callback_counts[(int)AICodedbLifecycleCallbackKind.ManagerGui], Is.EqualTo(1));
+            Assert.That(document.main_thread_work_counts[(int)AICodedbLifecycleWorkKind.FileSystem], Is.EqualTo(1));
+            Assert.That(document.domain_reload_count, Is.EqualTo(1));
+            Assert.That(document.play_transition_count, Is.EqualTo(1));
+            Assert.That(document.manager_cache_read_count, Is.EqualTo(1));
+            Assert.That(document.checkpoint, Is.EqualTo("cold_start"));
+        }
+
+        [Test]
+        public void LifecycleEvidence_CapturesManagerCloseAndQuittingTaskStateWithoutRawData()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            var entryQueue = new AICodedbSupervisorQueueSnapshot(
+                2,
+                true,
+                AICodedbSupervisorRequestKind.Reconcile,
+                7,
+                3,
+                false);
+            var returnQueue = new AICodedbSupervisorQueueSnapshot(
+                0,
+                false,
+                AICodedbSupervisorRequestKind.ObserveStatus,
+                7,
+                4,
+                true);
+
+            evidence.RecordManagerStatusRefreshStarted();
+            evidence.RecordManagerClosed();
+            evidence.RecordEditorQuittingBoundary(true, true, entryQueue);
+            evidence.RecordManagerStatusRefreshFinished(
+                AICodedbManagerStatusRefreshDisposition.Cancelled);
+            evidence.RecordEditorQuittingBoundary(false, false, returnQueue);
+
+            var document = evidence.Capture("quitting_boundary");
+
+            Assert.That(document.manager_close_count, Is.EqualTo(1));
+            Assert.That(document.manager_close_with_refresh_in_flight_count, Is.EqualTo(1));
+            Assert.That(document.manager_status_refresh_started_count, Is.EqualTo(1));
+            Assert.That(document.manager_status_refresh_completed_count, Is.EqualTo(0));
+            Assert.That(document.manager_status_refresh_cancelled_count, Is.EqualTo(1));
+            Assert.That(document.manager_status_refresh_failed_count, Is.EqualTo(0));
+            Assert.That(document.manager_status_refresh_in_flight_count, Is.EqualTo(0));
+            Assert.That(document.manager_status_refresh_max_in_flight_count, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_entry_count, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_return_count, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_entry_reconcile_in_flight, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_entry_manager_refresh_in_flight_count, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_entry_queue_pending_count, Is.EqualTo(2));
+            Assert.That(document.editor_quitting_entry_queue_active, Is.EqualTo(1));
+            Assert.That(document.editor_quitting_return_reconcile_in_flight, Is.EqualTo(0));
+            Assert.That(document.editor_quitting_return_manager_refresh_in_flight_count, Is.EqualTo(0));
+            Assert.That(document.editor_quitting_return_queue_pending_count, Is.EqualTo(0));
+            Assert.That(document.editor_quitting_return_queue_active, Is.EqualTo(0));
+
+            var restored = new AICodedbLifecycleEvidenceCounter(
+                Thread.CurrentThread.ManagedThreadId);
+            restored.Restore(document);
+            var restoredDocument = restored.Capture("restored");
+            Assert.That(restoredDocument.manager_close_count, Is.EqualTo(1));
+            Assert.That(restoredDocument.manager_status_refresh_cancelled_count, Is.EqualTo(1));
+            Assert.That(
+                restoredDocument.manager_status_refresh_in_flight_count,
+                Is.EqualTo(0),
+                "A Domain Reload must not restore an in-memory Manager task as live.");
+            Assert.That(restoredDocument.editor_quitting_entry_queue_pending_count, Is.EqualTo(2));
+            Assert.That(restoredDocument.editor_quitting_return_queue_active, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void LifecycleEvidence_ShutdownDispositionUsesFixedVocabularyAndPreservesSnapshotObservation()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            Assert.That(evidence.Capture("initial").shutdown_disposition, Is.EqualTo("NOT_EVALUATED"));
+
+            evidence.RecordShutdownDisposition(null);
+            Assert.That(evidence.Capture("no_response").shutdown_disposition, Is.EqualTo("NO_RESPONSE"));
+
+            evidence.RecordShutdownDisposition(CreateShutdownResponse(true, string.Empty));
+            Assert.That(evidence.Capture("succeeded").shutdown_disposition, Is.EqualTo("SUCCEEDED"));
+
+            evidence.RecordShutdownDisposition(CreateShutdownResponse(false, string.Empty));
+            Assert.That(evidence.Capture("failed").shutdown_disposition, Is.EqualTo("FAILED"));
+
+            var snapshot = AICodedbSupervisorSnapshot.Connected(
+                2,
+                123,
+                "unity-bridge",
+                "runtime",
+                "ready",
+                string.Empty,
+                "ready",
+                "ready",
+                "RUNNING",
+                "ONLINE",
+                AICodedbSupervisorReadinessState.CoreReady,
+                "READY",
+                "fixture",
+                "fixture_event",
+                AICodedbSupervisorProtocol.SupervisorStateSchemaVersion,
+                "poc.34",
+                "poc.34",
+                new string('a', 64),
+                "CURRENT",
+                456,
+                "0123456789abcdef0123456789abcdef");
+            evidence.RecordShutdownDisposition(
+                CreateShutdownResponse(true, "FUTURE_VALID_SUPERVISOR_ERROR", snapshot));
+            var supervisorError = evidence.Capture("supervisor_error");
+
+            Assert.That(supervisorError.shutdown_disposition, Is.EqualTo("SUPERVISOR_ERROR"));
+            Assert.That(supervisorError.supervisor_observation_count, Is.EqualTo(1));
+            Assert.That(supervisorError.supervisor_pid, Is.EqualTo(456));
+        }
+
+        [TestCase("NOT_EVALUATED")]
+        [TestCase("NO_RESPONSE")]
+        [TestCase("SUCCEEDED")]
+        [TestCase("FAILED")]
+        [TestCase("SUPERVISOR_ERROR")]
+        public void LifecycleEvidence_ShutdownDispositionRoundTripsFixedVocabulary(string disposition)
+        {
+            var document = new AICodedbLifecycleEvidenceDocument
+            {
+                shutdown_disposition = disposition
+            };
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+
+            evidence.Restore(document);
+
+            Assert.That(evidence.Capture("restored").shutdown_disposition, Is.EqualTo(disposition));
+        }
+
+        [Test]
+        public void LifecycleEvidence_ShutdownDispositionRestoreRejectsUnknownBoundedCode()
+        {
+            var document = new AICodedbLifecycleEvidenceDocument
+            {
+                shutdown_disposition = "FUTURE_VALID_SUPERVISOR_ERROR"
+            };
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+
+            evidence.Restore(document);
+
+            Assert.That(
+                evidence.Capture("restored").shutdown_disposition,
+                Is.EqualTo("NOT_EVALUATED"));
+        }
+
+        [Test]
+        public void LifecycleEvidence_PostAdmissionFieldsAreEnumBoundedAndRestoreSafely()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            evidence.RecordPostAdmissionDisposition(
+                AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.ConvergenceBlocked);
+            evidence.RecordPostAdmissionProductLayers(
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable);
+            evidence.RecordCurrentInstanceState(AICodedbCurrentInstanceState.Current);
+            evidence.RecordCurrentInstanceConvergencePlan(
+                AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked);
+
+            var document = evidence.Capture("post_admission");
+
+            Assert.That(document.post_admission_disposition, Is.EqualTo("ConvergenceBlocked"));
+            Assert.That(document.post_admission_prerequisite_state, Is.EqualTo("Current"));
+            Assert.That(document.post_admission_installed_state, Is.EqualTo("Current"));
+            Assert.That(document.post_admission_configured_state, Is.EqualTo("Current"));
+            Assert.That(document.post_admission_mcp_available_state, Is.EqualTo("Unavailable"));
+            Assert.That(document.current_instance_state, Is.EqualTo("Current"));
+            Assert.That(document.current_instance_convergence_plan, Is.EqualTo("Blocked"));
+
+            var legacyEvidence = new AICodedbLifecycleEvidenceCounter(
+                Thread.CurrentThread.ManagedThreadId);
+            legacyEvidence.Restore(new AICodedbLifecycleEvidenceDocument());
+            var legacyDocument = legacyEvidence.Capture("legacy");
+            AssertPostAdmissionEvidenceNotEvaluated(legacyDocument);
+
+            document.post_admission_disposition = "C:\\machine\\detail";
+            document.post_admission_prerequisite_state = "raw detail";
+            document.post_admission_installed_state = "stdout/stderr";
+            document.post_admission_configured_state = "token=value";
+            document.post_admission_mcp_available_state = "UNKNOWN_VALUE";
+            document.current_instance_state = "project/path";
+            document.current_instance_convergence_plan = "Deploy --force";
+            evidence.Restore(document);
+            AssertPostAdmissionEvidenceNotEvaluated(evidence.Capture("invalid"));
+        }
+
+        [TestCase(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Retire,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.RetirementSelected)]
+        [TestCase(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Deploy,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.DeploymentSelected)]
+        [TestCase(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.RecoverAvailability,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.AvailabilityRecoverySelected)]
+        [TestCase(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.ConvergenceBlocked)]
+        [TestCase(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.None,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.ConvergenceComplete)]
+        public void PostAdmissionConvergenceDisposition_MapsExistingPlanWithoutChangingIt(
+            AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan plan,
+            AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition expected)
+        {
+            var originalPlan = plan;
+            var actual = AICodedbEditorLifecycle.ResolvePostAdmissionConvergenceDisposition(plan);
+
+            Assert.That(plan, Is.EqualTo(originalPlan));
+            Assert.That(actual, Is.EqualTo(expected));
+        }
+
+        private static void AssertPostAdmissionEvidenceNotEvaluated(
+            AICodedbLifecycleEvidenceDocument document)
+        {
+            Assert.That(document.post_admission_disposition, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.post_admission_prerequisite_state, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.post_admission_installed_state, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.post_admission_configured_state, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.post_admission_mcp_available_state, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.current_instance_state, Is.EqualTo("NotEvaluated"));
+            Assert.That(document.current_instance_convergence_plan, Is.EqualTo("NotEvaluated"));
+        }
+
+        private static AICodedbSupervisorCommandResponse CreateShutdownResponse(
+            bool succeeded,
+            string errorCode,
+            AICodedbSupervisorSnapshot snapshot = null)
+        {
+            return new AICodedbSupervisorCommandResponse(
+                succeeded,
+                succeeded ? 0 : 4,
+                errorCode,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                snapshot,
+                string.Empty,
+                0);
         }
 
         [Test]
@@ -1093,6 +1581,13 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void MissingPrerequisite_RealEditorStatusPathRechecksOnceWithoutEarlyProjectWrites(
             string reasonCode)
         {
+            WriteUtf8NoBom(
+                Path.Combine(_projectRoot, "Packages", "manifest.json"),
+                "{\"dependencies\":{}}\n");
+            WriteUtf8NoBom(
+                Path.Combine(_projectRoot, "ProjectSettings", "ProjectVersion.txt"),
+                "m_EditorVersion: 2022.3.47f1\n"
+                + "m_EditorVersionWithRevision: 2022.3.47f1 (88c277b85d21)\n");
             var originalPath = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Process);
             var originalLocalAppData = Environment.GetEnvironmentVariable(
                 "LOCALAPPDATA",
@@ -1238,6 +1733,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                         () =>
                         {
                             leaseRefreshCount++;
+                            Directory.CreateDirectory(Path.GetDirectoryName(leasePath));
                             WriteUtf8NoBom(leasePath, "fixture lease after prerequisite recovery");
                         }),
                     Is.True,
@@ -1481,9 +1977,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             var pointer = File.ReadAllText(pointerPath);
             File.WriteAllText(
                 pointerPath,
-                pointer.Replace(
-                    "\"schema_version\": 1,",
-                    "\"schema_version\": 1,\n  \"schema_version\": 1,"));
+                InsertAfterRequiredJsonMatch(
+                    pointer,
+                    "\"schema_version\"\\s*:\\s*1",
+                    ",\"schema_version\":1"));
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
@@ -1500,7 +1997,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             var pointer = File.ReadAllText(pointerPath);
             File.WriteAllText(
                 pointerPath,
-                pointer.Replace("\"schema_version\": 1", "\"schema_version\": true"));
+                ReplaceRequiredJsonMatch(
+                    pointer,
+                    "\"schema_version\"\\s*:\\s*1",
+                    "\"schema_version\":true"));
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
 
@@ -1519,9 +2019,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             var manifest = File.ReadAllText(manifestPath);
             File.WriteAllText(
                 manifestPath,
-                manifest.Replace(
-                    "\"schema_version\": 1,",
-                    "\"schema_version\": 1,\n  \"SCHEMA_VERSION\": 1,"));
+                InsertAfterRequiredJsonMatch(
+                    manifest,
+                    "\"schema_version\"\\s*:\\s*1",
+                    ",\"SCHEMA_VERSION\":1"));
             RewriteCurrentPointerManifestHash(manifestPath);
 
             var selection = AICodedbHostGenerationStore.Resolve(_projectRoot);
@@ -2872,28 +3373,34 @@ namespace Rice.AI.Codedb.Editor.Tests
             AICodedbControlContractMigrationState.InvalidOrAmbiguous,
             AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
             false)]
-        public void ControlContractMigration_ExplicitCurrentPrerequisiteMapsBlockedState(
+        public void ControlContractMigration_TrustedIndependentPrerequisiteMapsBlockedStateWithoutCoordinatorProbe(
             AICodedbControlContractMigrationState state,
             AICodedbProductAttentionReason expectedReason,
             bool expectedReinstall)
         {
             var probeCount = 0;
+            var independentPrerequisiteResult = PrerequisiteResult("CURRENT");
             AICodedbProductStatus productStatus;
             AICodedbCommandResult admissionResult;
             var blocked = AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
                 CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
                 CreateMigrationStatus(state),
+                independentPrerequisiteResult,
                 () =>
                 {
                     probeCount++;
-                    return PrerequisiteResult("CURRENT");
+                    return new AICodedbCommandResult(
+                        4,
+                        PrerequisiteOutput("CURRENT"),
+                        "fixture coordinator probe must not run",
+                        false);
                 },
                 out productStatus,
                 out admissionResult);
 
             Assert.That(blocked, Is.True);
-            Assert.That(probeCount, Is.EqualTo(1));
-            Assert.That(admissionResult, Is.Not.Null);
+            Assert.That(probeCount, Is.Zero);
+            Assert.That(admissionResult, Is.SameAs(independentPrerequisiteResult));
             Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
             Assert.That(productStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Current));
             Assert.That(productStatus.AttentionReason, Is.EqualTo(expectedReason));
@@ -3633,6 +4140,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"control_contract_schema_version\":" + contract.ControlContract.SchemaVersion + ","
                    + "\"control_contract_sha256\":\"" + contract.ControlContract.Sha256 + "\","
                    + "\"control_namespace\":\"" + JsonPath(runtime) + "\","
+                   + "\"supervisor_pid\":1234,"
+                   + "\"selected_instance_id\":\"0123456789abcdef0123456789abcdef\","
                    + "\"coordinator_pid\":1234,"
                    + "\"lifecycle_id\":null,"
                    + "\"desired_state\":\"enabled\","
@@ -4037,12 +4546,37 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var currentPath = Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath);
             var current = File.ReadAllText(currentPath);
-            var start = current.IndexOf("\"generation_manifest_sha256\": \"", StringComparison.Ordinal);
-            Assert.That(start, Is.GreaterThanOrEqualTo(0));
-            start += "\"generation_manifest_sha256\": \"".Length;
-            var end = current.IndexOf('"', start);
-            Assert.That(end, Is.GreaterThan(start));
-            File.WriteAllText(currentPath, current.Substring(0, start) + GetSha256(manifestPath) + current.Substring(end));
+            var expression = new Regex(
+                "(?<prefix>\"generation_manifest_sha256\"\\s*:\\s*\")(?<sha>[0-9a-fA-F]{64})(?<suffix>\")",
+                RegexOptions.CultureInvariant);
+            var matches = expression.Matches(current);
+            Assert.That(matches.Count, Is.EqualTo(1), "The Current pointer fixture must contain one manifest hash.");
+            var rewritten = expression.Replace(
+                current,
+                match => match.Groups["prefix"].Value + GetSha256(manifestPath) + match.Groups["suffix"].Value,
+                1);
+            Assert.That(rewritten, Is.Not.EqualTo(current), "The Current pointer manifest hash must change.");
+            File.WriteAllText(currentPath, rewritten);
+        }
+
+        private static string InsertAfterRequiredJsonMatch(string json, string pattern, string insertion)
+        {
+            var expression = new Regex(pattern, RegexOptions.CultureInvariant);
+            var matches = expression.Matches(json);
+            Assert.That(matches.Count, Is.EqualTo(1), "The JSON fixture mutation target must occur exactly once.");
+            var mutated = expression.Replace(json, match => match.Value + insertion, 1);
+            Assert.That(mutated, Is.Not.EqualTo(json), "The JSON fixture mutation must change the document.");
+            return mutated;
+        }
+
+        private static string ReplaceRequiredJsonMatch(string json, string pattern, string replacement)
+        {
+            var expression = new Regex(pattern, RegexOptions.CultureInvariant);
+            var matches = expression.Matches(json);
+            Assert.That(matches.Count, Is.EqualTo(1), "The JSON fixture mutation target must occur exactly once.");
+            var mutated = expression.Replace(json, replacement, 1);
+            Assert.That(mutated, Is.Not.EqualTo(json), "The JSON fixture mutation must change the document.");
+            return mutated;
         }
 
         private static void CopyDirectory(string sourceRoot, string targetRoot)

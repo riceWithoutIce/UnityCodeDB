@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor.PackageManager;
@@ -120,6 +120,44 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(source, Does.Not.Contain("AICodedbControlContractMigrationStore"));
             Assert.That(source, Does.Not.Contain("TryResolveControlContractMigrationBlock"));
             Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.ReadStatus("));
+        }
+
+        [Test]
+        public void ManagerSource_DoesNotScheduleWatcherObservationFromOpenOrTabObservation()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbManagerWindow.cs"));
+            var openStart = source.IndexOf("internal static void Open(AICodedbManagerTab tab)", StringComparison.Ordinal);
+            var openEnd = source.IndexOf("private void OnEnable()", openStart, StringComparison.Ordinal);
+            var drawStart = source.IndexOf("private void DrawTabBar()", StringComparison.Ordinal);
+            var drawEnd = source.IndexOf("private void DrawMainContentArea", drawStart, StringComparison.Ordinal);
+            var selectStart = source.IndexOf("private void SelectTab(AICodedbManagerTab tab)", StringComparison.Ordinal);
+            var selectEnd = source.IndexOf("private string GetHeaderTitle()", selectStart, StringComparison.Ordinal);
+            var observerStart = source.IndexOf("private void ObserveTransientHostStatus()", StringComparison.Ordinal);
+            var observerEnd = source.IndexOf("private async void RefreshTransientHostStatusAsync()", observerStart, StringComparison.Ordinal);
+
+            Assert.That(openStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(openEnd, Is.GreaterThan(openStart));
+            Assert.That(drawStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(drawEnd, Is.GreaterThan(drawStart));
+            Assert.That(selectStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(selectEnd, Is.GreaterThan(selectStart));
+            Assert.That(observerStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(observerEnd, Is.GreaterThan(observerStart));
+            Assert.That(source.Substring(openStart, openEnd - openStart), Does.Not.Contain("ScheduleWatcherStatusRefresh"));
+            Assert.That(source.Substring(drawStart, drawEnd - drawStart), Does.Not.Contain("ScheduleWatcherStatusRefresh"));
+            Assert.That(source.Substring(selectStart, selectEnd - selectStart), Does.Not.Contain("ScheduleWatcherStatusRefresh"));
+            Assert.That(source.Substring(observerStart, observerEnd - observerStart), Does.Not.Contain("RequestBackgroundStatusObservation"));
+
+            var refreshStart = source.IndexOf("private void RefreshAllStatus()", StringComparison.Ordinal);
+            var refreshEnd = source.IndexOf("private void DrawHeader()", refreshStart, StringComparison.Ordinal);
+            Assert.That(refreshStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(refreshEnd, Is.GreaterThan(refreshStart));
+            var refreshBody = source.Substring(refreshStart, refreshEnd - refreshStart);
+            Assert.That(refreshBody, Does.Contain("ScheduleWatcherStatusRefresh"));
+            Assert.That(refreshBody, Does.Contain("BeginStatusRefresh(true)"));
         }
 
         [Test]
@@ -575,6 +613,43 @@ namespace Rice.AI.Codedb.Editor.Tests
                 isPlayingOrWillChangePlaymode);
         }
 
+        [TestCase(4, 4, false, 2, 2, false, ExpectedResult = true)]
+        [TestCase(4, 5, false, 2, 2, false, ExpectedResult = false)]
+        [TestCase(4, 4, true, 2, 2, false, ExpectedResult = false)]
+        [TestCase(4, 4, false, 2, 3, false, ExpectedResult = false)]
+        [TestCase(4, 4, false, 2, 2, true, ExpectedResult = false)]
+        public bool WindowStatusRefresh_RequiresCurrentUncancelledWindowAndPlayGeneration(
+            int requestWindowGeneration,
+            int currentWindowGeneration,
+            bool cancellationRequested,
+            int requestPlayModeGeneration,
+            int currentPlayModeGeneration,
+            bool isPlayingOrWillChangePlaymode)
+        {
+            return AICodedbManagerWindow.ShouldApplyStatusRefreshResult(
+                requestWindowGeneration,
+                currentWindowGeneration,
+                cancellationRequested,
+                requestPlayModeGeneration,
+                currentPlayModeGeneration,
+                isPlayingOrWillChangePlaymode);
+        }
+
+        [Test]
+        public void StatusSnapshotRefresh_PreCancelledWindowTokenDoesNotStartWork()
+        {
+            using (var cancellation = new CancellationTokenSource())
+            {
+                cancellation.Cancel();
+                var task = AICodedbStatusSnapshot.RefreshAsync(
+                    default(AICodedbEditorExecutionContext),
+                    null,
+                    cancellation.Token);
+
+                Assert.That(task.IsCanceled, Is.True);
+            }
+        }
+
         [TestCase(false, false, ExpectedResult = false)]
         [TestCase(true, false, ExpectedResult = true)]
         [TestCase(false, true, ExpectedResult = true)]
@@ -627,15 +702,46 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void CachedNeedsAttentionSnapshotDoesNotClaimReady()
+        public void CachedNeedsAttentionSnapshotIsTerminalAndDoesNotClaimChecking()
         {
             var snapshot = AICodedbStatusSnapshot.CreateCachedState(
                 "FixtureProject",
                 AICodedbProductState.NeedsAttention);
+            var publishedBeforeWorkerExit = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject",
+                AICodedbProductState.NeedsAttention,
+                true);
 
             Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
             Assert.That(snapshot.ProductStatus.IsReady, Is.False);
             Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(snapshot.HostPayloadStatus.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(snapshot.CurrentInstance.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(snapshot.HostGeneration.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(snapshot.ProviderExecutable.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(snapshot.McpAvailability.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(
+                publishedBeforeWorkerExit.CurrentInstance.Summary,
+                Is.EqualTo("Not evaluated"),
+                "A terminal cache published just before worker exit must not freeze Checking.");
+        }
+
+        [Test]
+        public void CachedStartingSnapshotUsesCheckingOnlyForActiveRefresh()
+        {
+            var idle = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject",
+                AICodedbProductState.Starting);
+            var inFlight = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject",
+                AICodedbProductState.Starting,
+                true);
+
+            Assert.That(idle.HostPayloadStatus.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(idle.CurrentInstance.Summary, Is.EqualTo("Not evaluated"));
+            Assert.That(inFlight.HostPayloadStatus.Summary, Is.EqualTo("Checking"));
+            Assert.That(inFlight.CurrentInstance.Summary, Is.EqualTo("Checking"));
+            Assert.That(inFlight.ProviderExecutable.Summary, Is.EqualTo("Checking"));
         }
 
         [TestCase(

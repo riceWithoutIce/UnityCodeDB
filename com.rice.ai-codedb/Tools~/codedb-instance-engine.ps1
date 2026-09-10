@@ -3862,7 +3862,6 @@ function Invoke-InstanceConvergence {
                             -CleanupState $cleanupState
                     }
                 }
-                Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
                 Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
                 Write-Host "[PRODUCT_LAYER CONFIGURED] CURRENT"
                 Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT"
@@ -3987,7 +3986,6 @@ function Invoke-InstanceConvergence {
         $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         $cleanupState = if ($null -ne $previous) { "PENDING" } else { "COMPLETE" }
         $outcome = switch ($ActionName) { "Install" { "INSTALLED" }; "Reinstall" { "REINSTALLED" }; default { "UPGRADED" } }
-        Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
         Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
         Write-Host "[PRODUCT_LAYER CONFIGURED] CURRENT"
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT"
@@ -4201,13 +4199,11 @@ function Write-InstanceProductStatus {
         $prerequisite = Get-MaterializerMachinePrerequisiteStatus -Manifest $Manifest
     }
     if (-not $prerequisite.Current) {
-        Write-Host "[PRODUCT_LAYER PREREQUISITE] MISSING"
         Write-Host "[PRODUCT_STATE] MISSING_PREREQUISITE"
         Write-Host "[PREREQUISITE] $($prerequisite.Detail)"
         Write-Host "[CLEANUP_STATE] $($desired.CleanupState)"
         return $true
     }
-    Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT"
     if ($desired.DesiredState -eq "UNINSTALLED") {
         Write-Host "[PRODUCT_LAYER INSTALLED] MISSING"
         Write-Host "[PRODUCT_LAYER CONFIGURED] MISSING"

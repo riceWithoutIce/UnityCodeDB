@@ -7778,6 +7778,10 @@ function Assert-MachinePrerequisiteFailure {
     Assert-True -Condition ($result.Text.Contains('"product_state":"MISSING_PREREQUISITE"')) -Message "$Label did not emit a versioned readiness snapshot."
     $commandResultLines = @($result.Text -split '\r?\n' | Where-Object { $_.StartsWith("[COMMAND_RESULT] ", [StringComparison]::Ordinal) })
     if ($Action -eq "DryRun") {
+        $prerequisiteLines = @($result.Text -split '\r?\n' | Where-Object { $_.StartsWith("[PRODUCT_LAYER PREREQUISITE]", [StringComparison]::Ordinal) })
+        Assert-Equal -Actual $prerequisiteLines.Count -Expected 1 -Message "$Label did not emit exactly one prerequisite marker."
+        $prerequisiteValue = $prerequisiteLines[0].Substring("[PRODUCT_LAYER PREREQUISITE]".Length).Trim()
+        Assert-True -Condition ($prerequisiteValue -eq "MISSING" -or $prerequisiteValue.StartsWith("MISSING - ", [StringComparison]::Ordinal)) -Message "$Label prerequisite marker was not MISSING."
         Assert-Equal -Actual $commandResultLines.Count -Expected 0 -Message "$Label emitted a mutating command result for read-only DryRun."
     } else {
         Assert-Equal -Actual $commandResultLines.Count -Expected 1 -Message "$Label did not emit exactly one versioned command result."
@@ -7806,7 +7810,10 @@ function Invoke-MachinePrerequisiteContractScenarios {
     $projectBefore = Get-FileSnapshot -Root $hostRoot
     $valid = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $valid -ExitCode 0 -Label "Current machine prerequisites"
-    Assert-True -Condition ($valid.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Current machine prerequisites were not reported as current."
+    $currentPrerequisiteLines = @($valid.Text -split '\r?\n' | Where-Object { $_.StartsWith("[PRODUCT_LAYER PREREQUISITE]", [StringComparison]::Ordinal) })
+    Assert-Equal -Actual $currentPrerequisiteLines.Count -Expected 1 -Message "Current instance-backed DryRun did not emit exactly one prerequisite marker."
+    $currentPrerequisiteValue = $currentPrerequisiteLines[0].Substring("[PRODUCT_LAYER PREREQUISITE]".Length).Trim()
+    Assert-True -Condition ($currentPrerequisiteValue -eq "CURRENT" -or $currentPrerequisiteValue.StartsWith("CURRENT - ", [StringComparison]::Ordinal)) -Message "Current machine prerequisite marker was not CURRENT."
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBefore -Message "Valid prerequisite DryRun changed the project."
 
     $preview6PayloadRoot = New-CanonicalIdentityPayload `

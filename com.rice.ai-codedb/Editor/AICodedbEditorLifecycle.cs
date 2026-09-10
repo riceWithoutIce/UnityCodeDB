@@ -33,6 +33,7 @@ namespace Rice.AI.Codedb.Editor
         private const string ManagedBy = "com.rice.ai-codedb";
         private const string SessionIdKey = "Rice.AICodedb.EditorLifecycle.SessionId";
         private const string SessionCreatedAtKey = "Rice.AICodedb.EditorLifecycle.CreatedAtUtc";
+        private const string SessionProjectIdentityKey = "Rice.AICodedb.EditorLifecycle.ProjectIdentity";
         private const string LastProductStateKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastProductState.";
         private const string LastPackageFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastPackageFingerprint.";
         private const string LastVerifiedReadyFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastVerifiedReadyFingerprint.";
@@ -87,8 +88,13 @@ namespace Rice.AI.Codedb.Editor
             if (Application.isBatchMode)
                 return;
 
+            AICodedbLifecycleEvidence.InitializeMainThread();
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.InitializeOnLoad);
             try
             {
+                _projectRoot = AICodedbPaths.ProjectRoot;
+                _projectIdentity = ReadSessionProjectIdentity();
                 // Do not touch Package Manager, the project filesystem, or a
                 // Process object from an InitializeOnLoad constructor. Unity
                 // invokes this constructor while the managed domain is being
@@ -99,6 +105,10 @@ namespace Rice.AI.Codedb.Editor
             catch (Exception exception)
             {
                 Debug.LogWarning($"CodeDB Editor lifecycle initialization was skipped: {exception.Message}");
+            }
+            finally
+            {
+                callback.Dispose();
             }
         }
 
@@ -113,51 +123,39 @@ namespace Rice.AI.Codedb.Editor
 
         private static void Initialize()
         {
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.DeferredInitialize);
             _initializationQueued = false;
-            if (!ShouldInitializeLifecycle(_quitting))
-                return;
-
-            if (_initializationWork != null)
-                return;
-
-            // Give Unity a couple of idle editor frames to finish package and
-            // script bookkeeping. If the user enters Play immediately, keep
-            // deferring instead of starting any CodeDB work in that transition.
-            if (_initializationDeferralFrames > 0
-                || ShouldDeferLifecycleInitialization(
-                    EditorApplication.isCompiling,
-                    EditorApplication.isUpdating,
-                    EditorApplication.isPlayingOrWillChangePlaymode,
-                    Application.isPlaying))
-            {
-                if (_initializationDeferralFrames > 0)
-                    _initializationDeferralFrames--;
-                QueueDeferredInitialization();
-                return;
-            }
-
             try
             {
+                if (!ShouldInitializeLifecycle(_quitting))
+                    return;
+
+                if (_initializationWork != null)
+                    return;
+
+                // Give Unity a couple of idle editor frames to finish package and
+                // script bookkeeping. If the user enters Play immediately, keep
+                // deferring instead of starting any CodeDB work in that transition.
+                if (_initializationDeferralFrames > 0
+                    || ShouldDeferLifecycleInitialization(
+                        EditorApplication.isCompiling,
+                        EditorApplication.isUpdating,
+                        EditorApplication.isPlayingOrWillChangePlaymode,
+                        Application.isPlaying))
+                {
+                    if (_initializationDeferralFrames > 0)
+                        _initializationDeferralFrames--;
+                    QueueDeferredInitialization();
+                    return;
+                }
+
                 // Package identity is the only resolved Unity context needed
                 // synchronously. Project validation and process identity are
                 // prepared on a worker so a cold Play transition never waits
                 // for directory or Process APIs from this callback.
                 _projectRoot = AICodedbPaths.ProjectRoot;
                 _executionContext = AICodedbPaths.CaptureExecutionContext();
-                _projectIdentity = CreateProjectIdentityFromPath(_projectRoot);
-                if (string.IsNullOrWhiteSpace(_projectIdentity))
-                    throw new InvalidOperationException("Unity project root could not be identified.");
-                _lastProductState = ReadPersistedProductState(_projectIdentity);
-                _packageFingerprintChanged = HasPackageFingerprintChanged(_projectIdentity);
-                Interlocked.Exchange(
-                    ref _leasePrerequisiteCurrent,
-                    ShouldRestoreLeasePrerequisite(
-                        ReadPersistedLeasePrerequisite(_projectIdentity),
-                        _packageFingerprintChanged)
-                        ? 1
-                        : 0);
-                if (_packageFingerprintChanged)
-                    PersistLeasePrerequisite(_projectIdentity, false);
                 _sessionId = GetOrCreateSessionValue(SessionIdKey, () => Guid.NewGuid().ToString("N"));
                 _sessionCreatedAtUtc = GetOrCreateSessionValue(SessionCreatedAtKey, () => DateTime.UtcNow.ToString("o"));
                 _leasePath = string.Empty;
@@ -169,6 +167,10 @@ namespace Rice.AI.Codedb.Editor
             catch (Exception exception)
             {
                 HandleInitializationFailure(exception);
+            }
+            finally
+            {
+                callback.Dispose();
             }
         }
 
@@ -184,36 +186,51 @@ namespace Rice.AI.Codedb.Editor
 
         private static void CompleteDeferredInitialization()
         {
-            if (_quitting)
-            {
-                EditorApplication.update -= CompleteDeferredInitialization;
-                _initializationCompletionQueued = false;
-                return;
-            }
-
-            var work = _initializationWork;
-            if (work == null || !work.IsCompleted)
-                return;
-
-            // Do not consume the worker result while Unity is entering Play or
-            // rebuilding scripts. The completed result remains in memory and
-            // is applied on a later idle Editor frame.
-            if (ShouldDeferLifecycleInitialization(
-                    EditorApplication.isCompiling,
-                    EditorApplication.isUpdating,
-                    EditorApplication.isPlayingOrWillChangePlaymode,
-                    Application.isPlaying))
-                return;
-
-            _initializationWork = null;
-            EditorApplication.update -= CompleteDeferredInitialization;
-            _initializationCompletionQueued = false;
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.InitializationCompletion);
             try
             {
+                if (_quitting)
+                {
+                    EditorApplication.update -= CompleteDeferredInitialization;
+                    _initializationCompletionQueued = false;
+                    return;
+                }
+
+                var work = _initializationWork;
+                if (work == null || !work.IsCompleted)
+                    return;
+
+                // Do not consume the worker result while Unity is entering Play or
+                // rebuilding scripts. The completed result remains in memory and
+                // is applied on a later idle Editor frame.
+                if (ShouldDeferLifecycleInitialization(
+                        EditorApplication.isCompiling,
+                        EditorApplication.isUpdating,
+                        EditorApplication.isPlayingOrWillChangePlaymode,
+                        Application.isPlaying))
+                    return;
+
+                _initializationWork = null;
+                EditorApplication.update -= CompleteDeferredInitialization;
+                _initializationCompletionQueued = false;
                 var prepared = work.GetAwaiter().GetResult();
                 _projectRoot = prepared.ProjectRoot;
+                _projectIdentity = prepared.ProjectIdentity;
+                SessionState.SetString(SessionProjectIdentityKey, _projectIdentity);
                 _editorPid = prepared.EditorPid;
                 _processStartTicks = prepared.ProcessStartTicks;
+                _lastProductState = ReadPersistedProductState(_projectIdentity);
+                _packageFingerprintChanged = HasPackageFingerprintChanged(_projectIdentity);
+                Interlocked.Exchange(
+                    ref _leasePrerequisiteCurrent,
+                    ShouldRestoreLeasePrerequisite(
+                        ReadPersistedLeasePrerequisite(_projectIdentity),
+                        _packageFingerprintChanged)
+                        ? 1
+                        : 0);
+                if (_packageFingerprintChanged)
+                    PersistLeasePrerequisite(_projectIdentity, false);
 
                 EditorApplication.update -= OnEditorUpdate;
                 EditorApplication.update += OnEditorUpdate;
@@ -246,15 +263,24 @@ namespace Rice.AI.Codedb.Editor
             {
                 HandleInitializationFailure(exception);
             }
+            finally
+            {
+                callback.Dispose();
+            }
         }
 
         private static LifecycleInitializationData PrepareLifecycleInitialization(string projectRoot)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Process);
             var validatedRoot = ValidateProjectRoot(projectRoot);
+            var projectIdentity = CreateProjectIdentityFromCanonicalPath(validatedRoot);
             using (var process = Process.GetCurrentProcess())
             {
                 return new LifecycleInitializationData(
                     validatedRoot,
+                    projectIdentity,
                     process.Id,
                     process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture));
             }
@@ -329,13 +355,25 @@ namespace Rice.AI.Codedb.Editor
         [DidReloadScripts]
         private static void OnScriptsReloaded()
         {
-            // A domain reload invalidates the managed IPC handle. Reconnect
-            // the Bridge to the selected instance, but never launch a
-            // replacement/upgrade loop for an already healthy backend.
-            SupervisorBridge.Invalidate();
-            SupervisorRequestQueue.Invalidate();
-            EditorApplication.delayCall += RequestReconcileIfNeeded;
-            EditorApplication.delayCall += ReconnectSupervisorAfterReload;
+            AICodedbLifecycleEvidence.InitializeMainThread();
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.ScriptsReloaded);
+            try
+            {
+                AICodedbLifecycleEvidence.RecordDomainReload();
+                // A domain reload invalidates the managed IPC handle. Reconnect
+                // the Bridge to the selected instance, but never launch a
+                // replacement/upgrade loop for an already healthy backend.
+                SupervisorBridge.Invalidate();
+                SupervisorRequestQueue.Invalidate();
+                EditorApplication.delayCall += RequestReconcileIfNeeded;
+                EditorApplication.delayCall += ReconnectSupervisorAfterReload;
+            }
+            finally
+            {
+                callback.Dispose();
+                AICodedbLifecycleEvidence.PersistAndEmit("scripts_reloaded");
+            }
         }
 
         internal static bool ShouldDeferLifecycleInitialization(
@@ -354,39 +392,48 @@ namespace Rice.AI.Codedb.Editor
             if (!_initialized || _quitting || EditorApplication.timeSinceStartup < _nextHeartbeatAt)
                 return;
 
-            _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-            var playTransition = IsPlayModeMaintenanceSuspended();
-            BackgroundScheduler.SetMaintenanceSuspended(playTransition);
-            SupervisorRequestQueue.SetMaintenanceSuspended(playTransition);
-            if (playTransition)
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.Heartbeat);
+            try
             {
-                // Keep the interactive Editor lease alive while maintenance is
-                // suspended so the coordinator does not mistake Play mode for
-                // an offline Editor. The write remains on the lease worker.
-                if (_lastProductState != AICodedbProductState.MissingPrerequisite)
-                    QueueLeaseRefresh();
-                _nextReconcileAt = Math.Max(
-                    _nextReconcileAt,
-                    EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
-                return;
+                _nextHeartbeatAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
+                var playTransition = IsPlayModeMaintenanceSuspended();
+                BackgroundScheduler.SetMaintenanceSuspended(playTransition);
+                SupervisorRequestQueue.SetMaintenanceSuspended(playTransition);
+                if (playTransition)
+                {
+                    // Keep the interactive Editor lease alive while maintenance is
+                    // suspended so the coordinator does not mistake Play mode for
+                    // an offline Editor. The write remains on the lease worker.
+                    if (_lastProductState != AICodedbProductState.MissingPrerequisite)
+                        QueueLeaseRefresh();
+                    _nextReconcileAt = Math.Max(
+                        _nextReconcileAt,
+                        EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
+                    return;
+                }
+                if (_lastProductState == AICodedbProductState.MissingPrerequisite)
+                {
+                    QueuePrerequisiteRecheck();
+                    return;
+                }
+                var cachedMigrationAdmissionBlocked =
+                    Volatile.Read(ref _scheduledMigrationAdmissionBlocked) != 0;
+                if (ShouldQueueScheduledReconcile(
+                        EditorApplication.timeSinceStartup,
+                        ref _nextReconcileAt,
+                        false,
+                        cachedMigrationAdmissionBlocked,
+                        Volatile.Read(ref _reconcileInFlight) != 0))
+                    BeginReconcile(false);
+                else if (cachedMigrationAdmissionBlocked)
+                    QueuePrerequisiteRecheck();
+                QueueLeaseRefresh();
             }
-            if (_lastProductState == AICodedbProductState.MissingPrerequisite)
+            finally
             {
-                QueuePrerequisiteRecheck();
-                return;
+                callback.Dispose();
             }
-            var cachedMigrationAdmissionBlocked =
-                Volatile.Read(ref _scheduledMigrationAdmissionBlocked) != 0;
-            if (ShouldQueueScheduledReconcile(
-                    EditorApplication.timeSinceStartup,
-                    ref _nextReconcileAt,
-                    false,
-                    cachedMigrationAdmissionBlocked,
-                    Volatile.Read(ref _reconcileInFlight) != 0))
-                BeginReconcile(false);
-            else if (cachedMigrationAdmissionBlocked)
-                QueuePrerequisiteRecheck();
-            QueueLeaseRefresh();
         }
 
         internal static bool ShouldRunScheduledReconcile(
@@ -428,62 +475,101 @@ namespace Rice.AI.Codedb.Editor
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
-            if (state == PlayModeStateChange.ExitingEditMode)
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.PlayModeTransition);
+            try
             {
-                // A cold Play transition can arrive before deferred lifecycle
-                // initialization has cached the project identity. In that
-                // window the handoff is display-only and must not validate or
-                // hash the project root on Unity's callback thread.
-                if (_initialized)
-                    RecordProductStateForPlayModeIfAbsent();
-                CancelBackgroundMaintenanceForBoundary();
-            }
-            else if (state == PlayModeStateChange.EnteredEditMode)
-                ClearProductStateForPlayMode();
+                AICodedbLifecycleEvidence.RecordPlayTransition();
+                if (state == PlayModeStateChange.ExitingEditMode)
+                {
+                    // A cold Play transition can arrive before deferred lifecycle
+                    // initialization has cached the project identity. In that
+                    // window the handoff is display-only and must not validate or
+                    // hash the project root on Unity's callback thread.
+                    if (_initialized)
+                        RecordProductStateForPlayModeIfAbsent();
+                    CancelBackgroundMaintenanceForBoundary();
+                }
+                else if (state == PlayModeStateChange.EnteredEditMode)
+                    ClearProductStateForPlayMode();
 
-            var suspended = state != PlayModeStateChange.EnteredEditMode;
-            BackgroundScheduler.SetMaintenanceSuspended(suspended);
-            SupervisorRequestQueue.SetMaintenanceSuspended(suspended);
-            if (state == PlayModeStateChange.EnteredPlayMode && !_quitting)
-            {
-                // Stable Play permits query-priority reconnects. Maintenance
-                // remains suspended until Edit mode resumes.
-                QueueSupervisorReconnect(false);
+                var suspended = state != PlayModeStateChange.EnteredEditMode;
+                BackgroundScheduler.SetMaintenanceSuspended(suspended);
+                SupervisorRequestQueue.SetMaintenanceSuspended(suspended);
+                if (state == PlayModeStateChange.EnteredPlayMode && !_quitting)
+                {
+                    // Stable Play permits query-priority reconnects. Maintenance
+                    // remains suspended until Edit mode resumes.
+                    QueueSupervisorReconnect(false);
+                }
+                else if (!suspended && !_quitting)
+                {
+                    _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
+                    if (ShouldForceReconcileAfterPlayModeResume(_packageFingerprintChanged))
+                        BeginReconcile(true);
+                    else if (ShouldReconcileAfterPlayModeResume(_lastProductState))
+                        BeginReconcile(false);
+                    QueueSupervisorReconnect(false);
+                }
             }
-            else if (!suspended && !_quitting)
+            finally
             {
-                _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
-                if (ShouldForceReconcileAfterPlayModeResume(_packageFingerprintChanged))
-                    BeginReconcile(true);
-                else if (ShouldReconcileAfterPlayModeResume(_lastProductState))
-                    BeginReconcile(false);
-                QueueSupervisorReconnect(false);
+                callback.Dispose();
+                AICodedbLifecycleEvidence.PersistAndEmit("play_" + state);
             }
         }
 
         private static void OnEditorQuitting()
         {
-            _quitting = true;
-            CancelBackgroundMaintenanceForBoundary();
-            QueueEditorLeaseDeletion();
-            QueueOwnedSupervisorShutdown();
-            SupervisorBridge.Dispose();
-            SupervisorRequestQueue.Dispose();
-            EditorApplication.update -= CompleteDeferredInitialization;
-            _initializationCompletionQueued = false;
-            EditorApplication.update -= OnEditorUpdate;
-            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            AICodedbLifecycleEvidence.RecordEditorQuittingBoundary(
+                true,
+                Volatile.Read(ref _reconcileInFlight) != 0,
+                SupervisorRequestQueue.Snapshot);
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.EditorQuitting);
+            try
+            {
+                _quitting = true;
+                CancelBackgroundMaintenanceForBoundary();
+                QueueEditorLeaseDeletion();
+                QueueOwnedSupervisorShutdown();
+                SupervisorBridge.Dispose();
+                SupervisorRequestQueue.Dispose();
+                EditorApplication.update -= CompleteDeferredInitialization;
+                _initializationCompletionQueued = false;
+                EditorApplication.update -= OnEditorUpdate;
+                EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            }
+            finally
+            {
+                callback.Dispose();
+                AICodedbLifecycleEvidence.RecordEditorQuittingBoundary(
+                    false,
+                    Volatile.Read(ref _reconcileInFlight) != 0,
+                    SupervisorRequestQueue.Snapshot);
+                AICodedbLifecycleEvidence.PersistAndEmit("editor_quitting");
+            }
         }
 
         private static void OnBeforeAssemblyReload()
         {
-            // Invalidate only Unity-side admission and IPC waiters. The
-            // external Supervisor owns backend processes across Domain Reload.
-            CancelBackgroundMaintenanceForBoundary();
-            SupervisorBridge.Invalidate();
-            SupervisorRequestQueue.Invalidate();
-            EditorApplication.update -= CompleteDeferredInitialization;
-            _initializationCompletionQueued = false;
+            var callback = AICodedbLifecycleEvidence.BeginCallback(
+                AICodedbLifecycleCallbackKind.BeforeAssemblyReload);
+            try
+            {
+                // Invalidate only Unity-side admission and IPC waiters. The
+                // external Supervisor owns backend processes across Domain Reload.
+                CancelBackgroundMaintenanceForBoundary();
+                SupervisorBridge.Invalidate();
+                SupervisorRequestQueue.Invalidate();
+                EditorApplication.update -= CompleteDeferredInitialization;
+                _initializationCompletionQueued = false;
+            }
+            finally
+            {
+                callback.Dispose();
+                AICodedbLifecycleEvidence.PersistAndEmit("before_assembly_reload");
+            }
         }
 
         private static async void BeginReconcile(bool force)
@@ -501,6 +587,7 @@ namespace Rice.AI.Codedb.Editor
             if (Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
                 return;
 
+            AICodedbLifecycleEvidence.RecordReconcileStarted();
             // Every reconcile epoch must re-establish the read-only control
             // contract admission before an automatic reconnect can start.
             Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
@@ -545,6 +632,9 @@ namespace Rice.AI.Codedb.Editor
                         _nextReconcileAt,
                         EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds);
                 }
+                AICodedbLifecycleEvidence.RecordReconcileCompleted(
+                    result.HasProductState ? result.ProductState : previousProductState);
+                AICodedbLifecycleEvidence.PersistAndEmit("reconcile_completed");
                 if (!string.IsNullOrWhiteSpace(result.Warning))
                     Debug.LogWarning(result.Warning);
             }
@@ -577,6 +667,8 @@ namespace Rice.AI.Codedb.Editor
                 || !canContinue())
                 return null;
 
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FullStatus);
             var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
             var migrationStatus = AICodedbControlContractMigrationStore.Read(
                 context.ProjectRoot,
@@ -586,14 +678,93 @@ namespace Rice.AI.Codedb.Editor
             if (cancellationToken.IsCancellationRequested || !canContinue())
                 return null;
 
+            // The immutable coordinator requires an interactive Editor lease
+            // before it can start. Establish that lease from the read-only
+            // prerequisite DryRun before asking the Supervisor to admit its
+            // first coordinator-backed Probe.
+            var independentPrerequisiteRead = !HasPublishedEditorLease();
+            var independentPrerequisiteCurrent = false;
+            var coordinatorAdmissionAllowed = !independentPrerequisiteRead;
+            var coordinatorAdmissionDisposition = independentPrerequisiteRead
+                ? AICodedbCoordinatorAdmissionDisposition.PrerequisiteEvidenceUntrustworthy
+                : AICodedbCoordinatorAdmissionDisposition.ExistingLease;
+            AICodedbCommandResult independentPrerequisiteResult = null;
+            AICodedbProductStatus independentPrerequisiteStatus = default(AICodedbProductStatus);
+            if (independentPrerequisiteRead
+                && integrationStatus.IsValid
+                && !integrationStatus.IsUninstalled)
+            {
+                independentPrerequisiteResult = RememberHostStatusResult(
+                    AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken));
+                independentPrerequisiteStatus = AICodedbProductStatusBuilder.Build(
+                    integrationStatus,
+                    independentPrerequisiteResult);
+                AICodedbProductLayerState prerequisite;
+                var prerequisiteEvidenceDisposition = ClassifyIndependentPrerequisiteEvidence(
+                    independentPrerequisiteResult,
+                    independentPrerequisiteStatus,
+                    out prerequisite);
+                AICodedbLifecycleEvidence.RecordPrerequisiteEvidenceDisposition(
+                    prerequisiteEvidenceDisposition);
+                independentPrerequisiteCurrent =
+                    prerequisiteEvidenceDisposition ==
+                    AICodedbPrerequisiteEvidenceDisposition.TrustworthyCurrent;
+                if (!independentPrerequisiteCurrent)
+                {
+                    coordinatorAdmissionDisposition =
+                        prerequisiteEvidenceDisposition ==
+                        AICodedbPrerequisiteEvidenceDisposition.TrustworthyMissing
+                        ? AICodedbCoordinatorAdmissionDisposition.PrerequisiteMissing
+                        : AICodedbCoordinatorAdmissionDisposition.PrerequisiteEvidenceUntrustworthy;
+                }
+                else if (ShouldPublishEditorLeaseAfterPrerequisite(
+                             integrationStatus,
+                             independentPrerequisiteStatus))
+                {
+                    var leaseDisposition = AICodedbCoordinatorAdmissionDisposition.Unknown;
+                    ApplyPrerequisiteGatedLeaseRefresh(
+                        integrationStatus,
+                        independentPrerequisiteStatus,
+                        () => leaseDisposition = TryRefreshEditorLeaseForAdmission(context));
+                    coordinatorAdmissionDisposition = leaseDisposition;
+                }
+                else
+                    coordinatorAdmissionDisposition = AICodedbCoordinatorAdmissionDisposition.IntegrationNotEligible;
+                AICodedbLifecycleEvidence.RecordCoordinatorAdmissionDisposition(
+                    coordinatorAdmissionDisposition);
+                coordinatorAdmissionAllowed = ShouldAttemptCoordinatorAdmission(
+                    true,
+                    independentPrerequisiteCurrent,
+                    HasPublishedEditorLease());
+                if (coordinatorAdmissionAllowed)
+                {
+                    Interlocked.Exchange(ref _leasePrerequisiteCurrent, 1);
+                    Interlocked.Exchange(ref _missingPrerequisiteFingerprint, string.Empty);
+                }
+                else
+                    Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+            }
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return null;
+
+            AICodedbLifecycleEvidence.ResetPostAdmissionEvidence();
             AICodedbProductStatus migrationProductStatus;
             AICodedbCommandResult migrationAdmissionResult;
             if (TryResolveControlContractMigrationBlock(
                     integrationStatus,
                     migrationStatus,
+                    independentPrerequisiteCurrent
+                        ? independentPrerequisiteResult
+                        : null,
                     () =>
                     {
-                        var result = AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken);
+                        if (!coordinatorAdmissionAllowed)
+                            return independentPrerequisiteResult;
+                        var result = RunSupervisorCommand(
+                            context,
+                            "materialize",
+                            "Probe",
+                            cancellationToken);
                         return cancellationToken.IsCancellationRequested || !canContinue()
                             ? null
                             : result;
@@ -601,6 +772,8 @@ namespace Rice.AI.Codedb.Editor
                     out migrationProductStatus,
                     out migrationAdmissionResult))
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.MigrationBlocked);
                 var suppressScheduledMigrationAdmission =
                     integrationStatus.IsValid
                     && !integrationStatus.IsUninstalled
@@ -631,13 +804,53 @@ namespace Rice.AI.Codedb.Editor
                 return LifecycleReconcileResult.WithState(migrationProductStatus.State);
             }
 
+            if (independentPrerequisiteRead && !coordinatorAdmissionAllowed)
+            {
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                if (independentPrerequisiteStatus.State == AICodedbProductState.MissingPrerequisite)
+                {
+                    Interlocked.Exchange(
+                        ref _missingPrerequisiteFingerprint,
+                        CaptureMachinePrerequisiteEvidenceFingerprint(context));
+                    RememberLifecycleProductStatus(
+                        independentPrerequisiteStatus,
+                        independentPrerequisiteResult);
+                    return LifecycleReconcileResult.WithState(
+                        AICodedbProductState.MissingPrerequisite);
+                }
+
+                var detail = string.IsNullOrWhiteSpace(independentPrerequisiteStatus.Detail)
+                    ? "CodeDB could not establish the current Editor lease before coordinator admission."
+                    : independentPrerequisiteStatus.Detail;
+                var blockedStatus = new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    independentPrerequisiteStatus.Prerequisite,
+                    independentPrerequisiteStatus.Installed,
+                    independentPrerequisiteStatus.Configured,
+                    independentPrerequisiteStatus.McpAvailable,
+                    detail,
+                    independentPrerequisiteStatus.Command,
+                    AICodedbProductAttentionReason.None,
+                    independentPrerequisiteStatus.DiagnosticDetail);
+                RememberLifecycleProductStatus(blockedStatus, independentPrerequisiteResult);
+                return LifecycleReconcileResult.WithWarning(
+                    AICodedbProductState.NeedsAttention,
+                    detail);
+            }
+
             Interlocked.Exchange(ref _scheduledMigrationAdmissionBlocked, 0);
             Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 1);
             if (!force && !BackendNeedsReconcile(context, previousProductState))
+            {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.BackendReconcileNotRequired);
                 return null;
+            }
 
             if (integrationStatus.State == AICodedbProjectIntegrationState.Invalid)
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.IntegrationInvalid);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
                 return LifecycleReconcileResult.WithWarning(
@@ -646,6 +859,8 @@ namespace Rice.AI.Codedb.Editor
             }
             if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.UninstallCleanup);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
                 if (!canContinue())
@@ -660,6 +875,8 @@ namespace Rice.AI.Codedb.Editor
             }
             if (integrationStatus.IsUninstalled)
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.Uninstalled);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
                 return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
@@ -671,9 +888,14 @@ namespace Rice.AI.Codedb.Editor
                 RunSupervisorCommand(context, "materialize", "Probe", cancellationToken));
             var hostStatus = BuildHostPayloadStatus(hostResult, context);
             var productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, hostResult);
+            AICodedbLifecycleEvidence.RecordPostAdmissionProductLayers(productStatus);
+            AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                AICodedbPostAdmissionDisposition.InitialSupervisorProbeEvaluated);
             var workerResult = LifecycleReconcileResult.WithState(productStatus.State);
             if (productStatus.State == AICodedbProductState.MissingPrerequisite)
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.ProbeReportedMissingPrerequisite);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 Interlocked.Exchange(
                     ref _missingPrerequisiteFingerprint,
@@ -700,8 +922,11 @@ namespace Rice.AI.Codedb.Editor
             // flat/generation path remains available to diagnostics, but it
             // must not be selected after a Package reload.
             var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+            AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
             if (currentInstance.State == AICodedbCurrentInstanceState.Invalid)
             {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.CurrentInstanceInvalid);
                 Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
                 workerResult.ProductState = AICodedbProductState.NeedsAttention;
                 workerResult.Warning = "CodeDB current instance identity is invalid: " + currentInstance.Detail;
@@ -713,6 +938,9 @@ namespace Rice.AI.Codedb.Editor
                     currentInstance.State,
                     productStatus,
                     integrationStatus.CleanupState);
+                AICodedbLifecycleEvidence.RecordCurrentInstanceConvergencePlan(convergencePlan);
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    ResolvePostAdmissionConvergenceDisposition(convergencePlan));
                 if (convergencePlan == AICodedbCurrentInstanceConvergencePlan.Retire)
                 {
                     var retirementResult = RememberHostStatusResult(
@@ -764,6 +992,10 @@ namespace Rice.AI.Codedb.Editor
                 RefreshEditorLeaseForIntegrationState(context);
                 return workerResult;
             }
+            AICodedbLifecycleEvidence.RecordCurrentInstanceConvergencePlan(
+                AICodedbCurrentInstanceConvergencePlan.Blocked);
+            AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                AICodedbPostAdmissionDisposition.ConvergenceBlocked);
             workerResult.ProductState = AICodedbProductState.NeedsAttention;
             workerResult.Warning = "CodeDB selected-instance state is unsupported by the v0.3 Supervisor route.";
             return workerResult;
@@ -772,6 +1004,23 @@ namespace Rice.AI.Codedb.Editor
         internal static bool TryResolveControlContractMigrationBlock(
             AICodedbProjectIntegrationStatus integrationStatus,
             AICodedbControlContractMigrationStatus migrationStatus,
+            Func<AICodedbCommandResult> prerequisiteAdmissionProbe,
+            out AICodedbProductStatus productStatus,
+            out AICodedbCommandResult admissionResult)
+        {
+            return TryResolveControlContractMigrationBlock(
+                integrationStatus,
+                migrationStatus,
+                null,
+                prerequisiteAdmissionProbe,
+                out productStatus,
+                out admissionResult);
+        }
+
+        internal static bool TryResolveControlContractMigrationBlock(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbControlContractMigrationStatus migrationStatus,
+            AICodedbCommandResult independentPrerequisiteResult,
             Func<AICodedbCommandResult> prerequisiteAdmissionProbe,
             out AICodedbProductStatus productStatus,
             out AICodedbCommandResult admissionResult)
@@ -789,9 +1038,10 @@ namespace Rice.AI.Codedb.Editor
                 return true;
             }
 
-            admissionResult = prerequisiteAdmissionProbe == null
-                ? null
-                : prerequisiteAdmissionProbe();
+            admissionResult = independentPrerequisiteResult
+                              ?? (prerequisiteAdmissionProbe == null
+                                  ? null
+                                  : prerequisiteAdmissionProbe());
             var prerequisiteStatus = AICodedbProductStatusBuilder.Build(
                 integrationStatus,
                 admissionResult);
@@ -861,10 +1111,71 @@ namespace Rice.AI.Codedb.Editor
                 return false;
             }
 
+            return TryReadPrerequisiteMarker(result, productStatus, out prerequisite);
+        }
+
+        private static AICodedbPrerequisiteEvidenceDisposition ClassifyIndependentPrerequisiteEvidence(
+            AICodedbCommandResult result,
+            AICodedbProductStatus productStatus,
+            out AICodedbProductLayerState prerequisite)
+        {
+            return ClassifyIndependentPrerequisiteEvidence(
+                result != null,
+                result != null && result.TimedOut,
+                productStatus.Command.Present,
+                productStatus.Command.IsValid,
+                result == null ? string.Empty : result.StandardOutput,
+                productStatus.Prerequisite,
+                out prerequisite);
+        }
+
+        internal static AICodedbPrerequisiteEvidenceDisposition ClassifyIndependentPrerequisiteEvidence(
+            bool resultPresent,
+            bool timedOut,
+            bool commandEnvelopePresent,
+            bool commandEnvelopeValid,
+            string standardOutput,
+            AICodedbProductLayerState productStatusPrerequisite,
+            out AICodedbProductLayerState prerequisite)
+        {
+            prerequisite = AICodedbProductLayerState.Unknown;
+            if (!resultPresent)
+                return AICodedbPrerequisiteEvidenceDisposition.ResultAbsent;
+            if (timedOut)
+                return AICodedbPrerequisiteEvidenceDisposition.CommandTimedOut;
+            if (commandEnvelopePresent && !commandEnvelopeValid)
+                return AICodedbPrerequisiteEvidenceDisposition.CommandEnvelopeInvalid;
+
+            return ClassifyPrerequisiteMarker(
+                standardOutput,
+                productStatusPrerequisite,
+                out prerequisite);
+        }
+
+        private static bool TryReadPrerequisiteMarker(
+            AICodedbCommandResult result,
+            AICodedbProductStatus productStatus,
+            out AICodedbProductLayerState prerequisite)
+        {
+            var disposition = ClassifyPrerequisiteMarker(
+                result.StandardOutput,
+                productStatus.Prerequisite,
+                out prerequisite);
+            return disposition == AICodedbPrerequisiteEvidenceDisposition.TrustworthyCurrent
+                   || disposition == AICodedbPrerequisiteEvidenceDisposition.TrustworthyMissing;
+        }
+
+        private static AICodedbPrerequisiteEvidenceDisposition ClassifyPrerequisiteMarker(
+            string standardOutput,
+            AICodedbProductLayerState productStatusPrerequisite,
+            out AICodedbProductLayerState prerequisite)
+        {
+            prerequisite = AICodedbProductLayerState.Unknown;
+
             const string prefix = "[PRODUCT_LAYER PREREQUISITE]";
             var markerCount = 0;
             var markerValue = string.Empty;
-            foreach (var line in (result.StandardOutput ?? string.Empty).Split(
+            foreach (var line in (standardOutput ?? string.Empty).Split(
                          new[] { "\r\n", "\n" },
                          StringSplitOptions.None))
             {
@@ -876,15 +1187,19 @@ namespace Rice.AI.Codedb.Editor
             }
 
             if (markerCount != 1)
-                return false;
+                return AICodedbPrerequisiteEvidenceDisposition.MarkerCardinalityInvalid;
             if (IsExactPrerequisiteMarker(markerValue, "CURRENT"))
                 prerequisite = AICodedbProductLayerState.Current;
             else if (IsExactPrerequisiteMarker(markerValue, "MISSING"))
                 prerequisite = AICodedbProductLayerState.Missing;
             else
-                return false;
+                return AICodedbPrerequisiteEvidenceDisposition.MarkerMalformed;
 
-            return productStatus.Prerequisite == prerequisite;
+            if (productStatusPrerequisite != prerequisite)
+                return AICodedbPrerequisiteEvidenceDisposition.MarkerProductStatusMismatch;
+            return prerequisite == AICodedbProductLayerState.Current
+                ? AICodedbPrerequisiteEvidenceDisposition.TrustworthyCurrent
+                : AICodedbPrerequisiteEvidenceDisposition.TrustworthyMissing;
         }
 
         private static bool IsExactPrerequisiteMarker(string value, string state)
@@ -905,6 +1220,8 @@ namespace Rice.AI.Codedb.Editor
             string action,
             CancellationToken cancellationToken)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
             var response = SupervisorBridge.SendCommand(
                 context.ProjectRoot,
                 command,
@@ -921,6 +1238,7 @@ namespace Rice.AI.Codedb.Editor
                 && IsSupervisorOneShotFallbackAllowed(commandResult)
                 && string.Equals(command, "materialize", StringComparison.Ordinal))
             {
+                AICodedbLifecycleEvidence.RecordMaterializerCommand(true);
                 // The Bridge grants this only for an empty-runtime bootstrap.
                 // Outage or ambiguous-owner failures never enter this branch.
                 if (string.Equals(action, "Probe", StringComparison.Ordinal))
@@ -930,6 +1248,8 @@ namespace Rice.AI.Codedb.Editor
                     return RememberHostStatusResult(
                         AICodedbHostPayloadMaterializer.RunUpgrade(context, cancellationToken));
             }
+            if (string.Equals(command, "materialize", StringComparison.Ordinal))
+                AICodedbLifecycleEvidence.RecordMaterializerCommand(false);
             return commandResult;
         }
 
@@ -943,7 +1263,8 @@ namespace Rice.AI.Codedb.Editor
         internal static async Task<AICodedbCommandResult> RunSupervisorCommandAsync(
             string command,
             string action,
-            bool confirmedProjectMutation)
+            bool confirmedProjectMutation,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
             var projectRoot = _projectRoot;
             if (string.IsNullOrWhiteSpace(projectRoot))
@@ -953,7 +1274,10 @@ namespace Rice.AI.Codedb.Editor
                 command,
                 action,
                 null,
-                confirmedProjectMutation);
+                confirmedProjectMutation,
+                cancellationToken);
+            if (string.Equals(command, "materialize", StringComparison.Ordinal))
+                AICodedbLifecycleEvidence.RecordMaterializerCommand(false);
             if (response != null && response.Snapshot != null)
                 RememberSupervisorSnapshot(response.Snapshot);
             return response == null
@@ -966,8 +1290,9 @@ namespace Rice.AI.Codedb.Editor
             if (snapshot == null)
                 return;
             // The Bridge remains the source of truth for the snapshot. This
-            // hook intentionally stays side-effect free so lifecycle workers
-            // can update only their in-memory observation.
+            // hook updates observation-only counters and never changes the
+            // lifecycle or Supervisor decision.
+            AICodedbLifecycleEvidence.RecordSupervisorObservation(snapshot);
         }
 
         internal static AICodedbCommandResult RunWatcherThenAvailability(
@@ -1090,6 +1415,24 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return AICodedbCurrentInstanceConvergencePlan.Deploy;
+        }
+
+        internal static AICodedbPostAdmissionDisposition ResolvePostAdmissionConvergenceDisposition(
+            AICodedbCurrentInstanceConvergencePlan plan)
+        {
+            switch (plan)
+            {
+                case AICodedbCurrentInstanceConvergencePlan.Retire:
+                    return AICodedbPostAdmissionDisposition.RetirementSelected;
+                case AICodedbCurrentInstanceConvergencePlan.Deploy:
+                    return AICodedbPostAdmissionDisposition.DeploymentSelected;
+                case AICodedbCurrentInstanceConvergencePlan.RecoverAvailability:
+                    return AICodedbPostAdmissionDisposition.AvailabilityRecoverySelected;
+                case AICodedbCurrentInstanceConvergencePlan.Blocked:
+                    return AICodedbPostAdmissionDisposition.ConvergenceBlocked;
+                default:
+                    return AICodedbPostAdmissionDisposition.ConvergenceComplete;
+            }
         }
 
         private static LifecycleReconcileResult RecoverCurrentInstanceAvailability(
@@ -1364,6 +1707,11 @@ namespace Rice.AI.Codedb.Editor
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
+            _ = task.ContinueWith(
+                completed => RememberSupervisorSnapshot(completed.Result),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         internal static bool ShouldDeferSupervisorReconnect(
@@ -1388,9 +1736,15 @@ namespace Rice.AI.Codedb.Editor
             {
                 // This only schedules a worker. The quitting callback neither
                 // reads Supervisor evidence nor waits for named-pipe I/O.
+                AICodedbLifecycleEvidence.RecordShutdownRequested();
                 var task = SupervisorBridge.RequestOwnedShutdownAsync(
                     _projectRoot,
                     "unity-bridge");
+                _ = task.ContinueWith(
+                    completed => AICodedbLifecycleEvidence.RecordShutdownDisposition(completed.Result),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
                 _ = task.ContinueWith(
                     completed =>
                     {
@@ -1884,6 +2238,15 @@ namespace Rice.AI.Codedb.Editor
                    && productStatus.Prerequisite == AICodedbProductLayerState.Current;
         }
 
+        internal static bool ShouldAttemptCoordinatorAdmission(
+            bool independentPrerequisiteRead,
+            bool prerequisiteCurrent,
+            bool editorLeasePublished)
+        {
+            return !independentPrerequisiteRead
+                   || (prerequisiteCurrent && editorLeasePublished);
+        }
+
         internal static bool ApplyPrerequisiteGatedLeaseRefresh(
             AICodedbProjectIntegrationStatus integrationStatus,
             AICodedbProductStatus productStatus,
@@ -2062,12 +2425,30 @@ namespace Rice.AI.Codedb.Editor
 
         private static void RefreshEditorLeaseForIntegrationState(AICodedbEditorExecutionContext context)
         {
-            lock (LeaseIoLock)
+            _ = TryRefreshEditorLeaseForAdmission(context);
+        }
+
+        private static AICodedbCoordinatorAdmissionDisposition TryRefreshEditorLeaseForAdmission(
+            AICodedbEditorExecutionContext context)
+        {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.BlockingLock);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            try
             {
-                var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
-                var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
-                if (ShouldPublishEditorLeaseForInstance(integrationStatus, currentInstance))
+                lock (LeaseIoLock)
                 {
+                    var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+                    var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+                    var initialDisposition = ClassifyEditorLeasePublication(
+                        integrationStatus,
+                        currentInstance,
+                        false);
+                    if (initialDisposition != AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed)
+                    {
+                        DeleteEditorLease();
+                        return initialDisposition;
+                    }
+
                     var previousLeasePath = _leasePath;
                     _leasePath = Path.Combine(
                         context.GetProjectPath(currentInstance.EditorLeaseRelativePath),
@@ -2079,9 +2460,57 @@ namespace Rice.AI.Codedb.Editor
                         File.Delete(previousLeasePath);
                     }
                     PublishLease();
+                    return ClassifyEditorLeasePublication(
+                        integrationStatus,
+                        currentInstance,
+                        HasPublishedEditorLease());
                 }
-                else
-                    DeleteEditorLease();
+            }
+            catch
+            {
+                return AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed;
+            }
+        }
+
+        internal static AICodedbCoordinatorAdmissionDisposition ClassifyEditorLeasePublication(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbCurrentInstanceStatus currentInstance,
+            bool leasePublished)
+        {
+            return ClassifyEditorLeasePublication(
+                integrationStatus.State,
+                currentInstance.State,
+                currentInstance.Present,
+                currentInstance.CanPublishEditorLease,
+                leasePublished);
+        }
+
+        internal static AICodedbCoordinatorAdmissionDisposition ClassifyEditorLeasePublication(
+            AICodedbProjectIntegrationState integrationState,
+            AICodedbCurrentInstanceState currentInstanceState,
+            bool currentInstancePresent,
+            bool canPublishEditorLease,
+            bool leasePublished)
+        {
+            if (integrationState != AICodedbProjectIntegrationState.Installed)
+                return AICodedbCoordinatorAdmissionDisposition.IntegrationNotEligible;
+            if (currentInstanceState == AICodedbCurrentInstanceState.Invalid)
+                return AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid;
+            if (!currentInstancePresent)
+                return AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing;
+            if (!canPublishEditorLease)
+                return AICodedbCoordinatorAdmissionDisposition.CurrentInstanceIneligible;
+            return leasePublished
+                ? AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished
+                : AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed;
+        }
+
+        private static bool HasPublishedEditorLease()
+        {
+            lock (LeaseIoLock)
+            {
+                return !string.IsNullOrWhiteSpace(_leasePath)
+                       && File.Exists(_leasePath);
             }
         }
 
@@ -2095,6 +2524,8 @@ namespace Rice.AI.Codedb.Editor
 
         private static void RefreshEditorLeaseHeartbeat()
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.BlockingLock);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             lock (LeaseIoLock)
             {
                 if (string.IsNullOrWhiteSpace(_leasePath))
@@ -2122,6 +2553,8 @@ namespace Rice.AI.Codedb.Editor
 
         private static void DeleteEditorLease()
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.BlockingLock);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             string leasePath;
             lock (LeaseIoLock)
             {
@@ -2134,12 +2567,7 @@ namespace Rice.AI.Codedb.Editor
 
         private static void QueueEditorLeaseDeletion()
         {
-            string leasePath;
-            lock (LeaseIoLock)
-            {
-                leasePath = _leasePath;
-                _leasePath = string.Empty;
-            }
+            var leasePath = TakeEditorLeasePathForDeletion(ref _leasePath);
 
             if (string.IsNullOrWhiteSpace(leasePath))
                 return;
@@ -2150,8 +2578,14 @@ namespace Rice.AI.Codedb.Editor
             _ = BackgroundScheduler.QueueLease(() => DeleteEditorLeaseAtPath(leasePath));
         }
 
+        internal static string TakeEditorLeasePathForDeletion(ref string leasePath)
+        {
+            return Interlocked.Exchange(ref leasePath, string.Empty);
+        }
+
         private static void DeleteEditorLeaseAtPath(string leasePath)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             try
             {
                 if (!string.IsNullOrWhiteSpace(leasePath) && File.Exists(leasePath))
@@ -2439,6 +2873,9 @@ namespace Rice.AI.Codedb.Editor
         private static string CaptureMachinePrerequisiteEvidenceFingerprint(
             AICodedbEditorExecutionContext context)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Process);
             var providerExecutablePath = context.MachineProviderExecutablePath;
             var providerManifestPath = string.IsNullOrWhiteSpace(providerExecutablePath)
                 ? string.Empty
@@ -2589,12 +3026,15 @@ namespace Rice.AI.Codedb.Editor
 
         internal static string CreateProjectIdentity(string projectRoot)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
             var canonical = ValidateProjectRoot(projectRoot);
             return CreateProjectIdentityFromCanonicalPath(canonical);
         }
 
         private static string CreateProjectIdentityFromPath(string projectRoot)
         {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
             if (string.IsNullOrWhiteSpace(projectRoot))
                 return string.Empty;
 
@@ -2616,6 +3056,22 @@ namespace Rice.AI.Codedb.Editor
                     builder.Append(value.ToString("x2", CultureInfo.InvariantCulture));
                 return "sha256:" + builder;
             }
+        }
+
+        private static string ReadSessionProjectIdentity()
+        {
+            var value = SessionState.GetString(SessionProjectIdentityKey, string.Empty);
+            if (value.Length != "sha256:".Length + 64
+                || !value.StartsWith("sha256:", StringComparison.Ordinal))
+                return string.Empty;
+            for (var index = "sha256:".Length; index < value.Length; index++)
+            {
+                var character = value[index];
+                if ((character < '0' || character > '9')
+                    && (character < 'a' || character > 'f'))
+                    return string.Empty;
+            }
+            return value;
         }
 
         private static string GetOrCreateSessionValue(string key, Func<string> factory)
@@ -2832,18 +3288,66 @@ namespace Rice.AI.Codedb.Editor
             Blocked
         }
 
+        internal enum AICodedbPostAdmissionDisposition
+        {
+            NotEvaluated,
+            MigrationBlocked,
+            BackendReconcileNotRequired,
+            IntegrationInvalid,
+            UninstallCleanup,
+            Uninstalled,
+            InitialSupervisorProbeEvaluated,
+            ProbeReportedMissingPrerequisite,
+            CurrentInstanceInvalid,
+            RetirementSelected,
+            DeploymentSelected,
+            AvailabilityRecoverySelected,
+            ConvergenceBlocked,
+            ConvergenceComplete
+        }
+
+        internal enum AICodedbCoordinatorAdmissionDisposition
+        {
+            Unknown,
+            ExistingLease,
+            PrerequisiteMissing,
+            PrerequisiteEvidenceUntrustworthy,
+            IntegrationNotEligible,
+            CurrentInstanceMissing,
+            CurrentInstanceInvalid,
+            CurrentInstanceIneligible,
+            EditorLeasePublished,
+            LeasePublicationFailed
+        }
+
+        internal enum AICodedbPrerequisiteEvidenceDisposition
+        {
+            Unknown,
+            ResultAbsent,
+            CommandTimedOut,
+            CommandEnvelopeInvalid,
+            MarkerCardinalityInvalid,
+            MarkerMalformed,
+            MarkerProductStatusMismatch,
+            TrustworthyCurrent,
+            TrustworthyMissing
+        }
+
         private sealed class LifecycleInitializationData
         {
             internal string ProjectRoot { get; }
+            internal string ProjectIdentity { get; }
             internal int EditorPid { get; }
             internal string ProcessStartTicks { get; }
 
             internal LifecycleInitializationData(
                 string projectRoot,
+                string projectIdentity,
                 int editorPid,
                 string processStartTicks)
             {
                 ProjectRoot = projectRoot;
+                ProjectIdentity = projectIdentity;
                 EditorPid = editorPid;
                 ProcessStartTicks = processStartTicks;
             }

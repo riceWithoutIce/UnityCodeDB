@@ -1080,9 +1080,9 @@ namespace Rice.AI.Codedb.Editor
 
         private static string FirstMatchingLine(string text, params string[] values)
         {
-            foreach (var line in SplitLines(text))
+            foreach (var value in values)
             {
-                foreach (var value in values)
+                foreach (var line in SplitLines(text))
                 {
                     if (Contains(line, value))
                         return line.Trim();
@@ -1430,7 +1430,8 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbStatusState.Error,
                 string.Empty,
                 "CHECK_FAILED",
-                detail);
+                detail,
+                AICodedbProjectCleanupState.Invalid);
         }
 
         private static bool IsValidGenerationId(string value)

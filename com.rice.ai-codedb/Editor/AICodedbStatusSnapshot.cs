@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Rice.AI.Codedb.Editor
@@ -117,14 +118,15 @@ namespace Rice.AI.Codedb.Editor
                 projectDisplayName,
                 displayState,
                 default(AICodedbProductStatus),
-                false)
+                false,
+                displayState == AICodedbProductState.Starting)
         {
         }
 
         private AICodedbStatusSnapshot(
             string projectDisplayName,
             AICodedbProductStatus productStatus)
-            : this(projectDisplayName, productStatus.State, productStatus, true)
+            : this(projectDisplayName, productStatus.State, productStatus, true, false)
         {
         }
 
@@ -132,7 +134,8 @@ namespace Rice.AI.Codedb.Editor
             string projectDisplayName,
             AICodedbProductState displayState,
             AICodedbProductStatus cachedProductStatus,
-            bool hasCachedProductStatus)
+            bool hasCachedProductStatus,
+            bool statusRefreshInFlight)
         {
             _context = default(AICodedbEditorExecutionContext);
             var productState = displayState;
@@ -140,6 +143,8 @@ namespace Rice.AI.Codedb.Editor
             var cachedMissingPrerequisite = productState == AICodedbProductState.MissingPrerequisite;
             var cachedUninstalled = productState == AICodedbProductState.Uninstalled;
             var cachedNeedsAttention = productState == AICodedbProductState.NeedsAttention;
+            var showChecking = statusRefreshInFlight
+                               && productState == AICodedbProductState.Starting;
             var prerequisiteState = cachedReady
                 ? AICodedbProductLayerState.Current
                 : cachedMissingPrerequisite
@@ -165,8 +170,10 @@ namespace Rice.AI.Codedb.Editor
                 : cachedUninstalled
                     ? "CodeDB is uninstalled from this project; live checks resume after installation."
                 : cachedNeedsAttention
-                    ? "The last CodeDB check needs attention; live checks resume in the background."
-                : "Checking project integration in the background.";
+                    ? "The last CodeDB check needs attention; detailed live checks were not evaluated in this cached result."
+                : showChecking
+                    ? "Checking project integration in the background."
+                    : "No project status observation is currently in flight.";
             var detail = hasCachedProductStatus
                          && !string.IsNullOrWhiteSpace(cachedProductStatus.Detail)
                 ? cachedProductStatus.Detail
@@ -211,13 +218,13 @@ namespace Rice.AI.Codedb.Editor
                     "Current instance",
                     "Last verified",
                     "Live instance checks resume after Play mode.")
-                : Checking("Current instance");
+                : CachedUnknown("Current instance", showChecking, detail);
             Cleanup = cachedReady
                 ? AICodedbStatusItem.Inactive(
                     "Background cleanup",
                     "Not checked",
                     "Live cleanup checks resume after Play mode.")
-                : Checking("Background cleanup");
+                : CachedUnknown("Background cleanup", showChecking, detail);
             ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             RuntimeRootRelativePath = runtimeRelativePath;
             IndexRootRelativePath = cachedReady ? runtimeRelativePath + "/index" : string.Empty;
@@ -227,7 +234,7 @@ namespace Rice.AI.Codedb.Editor
             HostPayloadStatus = new AICodedbHostPayloadStatus(
                 cachedReady ? AICodedbHostPayloadState.Current : AICodedbHostPayloadState.Unknown,
                 cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Warning,
-                cachedReady ? "Last verified" : "Checking",
+                cachedReady ? "Last verified" : showChecking ? "Checking" : "Not evaluated",
                 detail);
             HostGenerationSelection = new AICodedbHostGenerationSelection(
                 cachedReady ? AICodedbHostGenerationState.Current : AICodedbHostGenerationState.Unavailable,
@@ -242,55 +249,55 @@ namespace Rice.AI.Codedb.Editor
                 cachedReady ? AICodedbHostUpgradePhase.Current : AICodedbHostUpgradePhase.Unavailable,
                 cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Inactive,
                 string.Empty,
-                cachedReady ? "Last verified" : "Checking",
+                cachedReady ? "Last verified" : showChecking ? "Checking" : "Not evaluated",
                 detail);
             HostUpdatePolicyValue = new AICodedbHostUpdatePolicy(true, true, true, detail);
             HostPayload = HostPayloadStatus.ToStatusItem();
             HostGeneration = cachedReady
                 ? AICodedbStatusItem.Inactive("Host generation", "Last verified", detail)
-                : Checking("Host generation");
+                : CachedUnknown("Host generation", showChecking, detail);
             HostLastKnownGood = cachedReady
                 ? AICodedbStatusItem.Inactive("Last known good", "Not checked", detail)
-                : Checking("Last known good");
+                : CachedUnknown("Last known good", showChecking, detail);
             HostUpgrade = cachedReady
                 ? AICodedbStatusItem.Inactive("Host upgrade", "Not checked", detail)
-                : Checking("Host upgrade");
+                : CachedUnknown("Host upgrade", showChecking, detail);
             HostUpdatePolicy = cachedReady
                 ? AICodedbStatusItem.Inactive("Automatic host updates", "Last verified", detail)
-                : Checking("Automatic host updates");
+                : CachedUnknown("Automatic host updates", showChecking, detail);
             ProviderExecutable = cachedReady
                 ? AICodedbStatusItem.Inactive("Provider executable", "Last verified", detail)
-                : Checking("Provider executable");
+                : CachedUnknown("Provider executable", showChecking, detail);
             ProviderConfig = cachedReady
                 ? AICodedbStatusItem.Inactive("Provider config", "Last verified", detail)
-                : Checking("Provider config");
+                : CachedUnknown("Provider config", showChecking, detail);
             RuntimeConfigTemplate = cachedReady
                 ? AICodedbStatusItem.Inactive("Runtime config template", "Not checked", detail)
-                : Checking("Runtime config template");
+                : CachedUnknown("Runtime config template", showChecking, detail);
             RuntimeDirectory = cachedReady
                 ? AICodedbStatusItem.Inactive("Runtime directory", "Last verified", detail)
-                : Checking("Runtime directory");
+                : CachedUnknown("Runtime directory", showChecking, detail);
             IndexDirectory = cachedReady
                 ? AICodedbStatusItem.Inactive("Index directory", "Not checked", detail)
-                : Checking("Index directory");
+                : CachedUnknown("Index directory", showChecking, detail);
             IndexManifest = cachedReady
                 ? AICodedbStatusItem.Inactive("Index manifest", "Not checked", detail)
-                : Checking("Index manifest");
+                : CachedUnknown("Index manifest", showChecking, detail);
             TextAdapterDirectory = cachedReady
                 ? AICodedbStatusItem.Inactive("Shader adapter directory", "Not checked", detail)
-                : Checking("Shader adapter directory");
+                : CachedUnknown("Shader adapter directory", showChecking, detail);
             TextAdapterManifest = cachedReady
                 ? AICodedbStatusItem.Inactive("Shader adapter manifest", "Not checked", detail)
-                : Checking("Shader adapter manifest");
+                : CachedUnknown("Shader adapter manifest", showChecking, detail);
             ProjectMcpConfig = cachedReady
                 ? AICodedbStatusItem.Inactive("Project MCP config", "Last verified", detail)
-                : Checking("Project MCP config");
+                : CachedUnknown("Project MCP config", showChecking, detail);
             McpAvailability = cachedReady
                 ? AICodedbStatusItem.Inactive("MCP availability", "Last verified", detail)
-                : Checking("MCP availability");
+                : CachedUnknown("MCP availability", showChecking, detail);
             RuntimeBoundary = cachedReady
                 ? AICodedbStatusItem.Inactive("Runtime boundary", "Last verified", detail)
-                : Checking("Runtime boundary");
+                : CachedUnknown("Runtime boundary", showChecking, detail);
             ToolProfile = AICodedbStatusItem.Ok("Default profile", AICodedbProjectSettings.DefaultToolProfile, "Read-only discovery and source lookup.");
             OverallState = cachedReady
                 ? AICodedbStatusState.Ok
@@ -304,7 +311,9 @@ namespace Rice.AI.Codedb.Editor
             OverallTitle = CreateOverallTitle(productState, projectDisplayName);
             OverallDescription = cachedReady
                 ? "CodeDB was Ready before Play mode. Live checks resume when Play ends."
-                : CreateOverallDescription(ProductStatus);
+                : productState == AICodedbProductState.Starting && !showChecking
+                    ? detail
+                    : CreateOverallDescription(ProductStatus);
         }
 
         /// <summary>
@@ -354,9 +363,15 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbStatusSnapshot CreateCachedState(
             string projectDisplayName,
-            AICodedbProductState state)
+            AICodedbProductState state,
+            bool statusRefreshInFlight = false)
         {
-            return new AICodedbStatusSnapshot(projectDisplayName, state);
+            return new AICodedbStatusSnapshot(
+                projectDisplayName,
+                state,
+                default(AICodedbProductStatus),
+                false,
+                statusRefreshInFlight);
         }
 
         /// <summary>
@@ -366,16 +381,32 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbStatusSnapshot CreateCachedStatus(
             string projectDisplayName,
-            AICodedbProductStatus productStatus)
+            AICodedbProductStatus productStatus,
+            bool statusRefreshInFlight = false)
         {
-            return new AICodedbStatusSnapshot(projectDisplayName, productStatus);
+            return new AICodedbStatusSnapshot(
+                projectDisplayName,
+                productStatus.State,
+                productStatus,
+                true,
+                statusRefreshInFlight);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(
             AICodedbEditorExecutionContext context,
-            AICodedbCommandResult hostPayloadResult)
+            AICodedbCommandResult hostPayloadResult,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
-            return Task.Run(() => new AICodedbStatusSnapshot(context, hostPayloadResult));
+            return Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+                AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
+                AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FullStatus);
+                var snapshot = new AICodedbStatusSnapshot(context, hostPayloadResult);
+                cancellationToken.ThrowIfCancellationRequested();
+                return snapshot;
+            }, cancellationToken);
         }
 
         /// <summary>
@@ -912,6 +943,16 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbStatusItem Checking(string label)
         {
             return AICodedbStatusItem.Warning(label, "Checking", "Status is loading in the background.");
+        }
+
+        private static AICodedbStatusItem CachedUnknown(
+            string label,
+            bool showChecking,
+            string detail)
+        {
+            return showChecking
+                ? Checking(label)
+                : AICodedbStatusItem.Inactive(label, "Not evaluated", detail);
         }
 
         /// <summary>
