@@ -40,19 +40,23 @@ unchanged query merely to refresh context.
 
 ## Work Stages
 
-Every task uses these stages in order:
+Every task follows this outcome flow:
 
-1. `ALIGN`: inspect the current state and agree on one bounded objective.
-2. `IMPLEMENT`: change only the files and behavior approved for that slice.
-3. `VERIFY`: run the pre-declared focused tests and classify the evidence.
-4. `CHECKPOINT`: record the result, remaining risks, and the next entry point.
-5. `ACCEPTANCE`: perform user-facing or real-environment acceptance only when
-   the implementation slice is ready for it.
-6. `HANDOFF`: commit, push, publish, or transfer ownership only after a human
+1. `ALIGN`: inspect the current state and agree on one independently
+   acceptable engineering objective and its execution envelope.
+2. `IMPLEMENT / REPAIR`: diagnose, implement, and correct same-cause defects
+   continuously inside that envelope.
+3. `VERIFY`: run the declared evidence plan and classify the result.
+4. `ACCEPTANCE`: perform user-facing or real-environment acceptance only when
+   the implementation is ready for it.
+5. `HANDOFF`: commit, push, publish, or transfer ownership only after a human
    initiates and explicitly authorizes the exact operation.
 
-Do not enter a later stage while an earlier stage still has an open decision
-that can change the implementation.
+`CHECKPOINT` is an exceptional resume record, not a mandatory stage. A command
+error, failed test, fixture correction, or direct regression returns to
+`IMPLEMENT / REPAIR` while it remains part of the same objective and execution
+envelope. Do not enter acceptance while an open decision can still change the
+implementation.
 
 ## Dispatch Protocol
 
@@ -60,22 +64,25 @@ When a management session dispatches work to a Code session, the two sessions
 have distinct responsibilities:
 
 - The management session owns requirement alignment, task-card freezing, and
-  review. The Code session owns the bounded preflight, implementation, focused
-  verification, and checkpoint.
+  review. The Code session owns the bounded preflight, continuous
+  implementation/repair, focused verification, and consolidated result.
 - Immediately before dispatch, management performs one bounded target-state
   check. Once the task card is frozen and sent, the Code session starts its
   declared preflight and executes it without an ACK or a second approval.
 - After dispatch, management does not poll, wait, send a follow-up, or duplicate
   the task while the target is active. It inspects again only on a returned
-  checkpoint, an explicit user request, or a platform-reported interruption or
-  attention event.
+  result or necessary checkpoint, an explicit user request, or a
+  platform-reported interruption or attention event.
 - A user interruption or platform interruption does not prove that no work
   started. Record the operational state as `INTERRUPTED`, preserve the latest
   checkpoint, and require an explicit re-dispatch before retrying the slice.
 
 `ALIGN` is the pre-dispatch decision boundary, not a post-dispatch ACK phase.
-`CHECKPOINT` is the result boundary for the same frozen outcome; it does not
-create a second approval gate before implementation.
+The task card authorizes the complete declared execution envelope. The Code
+session does not request command-level approval for diagnosis, same-scope
+repairs, or validation attempts already inside that envelope. `RESULT` is the
+normal return boundary; `CHECKPOINT` is used only when execution genuinely
+needs a durable resume point. Neither record creates a new task by itself.
 
 Implementation completion, a passing focused test, or writing a `RESULT` does
 not authorize a commit. A Code session may propose a commit by stating the
@@ -150,8 +157,13 @@ automatic dispatch, or interruption of the active session.
 At the end of every terminal task turn, the owning session appends a concise
 completion-routing footer to the relevant task record and its user-facing
 handoff.
-Terminal states include `COMPLETE`, `PARTIAL`, `BLOCKED`, `DEFERRED`, and
-`INTERRUPTED`.
+Terminal states include `COMPLETE / PASS`, `COMPLETE /
+TEST_FAILURE_CLASSIFIED`, `COMPLETE / INFRASTRUCTURE_FAILURE_CLASSIFIED`,
+`PARTIAL`, `BLOCKED`, `DEFERRED`, and `INTERRUPTED`. A completed command or test
+with valid failure evidence is classified under `COMPLETE`; `BLOCKED` is
+reserved for an unavailable external prerequisite, missing/corrupt evidence,
+timeout without a classifiable result, or another condition that prevents the
+declared work from continuing.
 
 ```text
 Current task:
@@ -206,7 +218,7 @@ The minimum `TASK.md` shape is:
 ## Metadata
 - Product:
 - Version:
-- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED
+- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Planner:
 - Coder:
 - Verifier: optional
@@ -229,8 +241,12 @@ The minimum `TASK.md` shape is:
 - Coder actions:
 - Focused tests:
 - EditMode authorization: NOT_REQUESTED | authorized
+- Continuous repair: allowed scope and same-cause correction boundary
+- Validation attempts: exact per evidence class; Unity must be explicit
+- Side-effect authorization: external process, persistent state, or none
 - Stop conditions:
 - Escalation triggers:
+- Structural escalation guard: starting repair count <count>/2; starting consecutive diagnostic-only checkpoint count <count>/3; immediate structural triggers apply
 - Model escalation: none | request-only | human-approved
 
 ## Definition Of Done
@@ -254,7 +270,8 @@ Use the following minimal task directory. Do not create empty optional files:
   RESULT.md            # Coder terminal result or blocking report
   VERIFICATION.md      # only for GUARDED/RELEASE or an explicit request
   DECISION.md          # only when a human disposition is needed
-  CHECKPOINT.md        # only for interruption, timeout, budget stop, or recovery
+  ROUTE-REASSESSMENT.md # only after the structural escalation gate triggers
+  CHECKPOINT-NN.md     # only for a real interruption, external block, or handoff
 ```
 
 Use `.ai/tasks/shared/<task-id>/` only when the contract intentionally spans
@@ -263,13 +280,21 @@ session replacement such as `Coder.2` updates result metadata without rewriting
 the frozen task.
 
 `RESULT.md` contains only the outcome, changed-file list, focused evidence,
-risks/limits, and the same handoff footer. `VERIFICATION.md` contains only the
-review scope, targeted checks, findings, verdict, and handoff. Raw logs,
-generated files, and complete diffs remain outside the task documents.
+risks/limits, and the same handoff footer. Same-objective diagnosis, repair,
+and validation evidence is appended to that result instead of creating a new
+task directory for each attempt. `VERIFICATION.md` contains only the review
+scope, targeted checks, findings, verdict, and handoff. Raw logs, generated
+files, and complete diffs remain outside the task documents.
 
-The task card is frozen before `IMPLEMENT`. If a new requirement or behavior
-appears, stop at a checkpoint and create a new slice instead of silently
-extending the current one.
+The task card freezes the objective, authority boundary, protected state, and
+execution envelope before `IMPLEMENT`; it does not freeze each internal command
+or repair step. A discovered dependency, fixture defect, parser/construction
+error, or immediate regression remains in the current task when it is necessary
+to achieve the same accepted outcome and stays inside the declared files,
+side effects, and risk. Create a new task only when the outcome changes, work
+crosses into an independently owned subsystem, a new high-risk authority is
+needed, or the current result is independently acceptable and the next work is
+a separate deliverable.
 
 ## Read-Only Preflight
 
@@ -309,65 +334,173 @@ excerpts.
 
 ## Slice Sizing
 
-The default slice has:
+The unit of slicing is one independently acceptable engineering outcome, not a
+command, file count, language, test batch, elapsed work window, failure count,
+or context compaction. A healthy task has:
 
-- one observable behavior;
-- no more than two runtime boundaries;
-- roughly five or fewer production files;
-- one focused test batch;
-- a target of 45 to 60 minutes of active work;
-- at most one context compaction.
+- one observable product, contract, migration, or acceptance objective;
+- one coherent causal chain from diagnosis through validation;
+- declared authority, protected state, allowed files, and evidence classes;
+- one stable result suitable for acceptance or targeted Verifier review.
 
-These are stop-and-split defaults, not a reason to force an artificial split in
-a tiny change. A slice that exceeds them must be checkpointed and divided.
-Before `IMPLEMENT`, any exception must be written in the task card with a
-reason and an explicit split point. Crossing C#, Node, and PowerShell is not by
-itself a reason to keep one large slice: keep the changes together only when
-they implement one observable contract and are mechanically coupled; otherwise
-split by authority or adapter.
+Crossing C#, Node, and PowerShell or touching more than five files does not by
+itself require a split when the changes implement one mechanically coupled
+contract. File count, runtime boundaries, active time, output volume, and
+context compaction are planning signals used to narrow commands and summarize
+progress; they do not create task identity.
+
+Split only when at least one of these is true:
+
+- the independently acceptable objective changes;
+- work enters a separately owned subsystem or produces a separately shippable
+  deliverable;
+- continuing requires a new high-risk side effect or authority outside the
+  frozen envelope;
+- an external condition prevents meaningful progress and the remaining work
+  can no longer continue as the same owned outcome.
+
+## Structural Escalation And Route Reassessment
+
+Continuous repair is valid only while the evidence still describes a local
+defect and the same user acceptance path is advancing. The task must enter
+`ROUTE_REASSESSMENT_REQUIRED` no later than either of these limits:
+
+- the same user acceptance path remains blocked after `2` local repair
+  iterations;
+- `3` consecutive checkpoints improve diagnostics without advancing that
+  acceptance path.
+
+A local repair iteration is one causally distinct source or fixture correction
+returned for the blocked path and followed by an acceptance re-evaluation. It
+is not each edit, command, parser correction, quoting correction, or other
+mechanical pre-side-effect correction. A diagnostic-only checkpoint is a
+terminal handoff that adds cause or symptom detail but leaves the same
+acceptance gate blocked. Counts persist across replacement sessions and are
+recorded in `RESULT.md` and the task handoff. These numeric limits are the
+latest mandatory escalation point, not a quota to consume before escalating.
+
+Escalate immediately, regardless of count, when evidence shows any of these
+structural signals:
+
+- duplicate authorities for the same state, readiness, or admission decision;
+- semantic conflict across components that independently classify the same
+  product condition;
+- a decision composed from caches or observations belonging to different
+  revisions or snapshots;
+- concrete causes repeatedly compressed into a generic error that prevents
+  authoritative diagnosis or routing;
+- progress requires another special-case branch, compatibility hole, or local
+  exception instead of restoring one coherent contract.
+
+When this gate triggers:
+
+1. Stop further patches, repeated Unity or screenshot cycles, repeated tests,
+   and Verifier routing for the affected path.
+2. Preserve the current source, task records, and evidence as one frozen
+   snapshot. Do not commit, revert, clean, or discard it merely because the
+   gate triggered.
+3. The Coder records the trigger, counters, structural signals, frozen identity,
+   last acceptance state, and handoff to Planner. The Coder may identify the
+   signals but may not expand scope or choose a new architecture.
+4. Planner creates `ROUTE-REASSESSMENT.md`, consolidates the causal chain and
+   affected authorities, and presents one route recommendation to the user.
+5. The user chooses exactly one disposition: `CONTINUE_PATCH`, `REFACTOR`,
+   `REDESIGN`, `DEFER`, or `STOP`.
+
+`CONTINUE_PATCH` requires a recorded bounded hypothesis, allowed surface, and
+new evidence envelope before work resumes. `REFACTOR` or `REDESIGN` becomes one
+coherent vertical task spanning the affected contract from authority through
+user-visible acceptance; do not decompose it into one microtask per symptom,
+file, or test failure. `DEFER` and `STOP` preserve the frozen evidence and close
+the current route accordingly. No role infers a disposition from silence.
+
+`ROUTE-REASSESSMENT.md` has this minimum shape:
+
+```text
+# Route Reassessment: <task-id>
+
+## Trigger
+- Blocked acceptance path:
+- Repair iterations: <current>/2
+- Consecutive diagnostic-only checkpoints: <current>/3
+- Immediate structural signals:
+
+## Frozen State
+- Source/task identity:
+- Last acceptance state:
+- Protected state and active external ownership:
+
+## Causal Summary
+- Established facts:
+- Conflicting or duplicated authorities:
+- Uncertainty and deferred evidence:
+
+## Route Recommendation
+- Recommended disposition:
+- Coherent target boundary:
+- Rejected patch-only alternatives:
+
+## Human Decision
+- Disposition: PENDING | CONTINUE_PATCH | REFACTOR | REDESIGN | DEFER | STOP
+- Authorized envelope or next task:
+
+## Handoff
+- Current task:
+- Current status: ROUTE_REASSESSMENT_REQUIRED
+- Next notification: Planner/User
+- Next action:
+- Human decision or authorization required: yes
+```
+
+Route reassessment is a planning and decision artifact, not a checkpoint.
+`CHECKPOINT` remains reserved for a real external interruption, unavailable
+prerequisite, session handoff, or evidence contradiction that needs a durable
+resume point.
 
 ## Command, Output, And Retry Budgets
 
-The following are default hard workflow limits for one implementation slice.
-They are execution rules for the task owner; this document does not install an
-automatic command wrapper or hook. A future mechanical enforcer is a separate
-slice.
+The following guards limit resource use and unsafe repetition without defining
+task identity. This document does not install an automatic wrapper or hook.
 
-| Budget | Warning | Limit and required action |
+| Budget | Default guard | Required action |
 | --- | --- | --- |
-| Active implementation time | `45 minutes` | `60 minutes`; write a checkpoint at the warning and stop the slice at the limit unless a task-card exception was authorized in advance. |
-| A normal command's captured output (stdout and stderr) | None | `64 KiB`; mark the result `TRUNCATED`, retain a concise summary, and narrow the next command. |
-| A log, session record, or broad `rg` result | None | `16 KiB` or `120` lines, whichever is reached first; keep only the relevant excerpt or an aggregate summary. This lower limit takes precedence over the normal command limit. |
-| Cumulative captured output in one slice | None | `256 KiB`; stop expanding the inspection, write a checkpoint, and continue only from that checkpoint. |
-| A normal non-test command's wall-clock wait (including reads and searches) | `60 seconds` | `120 seconds`; stop waiting and record `TIMEOUT`. Do not automatically terminate the process. |
-| A focused test command's wall-clock wait | `120 seconds` | `300 seconds`; stop waiting and record `TIMEOUT`. Do not automatically terminate Unity or another external process. |
-| The same command or semantically equivalent filter after failure | None | At most `1` retry, and only after recording a concrete correction or changed prerequisite. A second failure stops the slice and requires a checkpoint. |
-| Context compaction in one slice | None | At most `1`; after the first compaction, write a checkpoint before doing more work and do not expand the slice. |
+| Active implementation time | Review progress near `60 minutes` | Narrow or summarize the current approach. Continue the same task while the objective and execution envelope remain valid; elapsed time alone does not require a checkpoint or split. |
+| A normal command's captured output (stdout and stderr) | `64 KiB` | Mark the output `TRUNCATED`, retain a concise summary, and narrow the next command. |
+| A log, session record, or broad `rg` result | `16 KiB` or `120` lines, whichever is reached first | Keep only the relevant excerpt or an aggregate summary. This lower limit takes precedence over the normal command guard. |
+| Cumulative captured output in one working window | `256 KiB` | Stop expanding inspection, summarize what is known, and continue with narrower commands inside the same task. |
+| A normal non-test command's wall-clock wait | Warn at `60 seconds`; stop waiting at `120 seconds` | Record `TIMEOUT`. Do not automatically terminate the process. |
+| A focused test command's wall-clock wait | Warn at `120 seconds`; stop waiting at `300 seconds` | Record `TIMEOUT`. Do not automatically terminate Unity or another external process. |
+| Parser, escaping, path-normalization, or admission command construction before side effects | Initial attempt plus at most `2` mechanical corrections | Record the concrete construction error and correction. These attempts do not consume the test or Unity invocation budget. Repeating the same uncorrected error is not allowed. |
+| Test or external validation attempts | Exact count declared per evidence class in `TASK.md` | One human authorization covers the declared envelope. Every rerun requires a concrete same-cause repair or changed prerequisite; exhausted attempts return to Planner/User but do not create a new task. |
+| Context compaction | Summarize after a compaction | Continue the same task from a concise state record. Create a file checkpoint only if execution stops, ownership changes, or evidence needs a durable recovery point. |
 
-Count output limits in UTF-8 bytes. When a tool cannot expose a byte count, use
-a conservative estimate and stop before the applicable limit. A retry means
-the same logical operation even if whitespace, ordering, or a display-only
-argument changes. Warnings are a signal to reduce scope; they do not authorize
-a blind rerun. A timeout stops waiting, not ownership or lifecycle cleanup:
-starting, pausing, and closing Unity or another external process still requires
-explicit authorization and a recorded cleanup plan.
-Any planned exception to a numeric limit must be written in the task card and
-authorized before the command starts; otherwise the limit is hard.
+Count output limits in UTF-8 bytes when the tool exposes a byte count; otherwise
+use a conservative bound without maintaining a manual byte ledger. A retry is
+the same logical validation even if ordering or a display-only argument
+changes. Warnings narrow the next action but do not authorize a blind rerun. A
+timeout stops waiting, not ownership or lifecycle cleanup: starting, pausing,
+and closing Unity or another external process still requires explicit
+authorization and a recorded cleanup plan.
 
-### Budget Ledger And Stop Gate
+Unity and other expensive or externally stateful invocations have no implicit
+budget. Their exact maximum count must be human-authorized in the task card.
+For a release/full gate, the request may authorize an initial run plus up to two
+same-scope corrected runs as one envelope; this is a maximum, not a requirement
+to consume every attempt.
 
-Keep a small ledger for each slice: active minutes, paused or interrupted
-minutes, compaction count, retry count, and cumulative captured output. Calendar
-waiting is not active work, but it is recorded separately so elapsed time is
-not mistaken for implementation effort.
+### Budget Ledger And Continuation Gate
 
-The first of the following events closes the current implementation window and
-requires a checkpoint before another command: the task-card active-time budget
-is reached (by default, checkpoint at 45 minutes and stop at 60), the first
-context compaction occurs, captured output is near the cumulative limit, or a
-second independent behavior or blocker appears. A second compaction or a
-repeated budget overrun stops the slice and requires a new slice; continuation
-may not silently enlarge the original task card.
+Record only evidence that affects safety or interpretation: external/test
+invocations, corrected attempts, retries, timeouts, truncation, and any process
+whose ownership returns to the human. Do not maintain minute-by-minute or
+estimated-byte accounting when the tools do not provide it.
+
+Pause for Planner/User only when the objective changes, authority must expand,
+an external prerequisite prevents progress, evidence is unavailable or corrupt,
+or the authorized external/test attempt envelope is exhausted. An exhausted
+envelope may be extended by appending authorization to the same task record;
+it does not require a new task unless the independently acceptable outcome has
+changed.
 
 ## Implementation Rules
 
@@ -377,6 +510,11 @@ may not silently enlarge the original task card.
   compatibility work, or formatting churn.
 - Keep comments limited to important or non-obvious behavior.
 - Do not add a second source of truth for version, control, or lifecycle policy.
+- Keep Git inspection milestone-based and scoped: normally one bounded
+  target-state check before dispatch and one final scoped status/diff or
+  `diff --check` at handoff. Do not repeatedly run full-repository status,
+  diff, or identity calculations. Freeze exact identities once, only when a
+  `GUARDED` or `RELEASE` handoff needs them.
 - Do not commit, push, publish, stop external processes, or mutate global
   configuration during implementation unless that action is explicitly
   authorized. Code sessions must never auto-commit when implementation or
@@ -404,8 +542,9 @@ or the number of nearby tests.
 ### Test Levels
 
 1. `L0` covers the changed pure logic, parsers, schemas, serialization,
-   classifiers, and script syntax. It is mandatory for every implementation
-   slice.
+   classifiers, and script syntax. It is required when an applicable harness
+   exists; otherwise record the boundary once as `DEFERRED` instead of building
+   an unrelated harness inside the task.
 2. `Affected L1` covers only the nearest consumers that directly call or
    consume the changed contract. It is selected before editing and updated only
    when a newly discovered direct dependency requires it.
@@ -428,17 +567,22 @@ A focused test batch is one named filter or one tightly coupled harness
 invocation for the same behavior. It is not an entire repository suite or a
 collection of unrelated neighboring tests.
 
-The default budget for one implementation slice is:
+The default evidence ownership is:
 
-- Coder: at most one `L0` batch and one `Affected L1` batch;
+- Coder: one initial `L0` batch and one initial `Affected L1` batch when
+  applicable, plus only the same-cause corrected attempts declared by the task
+  envelope;
 - Verifier: at most one targeted, read-only review batch, with no rerun of
   unchanged Coder tests.
 
-A concrete failure may justify one corrected retry of the same logical check,
-subject to the retry budget below. A second independent behavior or blocker
-closes the current test window and requires a checkpoint or a new slice. Any
-additional batch must be recorded with the `Additional tests` fields below
-and authorized before it runs.
+A completed failing run with readable artifacts is evidence, not a workflow
+blocker. Diagnose it inside the same task. A fixture defect, repair-created
+compile error, or immediate regression may be corrected and rerun when it stays
+inside the declared outcome and attempt envelope. An unrelated failure is
+classified once and returned to Planner; it does not trigger automatic repair
+or a new task. Any additional evidence class must be justified and authorized,
+but same-class attempts already covered by the envelope do not need
+command-level approval.
 
 Regression tests must be justified by the actual diff or by a known failure
 path. Shared directory membership, similar names, or a general desire for
@@ -491,7 +635,8 @@ another checkout. It is a tracked Unity 2022.3 project with a relative reference
 to the sibling `com.rice.ai-codedb` package.
 
 - The tracked project's presence does not authorize starting Unity. Every run
-  still requires the EditMode request below and an exact focused test filter.
+  still requires the EditMode request below and an exact declared test boundary:
+  a focused filter by default, or an explicitly authorized no-filter full gate.
 - Do not create, copy, regenerate, or substitute another Unity project during
   an implementation slice. If the tracked project is missing, invalid, or
   cannot be opened with its declared Unity version, record `BLOCKED`.
@@ -510,26 +655,28 @@ to the sibling `com.rice.ai-codedb` package.
   L1 check; it is not automatic.
 - `High`: Unity lifecycle, asset import/serialization, scene/project state, or
   multiple Unity boundaries. If that boundary is part of the definition of
-  done, an EditMode request is required; it must remain a focused filter rather
-  than a broad project regression. If it is not part of the definition of done,
-  record the gate as `DEFERRED` instead of starting Unity opportunistically.
+  done, an EditMode request is required. A focused filter is the default; a
+  no-filter full suite is permitted only when the task explicitly declares a
+  full code-freeze or release gate. If the Unity boundary is not part of the
+  definition of done, record it as `DEFERRED` instead of starting Unity
+  opportunistically.
 
 Every request must state all of the following before the process is started:
 
 ```text
 Project path:
 Purpose and criterion:
-Exact command and test filter:
+Exact command and test boundary (filter or explicit no-filter gate):
 Evidence class:
 Expected duration / maximum wait:
 Cleanup and ownership handoff:
 ```
 
-The request must receive explicit authorization. The focused-test budget above
-applies to the approved command, and the result is labeled `PASS`, `FAIL`,
-`BLOCKED`, or `DEFERRED`. Unity startup, shutdown, and any process left after a
-timeout are recorded in the checkpoint; a timeout never authorizes an automatic
-`Stop-Process`.
+The request must receive explicit authorization. The evidence-attempt budget
+declared in the task card applies to the approved command, and the result is
+labeled `PASS`, `FAIL`, `BLOCKED`, or `DEFERRED`. Unity startup, shutdown, and
+any process left after a timeout are recorded in the checkpoint; a timeout
+never authorizes an automatic `Stop-Process`.
 
 ## Evidence Labels
 
@@ -537,9 +684,17 @@ Every validation result uses one of these labels:
 
 - `PASS`: the declared check ran and met its criterion;
 - `FAIL`: the check ran and did not meet its criterion;
-- `BLOCKED`: the required environment or prerequisite was unavailable;
+- `BLOCKED`: the required environment or prerequisite was unavailable, the
+  evidence was missing/corrupt, or execution could not produce a classifiable
+  result;
 - `DEFERRED`: intentionally outside the current slice;
 - `FOLLOW-UP`: observed but unrelated to the current completion boundary.
+
+When a run completes with valid non-passing evidence, use `COMPLETE /
+TEST_FAILURE_CLASSIFIED`. When Package, compiler, result persistence, or other
+infrastructure evidence explains the completed failure, use `COMPLETE /
+INFRASTRUCTURE_FAILURE_CLASSIFIED`. Neither classification is `BLOCKED` merely
+because another repair or authorized attempt is needed.
 
 Static harnesses, Unity EditMode tests, real Unity behavior, Codex Desktop
 behavior, released artifacts, and third-party Package-only behavior are
@@ -564,11 +719,13 @@ Keep the active context small and resumable:
 - Bound every inspection command; narrow it when output is truncated.
 - Do not repeat the complete repository history after an interruption.
 - Send a concise progress update at meaningful milestones, not a full log.
-- Produce a `RESULT` after a terminal slice. Produce a `CHECKPOINT` only when
-  an interruption, timeout, budget stop, contradiction, or recovery trigger
-  occurs.
-- Stop and checkpoint after the first context compaction or when a second
-  independent behavior enters the task.
+- Produce one consolidated `RESULT` for the task outcome. Append same-objective
+  diagnosis, repairs, and validation evidence to that result instead of
+  creating attempt-level task directories.
+- Produce a `CHECKPOINT` only when an interruption, externally owned timeout,
+  unavailable prerequisite, session handoff, or evidence contradiction needs
+  a durable resume point. A context compaction, elapsed-time signal, parser
+  correction, or completed failing test alone does not require one.
 
 Each checkpoint contains only:
 
@@ -578,11 +735,12 @@ Actual diff:
 Tests and exact results:
 Not completed:
 Remaining risks:
-Next slice entry point:
+Next task entry point:
 ```
 
-A new task starts from the latest checkpoint rather than reloading the whole
-roadmap and all prior tool output.
+Resume the same task from its latest result or checkpoint without reloading the
+whole roadmap and all prior tool output. Start a new task only when the split
+criteria in `Slice Sizing` are met.
 
 After an interruption, do not infer that the slice was never started and do not
 rerun it automatically. Use the latest checkpoint and the task-card owner to

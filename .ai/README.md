@@ -93,22 +93,29 @@ repository suite.
 By default, Coder runs at most one `L0` batch and one `Affected L1` batch.
 Verifier runs at most one targeted read-only review batch and does not rerun
 unchanged Coder tests. A concrete failure may receive one corrected retry;
-additional batches require an authorized task-card exception, and a second
-independent behavior or blocker requires a checkpoint or new task.
+additional batches require an authorized task-card exception. A completed
+failure remains in the same task while it serves the same accepted outcome;
+repeated repairs and structural signals are governed by the project workflow's
+route-reassessment gate. A checkpoint is used only for a real interruption,
+external block, or handoff.
 
 ## Task Flow
 
 ```text
 TASK -> RESULT -> (optional VERIFICATION) -> (optional DECISION)
   ^
-  +-- CHECKPOINT is created only for interruption, timeout, budget stop, or recovery
+  +-- CHECKPOINT is created only for an external interruption/block, handoff, or evidence contradiction
+
+TASK/RESULT -> ROUTE-REASSESSMENT -> HUMAN DECISION
+               (only when the structural escalation gate triggers)
 ```
 
 `TASK` is frozen before implementation. `RESULT` reports Coder facts and does
 not accept the task. A `RESULT` may contain a commit proposal, but it never
 authorizes a commit. `VERIFICATION` is read-only targeted evidence when the
 task's review mode requires it. `DECISION` records a human disposition when one
-is needed.
+is needed. `ROUTE-REASSESSMENT` freezes repeated-blocker evidence and returns
+the route to Planner/User before more patches, tests, or Verifier work.
 
 ## Completion Routing
 
@@ -143,6 +150,7 @@ Create a task directory only when a task is frozen:
   RESULT.md            # Coder terminal result or blocking report
   VERIFICATION.md      # only for GUARDED/RELEASE or explicit request
   DECISION.md          # only when a human disposition is needed
+  ROUTE-REASSESSMENT.md # only after the structural escalation gate triggers
   CHECKPOINT.md        # only for interruption/recovery
 ```
 
@@ -159,7 +167,7 @@ the task documents.
 ## Metadata
 - Product:
 - Version:
-- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED
+- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Planner:
 - Coder:
 - Verifier: optional
@@ -184,6 +192,7 @@ the task documents.
 - EditMode authorization: NOT_REQUESTED | authorized
 - Stop conditions:
 - Escalation triggers:
+- Structural escalation guard: starting repair count <count>/2; starting consecutive diagnostic-only checkpoint count <count>/3; immediate structural triggers apply
 - Model escalation: none | request-only | human-approved
 
 ## Definition Of Done
@@ -202,6 +211,13 @@ the task documents.
 `RESULT.md` and `VERIFICATION.md` use only four sections: outcome, evidence,
 risks/findings, and handoff. The complete field rules live in the project
 workflow rather than being duplicated in every task.
+
+When the route-reassessment gate triggers, Coder stops the affected repair and
+records the frozen identity and evidence. Planner creates
+`ROUTE-REASSESSMENT.md`; the user chooses `CONTINUE_PATCH`, `REFACTOR`,
+`REDESIGN`, `DEFER`, or `STOP`. Numeric thresholds are mandatory escalation
+limits, not patch quotas. The authoritative triggers, counters, document shape,
+and role boundaries are defined in the project workflow.
 
 ## Version control rules
 
