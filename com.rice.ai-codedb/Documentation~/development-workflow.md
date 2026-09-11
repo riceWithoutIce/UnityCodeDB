@@ -631,15 +631,22 @@ claim.
 `<repository-root>/UnityValidationProject` is the only default EditMode
 validation project for UnityCodeDB development. Resolve and record its absolute
 path from the current repository root before an authorized run; do not hard-code
-another checkout. It is a tracked Unity 2022.3 project with a relative reference
-to the sibling `com.rice.ai-codedb` package.
+another checkout. It is a tracked Unity project with a relative reference to
+the sibling `com.rice.ai-codedb` package. Its current declared compatibility
+line is Unity `2022.3`.
 
 - The tracked project's presence does not authorize starting Unity. Every run
   still requires the EditMode request below and an exact declared test boundary:
   a focused filter by default, or an explicitly authorized no-filter full gate.
+- CodeDB product and runtime behavior must not read or branch on the installed
+  Unity Editor version. The package compatibility declaration and the
+  validation project's `ProjectVersion.txt` are support/reproducibility
+  metadata, not Supervisor, Manager, admission, migration, or lifecycle
+  decisions.
 - Do not create, copy, regenerate, or substitute another Unity project during
-  an implementation slice. If the tracked project is missing, invalid, or
-  cannot be opened with its declared Unity version, record `BLOCKED`.
+  an implementation slice. If the tracked project is missing or invalid,
+  record the requested Unity evidence as `BLOCKED`; do not convert that
+  environment result into a product failure.
 - Treat `Assets`, `Packages`, and `ProjectSettings` as the validation-project
   contract. Change them only in an explicitly scoped validation-project
   maintenance task. Unity-generated state, logs, and test results remain under
@@ -647,6 +654,27 @@ to the sibling `com.rice.ai-codedb` package.
 - Evidence from this project is development EditMode evidence only. It does not
   replace real consumer-project, third-party Package-only, released-artifact,
   or Codex Desktop acceptance.
+
+Every task that requests Unity must declare an Editor compatibility level before
+the process is started:
+
+- `NONE`: the task has no Unity boundary. Do not resolve or start an Editor.
+- `LINE`: use a human-approved Editor in the package/project declared
+  compatibility line (currently `2022.3`). Record the actual Editor version
+  after the run. If opening the project would upgrade or otherwise mutate its
+  tracked contract, stop and return the Unity evidence as `BLOCKED` or
+  `DEFERRED`.
+- `PINNED`: use the exact project-declared Editor version only when the task's
+  criterion requires serialization/lifecycle reproducibility, a known
+  version-specific behavior, or an explicit release gate. This is a test
+  reproducibility condition, not a CodeDB product condition.
+
+The human owns Editor selection and project open/close. Coder and Verifier must
+not install, search for, or automatically choose an Editor. A CLI invocation
+may use a human-provided executable route for the current run, but must not
+invent or persist an environment alias such as `UNITY_EDITOR_*` in order to
+hide that route. If no approved Editor route is available, defer or block only
+the Unity evidence class.
 
 - `Low`: documentation, configuration, pure logic, parsers, schemas, or static
   harness work. Do not start Unity EditMode.
@@ -666,6 +694,7 @@ Every request must state all of the following before the process is started:
 ```text
 Project path:
 Purpose and criterion:
+Editor compatibility level (NONE, LINE, or PINNED):
 Exact command and test boundary (filter or explicit no-filter gate):
 Evidence class:
 Expected duration / maximum wait:
