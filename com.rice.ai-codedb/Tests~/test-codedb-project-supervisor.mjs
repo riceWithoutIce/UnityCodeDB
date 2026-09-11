@@ -126,6 +126,15 @@ function createFixture(selected = TARGET) {
   const generationFiles = new Map([
     ["coordinator/codedb-watch-coordinator.mjs", "// synthetic coordinator path identity\n"],
     ["scripts/manage-codedb-project-watch.ps1", "# synthetic watch manager path identity\n"],
+    ["scripts/refresh-codedb-project-if-stale.ps1", "Write-Output '[PASS] synthetic RefreshIfStale'\r\nexit 0\r\n"],
+    ["scripts/refresh-codedb-project.ps1", [
+      "param([switch]$CleanFirst)",
+      "if ($CleanFirst) { Write-Output '[PASS] synthetic RebuildIndex' } else { Write-Output '[PASS] synthetic RefreshIndex' }",
+      "exit 0",
+      ""
+    ].join("\r\n")],
+    ["scripts/build-codedb-project-text-adapter.ps1", "Write-Output '[PASS] synthetic BuildShaderAdapter'\r\nexit 0\r\n"],
+    ["scripts/clear-codedb-project-index.ps1", "Write-Output '[PASS] synthetic CleanIndex'\r\nexit 0\r\n"],
     [workerRelativePath, "// synthetic immutable instance worker\n"]
   ]);
   const generationEntries = [];
@@ -433,6 +442,42 @@ function writeSlowProbeMaterializer(fixture, counterPath) {
   ].join("\r\n"));
 }
 
+function writeQueuedMaintenanceMaterializer(fixture, actionLogPath) {
+  const quote = (value) => String(value).replace(/'/g, "''");
+  write(fixture.materializerScript, [
+    "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
+    `  [IO.File]::AppendAllText('${quote(actionLogPath)}', $Action + [Environment]::NewLine)`,
+    "if ($Action -eq 'Probe') { Start-Sleep -Milliseconds 2400 }",
+    "Write-Output ('[PASS] synthetic queued materializer ' + $Action)",
+    "exit 0",
+    ""
+  ].join("\r\n"));
+}
+
+function writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCounterPath, verifySucceeds) {
+  const quote = (value) => String(value).replace(/'/g, "''");
+  write(fixture.materializerScript, [
+    "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
+    "if ($Action -eq 'Probe') {",
+    `  [IO.File]::WriteAllText('${quote(probeCounterPath)}', 'unexpected')`,
+    "  Write-Error 'Recovered operation launched a replacement Probe.'",
+    "  exit 9",
+    "}",
+    "if ($Action -eq 'Verify') {",
+    `  $counterPath = '${quote(verifyCounterPath)}'`,
+    "  $count = if (Test-Path -LiteralPath $counterPath) { [int][IO.File]::ReadAllText($counterPath) } else { 0 }",
+    "  [IO.File]::WriteAllText($counterPath, [string]($count + 1))",
+    verifySucceeds
+      ? "  Write-Output '[PASS] synthetic recovered operation verification'"
+      : "  Write-Error 'synthetic recovered operation verification rejection'",
+    `  exit ${verifySucceeds ? 0 : 7}`,
+    "}",
+    "Write-Error 'Unexpected recovered operation action.'",
+    "exit 8",
+    ""
+  ].join("\r\n"));
+}
+
 function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materializerCounterPath, failureGatePath) {
   const quote = (value) => String(value).replace(/'/g, "''");
   const scriptQuote = (value) => JSON.stringify(String(value));
@@ -477,6 +522,15 @@ function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materiali
   write(fixture.materializerScript, [
     "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
     `if ($Action -eq 'Probe' -or $Action -eq 'Upgrade') {`,
+    "  if ([string]::IsNullOrWhiteSpace($env:RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS)) {",
+    "    Write-Error 'synthetic materializer received no Supervisor operational observation'",
+    "    exit 10",
+    "  }",
+    "  $operational = $env:RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS | ConvertFrom-Json",
+    "  if ($operational.schema_version -ne 1 -or $operational.state -cne 'core_ready' -or $operational.coordinator_failure_category -cne 'NONE') {",
+    "    Write-Error 'synthetic materializer received an invalid operational observation'",
+    "    exit 11",
+    "  }",
     `  if (-not (Test-Path -LiteralPath '${quote(fixture.coordinatorReadyPath)}')) {`,
     "    Write-Error 'synthetic coordinator was not ensured before materializer'",
     "    exit 9",
@@ -484,6 +538,7 @@ function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materiali
     `  $counterPath = '${quote(materializerCounterPath)}'`,
     "  $count = if (Test-Path -LiteralPath $counterPath) { [int][IO.File]::ReadAllText($counterPath) } else { 0 }",
     "  [IO.File]::WriteAllText($counterPath, [string]($count + 1))",
+    "  Write-Output ('[OPERATIONAL_OBSERVATION] ' + ($operational | ConvertTo-Json -Depth 4 -Compress))",
     "}",
     "Write-Output '[PASS] synthetic readmission materializer'",
     "exit 0",
@@ -660,6 +715,9 @@ async function startCoordinator(fixture) {
           status.provider_state = fs.existsSync(fixture.coordinatorReadyPath) ? "ready" : "starting";
         }
       }
+      if (request.command === "query" && fixture.coordinatorRequestLogPath) {
+        fs.appendFileSync(fixture.coordinatorRequestLogPath, "query\n", "utf8");
+      }
       socket.end(`${JSON.stringify({
         ok: true,
         status,
@@ -781,7 +839,7 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(supervisorState.selected_instance_id, fixture.instanceId);
     assert.equal(supervisorState.generation_id, selected.generationId);
     assert.equal(supervisorState.runtime_contract_sha256, fixture.contractSha256);
-    assert.equal(supervisorState.supervisor_protocol_version, 2);
+    assert.equal(supervisorState.supervisor_protocol_version, 3);
     assert.equal(supervisorState.generation_disposition, expectedDisposition);
     assert.equal(supervisorState.pipe_name, expectedSupervisorPipe(fixture.root, fixture.runtime));
 
@@ -803,6 +861,12 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(status.ok, true);
     assert.equal(status.status.readiness_state, "core_ready");
     assert.equal(status.status.supervisor_schema_version, 3);
+    assert.equal(status.status.operational_readiness.schema_version, 1);
+    assert.equal(status.status.operational_readiness.state, "core_ready");
+    assert.equal(status.status.operational_readiness.reason_code, "COORDINATOR_OPERATIONAL");
+    assert.equal(status.status.operational_readiness.coordinator_failure_category, "NONE");
+    assert.equal(status.status.operational_readiness.owner_epoch, supervisorState.owner_epoch);
+    assert.equal(status.status.operational_readiness.supervisor_pid, supervisorState.supervisor_pid);
     assert.equal(status.status.generation_disposition, expectedDisposition);
     assert.equal(status.status.control_namespace, fixture.runtime);
 
@@ -948,6 +1012,123 @@ async function verifyAsynchronousMaterializerOperation() {
     assert.equal(failed.error_code, "SUPERVISOR_COMMAND_FAILED");
     assert.equal(failed.result.exit_code, 4);
     assert.match(failed.error, /synthetic terminal failure/);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifyQueryFirstBoundedMaintenanceQueue() {
+  const fixture = createFixture(TARGET);
+  const orderPath = path.join(fixture.root, "request-queue-order.txt");
+  try {
+    writeQueuedMaintenanceMaterializer(fixture, orderPath);
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const supervisorState = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    fixture.coordinatorRequestLogPath = orderPath;
+
+    const active = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "materialize", action: "Probe", request_id: "queue-active-probe" });
+    assert.equal(active.ok, true, active.error || "Probe was not accepted by the Supervisor queue.");
+    assert.equal(active.pending, true);
+    assert.equal(await waitForCondition(() =>
+      fs.existsSync(orderPath) && fs.readFileSync(orderPath, "utf8").includes("Probe")), true);
+
+    const queued = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "materialize", action: "Verify", request_id: "queue-pending-verify-1" });
+    assert.equal(queued.ok, true, queued.error || "Verify was not queued behind the active Probe.");
+    assert.equal(queued.pending, true);
+    assert.equal(queued.operation.state, "queued");
+    assert.equal(queued.operation.owner_epoch, supervisorState.owner_epoch);
+    assert.notEqual(queued.operation_id, active.operation_id);
+
+    const duplicate = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "materialize", action: "Verify", request_id: "queue-pending-verify-2" });
+    assert.equal(duplicate.ok, true);
+    assert.equal(duplicate.reused, true);
+    assert.equal(duplicate.operation_id, queued.operation_id);
+
+    const overflow = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "reconcile", request_id: "queue-overflow-reconcile" });
+    assert.equal(overflow.ok, false);
+    assert.equal(overflow.accepted, false);
+    assert.equal(overflow.error_code, "SUPERVISOR_QUEUE_FULL");
+
+    const queriedAt = Date.now();
+    const query = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "query", query: "queue-priority", request_id: "queue-priority-query" });
+    assert.equal(query.ok, true, query.error || "Query was not served while maintenance was pending.");
+    assert.deepEqual(query.result.hits, ["query-served"]);
+    assert.ok(Date.now() - queriedAt < 1500, "Query waited for queued maintenance admission.");
+
+    const queuedObservation = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "operation", operation_id: queued.operation_id });
+    assert.equal(queuedObservation.pending, true);
+    assert.equal(queuedObservation.operation.state, "queued");
+
+    const activeResult = await waitForOperation(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      active.operation_id,
+      15000);
+    assert.equal(activeResult.ok, true, activeResult.error || "Active Probe failed.");
+    const queuedResult = await waitForOperation(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      queued.operation_id,
+      15000);
+    assert.equal(queuedResult.ok, true, queuedResult.error || "Queued Verify failed.");
+
+    const order = fs.readFileSync(orderPath, "utf8").trim().split(/\r?\n/);
+    assert.deepEqual(
+      order,
+      ["Probe", "query", "Verify"],
+      "Query did not run before the pending maintenance operation or queued work ran more than once.");
+
+    const rejected = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "maintenance", action: "CallerProvidedScript", request_id: "maintenance-unsupported" });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error_code, "INVALID_ARGUMENT");
+
+    for (const action of [
+      "RefreshIfStale",
+      "RefreshIndex",
+      "BuildShaderAdapter",
+      "CleanIndex",
+      "RebuildIndex"
+    ]) {
+      const admitted = await requestPipe(
+        supervisorState.pipe_name,
+        supervisorState.auth_token,
+        { command: "maintenance", action, request_id: `maintenance-${action}` });
+      assert.equal(admitted.ok, true, admitted.error || `${action} was not admitted.`);
+      assert.equal(admitted.pending, true);
+      assert.equal(admitted.operation.name, `maintenance:${action}`);
+      assert.equal(admitted.operation.lane, "maintenance");
+      const completed = await waitForOperation(
+        supervisorState.pipe_name,
+        supervisorState.auth_token,
+        admitted.operation_id);
+      assert.equal(completed.ok, true, completed.error || `${action} failed.`);
+      assert.match(completed.result.stdout, new RegExp(`synthetic ${action}`));
+    }
   } finally {
     await cleanupFixture(fixture);
   }
@@ -1174,13 +1355,14 @@ async function verifyRecordedChildAlreadyAbsentFailsClosed() {
   const fixture = createFixture(TARGET);
   try {
     const counterPath = path.join(fixture.root, "absent-recorded-child-retry-count.txt");
+    const verifyCounterPath = path.join(fixture.root, "absent-recorded-child-verify-count.txt");
     const operationId = crypto.randomUUID().replaceAll("-", "");
     const absentPid = 2147483647;
     assert.equal(
       isProcessAlive({ pid: absentPid, exitCode: null }),
       false,
       "The reserved fixture PID must be absent before recovery starts.");
-    writeSlowProbeMaterializer(fixture, counterPath);
+    writeRecoveredOperationMaterializer(fixture, counterPath, verifyCounterPath, false);
     json(path.join(fixture.runtime, "operation.json"), {
       schema_version: 1,
       managed_by: "com.rice.ai-codedb",
@@ -1226,11 +1408,12 @@ async function verifyRecordedChildAlreadyAbsentFailsClosed() {
     assert.equal(terminal.ok, false);
     assert.match(
       terminal.error,
-      /child is no longer present and its result could not be authenticated/i);
+      /could not be verified/i);
     assert.equal(
       fs.existsSync(counterPath),
       false,
       "An absent recorded child must never launch a replacement materializer.");
+    assert.equal(fs.readFileSync(verifyCounterPath, "utf8"), "1");
     assert.ok(
       fixture.coordinatorStatusRequests > 0,
       "Coordinator status must be established before persisted operation recovery.");
@@ -1241,7 +1424,77 @@ async function verifyRecordedChildAlreadyAbsentFailsClosed() {
     assert.equal(durable.state, "failed");
     assert.match(
       durable.error,
-      /child is no longer present and its result could not be authenticated/i);
+      /could not be verified/i);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifyRecordedChildAlreadyAbsentUsesAuthoritativeVerifier() {
+  const fixture = createFixture(TARGET);
+  try {
+    const probeCounterPath = path.join(fixture.root, "verified-absent-child-probe-count.txt");
+    const verifyCounterPath = path.join(fixture.root, "verified-absent-child-verify-count.txt");
+    const operationId = crypto.randomUUID().replaceAll("-", "");
+    const absentPid = 2147483647;
+    assert.equal(
+      isProcessAlive({ pid: absentPid, exitCode: null }),
+      false,
+      "The reserved fixture PID must be absent before recovery starts.");
+    writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCounterPath, true);
+    json(path.join(fixture.runtime, "operation.json"), {
+      schema_version: 1,
+      managed_by: "com.rice.ai-codedb",
+      operation_id: operationId,
+      key: JSON.stringify(["materialize:Probe", "Probe", false, "", false, false, "", 0, ""]),
+      request_id: "recorded-child-verified-after-exit",
+      name: "materialize:Probe",
+      lane: "maintenance",
+      state: "running",
+      phase: "child_running",
+      owner_epoch: crypto.randomUUID().replaceAll("-", ""),
+      project_identity: projectIdentity(fixture.root),
+      root: fixture.root,
+      runtime: fixture.runtime,
+      selected_instance_id: fixture.instanceId,
+      selected_generation_id: TARGET.generationId,
+      runtime_contract_sha256: fixture.contractSha256,
+      child: {
+        schema_version: 1,
+        pid: absentPid,
+        process_start_identity: "1",
+        executable_path: path.resolve(process.execPath),
+        argv_sha256: "a".repeat(64),
+        command_line_sha256: "b".repeat(64),
+        command: process.execPath,
+        normalized_argv: ["synthetic-verified-absent-child"]
+      },
+      started_at_utc: new Date().toISOString()
+    });
+
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const state = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    const terminal = await waitForOperation(
+      state.pipe_name,
+      state.auth_token,
+      operationId);
+
+    assert.equal(terminal.pending, false);
+    assert.equal(terminal.ok, true, terminal.error || "Recovered operation verification failed.");
+    assert.equal(fs.existsSync(probeCounterPath), false);
+    assert.equal(fs.readFileSync(verifyCounterPath, "utf8"), "1");
+    assert.ok(
+      fixture.coordinatorStatusRequests > 0,
+      "Coordinator status must be established before persisted operation recovery.");
+    const durable = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "operation.json"),
+      "utf8"));
+    assert.equal(durable.operation_id, operationId);
+    assert.equal(durable.state, "completed");
   } finally {
     await cleanupFixture(fixture);
   }
@@ -1287,11 +1540,39 @@ async function verifyCoordinatorReadmissionBeforeMaterializer() {
     assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
     const statePath = path.join(fixture.runtime, "supervisor-state.json");
     assert.equal(await waitForPath(statePath), true);
+    assert.equal(await waitForCondition(() => {
+      try {
+        return JSON.parse(fs.readFileSync(statePath, "utf8")).coordinator_failure_category === "NONZERO_EXIT";
+      } catch {
+        return false;
+      }
+    }, 5000), true, "The startup failure category was not published.");
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     initialSupervisorPid.value = state.supervisor_pid;
     assert.equal(isProcessAlive({ pid: state.supervisor_pid, exitCode: null }), true);
     assert.equal(fs.readFileSync(startCounterPath, "utf8"), "1");
     assert.equal(fs.existsSync(fixture.coordinatorReadyPath), false);
+    assert.equal(state.coordinator_failure_category, "NONZERO_EXIT");
+    assert.equal(state.operational_readiness.schema_version, 1);
+    assert.equal(state.operational_readiness.state, "degraded");
+    assert.equal(state.operational_readiness.reason_code, "COORDINATOR_START_FAILED");
+    assert.equal(state.operational_readiness.coordinator_failure_category, "NONZERO_EXIT");
+    const failedStatus = await requestPipe(
+      state.pipe_name,
+      state.auth_token,
+      { command: "status" });
+    assert.equal(failedStatus.status.provider_state, "starting");
+    assert.equal(failedStatus.status.operational_readiness.state, "degraded");
+    assert.equal(failedStatus.status.operational_readiness.reason_code, "COORDINATOR_START_FAILED");
+    assert.equal(state.last_event, "coordinator_start_failed");
+    assert.equal(state.last_event_detail, "NONZERO_EXIT");
+    assert.doesNotMatch(
+      JSON.stringify({
+        coordinator_failure_category: state.coordinator_failure_category,
+        last_event: state.last_event,
+        last_event_detail: state.last_event_detail
+      }),
+      /synthetic coordinator start failure/);
 
     const probe = await requestPipe(
       state.pipe_name,
@@ -1300,12 +1581,55 @@ async function verifyCoordinatorReadmissionBeforeMaterializer() {
     assert.equal(probe.pending, true);
     const probeResult = await waitForOperation(state.pipe_name, state.auth_token, probe.operation_id);
     assert.equal(probeResult.ok, true, probeResult.error || "Probe re-admission failed.");
+    assert.equal(probeResult.status.coordinator_failure_category, "NONE");
+    assert.equal(probeResult.status.provider_state, "ready");
+    assert.equal(probeResult.status.operational_readiness.state, "core_ready");
+    assert.equal(probeResult.status.operational_readiness.reason_code, "COORDINATOR_OPERATIONAL");
+    assert.equal(probeResult.status.operational_readiness.coordinator_failure_category, "NONE");
+    const probeObservationLine = probeResult.result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("[OPERATIONAL_OBSERVATION] "));
+    assert.ok(probeObservationLine, "Probe did not receive the Supervisor observation.");
+    const probeObservation = JSON.parse(
+      probeObservationLine.slice("[OPERATIONAL_OBSERVATION] ".length));
+    assert.equal(
+      probeResult.status.operational_readiness.observation_id,
+      probeObservation.observation_id,
+      "The terminal command status must identify the observation passed to PowerShell.");
+    assert.equal(
+      probeResult.status.operational_readiness.revision,
+      probeObservation.revision,
+      "The terminal command status must retain the PowerShell observation revision.");
     assert.equal(fs.readFileSync(startCounterPath, "utf8"), "2");
     assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "1");
     assert.equal(fs.existsSync(fixture.coordinatorReadyPath), true);
     assert.equal(fixture.coordinatorServer, coordinatorOwner);
+    const durableProbe = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "operation.json"),
+      "utf8"));
+    const probeActionIndex = durableProbe.child.normalized_argv.indexOf("-Action");
+    assert.equal(probeActionIndex >= 0, true);
+    assert.equal(durableProbe.child.normalized_argv[probeActionIndex + 1], "Probe");
 
     fs.rmSync(fixture.coordinatorReadyPath, { force: true });
+    assert.equal(await waitForCondition(() => {
+      try {
+        const current = JSON.parse(fs.readFileSync(statePath, "utf8"));
+        return current.coordinator_failure_category === "NONE"
+          && current.operational_readiness.state === "starting"
+          && current.operational_readiness.reason_code === "COORDINATOR_STARTING"
+          && current.operational_readiness.coordinator_failure_category === "NONE";
+      } catch {
+        return false;
+      }
+    }, 5000), true, "A neutral startup category with a non-ready Coordinator must remain starting.");
+    const neutralStartingStatus = await requestPipe(
+      state.pipe_name,
+      state.auth_token,
+      { command: "status" });
+    assert.equal(neutralStartingStatus.status.provider_state, "starting");
+    assert.equal(neutralStartingStatus.status.coordinator_failure_category, "NONE");
+    assert.equal(neutralStartingStatus.status.operational_readiness.state, "starting");
     const upgrade = await requestPipe(
       state.pipe_name,
       state.auth_token,
@@ -1313,6 +1637,7 @@ async function verifyCoordinatorReadmissionBeforeMaterializer() {
     assert.equal(upgrade.pending, true);
     const upgradeResult = await waitForOperation(state.pipe_name, state.auth_token, upgrade.operation_id);
     assert.equal(upgradeResult.ok, true, upgradeResult.error || "Upgrade re-admission failed.");
+    assert.equal(upgradeResult.status.operational_readiness.state, "core_ready");
     assert.equal(fs.readFileSync(startCounterPath, "utf8"), "3");
     assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "2");
     assert.equal(fs.existsSync(fixture.coordinatorReadyPath), true);
@@ -1331,6 +1656,19 @@ async function verifyCoordinatorReadmissionBeforeMaterializer() {
       failedProbe.operation_id);
     assert.equal(failedResult.ok, false);
     assert.match(failedResult.error, /synthetic coordinator start failure/);
+    assert.equal(failedResult.status.coordinator_failure_category, "NONZERO_EXIT");
+    assert.equal(failedResult.status.operational_readiness.state, "degraded");
+    assert.equal(
+      failedResult.status.operational_readiness.coordinator_failure_category,
+      "NONZERO_EXIT");
+    assert.doesNotMatch(
+      JSON.stringify({
+        coordinator_failure_category: failedResult.status.coordinator_failure_category,
+        last_event: failedResult.status.last_event,
+        last_event_detail: failedResult.status.last_event_detail
+      }),
+      /synthetic coordinator start failure/,
+      "Authenticated status/event attribution must not expose the synthetic child stderr.");
     assert.equal(fs.readFileSync(startCounterPath, "utf8"), "4");
     assert.equal(fs.readFileSync(materializerCounterPath, "utf8"), "2");
     assert.equal(fixture.coordinatorServer, coordinatorOwner);
@@ -1487,9 +1825,16 @@ async function main() {
       ["G:", "RiceProgram", "Test", "Test"].join("\\"),
       ["G:", "RiceProgram", "Test", "Test", ...CONTROL_NAMESPACE_RELATIVE_PATH.split("/")].join("\\")),
     "\\\\.\\pipe\\codedb-supervisor-8ef262de0ef456d71b2b");
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "request-queue") {
+    await verifyQueryFirstBoundedMaintenanceQueue();
+    console.log("[PASS] Supervisor query-first bounded maintenance queue owns priority, coalescing, admission, and owner-epoch binding.");
+    return;
+  }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "coordinator-readmission") {
     await verifyCoordinatorReadmissionBeforeMaterializer();
-    console.log("[PASS] Supervisor coordinator re-admission precedes Probe/Upgrade materialization and blocks materializer on ensure failure.");
+    await verifyRecordedChildAlreadyAbsentUsesAuthoritativeVerifier();
+    await verifyRecordedChildAlreadyAbsentFailsClosed();
+    console.log("[PASS] Supervisor coordinator re-admission and persisted-child recovery preserve authoritative operation evidence.");
     return;
   }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "recorded-child-absent") {
@@ -1505,6 +1850,7 @@ async function main() {
   await verifyProvenStaleOwnerTakeover();
   await verifyPidReuseIsAmbiguousAndNeverStopped();
   await verifyAsynchronousMaterializerOperation();
+  await verifyQueryFirstBoundedMaintenanceQueue();
   await verifyOperationReattachesAfterSupervisorLoss();
   await verifyMissingChildEvidenceBlocksBlindRetry();
   await verifyRecordedChildAlreadyAbsentFailsClosed();

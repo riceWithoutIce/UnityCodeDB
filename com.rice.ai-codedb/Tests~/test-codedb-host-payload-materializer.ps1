@@ -22,6 +22,8 @@ param(
 
     [switch]$ActivationRetirementOnly,
 
+    [switch]$OperationalReadinessOnly,
+
     [switch]$ControlContractReinstallOnly,
 
     [switch]$PortabilityOnly,
@@ -32,8 +34,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $ControlContractReinstallOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, ControlContractReinstallOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, OperationalReadinessOnly, ControlContractReinstallOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -8330,6 +8332,190 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Write-Host "[OK] Exact Package-declared immutable instances hand off automatically, retain live owners, drain idempotently, and reject undeclared identities before activation."
 }
 
+function Invoke-OperationalReadinessAuthorityScenarios {
+    $parseErrors = $null
+    $parseTokens = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath,
+        [ref]$parseTokens,
+        [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message "Materializer source did not parse for focused operational readiness loading."
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+
+    $instanceEnginePath = Join-Path $packageRoot "Tools~\codedb-instance-engine.ps1"
+    . $instanceEnginePath
+    $script:ManagedBy = "com.rice.ai-codedb"
+
+    $manifestJson = Read-BoundedJsonDocument `
+        -Path $canonicalPayloadManifestPath `
+        -Label "focused operational readiness Package manifest" `
+        -MaximumBytes (1024 * 1024)
+    $controlContract = Read-InstanceControlContractIdentity -ManifestDocument $manifestJson.Document
+    $manifest = [pscustomobject]@{
+        ControlContract = $controlContract
+        RuntimeContractSha256 = $manifestJson.Sha256
+        TargetGenerationId = $generationId
+    }
+    $currentInstance = [pscustomobject]@{
+        InstanceId = "0123456789abcdef0123456789abcdef"
+        Generation = [pscustomobject]@{ GenerationId = $generationId }
+        GenerationDisposition = "CURRENT"
+    }
+    $contractPaths = Get-InstanceActivationContractPaths `
+        -ProjectRoot $hostRoot `
+        -ControlContract $controlContract `
+        -OperationId ([guid]::Empty.ToString("N"))
+
+    $engineSource = [System.IO.File]::ReadAllText($instanceEnginePath)
+    $readinessStart = $engineSource.IndexOf(
+        "function Get-InstanceCurrentReadiness",
+        [StringComparison]::Ordinal)
+    $readinessEnd = $engineSource.IndexOf(
+        "function Invoke-InstanceConvergence",
+        $readinessStart,
+        [StringComparison]::Ordinal)
+    Assert-True `
+        -Condition ($readinessStart -ge 0 -and $readinessEnd -gt $readinessStart) `
+        -Message "Focused source check could not isolate Get-InstanceCurrentReadiness."
+    $readinessSource = $engineSource.Substring($readinessStart, $readinessEnd - $readinessStart)
+    Assert-True `
+        -Condition ($readinessSource.IndexOf("Test-InstanceCoordinatorOperational", [StringComparison]::Ordinal) -lt 0) `
+        -Message "Get-InstanceCurrentReadiness still invokes an independent Coordinator operational probe."
+
+    $script:OperationalReadinessCoordinatorProbeCount = 0
+    function Get-RepairMcpConfigPlan {
+        param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+        return [pscustomobject]@{ Current = $true }
+    }
+    function Test-InstanceCoordinatorOperational {
+        $script:OperationalReadinessCoordinatorProbeCount++
+        throw "Independent Coordinator operational probe was invoked."
+    }
+
+    $observation = [ordered]@{
+        schema_version = [int64]1
+        observation_id = "11111111111111111111111111111111"
+        revision = [int64]7
+        observed_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+        state = "core_ready"
+        reason_code = "COORDINATOR_OPERATIONAL"
+        detail = "The selected instance Coordinator is operational."
+        coordinator_failure_category = "NONE"
+        project_root = [System.IO.Path]::GetFullPath($hostRoot)
+        project_identity = Get-MaterializerProjectIdentity -ProjectRoot $hostRoot
+        runtime = $contractPaths.SupervisorRoot
+        selected_instance_id = $currentInstance.InstanceId
+        selected_generation_id = $currentInstance.Generation.GenerationId
+        target_generation_id = $manifest.TargetGenerationId
+        runtime_contract_sha256 = $manifest.RuntimeContractSha256
+        generation_disposition = $currentInstance.GenerationDisposition
+        lifecycle_id = "fixture-lifecycle"
+        supervisor_id = "fixture-supervisor"
+        owner_epoch = "22222222222222222222222222222222"
+        supervisor_pid = [int64]$PID
+    }
+    $previousObservation = [Environment]::GetEnvironmentVariable(
+        $script:SupervisorOperationalReadinessEnvironmentVariable,
+        [EnvironmentVariableTarget]::Process)
+    try {
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            ($observation | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        $ready = Get-InstanceCurrentReadiness `
+            -Manifest $manifest `
+            -ProjectRoot $hostRoot `
+            -CurrentInstance $currentInstance `
+            -LiveProbe
+        Assert-True -Condition $ready.Ready -Message "Valid Supervisor authority did not produce Ready."
+        Assert-True -Condition $ready.McpAvailable -Message "Valid Supervisor authority did not produce MCP availability."
+        Assert-True -Condition (-not $ready.RuntimeTransitional) -Message "Valid core-ready authority remained transitional."
+        Assert-Equal -Actual $ready.OperationalObservation.Document.observation_id -Expected $observation.observation_id -Message "Validated authority did not preserve its observation identity."
+
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            $null,
+            [EnvironmentVariableTarget]::Process)
+        $absent = Get-InstanceCurrentReadiness `
+            -Manifest $manifest `
+            -ProjectRoot $hostRoot `
+            -CurrentInstance $currentInstance
+        Assert-True -Condition (-not $absent.Ready) -Message "Absent Supervisor authority produced Ready."
+        Assert-True -Condition $absent.RuntimeTransitional -Message "Absent Supervisor authority was not explicit Starting."
+        Assert-True -Condition ($null -eq $absent.OperationalObservation) -Message "Absent Supervisor authority produced an observation."
+
+        $degraded = [ordered]@{}
+        foreach ($entry in $observation.GetEnumerator()) { $degraded[$entry.Key] = $entry.Value }
+        $degraded.observation_id = "33333333333333333333333333333333"
+        $degraded.revision = [int64]8
+        $degraded.observed_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+        $degraded.state = "degraded"
+        $degraded.reason_code = "COORDINATOR_START_FAILED"
+        $degraded.detail = "The selected instance Coordinator did not start successfully."
+        $degraded.coordinator_failure_category = "NONZERO_EXIT"
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            ($degraded | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        $failed = Get-InstanceCurrentReadiness `
+            -Manifest $manifest `
+            -ProjectRoot $hostRoot `
+            -CurrentInstance $currentInstance
+        Assert-True -Condition (-not $failed.Ready -and -not $failed.RuntimeTransitional) -Message "Valid degraded authority was not terminal NeedsAttention evidence."
+        Assert-Equal -Actual $failed.OperationalObservation.Document.coordinator_failure_category -Expected "NONZERO_EXIT" -Message "Startup failure attribution was not passed through with readiness."
+
+        $stale = [ordered]@{}
+        foreach ($entry in $observation.GetEnumerator()) { $stale[$entry.Key] = $entry.Value }
+        $stale.observed_at_utc = [DateTimeOffset]::UtcNow.AddMinutes(-21).ToString("o")
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            ($stale | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        Assert-ThrowsMessage `
+            -Action { Get-ValidatedInstanceSupervisorOperationalReadiness -Manifest $manifest -ProjectRoot $hostRoot -CurrentInstance $currentInstance } `
+            -ExpectedMessage "identity or values are invalid" `
+            -Label "Stale Supervisor operational authority"
+
+        $mismatched = [ordered]@{}
+        foreach ($entry in $observation.GetEnumerator()) { $mismatched[$entry.Key] = $entry.Value }
+        $mismatched.observed_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+        $mismatched.selected_instance_id = "ffffffffffffffffffffffffffffffff"
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            ($mismatched | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        Assert-ThrowsMessage `
+            -Action { Get-ValidatedInstanceSupervisorOperationalReadiness -Manifest $manifest -ProjectRoot $hostRoot -CurrentInstance $currentInstance } `
+            -ExpectedMessage "identity or values are invalid" `
+            -Label "Mismatched Supervisor operational authority"
+
+        $malformed = [ordered]@{}
+        foreach ($entry in $observation.GetEnumerator()) { $malformed[$entry.Key] = $entry.Value }
+        $malformed.observed_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+        $malformed.revision = "7"
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            ($malformed | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        Assert-ThrowsMessage `
+            -Action { Get-ValidatedInstanceSupervisorOperationalReadiness -Manifest $manifest -ProjectRoot $hostRoot -CurrentInstance $currentInstance } `
+            -ExpectedMessage "signed 64-bit JSON integer" `
+            -Label "Malformed Supervisor operational authority"
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            $script:SupervisorOperationalReadinessEnvironmentVariable,
+            $previousObservation,
+            [EnvironmentVariableTarget]::Process)
+    }
+
+    Assert-Equal -Actual $script:OperationalReadinessCoordinatorProbeCount -Expected 0 -Message "PowerShell recomputed Coordinator operational readiness independently."
+    Write-Host "[OK] Supervisor operational readiness authority is validated, passed through, and never recomputed by PowerShell."
+}
+
 $packageSnapshotBefore = $null
 $sentinelSnapshot = $null
 try {
@@ -8395,6 +8581,14 @@ try {
         Invoke-ActivationRetirementScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused activation retirement acceptance modified package source files."
         Write-Host "[OK] Focused versioned lease-aware retirement scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($OperationalReadinessOnly) {
+        Invoke-OperationalReadinessAuthorityScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused operational readiness acceptance modified package source files."
+        Write-Host "[OK] Focused operational readiness authority scenarios passed."
         $fixturePassed = $true
         return
     }

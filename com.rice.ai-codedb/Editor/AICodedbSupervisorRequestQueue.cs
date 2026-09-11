@@ -13,12 +13,6 @@ namespace Rice.AI.Codedb.Editor
         Maintenance
     }
 
-    internal enum AICodedbSupervisorRequestPriority
-    {
-        Query = 0,
-        Maintenance = 1
-    }
-
     internal readonly struct AICodedbSupervisorQueueSnapshot
     {
         internal int PendingCount { get; }
@@ -46,36 +40,28 @@ namespace Rice.AI.Codedb.Editor
     }
 
     /// <summary>
-    /// Serializes lifecycle work before it reaches the project-local runtime.
-    /// Query/status observations take priority over maintenance, duplicate
-    /// requests coalesce by key, and an epoch boundary cancels stale work.
-    /// The queue never performs work on the Unity callback thread.
+    /// Moves lifecycle intent off Unity callbacks and rejects results from an
+    /// obsolete local lifetime. Runtime request ordering, keys, coalescing, and
+    /// admission belong exclusively to the project Supervisor.
     /// </summary>
-    internal sealed class AICodedbSupervisorRequestQueue : IDisposable
+    internal sealed class AICodedbSupervisorIntentAdapter : IDisposable
     {
         private sealed class Entry
         {
-            internal string Key;
             internal AICodedbSupervisorRequestKind Kind;
-            internal AICodedbSupervisorRequestPriority Priority;
             internal long Sequence;
-            internal int Epoch;
+            internal int Generation;
             internal bool IsMaintenance;
             internal CancellationTokenSource Cancellation;
             internal TaskCompletionSource<object> Completion;
             internal Func<CancellationToken, Task<object>> Work;
-            internal bool Started;
         }
 
         private readonly object _gate = new object();
-        private readonly List<Entry> _pending = new List<Entry>();
-        private readonly Dictionary<string, Entry> _byKey =
-            new Dictionary<string, Entry>(StringComparer.Ordinal);
-        private Entry _active;
-        private bool _workerScheduled;
+        private readonly HashSet<Entry> _active = new HashSet<Entry>();
         private bool _disposed;
         private bool _suspended;
-        private int _epoch;
+        private int _generation;
         private long _sequence;
 
         internal AICodedbSupervisorQueueSnapshot Snapshot
@@ -84,350 +70,192 @@ namespace Rice.AI.Codedb.Editor
             {
                 lock (_gate)
                 {
+                    var active = FindOldestActiveLocked();
                     return new AICodedbSupervisorQueueSnapshot(
-                        _pending.Count,
-                        _active != null,
-                        _active == null
+                        0,
+                        active != null,
+                        active == null
                             ? AICodedbSupervisorRequestKind.ObserveStatus
-                            : _active.Kind,
+                            : active.Kind,
                         _sequence,
-                        _epoch,
+                        _generation,
                         _suspended);
                 }
             }
         }
 
-        internal Task<T> Enqueue<T>(
+        internal Task<T> Dispatch<T>(
             AICodedbSupervisorRequestKind kind,
-            AICodedbSupervisorRequestPriority priority,
-            string key,
             Func<CancellationToken, Task<T>> work,
-            bool isMaintenance,
-            bool supersedeExisting = false)
+            bool isMaintenance)
         {
-            if (string.IsNullOrWhiteSpace(key))
-                throw new ArgumentException("A queue key is required.", nameof(key));
             if (work == null)
                 throw new ArgumentNullException(nameof(work));
 
             Entry entry;
             Task<T> task;
-            Entry superseded = null;
             lock (_gate)
             {
-                if (_disposed)
+                if (_disposed || (_suspended && isMaintenance))
                     return Task.FromCanceled<T>(new CancellationToken(true));
-
-                if (_suspended && isMaintenance)
-                    return Task.FromCanceled<T>(new CancellationToken(true));
-
-                Entry existing;
-                if (_byKey.TryGetValue(key, out existing))
-                {
-                    if (!supersedeExisting && existing.Epoch == _epoch)
-                        return CastCompletion<T>(existing.Completion.Task);
-
-                    CancelEntryLocked(existing);
-                    // Superseding, including an entry from an older epoch, is
-                    // terminal for the old caller even when its worker ignores
-                    // cancellation briefly. Do this while holding the queue
-                    // lock so a late result cannot win a same-key race.
-                    existing.Completion.TrySetCanceled(existing.Cancellation.Token);
-                    RemovePendingEntryLocked(existing);
-                    _byKey.Remove(key);
-                    superseded = existing;
-                }
 
                 var completion = new TaskCompletionSource<object>(
                     TaskCreationOptions.RunContinuationsAsynchronously);
                 entry = new Entry
                 {
-                    Key = key,
                     Kind = kind,
-                    Priority = priority,
                     Sequence = ++_sequence,
-                    Epoch = _epoch,
+                    Generation = _generation,
                     IsMaintenance = isMaintenance,
                     Cancellation = new CancellationTokenSource(),
                     Completion = completion,
-                    Work = async cancellationToken => (object)await work(cancellationToken).ConfigureAwait(false)
+                    Work = async cancellationToken =>
+                        (object)await work(cancellationToken).ConfigureAwait(false)
                 };
-                _pending.Add(entry);
-                _byKey[key] = entry;
+                _active.Add(entry);
                 task = CastCompletion<T>(completion.Task);
-                ScheduleWorkerLocked();
             }
 
-            if (superseded != null && !superseded.Started)
+            try
             {
-                superseded.Cancellation.Dispose();
+                _ = Task.Run(() => RunAsync(entry));
+            }
+            catch (Exception exception)
+            {
+                lock (_gate)
+                    _active.Remove(entry);
+                entry.Completion.TrySetException(exception);
+                entry.Cancellation.Dispose();
             }
 
             return task;
         }
 
         /// <summary>
-        /// Cancels maintenance requests at a Play/compile boundary while
-        /// leaving read-only observations eligible to refresh the cache.
+        /// Cancels local maintenance intent at a Play/compile boundary. Query
+        /// observations remain eligible to reach the Supervisor in the new
+        /// local generation.
         /// </summary>
         internal void SetMaintenanceSuspended(bool suspended)
         {
-            List<Entry> cancelled = null;
             lock (_gate)
             {
-                if (_disposed)
-                    return;
-
-                if (_suspended == suspended)
+                if (_disposed || _suspended == suspended)
                     return;
 
                 _suspended = suspended;
+                _generation++;
                 if (!suspended)
-                {
-                    _epoch++;
                     return;
-                }
 
-                _epoch++;
-                for (var index = _pending.Count - 1; index >= 0; index--)
+                foreach (var entry in _active)
                 {
-                    var entry = _pending[index];
                     if (!entry.IsMaintenance)
                         continue;
                     CancelEntryLocked(entry);
-                    RemovePendingEntryLocked(entry);
-                    if (cancelled == null)
-                        cancelled = new List<Entry>();
-                    cancelled.Add(entry);
-                }
-
-                if (_active != null && _active.IsMaintenance)
-                {
-                    CancelEntryLocked(_active);
-                    _active.Completion.TrySetCanceled(_active.Cancellation.Token);
-                    RemoveActiveMappingLocked(_active);
+                    entry.Completion.TrySetCanceled(entry.Cancellation.Token);
                 }
             }
-
-            CompleteCancelledEntries(cancelled);
         }
 
         /// <summary>
-        /// Invalidates every queued request. Used for Domain Reload and
-        /// shutdown so an old result cannot overwrite a newer epoch.
+        /// Invalidates local waiters during Domain Reload. An already admitted
+        /// external operation remains owned by the authenticated Supervisor.
         /// </summary>
         internal void Invalidate()
         {
-            List<Entry> cancelled;
             lock (_gate)
             {
                 if (_disposed)
                     return;
 
-                _epoch++;
-                cancelled = new List<Entry>(_pending);
-                _pending.Clear();
-                foreach (var entry in cancelled)
+                _generation++;
+                foreach (var entry in _active)
                 {
                     CancelEntryLocked(entry);
-                    _byKey.Remove(entry.Key);
-                }
-
-                if (_active != null)
-                {
-                    CancelEntryLocked(_active);
-                    _active.Completion.TrySetCanceled(_active.Cancellation.Token);
-                    RemoveActiveMappingLocked(_active);
+                    entry.Completion.TrySetCanceled(entry.Cancellation.Token);
                 }
             }
-
-            CompleteCancelledEntries(cancelled);
         }
 
         public void Dispose()
         {
-            List<Entry> cancelled;
             lock (_gate)
             {
                 if (_disposed)
                     return;
 
                 _disposed = true;
-                _epoch++;
-                cancelled = new List<Entry>(_pending);
-                _pending.Clear();
-                foreach (var entry in cancelled)
+                _generation++;
+                foreach (var entry in _active)
                 {
                     CancelEntryLocked(entry);
-                    _byKey.Remove(entry.Key);
-                }
-
-                if (_active != null)
-                {
-                    CancelEntryLocked(_active);
-                    _active.Completion.TrySetCanceled(_active.Cancellation.Token);
-                    RemoveActiveMappingLocked(_active);
+                    entry.Completion.TrySetCanceled(entry.Cancellation.Token);
                 }
             }
-
-            CompleteCancelledEntries(cancelled);
         }
 
-        private void ScheduleWorkerLocked()
+        private async Task RunAsync(Entry entry)
         {
-            if (_workerScheduled)
-                return;
-
-            _workerScheduled = true;
             try
             {
-                _ = Task.Run(DrainAsync);
-            }
-            catch (Exception exception)
-            {
-                _workerScheduled = false;
-                FailPendingLocked(exception);
-            }
-        }
-
-        private async Task DrainAsync()
-        {
-            while (true)
-            {
-                Entry entry;
-                lock (_gate)
+                if (entry.Cancellation.IsCancellationRequested)
                 {
-                    if (_disposed || _pending.Count == 0)
-                    {
-                        _workerScheduled = false;
-                        return;
-                    }
-
-                    entry = TakeNextEntryLocked();
-                    entry.Started = true;
-                    _active = entry;
+                    entry.Completion.TrySetCanceled(entry.Cancellation.Token);
+                    return;
                 }
 
-                try
+                var result = await entry.Work(entry.Cancellation.Token).ConfigureAwait(false);
+                lock (_gate)
                 {
-                    if (entry.Cancellation.IsCancellationRequested)
+                    if (_disposed
+                        || entry.Generation != _generation
+                        || entry.Cancellation.IsCancellationRequested)
                     {
                         entry.Completion.TrySetCanceled(entry.Cancellation.Token);
                     }
                     else
                     {
-                        var result = await entry.Work(entry.Cancellation.Token).ConfigureAwait(false);
-                        lock (_gate)
-                        {
-                            if (_disposed || entry.Epoch != _epoch)
-                            {
-                                entry.Completion.TrySetCanceled(entry.Cancellation.Token);
-                            }
-                            else
-                            {
-                                entry.Completion.TrySetResult(result);
-                            }
-                        }
+                        entry.Completion.TrySetResult(result);
                     }
-                }
-                catch (OperationCanceledException)
-                {
-                    entry.Completion.TrySetCanceled(entry.Cancellation.Token);
-                }
-                catch (Exception exception)
-                {
-                    entry.Completion.TrySetException(exception);
-                }
-                finally
-                {
-                    lock (_gate)
-                    {
-                        if (ReferenceEquals(_active, entry))
-                            _active = null;
-                        Entry mapped;
-                        if (_byKey.TryGetValue(entry.Key, out mapped)
-                            && ReferenceEquals(mapped, entry))
-                            _byKey.Remove(entry.Key);
-                    }
-                    entry.Cancellation.Dispose();
                 }
             }
-        }
-
-        private Entry TakeNextEntryLocked()
-        {
-            var selectedIndex = 0;
-            for (var index = 1; index < _pending.Count; index++)
+            catch (OperationCanceledException)
             {
-                var candidate = _pending[index];
-                var selected = _pending[selectedIndex];
-                if (candidate.Priority < selected.Priority
-                    || (candidate.Priority == selected.Priority
-                        && candidate.Sequence < selected.Sequence))
-                    selectedIndex = index;
+                entry.Completion.TrySetCanceled(entry.Cancellation.Token);
             }
-
-            var entry = _pending[selectedIndex];
-            _pending.RemoveAt(selectedIndex);
-            return entry;
+            catch (Exception exception)
+            {
+                entry.Completion.TrySetException(exception);
+            }
+            finally
+            {
+                lock (_gate)
+                    _active.Remove(entry);
+                entry.Cancellation.Dispose();
+            }
         }
 
-        private void CancelEntryLocked(Entry entry)
+        private Entry FindOldestActiveLocked()
         {
-            if (entry == null)
-                return;
+            Entry selected = null;
+            foreach (var entry in _active)
+            {
+                if (selected == null || entry.Sequence < selected.Sequence)
+                    selected = entry;
+            }
+            return selected;
+        }
 
+        private static void CancelEntryLocked(Entry entry)
+        {
             try
             {
                 entry.Cancellation.Cancel();
             }
             catch (ObjectDisposedException)
             {
-                // The worker completed concurrently with the boundary.
-            }
-        }
-
-        private void RemovePendingEntryLocked(Entry entry)
-        {
-            if (entry == null || entry.Started)
-                return;
-
-            _pending.Remove(entry);
-            _byKey.Remove(entry.Key);
-        }
-
-        private void RemoveActiveMappingLocked(Entry entry)
-        {
-            if (entry == null)
-                return;
-
-            Entry mapped;
-            if (_byKey.TryGetValue(entry.Key, out mapped)
-                && ReferenceEquals(mapped, entry))
-                _byKey.Remove(entry.Key);
-        }
-
-        private static void CompleteCancelledEntries(IEnumerable<Entry> entries)
-        {
-            if (entries == null)
-                return;
-
-            foreach (var entry in entries)
-            {
-                entry.Completion.TrySetCanceled(entry.Cancellation.Token);
-                entry.Cancellation.Dispose();
-            }
-        }
-
-        private void FailPendingLocked(Exception exception)
-        {
-            var entries = new List<Entry>(_pending);
-            _pending.Clear();
-            foreach (var entry in entries)
-            {
-                _byKey.Remove(entry.Key);
-                entry.Completion.TrySetException(exception);
-                entry.Cancellation.Dispose();
+                // The detached worker completed concurrently with the boundary.
             }
         }
 

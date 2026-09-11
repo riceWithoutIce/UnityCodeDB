@@ -16,6 +16,7 @@ namespace Rice.AI.Codedb.Editor
         internal bool IsProjectUninstalled => ProjectIntegrationStatus.IsUninstalled;
         internal AICodedbCurrentInstanceStatus CurrentInstanceStatus { get; }
         internal AICodedbStatusItem CurrentInstance { get; }
+        internal AICodedbStatusItem CoordinatorFailure { get; }
         internal AICodedbStatusItem Cleanup { get; }
         internal AICodedbStatusItem ControlContractMigration { get; }
         internal AICodedbHostPayloadStatus HostPayloadStatus { get; }
@@ -50,7 +51,9 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         private AICodedbStatusSnapshot(
             AICodedbEditorExecutionContext context,
-            AICodedbCommandResult hostPayloadResult)
+            AICodedbCommandResult hostPayloadResult,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             _context = context;
             var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
@@ -73,6 +76,7 @@ namespace Rice.AI.Codedb.Editor
                     : string.Empty);
             ProductStatus = AICodedbProductStatusBuilder.Build(ProjectIntegrationStatus, hostPayloadResult);
             CurrentInstance = CreateCurrentInstanceStatus(CurrentInstanceStatus);
+            CoordinatorFailure = CreateCoordinatorFailureStatus(coordinatorFailureCategory);
             Cleanup = CreateCleanupStatus(ProjectIntegrationStatus, ProductStatus.State);
             ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             HostPayload = HostPayloadStatus.ToStatusItem();
@@ -106,27 +110,38 @@ namespace Rice.AI.Codedb.Editor
             OverallDescription = CreateOverallDescription(ProductStatus);
         }
 
-        private AICodedbStatusSnapshot(string projectDisplayName)
-            : this(projectDisplayName, AICodedbProductState.Starting)
+        private AICodedbStatusSnapshot(
+            string projectDisplayName,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory)
+            : this(projectDisplayName, AICodedbProductState.Starting, coordinatorFailureCategory)
         {
         }
 
         private AICodedbStatusSnapshot(
             string projectDisplayName,
-            AICodedbProductState displayState)
+            AICodedbProductState displayState,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory)
             : this(
                 projectDisplayName,
                 displayState,
                 default(AICodedbProductStatus),
                 false,
-                displayState == AICodedbProductState.Starting)
+                displayState == AICodedbProductState.Starting,
+                coordinatorFailureCategory)
         {
         }
 
         private AICodedbStatusSnapshot(
             string projectDisplayName,
-            AICodedbProductStatus productStatus)
-            : this(projectDisplayName, productStatus.State, productStatus, true, false)
+            AICodedbProductStatus productStatus,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory)
+            : this(
+                projectDisplayName,
+                productStatus.State,
+                productStatus,
+                true,
+                false,
+                coordinatorFailureCategory)
         {
         }
 
@@ -135,7 +150,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductState displayState,
             AICodedbProductStatus cachedProductStatus,
             bool hasCachedProductStatus,
-            bool statusRefreshInFlight)
+            bool statusRefreshInFlight,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory)
         {
             _context = default(AICodedbEditorExecutionContext);
             var productState = displayState;
@@ -219,6 +235,7 @@ namespace Rice.AI.Codedb.Editor
                     "Last verified",
                     "Live instance checks resume after Play mode.")
                 : CachedUnknown("Current instance", showChecking, detail);
+            CoordinatorFailure = CreateCoordinatorFailureStatus(coordinatorFailureCategory);
             Cleanup = cachedReady
                 ? AICodedbStatusItem.Inactive(
                     "Background cleanup",
@@ -319,41 +336,65 @@ namespace Rice.AI.Codedb.Editor
         /// <summary>
         /// Creates a fresh status snapshot without writing project files.
         /// </summary>
-        internal static AICodedbStatusSnapshot Refresh()
+        internal static AICodedbStatusSnapshot Refresh(
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
-            return new AICodedbStatusSnapshot(AICodedbPaths.CaptureExecutionContext(), null);
+            return new AICodedbStatusSnapshot(
+                AICodedbPaths.CaptureExecutionContext(),
+                null,
+                coordinatorFailureCategory);
         }
 
-        internal static AICodedbStatusSnapshot Refresh(AICodedbCommandResult hostPayloadResult)
+        internal static AICodedbStatusSnapshot Refresh(
+            AICodedbCommandResult hostPayloadResult,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             if (hostPayloadResult == null)
                 throw new ArgumentNullException(nameof(hostPayloadResult));
-            return new AICodedbStatusSnapshot(AICodedbPaths.CaptureExecutionContext(), hostPayloadResult);
+            return new AICodedbStatusSnapshot(
+                AICodedbPaths.CaptureExecutionContext(),
+                hostPayloadResult,
+                coordinatorFailureCategory);
         }
 
-        internal static AICodedbStatusSnapshot CreateStarting(string projectDisplayName)
+        internal static AICodedbStatusSnapshot CreateStarting(
+            string projectDisplayName,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
-            return new AICodedbStatusSnapshot(projectDisplayName);
+            return new AICodedbStatusSnapshot(projectDisplayName, coordinatorFailureCategory);
         }
 
         /// <summary>
         /// Creates a display-only Ready snapshot from the lifecycle's last
         /// verified result. It performs no filesystem or process inspection.
         /// </summary>
-        internal static AICodedbStatusSnapshot CreateCachedReady(string projectDisplayName)
+        internal static AICodedbStatusSnapshot CreateCachedReady(
+            string projectDisplayName,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
-            return new AICodedbStatusSnapshot(projectDisplayName, AICodedbProductState.Ready);
+            return new AICodedbStatusSnapshot(
+                projectDisplayName,
+                AICodedbProductState.Ready,
+                coordinatorFailureCategory);
         }
 
         /// <summary>
         /// Creates a display-only Missing prerequisite snapshot captured before
         /// Play mode. It performs no filesystem or process inspection.
         /// </summary>
-        internal static AICodedbStatusSnapshot CreateCachedMissingPrerequisite(string projectDisplayName)
+        internal static AICodedbStatusSnapshot CreateCachedMissingPrerequisite(
+            string projectDisplayName,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
-                AICodedbProductState.MissingPrerequisite);
+                AICodedbProductState.MissingPrerequisite,
+                coordinatorFailureCategory);
         }
 
         /// <summary>
@@ -364,14 +405,17 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusSnapshot CreateCachedState(
             string projectDisplayName,
             AICodedbProductState state,
-            bool statusRefreshInFlight = false)
+            bool statusRefreshInFlight = false,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
                 state,
                 default(AICodedbProductStatus),
                 false,
-                statusRefreshInFlight);
+                statusRefreshInFlight,
+                coordinatorFailureCategory);
         }
 
         /// <summary>
@@ -382,20 +426,25 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusSnapshot CreateCachedStatus(
             string projectDisplayName,
             AICodedbProductStatus productStatus,
-            bool statusRefreshInFlight = false)
+            bool statusRefreshInFlight = false,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
                 productStatus.State,
                 productStatus,
                 true,
-                statusRefreshInFlight);
+                statusRefreshInFlight,
+                coordinatorFailureCategory);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(
             AICodedbEditorExecutionContext context,
             AICodedbCommandResult hostPayloadResult,
-            CancellationToken cancellationToken = default(CancellationToken))
+            CancellationToken cancellationToken = default(CancellationToken),
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             return Task.Run(() =>
             {
@@ -403,7 +452,10 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
                 AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Hash);
                 AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FullStatus);
-                var snapshot = new AICodedbStatusSnapshot(context, hostPayloadResult);
+                var snapshot = new AICodedbStatusSnapshot(
+                    context,
+                    hostPayloadResult,
+                    coordinatorFailureCategory);
                 cancellationToken.ThrowIfCancellationRequested();
                 return snapshot;
             }, cancellationToken);
@@ -749,6 +801,30 @@ namespace Rice.AI.Codedb.Editor
             if (status.Present)
                 return AICodedbStatusItem.Error("Current instance", "Invalid", status.Detail);
             return AICodedbStatusItem.Warning("Current instance", "Not selected", status.Detail);
+        }
+
+        internal static AICodedbStatusItem CreateCoordinatorFailureStatus(
+            AICodedbCoordinatorFailureCategory category)
+        {
+            var code = AICodedbSupervisorProtocol.GetCoordinatorFailureCategoryCode(category);
+            if (category == AICodedbCoordinatorFailureCategory.None)
+            {
+                return AICodedbStatusItem.Ok(
+                    "Coordinator startup",
+                    code,
+                    "No Coordinator startup failure is cached.");
+            }
+            if (category == AICodedbCoordinatorFailureCategory.NotEvaluated)
+            {
+                return AICodedbStatusItem.Inactive(
+                    "Coordinator startup",
+                    code,
+                    "No Coordinator startup attempt has been classified.");
+            }
+            return AICodedbStatusItem.Error(
+                "Coordinator startup",
+                code,
+                "Sanitized Supervisor attribution; no child process output is displayed.");
         }
 
         private static AICodedbStatusItem CreateCleanupStatus(

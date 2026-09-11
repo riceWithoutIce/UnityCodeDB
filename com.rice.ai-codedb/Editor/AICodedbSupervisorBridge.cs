@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Security.Cryptography;
@@ -33,6 +34,17 @@ namespace Rice.AI.Codedb.Editor
         Stopped
     }
 
+    internal enum AICodedbCoordinatorFailureCategory
+    {
+        NotEvaluated,
+        None,
+        LaunchFailed,
+        NonzeroExit,
+        StartupTimeout,
+        StatusUnavailable,
+        UnknownFailure
+    }
+
     internal sealed class AICodedbSupervisorSnapshot
     {
         internal AICodedbSupervisorConnectionState ConnectionState { get; }
@@ -58,7 +70,19 @@ namespace Rice.AI.Codedb.Editor
         internal string GenerationDisposition { get; }
         internal int SupervisorProcessId { get; }
         internal string SelectedInstanceId { get; }
+        internal int OperationalObservationSchemaVersion { get; }
+        internal string OperationalObservationId { get; }
+        internal long OperationalObservationRevision { get; }
+        internal string SupervisorId { get; }
+        internal string OwnerEpoch { get; }
+        internal AICodedbCoordinatorFailureCategory CoordinatorFailureCategory { get; }
+        internal string CoordinatorFailureCode =>
+            AICodedbSupervisorProtocol.GetCoordinatorFailureCategoryCode(CoordinatorFailureCategory);
         internal DateTimeOffset ObservedAtUtc { get; }
+        internal bool HasOperationalReadinessObservation =>
+            OperationalObservationSchemaVersion == 1
+            && !string.IsNullOrWhiteSpace(OperationalObservationId)
+            && OperationalObservationRevision > 0;
 
         internal bool IsConnected => ConnectionState == AICodedbSupervisorConnectionState.Connected;
         internal bool IsConnecting => ConnectionState == AICodedbSupervisorConnectionState.Connecting;
@@ -90,7 +114,15 @@ namespace Rice.AI.Codedb.Editor
             string runtimeContractSha256 = "",
             string generationDisposition = "",
             int supervisorProcessId = 0,
-            string selectedInstanceId = "")
+            string selectedInstanceId = "",
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            int operationalObservationSchemaVersion = 0,
+            string operationalObservationId = "",
+            long operationalObservationRevision = 0,
+            string supervisorId = "",
+            string ownerEpoch = "",
+            DateTimeOffset? observedAtUtc = null)
         {
             ConnectionState = connectionState;
             ProtocolVersion = protocolVersion;
@@ -115,7 +147,13 @@ namespace Rice.AI.Codedb.Editor
             GenerationDisposition = generationDisposition ?? string.Empty;
             SupervisorProcessId = supervisorProcessId;
             SelectedInstanceId = selectedInstanceId ?? string.Empty;
-            ObservedAtUtc = DateTimeOffset.UtcNow;
+            OperationalObservationSchemaVersion = operationalObservationSchemaVersion;
+            OperationalObservationId = operationalObservationId ?? string.Empty;
+            OperationalObservationRevision = operationalObservationRevision;
+            SupervisorId = supervisorId ?? string.Empty;
+            OwnerEpoch = ownerEpoch ?? string.Empty;
+            CoordinatorFailureCategory = coordinatorFailureCategory;
+            ObservedAtUtc = observedAtUtc ?? DateTimeOffset.UtcNow;
         }
 
         internal static AICodedbSupervisorSnapshot Disconnected(string reasonCode, string detail)
@@ -160,7 +198,10 @@ namespace Rice.AI.Codedb.Editor
                 string.Empty);
         }
 
-        internal static AICodedbSupervisorSnapshot Connecting(string detail)
+        internal static AICodedbSupervisorSnapshot Connecting(
+            string detail,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated)
         {
             return new AICodedbSupervisorSnapshot(
                 AICodedbSupervisorConnectionState.Connecting,
@@ -178,7 +219,8 @@ namespace Rice.AI.Codedb.Editor
                 string.Empty,
                 string.Empty,
                 string.Empty,
-                string.Empty);
+                string.Empty,
+                coordinatorFailureCategory: coordinatorFailureCategory);
         }
 
         internal static AICodedbSupervisorSnapshot Blocked(string reasonCode, string detail)
@@ -223,7 +265,15 @@ namespace Rice.AI.Codedb.Editor
             string runtimeContractSha256,
             string generationDisposition,
             int supervisorProcessId,
-            string selectedInstanceId)
+            string selectedInstanceId,
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            int operationalObservationSchemaVersion = 0,
+            string operationalObservationId = "",
+            long operationalObservationRevision = 0,
+            string supervisorId = "",
+            string ownerEpoch = "",
+            DateTimeOffset? observedAtUtc = null)
         {
             return new AICodedbSupervisorSnapshot(
                 AICodedbSupervisorConnectionState.Connected,
@@ -248,7 +298,57 @@ namespace Rice.AI.Codedb.Editor
                 runtimeContractSha256,
                 generationDisposition,
                 supervisorProcessId,
-                selectedInstanceId);
+                selectedInstanceId,
+                coordinatorFailureCategory,
+                operationalObservationSchemaVersion,
+                operationalObservationId,
+                operationalObservationRevision,
+                supervisorId,
+                ownerEpoch,
+                observedAtUtc);
+        }
+
+        internal static AICodedbSupervisorSnapshot Reconnecting(
+            AICodedbSupervisorSnapshot previousSnapshot)
+        {
+            if (previousSnapshot == null
+                || !previousSnapshot.HasOperationalReadinessObservation)
+            {
+                return Connecting(
+                    "The project-local Supervisor is being contacted asynchronously.");
+            }
+
+            return new AICodedbSupervisorSnapshot(
+                AICodedbSupervisorConnectionState.Connecting,
+                previousSnapshot.ProtocolVersion,
+                previousSnapshot.CoordinatorSchemaVersion,
+                previousSnapshot.ReadinessState,
+                previousSnapshot.ReasonCode,
+                previousSnapshot.Detail,
+                previousSnapshot.CoordinatorProcessId,
+                previousSnapshot.LifecycleId,
+                previousSnapshot.RuntimePath,
+                previousSnapshot.ProviderState,
+                previousSnapshot.ProviderReadyAtUtc,
+                previousSnapshot.AdapterState,
+                previousSnapshot.AdapterWorkerState,
+                previousSnapshot.DesiredState,
+                previousSnapshot.EditorDemand,
+                previousSnapshot.LastEvent,
+                previousSnapshot.SupervisorSchemaVersion,
+                previousSnapshot.TargetGenerationId,
+                previousSnapshot.SelectedGenerationId,
+                previousSnapshot.RuntimeContractSha256,
+                previousSnapshot.GenerationDisposition,
+                previousSnapshot.SupervisorProcessId,
+                previousSnapshot.SelectedInstanceId,
+                previousSnapshot.CoordinatorFailureCategory,
+                previousSnapshot.OperationalObservationSchemaVersion,
+                previousSnapshot.OperationalObservationId,
+                previousSnapshot.OperationalObservationRevision,
+                previousSnapshot.SupervisorId,
+                previousSnapshot.OwnerEpoch,
+                previousSnapshot.ObservedAtUtc);
         }
     }
 
@@ -316,10 +416,12 @@ namespace Rice.AI.Codedb.Editor
         // Supervisor process; its schema-2 status is the compatibility proof
         // without changing the immutable generation bytes in this task.
         internal const int Version = 1;
-        internal const int LegacySupervisorVersion = 1;
-        internal const int SupervisorVersion = 2;
+        internal const int LegacySupervisorVersionV1 = 1;
+        internal const int LegacySupervisorVersion = 2;
+        internal const int SupervisorVersion = 3;
         internal const int SupervisorStateSchemaVersion = 3;
         internal const int CoordinatorStateSchemaVersion = 2;
+        internal const int OperationalReadinessSchemaVersion = 1;
         internal const int MaximumMessageBytes = 64 * 1024;
         internal const int ConnectionTimeoutMilliseconds = 1500;
         internal const int OperationPollIntervalMilliseconds = 100;
@@ -328,6 +430,30 @@ namespace Rice.AI.Codedb.Editor
         internal const int HandoffTimeoutMilliseconds = 5000;
         internal const string ClientKind = "unity-bridge";
         internal const string SupervisorRole = "project-local-supervisor";
+        private static readonly HashSet<string> OperationalReadinessFields =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "schema_version",
+                "observation_id",
+                "revision",
+                "observed_at_utc",
+                "state",
+                "reason_code",
+                "detail",
+                "coordinator_failure_category",
+                "project_root",
+                "project_identity",
+                "runtime",
+                "selected_instance_id",
+                "selected_generation_id",
+                "target_generation_id",
+                "runtime_contract_sha256",
+                "generation_disposition",
+                "lifecycle_id",
+                "supervisor_id",
+                "owner_epoch",
+                "supervisor_pid"
+            };
 
         internal static string GetReadinessCode(AICodedbSupervisorReadinessState state)
         {
@@ -341,6 +467,90 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbSupervisorReadinessState.Stopping: return "STOPPING";
                 case AICodedbSupervisorReadinessState.Stopped: return "STOPPED";
                 default: return "UNKNOWN";
+            }
+        }
+
+        internal static AICodedbCoordinatorFailureCategory ParseCoordinatorFailureCategory(
+            string value)
+        {
+            switch (value)
+            {
+                case null: return AICodedbCoordinatorFailureCategory.NotEvaluated;
+                case "NOT_EVALUATED": return AICodedbCoordinatorFailureCategory.NotEvaluated;
+                case "NONE": return AICodedbCoordinatorFailureCategory.None;
+                case "LAUNCH_FAILED": return AICodedbCoordinatorFailureCategory.LaunchFailed;
+                case "NONZERO_EXIT": return AICodedbCoordinatorFailureCategory.NonzeroExit;
+                case "STARTUP_TIMEOUT": return AICodedbCoordinatorFailureCategory.StartupTimeout;
+                case "STATUS_UNAVAILABLE": return AICodedbCoordinatorFailureCategory.StatusUnavailable;
+                case "UNKNOWN_FAILURE": return AICodedbCoordinatorFailureCategory.UnknownFailure;
+                default: return AICodedbCoordinatorFailureCategory.UnknownFailure;
+            }
+        }
+
+        internal static bool IsCoordinatorFailureCategoryCode(string value)
+        {
+            switch (value)
+            {
+                case "NOT_EVALUATED":
+                case "NONE":
+                case "LAUNCH_FAILED":
+                case "NONZERO_EXIT":
+                case "STARTUP_TIMEOUT":
+                case "STATUS_UNAVAILABLE":
+                case "UNKNOWN_FAILURE":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        internal static bool HasExactOperationalReadinessFields(
+            Dictionary<string, object> value)
+        {
+            if (value == null || value.Count != OperationalReadinessFields.Count)
+                return false;
+            foreach (var field in value.Keys)
+            {
+                if (!OperationalReadinessFields.Contains(field))
+                    return false;
+            }
+            return true;
+        }
+
+        internal static bool IsOperationalReadinessReason(
+            string state,
+            string reasonCode)
+        {
+            switch (state)
+            {
+                case "core_ready":
+                    return string.Equals(reasonCode, "COORDINATOR_OPERATIONAL", StringComparison.Ordinal);
+                case "starting":
+                    return string.Equals(reasonCode, "COORDINATOR_STARTING", StringComparison.Ordinal);
+                case "degraded":
+                    return string.Equals(reasonCode, "COORDINATOR_COMPONENT_FAILED", StringComparison.Ordinal)
+                           || string.Equals(reasonCode, "COORDINATOR_START_FAILED", StringComparison.Ordinal)
+                           || string.Equals(reasonCode, "COORDINATOR_STATUS_UNAVAILABLE", StringComparison.Ordinal)
+                           || string.Equals(reasonCode, "SUPERVISOR_STATE_PUBLISH_FAILED", StringComparison.Ordinal);
+                case "stopping":
+                    return string.Equals(reasonCode, "SUPERVISOR_STOPPING", StringComparison.Ordinal);
+                default:
+                    return false;
+            }
+        }
+
+        internal static string GetCoordinatorFailureCategoryCode(
+            AICodedbCoordinatorFailureCategory category)
+        {
+            switch (category)
+            {
+                case AICodedbCoordinatorFailureCategory.NotEvaluated: return "NOT_EVALUATED";
+                case AICodedbCoordinatorFailureCategory.None: return "NONE";
+                case AICodedbCoordinatorFailureCategory.LaunchFailed: return "LAUNCH_FAILED";
+                case AICodedbCoordinatorFailureCategory.NonzeroExit: return "NONZERO_EXIT";
+                case AICodedbCoordinatorFailureCategory.StartupTimeout: return "STARTUP_TIMEOUT";
+                case AICodedbCoordinatorFailureCategory.StatusUnavailable: return "STATUS_UNAVAILABLE";
+                default: return "UNKNOWN_FAILURE";
             }
         }
 
@@ -897,8 +1107,7 @@ namespace Rice.AI.Codedb.Editor
 
                 var cancellation = new WorkerCancellation();
                 var epoch = ++_epoch;
-                _cachedSnapshot = AICodedbSupervisorSnapshot.Connecting(
-                    "The project-local Supervisor is being contacted asynchronously.");
+                _cachedSnapshot = CreateReconnectInFlightSnapshot(_cachedSnapshot);
                 var worker = Task.Run(
                     () => ConnectWorker(projectRoot, cancellation.Source.Token),
                     cancellation.Source.Token);
@@ -906,6 +1115,15 @@ namespace Rice.AI.Codedb.Editor
                 _inFlight = ObserveWorkerAsync(worker, cancellation, epoch);
                 return _inFlight;
             }
+        }
+
+        internal static AICodedbSupervisorSnapshot CreateReconnectInFlightSnapshot(
+            AICodedbSupervisorSnapshot previousSnapshot)
+        {
+            // Reconnect preserves one complete revision-bound observation or
+            // publishes a fresh transitional snapshot. Individual fields are
+            // never carried across revisions on their own.
+            return AICodedbSupervisorSnapshot.Reconnecting(previousSnapshot);
         }
 
         internal Task<AICodedbSupervisorCommandResponse> SendCommandAsync(
@@ -1226,7 +1444,8 @@ namespace Rice.AI.Codedb.Editor
             error = string.Empty;
             if (observedIdentity.SupervisorProtocolVersion == AICodedbSupervisorProtocol.SupervisorVersion)
                 return true;
-            if (observedIdentity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.LegacySupervisorVersion)
+            if (observedIdentity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.LegacySupervisorVersion
+                && observedIdentity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.LegacySupervisorVersionV1)
             {
                 error = "The running project Supervisor uses an unsupported command protocol.";
                 return false;
@@ -1465,7 +1684,8 @@ namespace Rice.AI.Codedb.Editor
                 || ownerEvidenceSchema != 1
                 || stateProtocol != AICodedbSupervisorProtocol.Version
                 || (supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
-                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersion)
+                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersion
+                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersionV1)
                 || !string.Equals(stateManagedBy, "com.rice.ai-codedb", StringComparison.Ordinal)
                 || !string.Equals(stateRole, AICodedbSupervisorProtocol.SupervisorRole, StringComparison.Ordinal)
                 || !AICodedbSupervisorProtocol.PathsEqual(stateRoot, normalizedRoot)
@@ -1487,7 +1707,7 @@ namespace Rice.AI.Codedb.Editor
                 || !IsGenerationId(targetGenerationId)
                 || !IsGenerationId(selectedGenerationId)
                 || !string.Equals(stateGenerationId, selectedGenerationId, StringComparison.Ordinal)
-                || (supervisorProtocol == AICodedbSupervisorProtocol.SupervisorVersion
+                || (supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersionV1
                     && !IsInstanceId(selectedInstanceId))
                 || (!string.IsNullOrWhiteSpace(selectedInstanceId)
                     && !IsInstanceId(selectedInstanceId))
@@ -2649,14 +2869,7 @@ namespace Rice.AI.Codedb.Editor
                 status,
                 "provider_ready_at_utc",
                 "CodeDB Supervisor status");
-            if (string.Equals(providerState, "ready", StringComparison.Ordinal)
-                && string.IsNullOrWhiteSpace(providerReadyAtUtc))
-            {
-                return AICodedbSupervisorSnapshot.Blocked(
-                    "INVALID_PROVIDER_HANDSHAKE",
-                    "The Supervisor reported a ready Provider without initialize/tools evidence.");
-            }
-            var adapterEnabled = AICodedbStrictJson.GetRequiredBoolean(
+            AICodedbStrictJson.GetRequiredBoolean(
                 status,
                 "adapter_enabled",
                 "CodeDB Supervisor status");
@@ -2672,87 +2885,203 @@ namespace Rice.AI.Codedb.Editor
                 status,
                 "adapter_worker",
                 "CodeDB Supervisor status");
-            AICodedbSupervisorReadinessState readiness;
-            string reasonCode;
-            string detail;
-            if (!AICodedbSupervisorProtocol.TryResolveReadiness(
-                    desiredState,
-                    editorDemand,
-                    providerState,
-                    adapterEnabled,
-                    adapterState,
-                    adapterWorkerState,
-                    !string.IsNullOrWhiteSpace(adapterWorker),
-                    out readiness,
-                    out reasonCode,
-                    out detail))
+            var lifecycleId = AICodedbStrictJson.GetRequiredString(
+                status,
+                "lifecycle_id",
+                "CodeDB Supervisor status");
+            var supervisorId = AICodedbStrictJson.GetRequiredString(
+                status,
+                "supervisor_id",
+                "CodeDB Supervisor status");
+            var ownerEpoch = AICodedbStrictJson.GetRequiredString(
+                status,
+                "owner_epoch",
+                "CodeDB Supervisor status");
+            var operational = AICodedbStrictJson.RequireObject(
+                status["operational_readiness"],
+                "CodeDB Supervisor operational readiness");
+            if (!AICodedbSupervisorProtocol.HasExactOperationalReadinessFields(operational))
             {
                 return AICodedbSupervisorSnapshot.Blocked(
-                    "INVALID_SUPERVISOR_READINESS",
-                    "The Supervisor status contains an unsupported readiness combination.");
+                    "INVALID_OPERATIONAL_READINESS",
+                    "The Supervisor operational readiness field set is invalid.");
+            }
+            var operationalSchema = AICodedbStrictJson.GetRequiredInt32(
+                operational,
+                "schema_version",
+                "CodeDB Supervisor operational readiness");
+            var observationId = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "observation_id",
+                "CodeDB Supervisor operational readiness");
+            var observationRevision = AICodedbStrictJson.GetRequiredInt64(
+                operational,
+                "revision",
+                "CodeDB Supervisor operational readiness");
+            var observedAtText = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "observed_at_utc",
+                "CodeDB Supervisor operational readiness");
+            var reportedReadiness = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "state",
+                "CodeDB Supervisor operational readiness");
+            var reasonCode = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "reason_code",
+                "CodeDB Supervisor operational readiness");
+            var detail = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "detail",
+                "CodeDB Supervisor operational readiness");
+            var failureCode = AICodedbStrictJson.GetRequiredString(
+                operational,
+                "coordinator_failure_category",
+                "CodeDB Supervisor operational readiness");
+            var topLevelFailureCode = AICodedbStrictJson.GetRequiredString(
+                status,
+                "coordinator_failure_category",
+                "CodeDB Supervisor status");
+            DateTimeOffset observedAtUtc;
+            Guid parsedObservationId;
+            Guid parsedOwnerEpoch;
+            var now = DateTimeOffset.UtcNow;
+            if (operationalSchema != AICodedbSupervisorProtocol.OperationalReadinessSchemaVersion
+                || observationRevision <= 0
+                || !Guid.TryParseExact(observationId, "N", out parsedObservationId)
+                || !string.Equals(observationId, observationId.ToLowerInvariant(), StringComparison.Ordinal)
+                || !Guid.TryParseExact(ownerEpoch, "N", out parsedOwnerEpoch)
+                || !string.Equals(ownerEpoch, ownerEpoch.ToLowerInvariant(), StringComparison.Ordinal)
+                || !DateTimeOffset.TryParse(
+                    observedAtText,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out observedAtUtc)
+                || observedAtUtc.Offset != TimeSpan.Zero
+                || observedAtUtc > now.AddMinutes(1)
+                || observedAtUtc < now.AddMinutes(-20)
+                || !AICodedbSupervisorProtocol.IsOperationalReadinessReason(
+                    reportedReadiness,
+                    reasonCode)
+                || string.IsNullOrWhiteSpace(detail)
+                || detail.Length > 256
+                || detail.IndexOfAny(new[] { '\r', '\n' }) >= 0
+                || !AICodedbSupervisorProtocol.IsCoordinatorFailureCategoryCode(failureCode)
+                || !string.Equals(failureCode, topLevelFailureCode, StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "project_root",
+                        "CodeDB Supervisor operational readiness"),
+                    root)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "project_identity",
+                        "CodeDB Supervisor operational readiness"),
+                    projectIdentity,
+                    StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "runtime",
+                        "CodeDB Supervisor operational readiness"),
+                    runtime)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "selected_instance_id",
+                        "CodeDB Supervisor operational readiness"),
+                    selectedInstanceId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "selected_generation_id",
+                        "CodeDB Supervisor operational readiness"),
+                    selectedGenerationId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "target_generation_id",
+                        "CodeDB Supervisor operational readiness"),
+                    targetGenerationId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "runtime_contract_sha256",
+                        "CodeDB Supervisor operational readiness"),
+                    runtimeContractSha256,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "generation_disposition",
+                        "CodeDB Supervisor operational readiness"),
+                    generationDisposition,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "lifecycle_id",
+                        "CodeDB Supervisor operational readiness"),
+                    lifecycleId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "supervisor_id",
+                        "CodeDB Supervisor operational readiness"),
+                    supervisorId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "owner_epoch",
+                        "CodeDB Supervisor operational readiness"),
+                    ownerEpoch,
+                    StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(
+                    operational,
+                    "supervisor_pid",
+                    "CodeDB Supervisor operational readiness") != supervisorProcessId
+                || (string.Equals(reportedReadiness, "core_ready", StringComparison.Ordinal)
+                    && !string.Equals(failureCode, "NONE", StringComparison.Ordinal)))
+            {
+                return AICodedbSupervisorSnapshot.Blocked(
+                    "INVALID_OPERATIONAL_READINESS",
+                    "The Supervisor operational readiness identity or values are invalid.");
             }
 
-            var reportedReadiness = AICodedbStrictJson.GetOptionalNullableString(
-                status,
-                "readiness_state",
-                "CodeDB Supervisor status");
-            if (!string.IsNullOrWhiteSpace(reportedReadiness))
+            var coordinatorFailureCategory =
+                AICodedbSupervisorProtocol.ParseCoordinatorFailureCategory(failureCode);
+            AICodedbSupervisorReadinessState readiness;
+            switch (reportedReadiness)
             {
-                var reportedReason = AICodedbStrictJson.GetOptionalNullableString(
-                    status,
-                    "reason_code",
-                    "CodeDB Supervisor status");
-                var reportedDetail = AICodedbStrictJson.GetOptionalNullableString(
-                    status,
-                    "detail",
-                    "CodeDB Supervisor status");
-                switch (reportedReadiness)
-                {
-                    case "core_ready":
-                        // Never let the outer state promote a coordinator that
-                        // has not independently satisfied the readiness gate.
-                        break;
-                    case "starting":
-                        readiness = AICodedbSupervisorReadinessState.Starting;
-                        reasonCode = reportedReason ?? "SUPERVISOR_STARTING";
-                        detail = reportedDetail ?? "The project Supervisor is starting.";
-                        break;
-                    case "maintenance":
-                        readiness = AICodedbSupervisorReadinessState.Maintenance;
-                        reasonCode = reportedReason ?? "SUPERVISOR_MAINTENANCE";
-                        detail = reportedDetail ?? "The project Supervisor is running maintenance.";
-                        break;
-                    case "degraded":
-                        readiness = AICodedbSupervisorReadinessState.Degraded;
-                        reasonCode = reportedReason ?? "SUPERVISOR_DEGRADED";
-                        detail = reportedDetail ?? "The project Supervisor reported a degraded runtime.";
-                        break;
-                    case "blocked":
-                        readiness = AICodedbSupervisorReadinessState.Blocked;
-                        reasonCode = reportedReason ?? "SUPERVISOR_BLOCKED";
-                        detail = reportedDetail ?? "The project Supervisor blocked the requested operation.";
-                        break;
-                    case "stopping":
-                        readiness = AICodedbSupervisorReadinessState.Stopping;
-                        reasonCode = reportedReason ?? "SUPERVISOR_STOPPING";
-                        detail = reportedDetail ?? "The project Supervisor is stopping.";
-                        break;
-                    case "stopped":
-                        readiness = AICodedbSupervisorReadinessState.Stopped;
-                        reasonCode = reportedReason ?? "SUPERVISOR_STOPPED";
-                        detail = reportedDetail ?? "The project Supervisor is stopped.";
-                        break;
-                    default:
-                        return AICodedbSupervisorSnapshot.Blocked(
-                            "INVALID_SUPERVISOR_READINESS",
-                            "The Supervisor status contains an unsupported outer readiness state.");
-                }
+                case "core_ready":
+                    readiness = AICodedbSupervisorReadinessState.CoreReady;
+                    break;
+                case "starting":
+                    readiness = AICodedbSupervisorReadinessState.Starting;
+                    break;
+                case "degraded":
+                    readiness = AICodedbSupervisorReadinessState.Degraded;
+                    break;
+                case "stopping":
+                    readiness = AICodedbSupervisorReadinessState.Stopping;
+                    break;
+                default:
+                    return AICodedbSupervisorSnapshot.Blocked(
+                        "INVALID_OPERATIONAL_READINESS",
+                        "The Supervisor operational readiness state is unsupported.");
             }
 
             return AICodedbSupervisorSnapshot.Connected(
                 schema,
                 AICodedbStrictJson.GetOptionalNullableInt32(status, "coordinator_pid", "CodeDB Supervisor status") ?? 0,
-                AICodedbStrictJson.GetOptionalNullableString(status, "lifecycle_id", "CodeDB Supervisor status"),
+                lifecycleId,
                 runtime,
                 providerState,
                 providerReadyAtUtc,
@@ -2770,7 +3099,14 @@ namespace Rice.AI.Codedb.Editor
                 runtimeContractSha256,
                 generationDisposition,
                 supervisorProcessId,
-                selectedInstanceId);
+                selectedInstanceId,
+                coordinatorFailureCategory,
+                operationalSchema,
+                observationId,
+                observationRevision,
+                supervisorId,
+                ownerEpoch,
+                observedAtUtc);
         }
     }
 }

@@ -136,7 +136,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var selectStart = source.IndexOf("private void SelectTab(AICodedbManagerTab tab)", StringComparison.Ordinal);
             var selectEnd = source.IndexOf("private string GetHeaderTitle()", selectStart, StringComparison.Ordinal);
             var observerStart = source.IndexOf("private void ObserveTransientHostStatus()", StringComparison.Ordinal);
-            var observerEnd = source.IndexOf("private async void RefreshTransientHostStatusAsync()", observerStart, StringComparison.Ordinal);
+            var observerEnd = source.IndexOf("private void ApplyStatusSnapshot(", observerStart, StringComparison.Ordinal);
 
             Assert.That(openStart, Is.GreaterThanOrEqualTo(0));
             Assert.That(openEnd, Is.GreaterThan(openStart));
@@ -150,6 +150,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(source.Substring(drawStart, drawEnd - drawStart), Does.Not.Contain("ScheduleWatcherStatusRefresh"));
             Assert.That(source.Substring(selectStart, selectEnd - selectStart), Does.Not.Contain("ScheduleWatcherStatusRefresh"));
             Assert.That(source.Substring(observerStart, observerEnd - observerStart), Does.Not.Contain("RequestBackgroundStatusObservation"));
+            Assert.That(source, Does.Not.Contain("RefreshTransientHostStatusAsync"));
+            Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.ReadStatusAsync"));
 
             var refreshStart = source.IndexOf("private void RefreshAllStatus()", StringComparison.Ordinal);
             var refreshEnd = source.IndexOf("private void DrawHeader()", refreshStart, StringComparison.Ordinal);
@@ -158,6 +160,66 @@ namespace Rice.AI.Codedb.Editor.Tests
             var refreshBody = source.Substring(refreshStart, refreshEnd - refreshStart);
             Assert.That(refreshBody, Does.Contain("ScheduleWatcherStatusRefresh"));
             Assert.That(refreshBody, Does.Contain("BeginStatusRefresh(true)"));
+
+            var requestStart = source.IndexOf("private void BeginStatusRefresh(bool force = false)", StringComparison.Ordinal);
+            var requestEnd = source.IndexOf("private bool TryApplyCachedLifecycleStatus()", requestStart, StringComparison.Ordinal);
+            Assert.That(requestStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(requestEnd, Is.GreaterThan(requestStart));
+            var requestBody = source.Substring(requestStart, requestEnd - requestStart);
+            Assert.That(requestBody, Does.Contain("RequestBackgroundStatusObservation(true)"));
+            Assert.That(requestBody, Does.Not.Contain("AICodedbStatusSnapshot.RefreshAsync"));
+            Assert.That(requestBody, Does.Not.Contain("AICodedbHostPayloadMaterializer"));
+        }
+
+        [Test]
+        public void ManagerMaintenanceSource_UsesSupervisorQueueAndCacheOnlyCompletion()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbManagerWindow.cs"));
+
+            Assert.That(source, Does.Contain("RunSupervisorMaintenanceAction(\"Refresh If Stale\", \"RefreshIfStale\")"));
+            Assert.That(source, Does.Contain("RunSupervisorMaintenanceAction(\"Refresh Index\", \"RefreshIndex\")"));
+            Assert.That(source, Does.Contain("RunSupervisorMaintenanceAction(\"Build Shader Adapter\", \"BuildShaderAdapter\")"));
+            Assert.That(source, Does.Contain("RunSupervisorMaintenanceAction(\"Clean Index\", \"CleanIndex\")"));
+            Assert.That(source, Does.Contain("RunSupervisorMaintenanceAction(\"Rebuild Index\", \"RebuildIndex\")"));
+            Assert.That(source, Does.Not.Contain("AICodedbActions.RunRefreshIfStale"));
+            Assert.That(source, Does.Not.Contain("AICodedbActions.RunRefreshIndex"));
+            Assert.That(source, Does.Not.Contain("AICodedbActions.RunBuildShaderAdapter"));
+            Assert.That(source, Does.Not.Contain("AICodedbActions.RunCleanIndex"));
+            Assert.That(source, Does.Not.Contain("AICodedbActions.RunRebuildIndex"));
+
+            var helperStart = source.IndexOf(
+                "private void RunSupervisorMaintenanceAction",
+                StringComparison.Ordinal);
+            var helperEnd = source.IndexOf(
+                "private void RunUserActionAsync",
+                helperStart,
+                StringComparison.Ordinal);
+            Assert.That(helperStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(helperEnd, Is.GreaterThan(helperStart));
+            var helperBody = source.Substring(helperStart, helperEnd - helperStart);
+            Assert.That(helperBody, Does.Contain("RunSupervisorMaintenanceCommandAsync(action)"));
+            Assert.That(helperBody, Does.Contain("requestReconcileAfterAction: true"));
+            Assert.That(helperBody, Does.Contain("refreshStatusAfterAction: false"));
+            Assert.That(helperBody, Does.Not.Contain("Task.Run"));
+            Assert.That(helperBody, Does.Not.Contain("RefreshStatusAsync"));
+
+            var completionStart = source.IndexOf(
+                "private async Task RunUserActionAsync",
+                helperEnd,
+                StringComparison.Ordinal);
+            var completionEnd = source.IndexOf(
+                "private void DrawActivityPanel",
+                completionStart,
+                StringComparison.Ordinal);
+            Assert.That(completionStart, Is.GreaterThan(helperEnd));
+            Assert.That(completionEnd, Is.GreaterThan(completionStart));
+            var completionBody = source.Substring(completionStart, completionEnd - completionStart);
+            Assert.That(completionBody, Does.Contain("if (refreshStatusAfterAction)"));
+            Assert.That(completionBody, Does.Contain("await RefreshStatusAsync(_lastResult)"));
+            Assert.That(completionBody, Does.Contain("AICodedbEditorLifecycle.RequestReconcile()"));
         }
 
         [Test]
@@ -213,6 +275,53 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.HostPayloadStatus.Summary, Is.EqualTo("Checking"));
             Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Starting"));
             Assert.That(snapshot.OverallDescription, Does.Contain("background"));
+        }
+
+        [Test]
+        public void CoordinatorFailurePresentation_IsFixedVocabularyAndCacheOnly()
+        {
+            var failed = AICodedbStatusSnapshot.CreateCoordinatorFailureStatus(
+                AICodedbCoordinatorFailureCategory.NonzeroExit);
+            var unknown = AICodedbStatusSnapshot.CreateCoordinatorFailureStatus(
+                (AICodedbCoordinatorFailureCategory)int.MaxValue);
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbManagerWindow.cs"));
+            var cacheStart = source.IndexOf(
+                "private static AICodedbCoordinatorFailureCategory GetCachedCoordinatorFailureCategory()",
+                StringComparison.Ordinal);
+            var cacheEnd = source.IndexOf("private static void InvalidateReadySnapshot", cacheStart, StringComparison.Ordinal);
+            var cacheBody = source.Substring(cacheStart, cacheEnd - cacheStart);
+            var applyStart = source.IndexOf(
+                "private bool TryApplyCachedLifecycleStatus()",
+                StringComparison.Ordinal);
+            var applyEnd = source.IndexOf(
+                "private async void ApplyCachedLifecycleStatusAsync",
+                applyStart,
+                StringComparison.Ordinal);
+            var applyBody = source.Substring(applyStart, applyEnd - applyStart);
+
+            Assert.That(failed.Label, Is.EqualTo("Coordinator startup"));
+            Assert.That(failed.Summary, Is.EqualTo("NONZERO_EXIT"));
+            Assert.That(failed.Detail, Does.Not.Contain("stderr"));
+            Assert.That(unknown.Summary, Is.EqualTo("UNKNOWN_FAILURE"));
+            Assert.That(cacheStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(cacheEnd, Is.GreaterThan(cacheStart));
+            Assert.That(applyStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(applyEnd, Is.GreaterThan(applyStart));
+            Assert.That(cacheBody, Does.Contain("GetCachedLifecycleSupervisorSnapshot"));
+            Assert.That(cacheBody, Does.Not.Contain("GetCachedSupervisorSnapshot()"));
+            Assert.That(cacheBody, Does.Not.Contain("File."));
+            Assert.That(cacheBody, Does.Not.Contain("Process."));
+            Assert.That(cacheBody, Does.Not.Contain("RequestBackgroundStatusObservation"));
+            Assert.That(applyBody, Does.Contain("TryGetCachedLifecycleStatus"));
+            Assert.That(applyBody, Does.Contain("cachedSupervisorSnapshot"));
+            Assert.That(applyBody, Does.Not.Contain("GetCachedSupervisorSnapshot"));
+            Assert.That(applyBody, Does.Not.Contain("SupervisorBridge"));
+            Assert.That(
+                source,
+                Does.Contain("DrawStatus(_statusSnapshot.CoordinatorFailure)"));
         }
 
         [Test]
@@ -1226,7 +1335,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 { "selected_generation_id", target.GenerationId },
                 { "selected_instance_id", instanceId },
                 { "runtime_contract_sha256", runtimeContract.Sha256 },
-                { "supervisor_protocol_version", 2 },
+                { "supervisor_protocol_version", AICodedbSupervisorProtocol.SupervisorVersion },
                 { "generation_disposition", "CURRENT" },
                 { "lifecycle_id", "unity-bridge" },
                 { "supervisor_id", "unity-bridge" },

@@ -489,6 +489,32 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void LifecycleMaintenanceCommand_SourceUsesIntentAdapterAndDefersCachePublication()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbEditorLifecycle.cs"));
+            var start = source.IndexOf(
+                "RunSupervisorMaintenanceCommandAsync(",
+                StringComparison.Ordinal);
+            var end = source.IndexOf(
+                "private static void RememberSupervisorSnapshot",
+                start,
+                StringComparison.Ordinal);
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            Assert.That(end, Is.GreaterThan(start));
+            var body = source.Substring(start, end - start);
+
+            Assert.That(body, Does.Contain("SupervisorIntentAdapter.Dispatch("));
+            Assert.That(body, Does.Contain("AICodedbSupervisorRequestKind.Maintenance"));
+            Assert.That(body, Does.Contain("SupervisorBridge.SendCommandAsync("));
+            Assert.That(body, Does.Contain("\"maintenance\""));
+            Assert.That(body, Does.Contain("AICodedbLifecycleEvidence.RecordSupervisorObservation"));
+            Assert.That(body, Does.Not.Contain("RememberSupervisorSnapshot("));
+        }
+
+        [Test]
         public void SupervisorProtocol_RejectsUnsafeOrNonWindowsPipeIdentities()
         {
             string pipeName;
@@ -759,6 +785,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.SelectedGenerationId, Is.EqualTo(contract.Target.GenerationId));
             Assert.That(snapshot.RuntimeContractSha256, Is.EqualTo(contract.Sha256));
             Assert.That(snapshot.GenerationDisposition, Is.EqualTo("CURRENT"));
+            Assert.That(snapshot.OperationalObservationSchemaVersion, Is.EqualTo(1));
+            Assert.That(snapshot.OperationalObservationId, Is.EqualTo("11111111111111111111111111111111"));
+            Assert.That(snapshot.OperationalObservationRevision, Is.EqualTo(7));
+            Assert.That(snapshot.OwnerEpoch, Is.EqualTo("abcdefabcdefabcdefabcdefabcdefab"));
 
             var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
             evidence.RecordSupervisorObservation(snapshot);
@@ -768,6 +798,244 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(continuity.supervisor_identity_change_count, Is.EqualTo(0));
             Assert.That(continuity.supervisor_pid, Is.EqualTo(1234));
             Assert.That(continuity.selected_instance_id, Is.EqualTo("0123456789abcdef0123456789abcdef"));
+        }
+
+        [Test]
+        public void SupervisorProtocol_CoordinatorFailureCategoryUsesFixedVocabulary()
+        {
+            var root = _projectRoot;
+            var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var response = SupervisorStatusResponse(
+                root,
+                runtime,
+                contract,
+                "2026-08-25T00:00:00.0000000Z");
+
+            var nonzeroExit = AICodedbSupervisorBridge.ParseStatusResponse(
+                response
+                    .Replace(
+                        "\"coordinator_failure_category\":\"NONE\"",
+                        "\"coordinator_failure_category\":\"NONZERO_EXIT\"")
+                    .Replace("\"state\":\"core_ready\"", "\"state\":\"degraded\"")
+                    .Replace(
+                        "\"reason_code\":\"COORDINATOR_OPERATIONAL\"",
+                        "\"reason_code\":\"COORDINATOR_START_FAILED\""),
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+            var unknown = AICodedbSupervisorBridge.ParseStatusResponse(
+                response.Replace(
+                    "\"coordinator_failure_category\":\"NONE\"",
+                    "\"coordinator_failure_category\":\"FUTURE_VALID_FAILURE\""),
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+
+            Assert.That(
+                nonzeroExit.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NonzeroExit));
+            Assert.That(nonzeroExit.CoordinatorFailureCode, Is.EqualTo("NONZERO_EXIT"));
+            Assert.That(
+                unknown.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NotEvaluated));
+            Assert.That(unknown.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(unknown.ReasonCode, Is.EqualTo("INVALID_OPERATIONAL_READINESS"));
+        }
+
+        [Test]
+        public void SupervisorProtocol_RejectsMalformedOrMismatchedOperationalAuthority()
+        {
+            var root = _projectRoot;
+            var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var response = SupervisorStatusResponse(root, runtime, contract, null);
+            var malformedResponse = response.Replace(
+                "\"supervisor_pid\":1234},",
+                "\"supervisor_pid\":1234,\"unexpected\":true},");
+            var mismatchedResponse = response.Replace(
+                "\"selected_instance_id\":\"0123456789abcdef0123456789abcdef\",\"selected_generation_id\"",
+                "\"selected_instance_id\":\"ffffffffffffffffffffffffffffffff\",\"selected_generation_id\"");
+
+            var malformed = AICodedbSupervisorBridge.ParseStatusResponse(
+                malformedResponse,
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+            var mismatched = AICodedbSupervisorBridge.ParseStatusResponse(
+                mismatchedResponse,
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+
+            Assert.That(malformed.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(malformed.ReasonCode, Is.EqualTo("INVALID_OPERATIONAL_READINESS"));
+            Assert.That(mismatched.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(mismatched.ReasonCode, Is.EqualTo("INVALID_OPERATIONAL_READINESS"));
+        }
+
+        [Test]
+        public void LifecycleStatusBinding_RequiresSameOperationalObservationRevision()
+        {
+            var root = _projectRoot;
+            var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var response = SupervisorStatusResponse(root, runtime, contract, null);
+            var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
+                response,
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+            var envelope = AICodedbStrictJson.ParseObject(response, "fixture Supervisor response");
+            var status = AICodedbStrictJson.RequireObject(
+                envelope["status"],
+                "fixture Supervisor status");
+            var observation = AICodedbStrictJson.RequireObject(
+                status["operational_readiness"],
+                "fixture Supervisor operational readiness");
+            var ready = new AICodedbProductStatus(
+                AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                "CodeDB is ready.");
+            var matchingResult = new AICodedbCommandResult(
+                0,
+                "[SUPERVISOR_OPERATIONAL_READINESS] "
+                + AICodedbSupervisorBridge.SerializeJsonObject(observation),
+                string.Empty,
+                false);
+
+            AICodedbSupervisorSnapshot boundSnapshot;
+            var bound = AICodedbEditorLifecycle.BindProductStatusToSupervisorObservation(
+                ready,
+                matchingResult,
+                snapshot,
+                out boundSnapshot);
+
+            Assert.That(bound.State, Is.EqualTo(AICodedbProductState.Ready));
+            Assert.That(boundSnapshot, Is.SameAs(snapshot));
+
+            observation["revision"] = snapshot.OperationalObservationRevision + 1;
+            var mismatchedResult = new AICodedbCommandResult(
+                0,
+                "[SUPERVISOR_OPERATIONAL_READINESS] "
+                + AICodedbSupervisorBridge.SerializeJsonObject(observation),
+                string.Empty,
+                false);
+            var rejected = AICodedbEditorLifecycle.BindProductStatusToSupervisorObservation(
+                ready,
+                mismatchedResult,
+                snapshot,
+                out boundSnapshot);
+
+            Assert.That(rejected.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(rejected.Detail, Does.Contain("same revision"));
+            Assert.That(boundSnapshot, Is.Null);
+        }
+
+        [Test]
+        public void SupervisorReconnect_InFlightSnapshotDoesNotEraseAttemptClassification()
+        {
+            var root = _projectRoot;
+            var contract = ReadPackageRuntimeContract();
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var response = SupervisorStatusResponse(
+                root,
+                runtime,
+                contract,
+                "2026-08-25T00:00:00.0000000Z");
+            var missingField = AICodedbSupervisorBridge.ParseStatusResponse(
+                response.Replace(
+                    "\"coordinator_failure_category\":\"NONE\",",
+                    string.Empty),
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+            var notEvaluated = AICodedbSupervisorBridge.ParseStatusResponse(
+                response.Replace(
+                    "\"coordinator_failure_category\":\"NONE\"",
+                    "\"coordinator_failure_category\":\"NOT_EVALUATED\""),
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+            var failedAttempt = AICodedbSupervisorBridge.ParseStatusResponse(
+                response
+                    .Replace(
+                        "\"coordinator_failure_category\":\"NONE\"",
+                        "\"coordinator_failure_category\":\"NONZERO_EXIT\"")
+                    .Replace("\"state\":\"core_ready\"", "\"state\":\"degraded\"")
+                    .Replace(
+                        "\"reason_code\":\"COORDINATOR_OPERATIONAL\"",
+                        "\"reason_code\":\"COORDINATOR_START_FAILED\""),
+                root,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                runtime);
+
+            var noPriorSnapshot =
+                AICodedbSupervisorBridge.CreateReconnectInFlightSnapshot(null);
+            var legacyReconnect =
+                AICodedbSupervisorBridge.CreateReconnectInFlightSnapshot(missingField);
+            var unevaluatedReconnect =
+                AICodedbSupervisorBridge.CreateReconnectInFlightSnapshot(notEvaluated);
+            var failedReconnect =
+                AICodedbSupervisorBridge.CreateReconnectInFlightSnapshot(failedAttempt);
+
+            Assert.That(
+                noPriorSnapshot.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NotEvaluated));
+            Assert.That(
+                legacyReconnect.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NotEvaluated));
+            Assert.That(
+                unevaluatedReconnect.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NotEvaluated));
+            Assert.That(
+                failedReconnect.ConnectionState,
+                Is.EqualTo(AICodedbSupervisorConnectionState.Connecting));
+            Assert.That(
+                failedReconnect.CoordinatorFailureCategory,
+                Is.EqualTo(AICodedbCoordinatorFailureCategory.NonzeroExit));
+            Assert.That(failedReconnect.CoordinatorFailureCode, Is.EqualTo("NONZERO_EXIT"));
+            Assert.That(
+                failedReconnect.OperationalObservationId,
+                Is.EqualTo(failedAttempt.OperationalObservationId));
+            Assert.That(
+                failedReconnect.OperationalObservationRevision,
+                Is.EqualTo(failedAttempt.OperationalObservationRevision));
         }
 
         [Test]
@@ -1128,7 +1396,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void SupervisorProtocol_ReadyWithoutProviderHandshakeIsBlocked()
+        public void SupervisorProtocol_OperationalAuthorityDoesNotRecomputeProviderHandshake()
         {
             var root = _projectRoot;
             var contract = ReadPackageRuntimeContract();
@@ -1146,13 +1414,13 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "CURRENT",
                 runtime);
 
-            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
-            Assert.That(snapshot.ReasonCode, Is.EqualTo("INVALID_PROVIDER_HANDSHAKE"));
-            Assert.That(snapshot.IsCoreReady, Is.False);
+            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.CoreReady));
+            Assert.That(snapshot.ReasonCode, Is.EqualTo("COORDINATOR_OPERATIONAL"));
+            Assert.That(snapshot.IsCoreReady, Is.True);
         }
 
         [Test]
-        public void SupervisorProtocol_RunningOperationCannotReportReady()
+        public void SupervisorProtocol_MaintenanceLaneDoesNotReplaceOperationalAuthority()
         {
             var root = _projectRoot;
             var contract = ReadPackageRuntimeContract();
@@ -1180,9 +1448,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "CURRENT",
                 runtime);
 
-            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Maintenance));
-            Assert.That(snapshot.IsCoreReady, Is.False);
-            Assert.That(snapshot.ReasonCode, Is.EqualTo("SUPERVISOR_MAINTENANCE"));
+            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.CoreReady));
+            Assert.That(snapshot.IsCoreReady, Is.True);
+            Assert.That(snapshot.ReasonCode, Is.EqualTo("COORDINATOR_OPERATIONAL"));
         }
 
         [Test]
@@ -2698,303 +2966,172 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void SupervisorRequestQueue_RunsOffCallingThreadAndSerializesMaintenance()
+        public void SupervisorIntentAdapter_DispatchesIndependentIntentOffCallingThread()
         {
-            var queue = new AICodedbSupervisorRequestQueue();
+            var adapter = new AICodedbSupervisorIntentAdapter();
             var callerThreadId = Thread.CurrentThread.ManagedThreadId;
-            var workerThreadId = 0;
-            using (var started = new ManualResetEventSlim(false))
-            using (var release = new ManualResetEventSlim(false))
-            {
-                var task = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.Reconcile,
-                    AICodedbSupervisorRequestPriority.Maintenance,
-                    "reconcile",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        workerThreadId = Thread.CurrentThread.ManagedThreadId;
-                        started.Set();
-                        release.Wait(TimeSpan.FromSeconds(5));
-                        cancellationToken.ThrowIfCancellationRequested();
-                        return true;
-                    }),
-                    true);
-
-                Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                Assert.That(task.IsCompleted, Is.False,
-                    "Queue admission must not wait for maintenance completion.");
-                Assert.That(workerThreadId, Is.Not.EqualTo(callerThreadId));
-                Assert.That(queue.Snapshot.HasActiveRequest, Is.True);
-                release.Set();
-                Assert.That(task.GetAwaiter().GetResult(), Is.True);
-            }
-            queue.Dispose();
-        }
-
-        [Test]
-        public void SupervisorRequestQueue_PrioritizesObservationOverPendingMaintenance()
-        {
-            var queue = new AICodedbSupervisorRequestQueue();
-            var order = new List<string>();
-            var orderLock = new object();
+            var firstThreadId = 0;
+            var secondThreadId = 0;
             using (var firstStarted = new ManualResetEventSlim(false))
+            using (var secondStarted = new ManualResetEventSlim(false))
             using (var release = new ManualResetEventSlim(false))
             {
-                var first = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.Maintenance,
-                    AICodedbSupervisorRequestPriority.Maintenance,
-                    "maintenance-1",
-                    cancellationToken => Task.Run(() =>
+                var first = adapter.Dispatch(
+                    AICodedbSupervisorRequestKind.Reconcile,
+                    cancellationToken =>
                     {
-                        lock (orderLock)
-                            order.Add("maintenance-1");
+                        firstThreadId = Thread.CurrentThread.ManagedThreadId;
                         firstStarted.Set();
                         release.Wait(TimeSpan.FromSeconds(5));
-                        return true;
-                    }),
+                        cancellationToken.ThrowIfCancellationRequested();
+                        return Task.FromResult("first");
+                    },
                     true);
+                var second = adapter.Dispatch(
+                    AICodedbSupervisorRequestKind.ObserveStatus,
+                    cancellationToken =>
+                    {
+                        secondThreadId = Thread.CurrentThread.ManagedThreadId;
+                        secondStarted.Set();
+                        release.Wait(TimeSpan.FromSeconds(5));
+                        cancellationToken.ThrowIfCancellationRequested();
+                        return Task.FromResult("second");
+                    },
+                    false);
+
                 Assert.That(firstStarted.Wait(TimeSpan.FromSeconds(5)), Is.True);
-
-                var second = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.Maintenance,
-                    AICodedbSupervisorRequestPriority.Maintenance,
-                    "maintenance-2",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        lock (orderLock)
-                            order.Add("maintenance-2");
-                        return true;
-                    }),
-                    true);
-                var observation = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "observe",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        lock (orderLock)
-                            order.Add("observe");
-                        return true;
-                    }),
-                    false);
+                Assert.That(secondStarted.Wait(TimeSpan.FromSeconds(5)), Is.True,
+                    "The Unity adapter must not serialize runtime request admission.");
+                Assert.That(firstThreadId, Is.Not.EqualTo(callerThreadId));
+                Assert.That(secondThreadId, Is.Not.EqualTo(callerThreadId));
+                Assert.That(adapter.Snapshot.PendingCount, Is.EqualTo(0));
+                Assert.That(adapter.Snapshot.LastSequence, Is.EqualTo(2));
 
                 release.Set();
-                Assert.That(first.GetAwaiter().GetResult(), Is.True);
-                Assert.That(observation.GetAwaiter().GetResult(), Is.True);
-                Assert.That(second.GetAwaiter().GetResult(), Is.True);
+                Assert.That(first.GetAwaiter().GetResult(), Is.EqualTo("first"));
+                Assert.That(second.GetAwaiter().GetResult(), Is.EqualTo("second"));
             }
-
-            Assert.That(order, Is.EqualTo(new[] { "maintenance-1", "observe", "maintenance-2" }));
-            queue.Dispose();
+            adapter.Dispose();
         }
 
         [Test]
-        public void SupervisorRequestQueue_CoalescesDuplicateKeys()
+        public void SupervisorIntentAdapter_DoesNotCoalesceRuntimeOperationKeysLocally()
         {
-            var queue = new AICodedbSupervisorRequestQueue();
+            var adapter = new AICodedbSupervisorIntentAdapter();
             var executionCount = 0;
-            using (var release = new ManualResetEventSlim(false))
-            {
-                Func<CancellationToken, Task<int>> work = cancellationToken => Task.Run(() =>
-                {
-                    Interlocked.Increment(ref executionCount);
-                    release.Wait(TimeSpan.FromSeconds(5));
-                    return 7;
-                });
+            Func<CancellationToken, Task<int>> work = cancellationToken =>
+                Task.FromResult(Interlocked.Increment(ref executionCount));
 
-                var first = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "same-observation",
-                    work,
-                    false);
-                var second = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "same-observation",
-                    work,
-                    false);
+            var first = adapter.Dispatch(
+                AICodedbSupervisorRequestKind.ObserveStatus,
+                work,
+                false);
+            var second = adapter.Dispatch(
+                AICodedbSupervisorRequestKind.ObserveStatus,
+                work,
+                false);
 
-                release.Set();
-                Assert.That(first.GetAwaiter().GetResult(), Is.EqualTo(7));
-                Assert.That(second.GetAwaiter().GetResult(), Is.EqualTo(7));
-            }
-
-            Assert.That(executionCount, Is.EqualTo(1));
-            queue.Dispose();
+            Assert.That(first.GetAwaiter().GetResult(), Is.GreaterThan(0));
+            Assert.That(second.GetAwaiter().GetResult(), Is.GreaterThan(0));
+            Assert.That(executionCount, Is.EqualTo(2),
+                "Only the project Supervisor may coalesce runtime request keys.");
+            adapter.Dispose();
         }
 
         [Test]
-        public void SupervisorRequestQueue_SupersedingActiveRequestCancelsOldCompletion()
+        public void SupervisorIntentAdapter_SuspendsMaintenanceButKeepsQueriesEligible()
         {
-            var queue = new AICodedbSupervisorRequestQueue();
-            using (var started = new ManualResetEventSlim(false))
-            using (var release = new ManualResetEventSlim(false))
-            {
-                var oldRequest = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.Reconnect,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "supervisor-reconnect",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        started.Set();
-                        // Deliberately ignore cancellation until the test
-                        // releases the worker, exercising the late-result race.
-                        release.Wait(TimeSpan.FromSeconds(5));
-                        return "old";
-                    }),
-                    false);
+            var adapter = new AICodedbSupervisorIntentAdapter();
+            adapter.SetMaintenanceSuspended(true);
 
-                Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
-
-                var replacement = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.Reconnect,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "supervisor-reconnect",
-                    cancellationToken => Task.FromResult("new"),
-                    false,
-                    true);
-
-                Assert.Throws<TaskCanceledException>(
-                    () => oldRequest.GetAwaiter().GetResult());
-
-                release.Set();
-                Assert.That(replacement.GetAwaiter().GetResult(), Is.EqualTo("new"));
-            }
-            queue.Dispose();
-        }
-
-        [Test]
-        public void SupervisorRequestQueue_InvalidationAllowsSameKeyReplacement()
-        {
-            var queue = new AICodedbSupervisorRequestQueue();
-            using (var started = new ManualResetEventSlim(false))
-            using (var release = new ManualResetEventSlim(false))
-            {
-                var oldRequest = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "same-after-invalidation",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        started.Set();
-                        release.Wait(TimeSpan.FromSeconds(5));
-                        return "old";
-                    }),
-                    false);
-
-                Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                queue.Invalidate();
-
-                var replacement = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "same-after-invalidation",
-                    cancellationToken => Task.FromResult("new"),
-                    false);
-
-                Assert.Throws<TaskCanceledException>(
-                    () => oldRequest.GetAwaiter().GetResult());
-                release.Set();
-                Assert.That(replacement.GetAwaiter().GetResult(), Is.EqualTo("new"));
-            }
-            queue.Dispose();
-        }
-
-        [Test]
-        public void SupervisorRequestQueue_DoesNotReuseObservationAcrossSuspensionEpoch()
-        {
-            var queue = new AICodedbSupervisorRequestQueue();
-            using (var started = new ManualResetEventSlim(false))
-            using (var release = new ManualResetEventSlim(false))
-            {
-                var oldObservation = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "observation-after-suspension",
-                    cancellationToken => Task.Run(() =>
-                    {
-                        started.Set();
-                        release.Wait(TimeSpan.FromSeconds(5));
-                        return "old";
-                    }),
-                    false);
-
-                Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                queue.SetMaintenanceSuspended(true);
-
-                var replacement = queue.Enqueue(
-                    AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "observation-after-suspension",
-                    cancellationToken => Task.FromResult("new"),
-                    false);
-
-                Assert.Throws<TaskCanceledException>(
-                    () => oldObservation.GetAwaiter().GetResult());
-                release.Set();
-                Assert.That(replacement.GetAwaiter().GetResult(), Is.EqualTo("new"));
-            }
-            queue.Dispose();
-        }
-
-        [Test]
-        public void SupervisorRequestQueue_SuspendsMaintenanceAtBoundary()
-        {
-            var queue = new AICodedbSupervisorRequestQueue();
-            var executionCount = 0;
-            var task = queue.Enqueue(
+            var maintenance = adapter.Dispatch(
                 AICodedbSupervisorRequestKind.Reconcile,
-                AICodedbSupervisorRequestPriority.Maintenance,
-                "boundary-reconcile",
-                cancellationToken => Task.Run(() =>
-                {
-                    Interlocked.Increment(ref executionCount);
-                    while (!cancellationToken.IsCancellationRequested)
-                        Thread.Sleep(2);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return true;
-                }),
+                cancellationToken => Task.FromResult(true),
                 true);
+            var query = adapter.Dispatch(
+                AICodedbSupervisorRequestKind.ObserveStatus,
+                cancellationToken => Task.FromResult(true),
+                false);
 
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-            while (!queue.Snapshot.HasActiveRequest && DateTime.UtcNow < deadline)
-                Thread.Sleep(2);
-            queue.SetMaintenanceSuspended(true);
-
-            Assert.Throws<TaskCanceledException>(() => task.GetAwaiter().GetResult());
-            Assert.That(executionCount, Is.EqualTo(1));
-            Assert.That(queue.Snapshot.IsSuspended, Is.True);
-            queue.Dispose();
+            Assert.Throws<TaskCanceledException>(() => maintenance.GetAwaiter().GetResult());
+            Assert.That(query.GetAwaiter().GetResult(), Is.True);
+            Assert.That(adapter.Snapshot.IsSuspended, Is.True);
+            Assert.That(adapter.Snapshot.PendingCount, Is.EqualTo(0));
+            adapter.Dispose();
         }
 
         [Test]
-        public void SupervisorRequestQueue_InvalidatesStaleResultAtEpochBoundary()
+        public void SupervisorIntentAdapter_InvalidatesLateLocalResultAtGenerationBoundary()
         {
-            var queue = new AICodedbSupervisorRequestQueue();
+            var adapter = new AICodedbSupervisorIntentAdapter();
             using (var started = new ManualResetEventSlim(false))
             using (var release = new ManualResetEventSlim(false))
             {
-                var task = queue.Enqueue(
+                var task = adapter.Dispatch(
                     AICodedbSupervisorRequestKind.ObserveStatus,
-                    AICodedbSupervisorRequestPriority.Query,
-                    "stale-observation",
-                    cancellationToken => Task.Run(() =>
+                    cancellationToken =>
                     {
                         started.Set();
                         release.Wait(TimeSpan.FromSeconds(5));
-                        // Deliberately ignore cancellation to prove the epoch
-                        // guard rejects a late result.
-                        return true;
-                    }),
+                        return Task.FromResult(true);
+                    },
                     false);
                 Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
-                queue.Invalidate();
+
+                adapter.Invalidate();
                 release.Set();
+
                 Assert.Throws<TaskCanceledException>(() => task.GetAwaiter().GetResult());
-                Assert.That(queue.Snapshot.Epoch, Is.EqualTo(1));
+                Assert.That(adapter.Snapshot.Epoch, Is.EqualTo(1));
             }
-            queue.Dispose();
+            adapter.Dispose();
+        }
+
+        [Test]
+        public void SupervisorIntentAdapter_MaintenanceSuspensionRejectsLateMaintenanceButKeepsQueriesEligible()
+        {
+            var adapter = new AICodedbSupervisorIntentAdapter();
+            using (var started = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                var maintenance = adapter.Dispatch(
+                    AICodedbSupervisorRequestKind.Maintenance,
+                    cancellationToken =>
+                    {
+                        started.Set();
+                        release.Wait(TimeSpan.FromSeconds(5));
+                        return Task.FromResult("late-maintenance");
+                    },
+                    true);
+                Assert.That(started.Wait(TimeSpan.FromSeconds(5)), Is.True);
+
+                adapter.SetMaintenanceSuspended(true);
+                var query = adapter.Dispatch(
+                    AICodedbSupervisorRequestKind.ObserveStatus,
+                    cancellationToken => Task.FromResult("query"),
+                    false);
+                release.Set();
+
+                Assert.Throws<TaskCanceledException>(() => maintenance.GetAwaiter().GetResult());
+                Assert.That(query.GetAwaiter().GetResult(), Is.EqualTo("query"));
+                Assert.That(adapter.Snapshot.Epoch, Is.EqualTo(1));
+            }
+            adapter.Dispose();
+        }
+
+        [Test]
+        public void SupervisorIntentAdapter_SourceDoesNotOwnRuntimeAdmissionPolicy()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbSupervisorRequestQueue.cs"));
+
+            Assert.That(source, Does.Contain("AICodedbSupervisorIntentAdapter"));
+            Assert.That(source, Does.Not.Contain("AICodedbSupervisorRequestPriority"));
+            Assert.That(source, Does.Not.Contain("supersedeExisting"));
+            Assert.That(source, Does.Not.Contain("TakeNextEntryLocked"));
+            Assert.That(source, Does.Not.Contain("Dictionary<string, Entry>"));
         }
 
         [Test]
@@ -3899,6 +4036,45 @@ namespace Rice.AI.Codedb.Editor.Tests
                 isPlayingOrWillChangePlaymode);
         }
 
+        [TestCase(false, false, false, ExpectedResult = false)]
+        [TestCase(true, false, false, ExpectedResult = true)]
+        [TestCase(false, true, false, ExpectedResult = true)]
+        [TestCase(false, false, true, ExpectedResult = true)]
+        public bool ShouldSuspendMaintenance_CombinesCompileUpdateAndPlayBoundaries(
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlayModeMaintenanceSuspended)
+        {
+            return AICodedbEditorLifecycle.ShouldSuspendMaintenance(
+                isCompiling,
+                isUpdating,
+                isPlayModeMaintenanceSuspended);
+        }
+
+        [Test]
+        public void EditorUpdate_SourceObservesMaintenanceBoundaryBeforeHeartbeatThrottle()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbEditorLifecycle.cs"));
+            var start = source.IndexOf("private static void OnEditorUpdate()", StringComparison.Ordinal);
+            var end = source.IndexOf("internal static bool ShouldRunScheduledReconcile", start, StringComparison.Ordinal);
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            Assert.That(end, Is.GreaterThan(start));
+            var body = source.Substring(start, end - start);
+            var boundary = body.IndexOf("ShouldSuspendMaintenance(", StringComparison.Ordinal);
+            var throttle = body.IndexOf("EditorApplication.timeSinceStartup < _nextHeartbeatAt", StringComparison.Ordinal);
+
+            Assert.That(body, Does.Contain("EditorApplication.isCompiling"));
+            Assert.That(body, Does.Contain("EditorApplication.isUpdating"));
+            Assert.That(body, Does.Contain("BackgroundScheduler.SetMaintenanceSuspended(maintenanceSuspended)"));
+            Assert.That(body, Does.Contain("SupervisorIntentAdapter.SetMaintenanceSuspended(maintenanceSuspended)"));
+            Assert.That(boundary, Is.GreaterThanOrEqualTo(0));
+            Assert.That(throttle, Is.GreaterThan(boundary),
+                "Compile and Asset Update transitions must invalidate maintenance without waiting for the heartbeat interval.");
+        }
+
         [Test]
         public void ShouldReconcileAutomaticHostUpgrade_RecognizesLegacyAndPreviousGenerationPointers()
         {
@@ -4121,6 +4297,11 @@ namespace Rice.AI.Codedb.Editor.Tests
             var providerReadyValue = providerReadyAtUtc == null
                 ? "null"
                 : "\"" + providerReadyAtUtc + "\"";
+            var observedAtUtc = DateTimeOffset.UtcNow.ToString("o");
+            const string selectedInstanceId = "0123456789abcdef0123456789abcdef";
+            const string lifecycleId = "lifecycle-test";
+            const string supervisorId = "unity-bridge";
+            const string ownerEpoch = "abcdefabcdefabcdefabcdefabcdefab";
             return "{\"ok\":true,\"status\":{"
                    + "\"schema_version\":" + AICodedbSupervisorProtocol.CoordinatorStateSchemaVersion + ","
                    + "\"supervisor_schema_version\":" + AICodedbSupervisorProtocol.SupervisorStateSchemaVersion + ","
@@ -4141,9 +4322,11 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"control_contract_sha256\":\"" + contract.ControlContract.Sha256 + "\","
                    + "\"control_namespace\":\"" + JsonPath(runtime) + "\","
                    + "\"supervisor_pid\":1234,"
-                   + "\"selected_instance_id\":\"0123456789abcdef0123456789abcdef\","
+                   + "\"selected_instance_id\":\"" + selectedInstanceId + "\","
                    + "\"coordinator_pid\":1234,"
-                   + "\"lifecycle_id\":null,"
+                   + "\"lifecycle_id\":\"" + lifecycleId + "\","
+                   + "\"supervisor_id\":\"" + supervisorId + "\","
+                   + "\"owner_epoch\":\"" + ownerEpoch + "\","
                    + "\"desired_state\":\"enabled\","
                    + "\"editor_demand\":\"online\","
                    + "\"provider_state\":\"ready\","
@@ -4152,6 +4335,28 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"adapter_state\":\"disabled\","
                    + "\"adapter_worker\":null,"
                    + "\"adapter_worker_state\":\"disabled\","
+                   + "\"coordinator_failure_category\":\"NONE\","
+                   + "\"operational_readiness\":{"
+                   + "\"schema_version\":1,"
+                   + "\"observation_id\":\"11111111111111111111111111111111\","
+                   + "\"revision\":7,"
+                   + "\"observed_at_utc\":\"" + observedAtUtc + "\","
+                   + "\"state\":\"core_ready\","
+                   + "\"reason_code\":\"COORDINATOR_OPERATIONAL\","
+                   + "\"detail\":\"The selected instance Coordinator is operational.\","
+                   + "\"coordinator_failure_category\":\"NONE\","
+                   + "\"project_root\":\"" + JsonPath(root) + "\","
+                   + "\"project_identity\":\"" + AICodedbEditorLifecycle.CreateProjectIdentity(root) + "\","
+                   + "\"runtime\":\"" + JsonPath(runtime) + "\","
+                   + "\"selected_instance_id\":\"" + selectedInstanceId + "\","
+                   + "\"selected_generation_id\":\"" + target.GenerationId + "\","
+                   + "\"target_generation_id\":\"" + target.GenerationId + "\","
+                   + "\"runtime_contract_sha256\":\"" + contract.Sha256 + "\","
+                   + "\"generation_disposition\":\"CURRENT\","
+                   + "\"lifecycle_id\":\"" + lifecycleId + "\","
+                   + "\"supervisor_id\":\"" + supervisorId + "\","
+                   + "\"owner_epoch\":\"" + ownerEpoch + "\","
+                   + "\"supervisor_pid\":1234},"
                    + "\"last_event\":\"provider_ready\"}}";
         }
 

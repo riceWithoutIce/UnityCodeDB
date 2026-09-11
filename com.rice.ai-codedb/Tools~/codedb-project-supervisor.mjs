@@ -13,9 +13,12 @@ import { fileURLToPath } from "node:url";
 
 const PROTOCOL_VERSION = 1;
 const LEGACY_SUPERVISOR_PROTOCOL_VERSION = 1;
-const SUPERVISOR_PROTOCOL_VERSION = 2;
+const PREVIOUS_SUPERVISOR_PROTOCOL_VERSION = 2;
+const SUPERVISOR_PROTOCOL_VERSION = 3;
 const STATE_SCHEMA_VERSION = 3;
 const EVIDENCE_SCHEMA_VERSION = 1;
+const OPERATIONAL_READINESS_SCHEMA_VERSION = 1;
+const OPERATIONAL_READINESS_ENV = "RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_RUNTIME_CONTRACT_BYTES = 4 * 1024 * 1024;
 const MAX_INSTANCE_SELECTION_BYTES = 64 * 1024;
@@ -31,6 +34,8 @@ const POLL_INTERVAL_MS = 1000;
 const COORDINATOR_OFFLINE_RETIRE_MS = 5000;
 const HANDOFF_OBSERVATION_GRACE_MS = 1000;
 const OPERATION_RETENTION_LIMIT = 16;
+const MAX_PENDING_MAINTENANCE_REQUESTS = 1;
+const MAX_PENDING_QUERY_REQUESTS = 16;
 const LOCK_NAME = "supervisor.lock";
 const STATE_NAME = "supervisor-state.json";
 const OPERATION_NAME = "operation.json";
@@ -44,6 +49,61 @@ const MAX_START_CLAIM_RETRIES = 16;
 const ATOMIC_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250, 500];
 const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM", "EEXIST"]);
 const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
+const COORDINATOR_FAILURE_CATEGORIES = new Set([
+  "NOT_EVALUATED",
+  "NONE",
+  "LAUNCH_FAILED",
+  "NONZERO_EXIT",
+  "STARTUP_TIMEOUT",
+  "STATUS_UNAVAILABLE",
+  "UNKNOWN_FAILURE"
+]);
+const TERMINAL_COORDINATOR_STARTUP_FAILURE_CATEGORIES = new Set([
+  "LAUNCH_FAILED",
+  "NONZERO_EXIT",
+  "STARTUP_TIMEOUT",
+  "UNKNOWN_FAILURE"
+]);
+const PROJECT_MAINTENANCE_ACTIONS = new Map([
+  ["RefreshIfStale", { script: "scripts/refresh-codedb-project-if-stale.ps1", args: [], timeoutMs: 600000 }],
+  ["RefreshIndex", { script: "scripts/refresh-codedb-project.ps1", args: [], timeoutMs: 600000 }],
+  ["BuildShaderAdapter", { script: "scripts/build-codedb-project-text-adapter.ps1", args: [], timeoutMs: 300000 }],
+  ["CleanIndex", { script: "scripts/clear-codedb-project-index.ps1", args: [], timeoutMs: 120000 }],
+  ["RebuildIndex", { script: "scripts/refresh-codedb-project.ps1", args: ["-CleanFirst"], timeoutMs: 600000 }]
+]);
+const OPERATIONAL_READINESS_FIELDS = new Set([
+  "schema_version",
+  "observation_id",
+  "revision",
+  "observed_at_utc",
+  "state",
+  "reason_code",
+  "detail",
+  "coordinator_failure_category",
+  "project_root",
+  "project_identity",
+  "runtime",
+  "selected_instance_id",
+  "selected_generation_id",
+  "target_generation_id",
+  "runtime_contract_sha256",
+  "generation_disposition",
+  "lifecycle_id",
+  "supervisor_id",
+  "owner_epoch",
+  "supervisor_pid"
+]);
+const OPERATIONAL_READINESS_REASONS = new Map([
+  ["core_ready", new Set(["COORDINATOR_OPERATIONAL"])],
+  ["starting", new Set(["COORDINATOR_STARTING"])],
+  ["degraded", new Set([
+    "COORDINATOR_COMPONENT_FAILED",
+    "COORDINATOR_START_FAILED",
+    "COORDINATOR_STATUS_UNAVAILABLE",
+    "SUPERVISOR_STATE_PUBLISH_FAILED"
+  ])],
+  ["stopping", new Set(["SUPERVISOR_STOPPING"])]
+]);
 
 const { command, options } = parseArgs(process.argv.slice(2));
 let validatedDaemonContext = null;
@@ -744,6 +804,7 @@ function validateSupervisorOwnerRecord(context, value, label) {
       || value.selected_instance_id !== context.selectedInstance.instanceId
       || value.runtime_contract_sha256 !== context.runtimeContractSha256
       || (value.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+          && value.supervisor_protocol_version !== PREVIOUS_SUPERVISOR_PROTOCOL_VERSION
           && value.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
       || value.generation_disposition !== context.generationDisposition
       || value.lifecycle_id !== context.lifecycleId
@@ -928,10 +989,19 @@ async function runDaemon(raw) {
   let coordinatorObserved = false;
   let coordinatorUnavailableSince = 0;
   let pollTimer = null;
-  let queryTail = Promise.resolve();
+  let requestQueueScheduled = false;
+  let queryRunning = false;
+  const pendingQueries = [];
+  const pendingMaintenance = [];
+  const queuedQueriesByKey = new Map();
+  const queuedMaintenanceByKey = new Map();
   let activeOperation = null;
   const operations = new Map();
+  const operationReadiness = new WeakMap();
   let latestOperation = readPersistedOperation(context);
+  const startupOperationToRecover = latestOperation?.state === "running"
+    ? latestOperation
+    : null;
   if (latestOperation) {
     operations.set(latestOperation.operation_id, latestOperation);
     if (latestOperation.state === "running") activeOperation = latestOperation;
@@ -943,6 +1013,8 @@ async function runDaemon(raw) {
 
   const persist = () => {
     state.operation = publicOperation(latestOperation);
+    state.coordinator_failure_category = sanitizeCoordinatorFailureCategory(
+      state.coordinator_failure_category);
     return writeJson(context.statePath, {
     ...state,
     event_sequence: eventSequence,
@@ -973,6 +1045,11 @@ async function runDaemon(raw) {
       state.readiness_state = "degraded";
       state.reason_code = "SUPERVISOR_STATE_PUBLISH_FAILED";
       state.detail = "The project Supervisor could not durably publish its state; maintenance is blocked.";
+      publishOperationalReadiness(state, null, {
+        state: "degraded",
+        reasonCode: "SUPERVISOR_STATE_PUBLISH_FAILED",
+        detail: "The project Supervisor could not durably publish its operational state."
+      });
       // Do not call emit or persist again here. The original publication
       // failure is terminal for this owner epoch; report it without creating
       // an unhandled rejection from a timer or operation callback.
@@ -982,9 +1059,141 @@ async function runDaemon(raw) {
       return false;
     }
   };
+  const failQueuedMaintenance = (value, errorCode, detail) => {
+    value.completed_at_utc = new Date().toISOString();
+    value.result = {
+      exit_code: 4,
+      stdout: "",
+      stderr: detail,
+      timed_out: false
+    };
+    value.state = "failed";
+    value.phase = "invalidated";
+    value.error_code = errorCode;
+    value.error = detail;
+    operations.set(value.operation_id, value);
+  };
+  const invalidatePendingRequests = (errorCode, detail) => {
+    while (pendingQueries.length > 0) {
+      const entry = pendingQueries.shift();
+      if (entry.key) queuedQueriesByKey.delete(entry.key);
+      const error = new Error(detail);
+      error.code = errorCode;
+      entry.reject(error);
+    }
+    while (pendingMaintenance.length > 0) {
+      const entry = pendingMaintenance.shift();
+      queuedMaintenanceByKey.delete(entry.value.key);
+      failQueuedMaintenance(entry.value, errorCode, detail);
+    }
+  };
+  const scheduleRequestQueue = () => {
+    if (requestQueueScheduled || shuttingDown) return;
+    requestQueueScheduled = true;
+    setImmediate(() => {
+      requestQueueScheduled = false;
+      drainRequestQueue();
+    });
+  };
+  const queueQuery = (fn, key = "") => {
+    if (typeof fn !== "function")
+      return Promise.reject(new TypeError("A Supervisor query callback is required."));
+    if (shuttingDown)
+      return Promise.reject(Object.assign(
+        new Error("The project Supervisor is retiring and cannot serve another query."),
+        { code: "SUPERVISOR_STOPPING" }));
+    if (key && queuedQueriesByKey.has(key))
+      return queuedQueriesByKey.get(key).promise;
+    if (pendingQueries.length >= MAX_PENDING_QUERY_REQUESTS)
+      return Promise.reject(Object.assign(
+        new Error("The bounded Supervisor query queue is full."),
+        { code: "SUPERVISOR_QUERY_QUEUE_FULL" }));
+
+    let entry;
+    const promise = new Promise((resolve, reject) => {
+      entry = {
+        key,
+        ownerEpoch: context.ownerEpoch,
+        run: fn,
+        resolve,
+        reject,
+        promise: null
+      };
+    });
+    entry.promise = promise;
+    pendingQueries.push(entry);
+    if (key) queuedQueriesByKey.set(key, entry);
+    scheduleRequestQueue();
+    return promise;
+  };
+  const drainRequestQueue = () => {
+    if (shuttingDown) {
+      invalidatePendingRequests(
+        "SUPERVISOR_STOPPING",
+        "The project Supervisor retired before the queued request was admitted.");
+      return;
+    }
+    if (queryRunning) return;
+    if (pendingQueries.length > 0) {
+      const entry = pendingQueries.shift();
+      queryRunning = true;
+      Promise.resolve()
+        .then(() => {
+          if (entry.ownerEpoch !== context.ownerEpoch) {
+            const error = new Error("The queued query belongs to an obsolete Supervisor owner epoch.");
+            error.code = "SUPERVISOR_EPOCH_INVALIDATED";
+            throw error;
+          }
+          return entry.run();
+        })
+        .then((result) => {
+          if (shuttingDown || entry.ownerEpoch !== context.ownerEpoch) {
+            const error = new Error("The Supervisor owner epoch ended before the queued query completed.");
+            error.code = "SUPERVISOR_EPOCH_INVALIDATED";
+            throw error;
+          }
+          return result;
+        })
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          if (entry.key && queuedQueriesByKey.get(entry.key) === entry)
+            queuedQueriesByKey.delete(entry.key);
+          queryRunning = false;
+          scheduleRequestQueue();
+        });
+      return;
+    }
+    if (activeOperation || pendingMaintenance.length === 0) return;
+
+    const entry = pendingMaintenance.shift();
+    queuedMaintenanceByKey.delete(entry.value.key);
+    if (entry.ownerEpoch !== context.ownerEpoch) {
+      failQueuedMaintenance(
+        entry.value,
+        "SUPERVISOR_EPOCH_INVALIDATED",
+        "The queued maintenance request belongs to an obsolete Supervisor owner epoch.");
+      scheduleRequestQueue();
+      return;
+    }
+    startMaintenance(entry);
+  };
+  const ensureCoordinatorWithAttribution = async (operation = null) => {
+    try {
+      const result = await ensureCoordinator(context, operation);
+      state.coordinator_failure_category = "NONE";
+      return result;
+    } catch (error) {
+      state.coordinator_failure_category = coordinatorFailureCategory(error);
+      publishOperationalReadiness(state, null);
+      throw error;
+    }
+  };
   const beginRetirement = (reason) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    invalidatePendingRequests(
+      "SUPERVISOR_EPOCH_INVALIDATED",
+      "The Supervisor owner epoch ended before the queued maintenance request was admitted.");
     if (handoffTimer) {
       clearTimeout(handoffTimer);
       handoffTimer = null;
@@ -992,6 +1201,11 @@ async function runDaemon(raw) {
     state.readiness_state = "stopping";
     state.reason_code = "SUPERVISOR_STOPPING";
     state.detail = "The project Supervisor is retiring its authenticated runtime.";
+    publishOperationalReadiness(state, coordinatorStatus, {
+      state: "stopping",
+      reasonCode: "SUPERVISOR_STOPPING",
+      detail: "The project Supervisor is retiring its authenticated runtime."
+    });
     emitSafely("supervisor_retiring", reason);
     setTimeout(() => void shutdown(), 10);
   };
@@ -1014,8 +1228,12 @@ async function runDaemon(raw) {
       coordinatorObserved = true;
       coordinatorUnavailableSince = 0;
       state.editor_demand = rawStatus.editor_demand ?? state.editor_demand;
+      if (rawStatus.provider_state === "ready")
+        state.coordinator_failure_category = "NONE";
     } else {
       coordinatorStatus = null;
+      if (state.coordinator_failure_category === "NONE")
+        state.coordinator_failure_category = "STATUS_UNAVAILABLE";
       if (coordinatorObserved && coordinatorUnavailableSince === 0)
         coordinatorUnavailableSince = Date.now();
     }
@@ -1034,13 +1252,15 @@ async function runDaemon(raw) {
     latestOperation = value;
     persistOperation(context, value);
     while (operations.size > OPERATION_RETENTION_LIMIT) {
-      const oldest = operations.keys().next().value;
-      if (oldest === activeOperation?.operation_id) break;
-      operations.delete(oldest);
+      const removable = [...operations.keys()].find((operationId) =>
+        operationId !== activeOperation?.operation_id
+        && !pendingMaintenance.some((entry) => entry.value.operation_id === operationId));
+      if (!removable) break;
+      operations.delete(removable);
     }
   };
   const operationResponse = (value, reused = false) => {
-    const pending = value.state === "running";
+    const pending = value.state === "queued" || value.state === "running";
     const exitCode = pending ? 0 : commandExitCode(value.result);
     const succeeded = pending || (value.state === "completed" && exitCode === 0);
     return {
@@ -1049,11 +1269,14 @@ async function runDaemon(raw) {
       reused,
       pending,
       operation_id: value.operation_id,
-      error_code: succeeded ? null : "SUPERVISOR_COMMAND_FAILED",
+      error_code: succeeded ? null : (value.error_code || "SUPERVISOR_COMMAND_FAILED"),
       error: succeeded ? null : (value.error || value.result?.stderr || value.result?.stdout || "Supervisor command failed."),
       result: pending ? null : value.result,
       operation: publicOperation(value),
-      status: publicStatus(state, coordinatorStatus),
+      status: publicStatus(
+        state,
+        coordinatorStatus,
+        operationReadiness.get(value) ?? state.operational_readiness),
       handoff_queued: value.handoff_queued === true,
       handoff_reason: value.handoff_reason ?? null
     };
@@ -1074,12 +1297,12 @@ async function runDaemon(raw) {
       value.handoff_queued = true;
       value.handoff_reason = "selected_instance_changed";
     }
+    rememberOperation(value);
+    updateReadiness(state, coordinatorStatus, null);
+    emitSafely(value.state === "completed" ? "operation_completed" : "operation_failed", value.name);
+    try { await queueQuery(refresh, "internal:status-refresh"); } catch (refreshError) { emitSafely("status_error", refreshError.message); }
     if (activeOperation?.operation_id === value.operation_id)
       activeOperation = null;
-    rememberOperation(value);
-    updateReadiness(state, coordinatorStatus, activeOperation);
-    emitSafely(value.state === "completed" ? "operation_completed" : "operation_failed", value.name);
-    try { await refresh(); } catch (refreshError) { emitSafely("status_error", refreshError.message); }
     if (retirementReason) {
       const reason = retirementReason;
       retirementReason = "";
@@ -1087,10 +1310,50 @@ async function runDaemon(raw) {
       return;
     }
     if (value.handoff_queued === true && !shuttingDown) {
+      invalidatePendingRequests(
+        "SUPERVISOR_EPOCH_INVALIDATED",
+        "The selected instance changed before the queued maintenance request was admitted.");
       handoffTimer = setTimeout(
         () => queueRetirement("selected_instance_changed_unobserved"),
         HANDOFF_OBSERVATION_GRACE_MS);
+      return;
     }
+    scheduleRequestQueue();
+  };
+  const startMaintenance = (entry) => {
+    const value = entry.value;
+    value.state = "running";
+    value.phase = "admitted";
+    value.started_at_utc = new Date().toISOString();
+    activeOperation = value;
+    try {
+      rememberOperation(value);
+    } catch (error) {
+      activeOperation = null;
+      failQueuedMaintenance(
+        value,
+        "SUPERVISOR_STATE_PUBLISH_FAILED",
+        error instanceof Error ? error.message : String(error));
+      scheduleRequestQueue();
+      return;
+    }
+    updateReadiness(state, coordinatorStatus, activeOperation);
+    if (!emitSafely("operation_started", value.name)) {
+      activeOperation = null;
+      failQueuedMaintenance(
+        value,
+        "SUPERVISOR_STATE_PUBLISH_FAILED",
+        state.detail);
+      scheduleRequestQueue();
+      return;
+    }
+    Promise.resolve()
+      .then(() => entry.run(value))
+      .then(
+        (result) => void finishOperation(value, result)
+          .catch((error) => emitSafely("operation_state_error", error.message)),
+        (error) => void finishOperation(value, null, error)
+          .catch((stateError) => emitSafely("operation_state_error", stateError.message)));
   };
   const admitMaintenance = (name, request, fn) => {
     if (statePublicationError) {
@@ -1110,16 +1373,22 @@ async function runDaemon(raw) {
       };
     }
     const key = maintenanceOperationKey(name, request);
-    if (activeOperation?.state === "running") {
-      if (activeOperation.key === key)
-        return operationResponse(activeOperation, true);
+    if (activeOperation?.state === "running" && activeOperation.key === key)
+      return operationResponse(activeOperation, true);
+    const queued = queuedMaintenanceByKey.get(key);
+    if (queued) return operationResponse(queued.value, true);
+    if (pendingMaintenance.length >= MAX_PENDING_MAINTENANCE_REQUESTS) {
+      const blockingOperation = activeOperation?.state === "running"
+        ? activeOperation
+        : pendingMaintenance[0].value;
       return {
         ok: false,
-        error_code: "SUPERVISOR_BUSY",
-        error: `Supervisor operation ${activeOperation.name} is already running.`,
+        accepted: false,
+        error_code: "SUPERVISOR_QUEUE_FULL",
+        error: "The bounded Supervisor maintenance queue already contains a different request.",
         pending: true,
-        operation_id: activeOperation.operation_id,
-        operation: publicOperation(activeOperation),
+        operation_id: blockingOperation.operation_id,
+        operation: publicOperation(blockingOperation),
         status: publicStatus(state, coordinatorStatus)
       };
     }
@@ -1132,8 +1401,8 @@ async function runDaemon(raw) {
       request_id: typeof request.request_id === "string" ? request.request_id : "",
       name,
       lane: "maintenance",
-      state: "running",
-      phase: "admitted",
+      state: "queued",
+      phase: "queued",
       owner_epoch: context.ownerEpoch,
       project_identity: context.projectIdentity,
       root: context.root,
@@ -1142,97 +1411,98 @@ async function runDaemon(raw) {
       selected_generation_id: context.selectedGenerationId,
       runtime_contract_sha256: context.runtimeContractSha256,
       child: null,
-      started_at_utc: new Date().toISOString()
+      started_at_utc: null
     };
-    activeOperation = value;
-    try {
-      rememberOperation(value);
-    } catch (error) {
-      activeOperation = null;
-      return {
-        ok: false,
-        error_code: "SUPERVISOR_STATE_PUBLISH_FAILED",
-        error: error instanceof Error ? error.message : String(error),
-        status: publicStatus(state, coordinatorStatus)
-      };
-    }
-    updateReadiness(state, coordinatorStatus, activeOperation);
-    if (!emitSafely("operation_started", name)) {
-      activeOperation = null;
-      return {
-        ok: false,
-        error_code: "SUPERVISOR_STATE_PUBLISH_FAILED",
-        error: state.detail,
-        status: publicStatus(state, coordinatorStatus)
-      };
-    }
-    Promise.resolve()
-      .then(() => fn(value))
-      .then(
-        (result) => void finishOperation(value, result)
-          .catch((error) => emitSafely("operation_state_error", error.message)),
-        (error) => void finishOperation(value, null, error)
-          .catch((stateError) => emitSafely("operation_state_error", stateError.message)));
+    const entry = {
+      ownerEpoch: context.ownerEpoch,
+      value,
+      run: fn
+    };
+    operations.set(value.operation_id, value);
+    pendingMaintenance.push(entry);
+    queuedMaintenanceByKey.set(key, entry);
+    scheduleRequestQueue();
     return operationResponse(value);
   };
-  const queueQuery = (fn) => {
-    // Queries are kept on a separate tail and are never blocked by a pending
-    // maintenance admission. The coordinator itself serializes Provider RPC.
-    const run = queryTail.then(fn, fn);
-    queryTail = run.then(() => undefined, () => undefined);
-    return run;
-  };
+
 
   const dispatch = async (request) => {
     const name = String(request.command || "");
     if (name === "status") {
-      void refresh().catch((error) => emitSafely("status_error", error.message));
-      return { ok: true, status: publicStatus(state, coordinatorStatus) };
+      return queueQuery(() => {
+        const response = { ok: true, status: publicStatus(state, coordinatorStatus) };
+        void queueQuery(refresh, "internal:status-refresh")
+          .catch((error) => emitSafely("status_error", error.message));
+        return response;
+      }, queryRequestKey(name, request));
     }
     if (name === "operation") {
-      const operationId = String(request.operation_id || "");
-      const selected = operations.get(operationId);
-      if (!selected) {
-        return {
-          ok: false,
-          error_code: "OPERATION_NOT_FOUND",
-          error: "The requested Supervisor operation is unavailable.",
-          pending: false,
-          operation_id: operationId,
-          status: publicStatus(state, coordinatorStatus)
-        };
-      }
-      const response = operationResponse(selected);
-      if (!response.pending && response.handoff_queued && !shuttingDown)
-        queueRetirement("selected_instance_changed_observed");
-      return response;
+      return queueQuery(() => {
+        const operationId = String(request.operation_id || "");
+        const selected = operations.get(operationId);
+        if (!selected) {
+          return {
+            ok: false,
+            error_code: "OPERATION_NOT_FOUND",
+            error: "The requested Supervisor operation is unavailable.",
+            pending: false,
+            operation_id: operationId,
+            status: publicStatus(state, coordinatorStatus)
+          };
+        }
+        const response = operationResponse(selected);
+        if (!response.pending && response.handoff_queued && !shuttingDown)
+          queueRetirement("selected_instance_changed_observed");
+        return response;
+      }, queryRequestKey(name, request));
     }
-    if (name === "query") return queueQuery(() => requestCoordinator(context, "query", IPC_TIMEOUT_MS, request));
+    if (name === "query") {
+      return queueQuery(
+        () => requestCoordinator(context, "query", IPC_TIMEOUT_MS, request),
+        queryRequestKey(name, request));
+    }
     if (name === "reconcile" || name === "ensure") {
-      return admitMaintenance(name, request, (value) => ensureCoordinator(context, value));
+      return admitMaintenance(name, request, (value) => ensureCoordinatorWithAttribution(value));
     }
     if (name === "watcher") {
       const action = String(request.action || "");
       if (!["Ensure", "Enable", "Disable", "Start", "Status", "Pause", "Stop", "Restart"].includes(action)) {
         return { ok: false, error_code: "INVALID_ARGUMENT", error: "Unsupported watcher action." };
       }
-      if (action === "Status") return resultResponse(await queueQuery(() => requestCoordinator(context, "status", IPC_TIMEOUT_MS)));
+      if (action === "Status") {
+        return resultResponse(await queueQuery(
+          () => requestCoordinator(context, "status", IPC_TIMEOUT_MS),
+          queryRequestKey(name, request)));
+      }
       return admitMaintenance(
         `watcher:${action}`,
         request,
         (value) => runWatchManager(context, action, request, value));
+    }
+    if (name === "maintenance") {
+      const action = String(request.action || "");
+      if (!PROJECT_MAINTENANCE_ACTIONS.has(action)) {
+        return { ok: false, error_code: "INVALID_ARGUMENT", error: "Unsupported project maintenance action." };
+      }
+      return admitMaintenance(
+        `maintenance:${action}`,
+        request,
+        (value) => runProjectMaintenance(context, action, value));
     }
     if (name === "materialize") {
       const action = String(request.action || "");
       if (!["DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install"].includes(action)) {
         return { ok: false, error_code: "INVALID_ARGUMENT", error: "Unsupported materializer action." };
       }
-      const runAdmittedMaterializer = action === "Probe" || action === "Upgrade"
-        ? async (value) => {
-            await ensureCoordinator(context, value);
-            return runMaterializer(context, action, request, value);
-          }
-        : (value) => runMaterializer(context, action, request, value);
+      const runAdmittedMaterializer = async (value) => {
+        if (action === "Probe" || action === "Upgrade") {
+          await ensureCoordinatorWithAttribution(value);
+          await queueQuery(refresh, "internal:status-refresh");
+        }
+        const observation = state.operational_readiness;
+        operationReadiness.set(value, observation);
+        return runMaterializer(context, action, request, value, observation);
+      };
       return admitMaintenance(
         `materialize:${action}`,
         request,
@@ -1278,12 +1548,16 @@ async function runDaemon(raw) {
     state.publication_phase = "listening";
     state.started_at_utc = new Date().toISOString();
     emit("supervisor_started", context.root);
-    pollTimer = setInterval(() => { void refresh().catch((error) => emitSafely("status_error", error.message)); }, POLL_INTERVAL_MS);
+    pollTimer = setInterval(() => {
+      void queueQuery(refresh, "internal:status-refresh")
+        .catch((error) => emitSafely("status_error", error.message));
+    }, POLL_INTERVAL_MS);
     await refresh();
-    await ensureCoordinator(context).catch((error) => emitSafely("coordinator_start_failed", error.message));
+    await ensureCoordinatorWithAttribution()
+      .catch(() => emitSafely("coordinator_start_failed", state.coordinator_failure_category));
     await refresh();
-    if (activeOperation) {
-      void recoverPersistedOperation(activeOperation, context, finishOperation)
+    if (startupOperationToRecover) {
+      void recoverPersistedOperation(startupOperationToRecover, context, finishOperation)
         .catch((error) => emitSafely("operation_recovery_error", error.message));
     }
     await new Promise((resolve) => server.once("close", resolve));
@@ -1296,7 +1570,7 @@ async function runDaemon(raw) {
 }
 
 function createInitialState(context, ownerEvidence) {
-  return {
+  const state = {
     schema_version: STATE_SCHEMA_VERSION,
     evidence_schema_version: EVIDENCE_SCHEMA_VERSION,
     protocol_version: PROTOCOL_VERSION,
@@ -1330,12 +1604,18 @@ function createInitialState(context, ownerEvidence) {
     readiness_state: "starting",
     reason_code: "SUPERVISOR_STARTING",
     detail: "The project Supervisor is starting.",
+    coordinator_failure_category: "NOT_EVALUATED",
     last_event: "",
     last_event_detail: ""
   };
+  publishOperationalReadiness(state, null);
+  return state;
 }
 
-function publicStatus(state, coordinatorStatus) {
+function publicStatus(
+  state,
+  coordinatorStatus,
+  operationalReadiness = state.operational_readiness) {
   return {
     // Keep the Bridge-facing status shape compatible with the reviewed
     // coordinator status contract while the durable Supervisor state has its
@@ -1373,6 +1653,10 @@ function publicStatus(state, coordinatorStatus) {
     readiness_state: state.readiness_state,
     reason_code: state.reason_code,
     detail: state.detail,
+    coordinator_failure_category: sanitizeCoordinatorFailureCategory(
+      operationalReadiness?.coordinator_failure_category
+        ?? state.coordinator_failure_category),
+    operational_readiness: operationalReadiness ?? null,
     provider_state: coordinatorStatus?.provider_state ?? "starting",
     provider_ready_at_utc: coordinatorStatus?.provider_ready_at_utc ?? null,
     adapter_enabled: coordinatorStatus?.adapter_enabled === true,
@@ -1391,36 +1675,106 @@ function publicStatus(state, coordinatorStatus) {
 }
 
 function updateReadiness(state, coordinatorStatus, operation) {
+  const operational = publishOperationalReadiness(state, coordinatorStatus);
   if (operation?.state === "running") {
     state.readiness_state = "maintenance";
     state.reason_code = "SUPERVISOR_MAINTENANCE";
     state.detail = `Supervisor operation ${operation.name} is running.`;
     return;
   }
+  state.readiness_state = operational.state;
+  state.reason_code = operational.reason_code;
+  state.detail = operational.detail;
+}
+
+function publishOperationalReadiness(state, coordinatorStatus, override = null) {
+  const decision = override ?? resolveOperationalReadiness(
+    coordinatorStatus,
+    sanitizeCoordinatorFailureCategory(state.coordinator_failure_category));
+  const previousRevision = Number.isSafeInteger(state.operational_readiness?.revision)
+    ? state.operational_readiness.revision
+    : 0;
+  const observation = {
+    schema_version: OPERATIONAL_READINESS_SCHEMA_VERSION,
+    observation_id: crypto.randomUUID().replaceAll("-", ""),
+    revision: previousRevision + 1,
+    observed_at_utc: new Date().toISOString(),
+    state: decision.state,
+    reason_code: decision.reasonCode,
+    detail: decision.detail,
+    coordinator_failure_category: sanitizeCoordinatorFailureCategory(
+      state.coordinator_failure_category),
+    project_root: state.root,
+    project_identity: state.project_identity,
+    runtime: state.runtime,
+    selected_instance_id: state.selected_instance_id,
+    selected_generation_id: state.selected_generation_id,
+    target_generation_id: state.target_generation_id,
+    runtime_contract_sha256: state.runtime_contract_sha256,
+    generation_disposition: state.generation_disposition,
+    lifecycle_id: state.lifecycle_id,
+    supervisor_id: state.supervisor_id,
+    owner_epoch: state.owner_epoch,
+    supervisor_pid: state.supervisor_pid
+  };
+  state.operational_readiness = observation;
+  return observation;
+}
+
+function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
   if (!coordinatorStatus) {
-    state.readiness_state = "starting";
-    state.reason_code = "SUPERVISOR_STARTING";
-    state.detail = "The project Supervisor is starting or reconnecting to its coordinator.";
-    return;
+    if (!["NOT_EVALUATED", "NONE"].includes(failureCategory)) {
+      return {
+        state: "degraded",
+        reasonCode: failureCategory === "STATUS_UNAVAILABLE"
+          ? "COORDINATOR_STATUS_UNAVAILABLE"
+          : "COORDINATOR_START_FAILED",
+        detail: failureCategory === "STATUS_UNAVAILABLE"
+          ? "The selected instance Coordinator status is unavailable."
+          : "The selected instance Coordinator did not start successfully."
+      };
+    }
+    return {
+      state: "starting",
+      reasonCode: "COORDINATOR_STARTING",
+      detail: "The selected instance Coordinator is starting."
+    };
   }
+
+  if (TERMINAL_COORDINATOR_STARTUP_FAILURE_CATEGORIES.has(failureCategory)) {
+    return {
+      state: "degraded",
+      reasonCode: "COORDINATOR_START_FAILED",
+      detail: "The selected instance Coordinator did not start successfully."
+    };
+  }
+
   const provider = coordinatorStatus.provider_state;
   const adapter = coordinatorStatus.adapter_state;
   const worker = coordinatorStatus.adapter_worker_state;
-  if (["failed", "exited"].includes(provider) || ["failed"].includes(adapter) || ["failed"].includes(worker)) {
-    state.readiness_state = "degraded";
-    state.reason_code = "SUPERVISOR_DEGRADED";
-    state.detail = "The project Supervisor or an owned worker reported a failure.";
-    return;
+  if (["failed", "exited"].includes(provider)
+      || adapter === "failed"
+      || worker === "failed") {
+    return {
+      state: "degraded",
+      reasonCode: "COORDINATOR_COMPONENT_FAILED",
+      detail: "The selected instance Coordinator reported a failed owned component."
+    };
   }
-  if (provider !== "ready" || ["starting", "pending", "building", "restarting"].includes(adapter) || ["starting", "restarting"].includes(worker)) {
-    state.readiness_state = "starting";
-    state.reason_code = "SUPERVISOR_STARTING";
-    state.detail = "The project Supervisor is starting its Provider or adapter.";
-    return;
+  if (provider !== "ready"
+      || ["starting", "pending", "building", "restarting"].includes(adapter)
+      || ["starting", "restarting"].includes(worker)) {
+    return {
+      state: "starting",
+      reasonCode: "COORDINATOR_STARTING",
+      detail: "The selected instance Coordinator is starting its owned components."
+    };
   }
-  state.readiness_state = "core_ready";
-  state.reason_code = "CORE_READY";
-  state.detail = "The project Supervisor and Provider are ready.";
+  return {
+    state: "core_ready",
+    reasonCode: "COORDINATOR_OPERATIONAL",
+    detail: "The selected instance Coordinator is operational."
+  };
 }
 
 async function ensureCoordinator(context, operation = null) {
@@ -1438,14 +1792,43 @@ async function ensureCoordinator(context, operation = null) {
     "--exclusive-lifecycle", "false",
     "--startup-timeout-ms", String(context.startupTimeoutMs)
   ];
+  prepareOperationChildEvidence(context, operation, "coordinator_start_admitted");
   const result = await runChild(
     process.execPath,
     args,
     context.root,
     context.startupTimeoutMs + 5000,
     (child) => queueChildEvidenceCapture(context, operation, process.execPath, args, child));
-  if (result.code !== 0) throw new Error(result.stderr || result.stdout || `Coordinator start failed with exit code ${result.code}.`);
+  if (result.code !== 0) {
+    const category = result.timedOut
+      ? "STARTUP_TIMEOUT"
+      : result.launchFailed
+        ? "LAUNCH_FAILED"
+        : result.evidenceFailed
+          ? "UNKNOWN_FAILURE"
+          : "NONZERO_EXIT";
+    throw createCoordinatorFailure(
+      result.stderr || result.stdout || `Coordinator start failed with exit code ${result.code}.`,
+      category);
+  }
   return { exit_code: 0, action: "started", output: result.stdout };
+}
+
+function createCoordinatorFailure(message, category) {
+  const error = new Error(message);
+  error.coordinatorFailureCategory = sanitizeCoordinatorFailureCategory(category);
+  return error;
+}
+
+function coordinatorFailureCategory(error) {
+  return sanitizeCoordinatorFailureCategory(error?.coordinatorFailureCategory);
+}
+
+function sanitizeCoordinatorFailureCategory(value) {
+  const normalized = String(value ?? "");
+  return COORDINATOR_FAILURE_CATEGORIES.has(normalized)
+    ? normalized
+    : "UNKNOWN_FAILURE";
 }
 
 async function runWatchManager(context, action, request, operation = null) {
@@ -1465,19 +1848,58 @@ async function runWatchManager(context, action, request, operation = null) {
     (child) => queueChildEvidenceCapture(context, operation, command, args, child));
 }
 
-async function runMaterializer(context, action, request, operation = null) {
+async function runProjectMaintenance(context, action, operation = null) {
+  const specification = PROJECT_MAINTENANCE_ACTIONS.get(action);
+  if (!specification) throw new Error("Unsupported project maintenance action.");
+  const script = path.resolve(
+    context.selectedInstance.generationRoot,
+    specification.script.replace(/\//g, path.sep));
+  assertReviewedPath(
+    context.selectedInstance.generationRoot,
+    script,
+    `selected project maintenance script ${action}`,
+    "file");
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    ...specification.args
+  ];
+  const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  prepareOperationChildEvidence(context, operation, "project_maintenance_admitted");
+  return runChild(
+    command,
+    args,
+    context.root,
+    specification.timeoutMs,
+    (child) => queueChildEvidenceCapture(context, operation, command, args, child));
+}
+
+async function runMaterializer(
+  context,
+  action,
+  request,
+  operation = null,
+  operationalReadiness = null) {
   const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript, "-Action", action, "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot];
   if (request.confirmed_project_mutation === true) args.push("-ConfirmedProjectMutation");
   if (request.editor_session_id) args.push("-EditorSessionId", String(request.editor_session_id));
   if (Number.isInteger(request.editor_process_id) && request.editor_process_id > 0) args.push("-EditorProcessId", String(request.editor_process_id));
   if (request.editor_process_start_ticks) args.push("-EditorProcessStartTicks", String(request.editor_process_start_ticks));
   const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  prepareOperationChildEvidence(context, operation, "materializer_admitted");
   return runChild(
     command,
     args,
     context.root,
     15 * 60 * 1000,
-    (child) => queueChildEvidenceCapture(context, operation, command, args, child));
+    (child) => queueChildEvidenceCapture(context, operation, command, args, child),
+    operationalReadiness
+      ? { [OPERATIONAL_READINESS_ENV]: JSON.stringify(operationalReadiness) }
+      : null);
 }
 
 function resultResponse(result) {
@@ -1502,6 +1924,7 @@ function compactResult(result) {
 
 function publicOperation(value) {
   if (!value) return null;
+  const pending = value.state === "queued" || value.state === "running";
   return {
     schema_version: value.schema_version ?? EVIDENCE_SCHEMA_VERSION,
     operation_id: value.operation_id,
@@ -1514,11 +1937,20 @@ function publicOperation(value) {
     child_pid: value.child?.pid ?? null,
     started_at_utc: value.started_at_utc,
     completed_at_utc: value.completed_at_utc ?? null,
-    result: value.state === "running" ? null : value.result ?? null,
+    result: pending ? null : value.result ?? null,
     error: value.error ?? null,
     handoff_queued: value.handoff_queued === true,
     handoff_reason: value.handoff_reason ?? null
   };
+}
+
+function queryRequestKey(name, request) {
+  const normalized = {};
+  for (const key of Object.keys(request).sort()) {
+    if (key === "auth_token" || key === "request_id") continue;
+    normalized[key] = request[key];
+  }
+  return `query:${name}:${hash(JSON.stringify(normalized))}`;
 }
 
 function maintenanceOperationKey(name, request) {
@@ -1608,7 +2040,7 @@ async function recoverPersistedOperation(operation, context, finish) {
     return;
   }
   if (!initial.exists) {
-    await finish(operation, null, new Error("Supervisor operation child is no longer present and its result could not be authenticated."));
+    await finishRecoveredOperationAfterChildExit(operation, context, finish);
     return;
   }
   if (!processEvidenceMatches(expected, initial)) {
@@ -1625,15 +2057,7 @@ async function recoverPersistedOperation(operation, context, finish) {
       return;
     }
     if (!current.exists) {
-      // A child exit is only an observation. Ask the authoritative coordinator
-      // or materializer verifier before recording success; never infer a
-      // successful mutation from process disappearance alone.
-      const verification = await verifyRecoveredOperation(context, operation);
-      if (!verification.ok) {
-        await finish(operation, null, new Error(verification.error || "Recovered operation verification failed."));
-        return;
-      }
-      await finish(operation, verification.result || { code: 0, stdout: "", stderr: "", timedOut: false });
+      await finishRecoveredOperationAfterChildExit(operation, context, finish);
       return;
     }
     if (!processEvidenceMatches(expected, current)) {
@@ -1641,6 +2065,17 @@ async function recoverPersistedOperation(operation, context, finish) {
       return;
     }
   }
+}
+
+async function finishRecoveredOperationAfterChildExit(operation, context, finish) {
+  // Process disappearance is not success evidence. Recovery must obtain a
+  // fresh authoritative postcondition before publishing a terminal result.
+  const verification = await verifyRecoveredOperation(context, operation);
+  if (!verification.ok) {
+    await finish(operation, null, new Error(verification.error || "Recovered operation verification failed."));
+    return;
+  }
+  await finish(operation, verification.result || { code: 0, stdout: "", stderr: "", timedOut: false });
 }
 
 async function verifyRecoveredOperation(context, operation) {
@@ -1656,6 +2091,12 @@ async function verifyRecoveredOperation(context, operation) {
       ok: result.code === 0,
       result,
       error: result.code === 0 ? "" : `Recovered ${action} operation could not be verified.`
+    };
+  }
+  if (operation.name.startsWith("maintenance:")) {
+    return {
+      ok: false,
+      error: "Recovered project maintenance completion cannot be inferred after its recorded child exited."
     };
   }
   const status = await requestCoordinatorStatus(context);
@@ -1687,6 +2128,15 @@ function recordChildEvidence(context, operation, commandName, args, child) {
     command: normalizeExecutable(expectedExecutable),
     normalized_argv: expectedArgv
   };
+  persistOperation(context, operation);
+}
+
+function prepareOperationChildEvidence(context, operation, phase) {
+  if (!operation) return;
+  if (operation.state !== "running")
+    throw new Error("Supervisor operation is not running and cannot admit another child.");
+  operation.phase = phase;
+  operation.child = null;
   persistOperation(context, operation);
 }
 
@@ -2125,7 +2575,7 @@ function processEvidenceMatches(expected, actual) {
 }
 
 function authenticatedStatusMatches(state, status) {
-  return status
+  const identityMatches = status
     && status.owner_epoch === state.owner_epoch
     && status.supervisor_pid === state.supervisor_pid
     && status.project_identity === state.project_identity
@@ -2139,6 +2589,61 @@ function authenticatedStatusMatches(state, status) {
     && status.selected_generation_id === state.selected_generation_id
     && status.runtime_contract_sha256 === state.runtime_contract_sha256
     && status.pipe_name === state.pipe_name;
+  if (!identityMatches) return false;
+  if (state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION)
+    return true;
+  try {
+    validateOperationalReadinessObservation(
+      state.operational_readiness,
+      state,
+      "Supervisor state operational readiness");
+    validateOperationalReadinessObservation(
+      status.operational_readiness,
+      state,
+      "Supervisor status operational readiness");
+    return status.operational_readiness.observation_id
+        === state.operational_readiness.observation_id
+      && status.operational_readiness.revision
+        === state.operational_readiness.revision;
+  } catch {
+    return false;
+  }
+}
+
+function validateOperationalReadinessObservation(value, identity, label) {
+  requireObject(value, label);
+  const fields = Object.keys(value);
+  if (fields.length !== OPERATIONAL_READINESS_FIELDS.size
+      || fields.some((field) => !OPERATIONAL_READINESS_FIELDS.has(field)))
+    throw new Error(`${label} field set is invalid.`);
+  const reasons = OPERATIONAL_READINESS_REASONS.get(value.state);
+  const observedAt = Date.parse(value.observed_at_utc);
+  if (value.schema_version !== OPERATIONAL_READINESS_SCHEMA_VERSION
+      || !validId(value.observation_id)
+      || !Number.isSafeInteger(value.revision)
+      || value.revision <= 0
+      || !Number.isFinite(observedAt)
+      || !reasons?.has(value.reason_code)
+      || typeof value.detail !== "string"
+      || value.detail.length === 0
+      || value.detail.length > 256
+      || /[\r\n]/.test(value.detail)
+      || !COORDINATOR_FAILURE_CATEGORIES.has(value.coordinator_failure_category)
+      || !pathsEqual(value.project_root, identity.root)
+      || value.project_identity !== identity.project_identity
+      || !pathsEqual(value.runtime, identity.runtime)
+      || value.selected_instance_id !== identity.selected_instance_id
+      || value.selected_generation_id !== identity.selected_generation_id
+      || value.target_generation_id !== identity.target_generation_id
+      || value.runtime_contract_sha256 !== identity.runtime_contract_sha256
+      || value.generation_disposition !== identity.generation_disposition
+      || value.lifecycle_id !== identity.lifecycle_id
+      || value.supervisor_id !== identity.supervisor_id
+      || value.owner_epoch !== identity.owner_epoch
+      || value.supervisor_pid !== identity.supervisor_pid) {
+    throw new Error(`${label} identity or values are invalid.`);
+  }
+  return value;
 }
 
 function validateSupervisorState(context, state) {
@@ -2163,6 +2668,7 @@ function validateSupervisorState(context, state) {
       || state.selected_instance_id !== context.selectedInstance.instanceId
       || state.runtime_contract_sha256 !== context.runtimeContractSha256
       || (state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
+          && state.supervisor_protocol_version !== PREVIOUS_SUPERVISOR_PROTOCOL_VERSION
           && state.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
       || state.generation_disposition !== context.generationDisposition
       || state.lifecycle_id !== context.lifecycleId
@@ -2181,6 +2687,11 @@ function validateSupervisorState(context, state) {
   const ownerEvidence = validateSupervisorOwnerRecord(context, state, "Supervisor state");
   if (ownerEvidence.pid !== state.supervisor_pid)
     throw new Error("Supervisor state process evidence PID does not match the Supervisor PID.");
+  if (state.supervisor_protocol_version === SUPERVISOR_PROTOCOL_VERSION)
+    validateOperationalReadinessObservation(
+      state.operational_readiness,
+      state,
+      "Supervisor state operational readiness");
 }
 
 function pathsEqual(left, right) {
@@ -2258,9 +2769,14 @@ function sanitizeCoordinatorStatus(status) {
   };
 }
 
-function runChild(commandName, args, cwd, timeoutMs, onSpawn = null) {
+function runChild(commandName, args, cwd, timeoutMs, onSpawn = null, environment = null) {
   return new Promise((resolve) => {
-    const child = spawn(commandName, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(commandName, args, {
+      cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: environment ? { ...process.env, ...environment } : process.env
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -2275,7 +2791,7 @@ function runChild(commandName, args, cwd, timeoutMs, onSpawn = null) {
     const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* best effort */ } }, timeoutMs);
     child.once("error", (error) => {
       clearTimeout(timer);
-      finish({ code: 1, stdout, stderr: error.message, timedOut });
+      finish({ code: 1, stdout, stderr: error.message, timedOut, launchFailed: true, evidenceFailed: false });
     });
     let spawnEvidence = Promise.resolve();
     try {
@@ -2293,7 +2809,9 @@ function runChild(commandName, args, cwd, timeoutMs, onSpawn = null) {
         signal,
         stdout: stdout.trim(),
         stderr: [stderr.trim(), evidenceError].filter(Boolean).join("\n"),
-        timedOut
+        timedOut,
+        launchFailed: false,
+        evidenceFailed: Boolean(evidenceError)
       });
     });
   });
