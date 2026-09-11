@@ -1965,6 +1965,13 @@ namespace Rice.AI.Codedb.Editor
             string projectIdentity;
             if (!TryResolveProjectIdentity(projectRoot, out projectIdentity))
                 return false;
+            return HasVerifiedReadyForPublishedProjectIdentity(projectIdentity);
+        }
+
+        private static bool HasVerifiedReadyForPublishedProjectIdentity(string projectIdentity)
+        {
+            if (string.IsNullOrWhiteSpace(projectIdentity))
+                return false;
             var fingerprint = SessionState.GetString(
                 LastVerifiedReadyFingerprintKeyPrefix + projectIdentity,
                 string.Empty);
@@ -2160,6 +2167,45 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        /// <summary>
+        /// Selects an identity already published by lifecycle initialization
+        /// for display-only cache reads. It never derives or validates an
+        /// identity on the caller's thread.
+        /// </summary>
+        internal static bool TryGetPublishedProjectIdentityForDisplay(
+            string projectRoot,
+            string publishedProjectRoot,
+            string publishedProjectIdentity,
+            out string projectIdentity)
+        {
+            projectIdentity = string.Empty;
+            if (string.IsNullOrWhiteSpace(projectRoot)
+                || string.IsNullOrWhiteSpace(publishedProjectRoot)
+                || string.IsNullOrWhiteSpace(publishedProjectIdentity))
+            {
+                return false;
+            }
+
+            try
+            {
+                var requestedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
+                var availableRoot = AICodedbPaths.NormalizePath(publishedProjectRoot).TrimEnd('/', '\\');
+                if (string.IsNullOrWhiteSpace(requestedRoot)
+                    || string.IsNullOrWhiteSpace(availableRoot)
+                    || !string.Equals(requestedRoot, availableRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            projectIdentity = publishedProjectIdentity;
+            return true;
+        }
+
         internal static bool ShouldUsePersistedReadyStateDuringPlay(
             AICodedbProductState lastProductState,
             bool packageFingerprintMatches)
@@ -2241,9 +2287,26 @@ namespace Rice.AI.Codedb.Editor
             string projectRoot,
             out AICodedbProductState state)
         {
+            return TryGetPersistedProductState(
+                projectRoot,
+                _projectRoot,
+                _projectIdentity,
+                out state);
+        }
+
+        internal static bool TryGetPersistedProductState(
+            string projectRoot,
+            string publishedProjectRoot,
+            string publishedProjectIdentity,
+            out AICodedbProductState state)
+        {
             state = AICodedbProductState.Starting;
             string projectIdentity;
-            if (!TryResolveProjectIdentity(projectRoot, out projectIdentity))
+            if (!TryGetPublishedProjectIdentityForDisplay(
+                    projectRoot,
+                    publishedProjectRoot,
+                    publishedProjectIdentity,
+                    out projectIdentity))
                 return false;
 
             var value = SessionState.GetString(
@@ -2252,7 +2315,7 @@ namespace Rice.AI.Codedb.Editor
             if (Enum.TryParse(value, false, out state))
                 return true;
 
-            if (HasVerifiedReadyForCurrentPackage(projectRoot))
+            if (HasVerifiedReadyForPublishedProjectIdentity(projectIdentity))
             {
                 state = AICodedbProductState.Ready;
                 return true;

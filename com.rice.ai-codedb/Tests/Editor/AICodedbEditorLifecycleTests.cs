@@ -1785,13 +1785,91 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void PersistedProductState_ProvidesDisplayOnlyReadyHint()
         {
+            var publishedIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
             AICodedbEditorLifecycle.RecordVerifiedReadyForCurrentPackage(_projectRoot);
 
             AICodedbProductState state;
             Assert.That(
-                AICodedbEditorLifecycle.TryGetPersistedProductState(_projectRoot, out state),
+                AICodedbEditorLifecycle.TryGetPersistedProductState(
+                    _projectRoot,
+                    _projectRoot,
+                    publishedIdentity,
+                    out state),
                 Is.True);
             Assert.That(state, Is.EqualTo(AICodedbProductState.Ready));
+        }
+
+        [Test]
+        public void PersistedProductState_DisplayLookupRequiresPublishedMatchingIdentity()
+        {
+            var publishedIdentity = "sha256:" + new string('a', 64);
+            string selectedIdentity;
+            AICodedbProductState state;
+
+            Assert.That(
+                AICodedbEditorLifecycle.TryGetPersistedProductState(
+                    _projectRoot,
+                    _projectRoot,
+                    string.Empty,
+                    out state),
+                Is.False,
+                "Manager restoration must return a bounded miss until the worker publishes identity.");
+            Assert.That(state, Is.EqualTo(AICodedbProductState.Starting));
+
+            Assert.That(
+                AICodedbEditorLifecycle.TryGetPublishedProjectIdentityForDisplay(
+                    _projectRoot,
+                    _projectRoot,
+                    string.Empty,
+                    out selectedIdentity),
+                Is.False,
+                "Manager restoration must return a cache miss until the worker publishes identity.");
+            Assert.That(selectedIdentity, Is.Empty);
+
+            Assert.That(
+                AICodedbEditorLifecycle.TryGetPublishedProjectIdentityForDisplay(
+                    _projectRoot,
+                    Path.Combine(_projectRoot, "OtherProject"),
+                    publishedIdentity,
+                    out selectedIdentity),
+                Is.False,
+                "A published identity for another project must not be reused.");
+            Assert.That(selectedIdentity, Is.Empty);
+
+            Assert.That(
+                AICodedbEditorLifecycle.TryGetPublishedProjectIdentityForDisplay(
+                    _projectRoot + Path.DirectorySeparatorChar,
+                    _projectRoot,
+                    publishedIdentity,
+                    out selectedIdentity),
+                Is.True);
+            Assert.That(selectedIdentity, Is.EqualTo(publishedIdentity));
+        }
+
+        [Test]
+        public void PersistedProductState_SourceDoesNotDeriveIdentityForDisplayLookup()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbEditorLifecycle.cs"));
+            var start = source.IndexOf(
+                "internal static bool TryGetPersistedProductState(",
+                StringComparison.Ordinal);
+            var end = source.IndexOf(
+                "private static AICodedbCommandResult RememberHostStatusResult(",
+                start,
+                StringComparison.Ordinal);
+
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            Assert.That(end, Is.GreaterThan(start));
+            var body = source.Substring(start, end - start);
+            Assert.That(body, Does.Contain("state = AICodedbProductState.Starting"));
+            Assert.That(body, Does.Contain("TryGetPublishedProjectIdentityForDisplay("));
+            Assert.That(body, Does.Contain("HasVerifiedReadyForPublishedProjectIdentity(projectIdentity)"));
+            Assert.That(body, Does.Not.Contain("TryResolveProjectIdentity("));
+            Assert.That(body, Does.Not.Contain("CreateProjectIdentity"));
+            Assert.That(body, Does.Not.Contain("AICodedbLifecycleWorkKind.Hash"));
         }
 
         [TestCase("NODE_MISSING")]
