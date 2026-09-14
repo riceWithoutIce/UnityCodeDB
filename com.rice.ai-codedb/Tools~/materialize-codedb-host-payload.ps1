@@ -1594,7 +1594,7 @@ function Get-MaterializerMachinePrerequisiteStatus {
     $contractPath = [string]$Manifest.TargetMap[$contractTarget].SourcePath
     try {
         . $contractPath
-        return Get-CodedbMachinePrerequisiteStatus -PackageVersion $Manifest.PackageVersion
+        return Get-CodedbMachinePrerequisiteStatus
     } catch {
         return [pscustomobject]@{
             Current = $false
@@ -1604,7 +1604,7 @@ function Get-MaterializerMachinePrerequisiteStatus {
             NextAction = "Reinstall this CodeDB Package, then let Unity recheck automatically."
             NodePath = ""
             NodeVersion = ""
-            ProviderVersion = "0.5.0-28e3912"
+            ProviderVersion = "0.5.0-28e3912-c2"
             ProviderRoot = ""
             ProviderManifestPath = ""
             ProviderExecutablePath = ""

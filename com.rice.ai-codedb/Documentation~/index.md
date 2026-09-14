@@ -49,12 +49,13 @@ the Package launches its current wrapper from the project working directory and
 requires MCP initialize, the bounded tool list, usable `codedb_status`, and a
 bounded `codedb_text_search`.
 This Package-owned probe supports but does not replace the real new Codex
-Desktop task acceptance. The active v0.3 development snapshot advances the
-Package-owned immutable Host to `poc.34` and activates the byte-exact `28e3912`
-artifact under the versioned machine identity `0.5.0-28e3912`. The preserved
-`poc.31`/`poc.32` generations retain their historical Provider identity;
-`poc.33` is also retained byte-exact and is not rewritten in place. See the
-Provider contract for the identity boundary.
+Desktop task acceptance. The `0.3.0-preview.1` candidate advances the
+Package-owned immutable Host to `poc.35` and activates the byte-exact `28e3912`
+artifact under side-by-side schema-2 machine identity `0.5.0-28e3912-c2`.
+Provider admission binds protocol `codedb-cli-v1` and capability contract
+`codedb-search-tools-v1`, not Package semver. The preserved `poc.31` through
+`poc.34` generations and schema-1 Provider identities remain byte-exact. See
+the Provider contract for the identity boundary.
 The underlying design and stable acceptance decision are tracked in the
 [v0.2.3 roadmap](v0.2.3-roadmap.md). Live two-project concurrency and Elevated
 Unity with a NotElevated MCP client were explicitly deferred without being
@@ -92,11 +93,12 @@ an old `v0.2.x` artifact remain historical context only.
 - Windows Editor
 - Windows PowerShell 5.1
 - Node.js `22.x` or `24.x`
-- External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0`; the selected
-  baseline is commit `28e3912d5cd67ff3499734984f3e3d626a204796`, distributed
-  under `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912` for active
-  generation `poc.34`. The older `poc.31`/`poc.32` machine identity is not
-  rewritten or mixed with this directory.
+- External `killop/codedb-mcp` / `codebase-mcp` Provider `0.5.0`; active
+  generation `poc.35` uses commit
+  `28e3912d5cd67ff3499734984f3e3d626a204796` under
+  `%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912-c2`, with strict schema 2,
+  protocol `codedb-cli-v1`, and capability `codedb-search-tools-v1`. Historical
+  generations and `0.5.0-28e3912` remain separate and immutable.
 
 The package does not bundle or redistribute the external provider.
 
@@ -108,7 +110,7 @@ Add the published package tag to the Unity project's
 ```json
 {
   "dependencies": {
-    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5"
+    "com.rice.ai-codedb": "https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.3.0-preview.1"
   }
 }
 ```

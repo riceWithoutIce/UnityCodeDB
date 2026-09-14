@@ -23,6 +23,10 @@ $script:InstanceActivationRecordMaximumBytes = 64 * 1024
 $script:InstanceActivationOperationMaximumBytes = 1024 * 1024
 $script:InstanceRetirementIntentMaximumBytes = 128 * 1024
 $script:InstanceContractNamespaceRelativePath = "$($script:InstanceControlRelativePath)/contracts"
+$script:SupervisorOperationalReadinessEnvironmentVariable = "RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS"
+$script:SupervisorOperationalReadinessSchemaVersion = 1
+$script:SupervisorOperationalReadinessMaximumBytes = 32 * 1024
+$script:SupervisorOperationalReadinessMaximumAge = [TimeSpan]::FromMinutes(20)
 
 function Assert-InstanceJsonFieldAllowlist {
     param(
@@ -3711,6 +3715,138 @@ function Update-InstanceDesiredCleanupState {
     Publish-InstanceAtomicText -Path $path -Content (ConvertTo-InstanceJsonText -Value $document) -StageRoot $Lock.Root
 }
 
+function Get-ValidatedInstanceSupervisorOperationalReadiness {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$CurrentInstance
+    )
+
+    $json = [Environment]::GetEnvironmentVariable(
+        $script:SupervisorOperationalReadinessEnvironmentVariable,
+        [EnvironmentVariableTarget]::Process)
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        return [pscustomobject]@{
+            Present = $false
+            State = "starting"
+            ReasonCode = "SUPERVISOR_OBSERVATION_UNAVAILABLE"
+            Detail = "The authenticated Supervisor operational observation is not available yet."
+            Document = $null
+            Json = ""
+        }
+    }
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt $script:SupervisorOperationalReadinessMaximumBytes) {
+        throw "Supervisor operational readiness observation exceeds the bounded size."
+    }
+
+    $label = "Supervisor operational readiness observation"
+    $document = ConvertFrom-StrictJsonText -Text $json -Label $label
+    $null = Assert-JsonObject -Value $document -Label $label
+    Assert-InstanceJsonFieldAllowlist `
+        -Object $document `
+        -Fields @(
+            "schema_version",
+            "observation_id",
+            "revision",
+            "observed_at_utc",
+            "state",
+            "reason_code",
+            "detail",
+            "coordinator_failure_category",
+            "project_root",
+            "project_identity",
+            "runtime",
+            "selected_instance_id",
+            "selected_generation_id",
+            "target_generation_id",
+            "runtime_contract_sha256",
+            "generation_disposition",
+            "lifecycle_id",
+            "supervisor_id",
+            "owner_epoch",
+            "supervisor_pid"
+        ) `
+        -Label $label
+
+    $schemaVersion = Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label $label
+    $observationId = Get-RequiredJsonString -Object $document -Name "observation_id" -Label $label
+    $revision = Get-RequiredJsonInt64 -Object $document -Name "revision" -Label $label
+    $observedAtText = Assert-InstanceUtcTimestamp `
+        -Value (Get-RequiredJsonString -Object $document -Name "observed_at_utc" -Label $label) `
+        -Label "Supervisor operational readiness timestamp"
+    $state = Get-RequiredJsonString -Object $document -Name "state" -Label $label
+    $reasonCode = Get-RequiredJsonString -Object $document -Name "reason_code" -Label $label
+    $detail = Get-RequiredJsonString -Object $document -Name "detail" -Label $label
+    $failureCategory = Get-RequiredJsonString -Object $document -Name "coordinator_failure_category" -Label $label
+    $projectRootValue = Get-RequiredJsonString -Object $document -Name "project_root" -Label $label
+    $runtime = Get-RequiredJsonString -Object $document -Name "runtime" -Label $label
+    $controlContract = Assert-InstanceControlContractIdentity -ControlContract $Manifest.ControlContract
+    $contractPaths = Get-InstanceActivationContractPaths `
+        -ProjectRoot $ProjectRoot `
+        -ControlContract $controlContract `
+        -OperationId ([guid]::Empty.ToString("N"))
+    $reasonAllowlist = @{
+        core_ready = @("COORDINATOR_OPERATIONAL")
+        starting = @("COORDINATOR_STARTING")
+        degraded = @(
+            "COORDINATOR_COMPONENT_FAILED",
+            "COORDINATOR_START_FAILED",
+            "COORDINATOR_STATUS_UNAVAILABLE",
+            "SUPERVISOR_STATE_PUBLISH_FAILED"
+        )
+        stopping = @("SUPERVISOR_STOPPING")
+    }
+    $failureAllowlist = @(
+        "NOT_EVALUATED",
+        "NONE",
+        "LAUNCH_FAILED",
+        "NONZERO_EXIT",
+        "STARTUP_TIMEOUT",
+        "STATUS_UNAVAILABLE",
+        "UNKNOWN_FAILURE"
+    )
+    [DateTimeOffset]$observedAt = [DateTimeOffset]::Parse(
+        $observedAtText,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind)
+    $age = [DateTimeOffset]::UtcNow - $observedAt
+    if ($schemaVersion -ne $script:SupervisorOperationalReadinessSchemaVersion -or
+        $observationId -cnotmatch '^[0-9a-f]{32}$' -or
+        $revision -le 0 -or
+        $age -lt [TimeSpan]::FromMinutes(-1) -or
+        $age -gt $script:SupervisorOperationalReadinessMaximumAge -or
+        -not $reasonAllowlist.ContainsKey($state) -or
+        $reasonCode -cnotin $reasonAllowlist[$state] -or
+        [string]::IsNullOrWhiteSpace($detail) -or
+        $detail.Length -gt 256 -or
+        $detail -match '[\r\n]' -or
+        $failureCategory -cnotin $failureAllowlist -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath($projectRootValue), [System.IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "project_identity" -Label $label), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not [string]::Equals([System.IO.Path]::GetFullPath($runtime), [System.IO.Path]::GetFullPath($contractPaths.SupervisorRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "selected_instance_id" -Label $label), [string]$CurrentInstance.InstanceId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "selected_generation_id" -Label $label), [string]$CurrentInstance.Generation.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "target_generation_id" -Label $label), [string]$Manifest.TargetGenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "runtime_contract_sha256" -Label $label), [string]$Manifest.RuntimeContractSha256, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_disposition" -Label $label), [string]$CurrentInstance.GenerationDisposition, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonString -Object $document -Name "lifecycle_id" -Label $label) -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
+        (Get-RequiredJsonString -Object $document -Name "supervisor_id" -Label $label) -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        (Get-RequiredJsonString -Object $document -Name "owner_epoch" -Label $label) -cnotmatch '^[0-9a-f]{32}$' -or
+        (Get-RequiredJsonInt32 -Object $document -Name "supervisor_pid" -Label $label) -le 0 -or
+        ($state -ceq "core_ready" -and $failureCategory -cne "NONE")) {
+        throw "Supervisor operational readiness observation identity or values are invalid."
+    }
+
+    return [pscustomobject]@{
+        Present = $true
+        State = $state
+        ReasonCode = $reasonCode
+        Detail = $detail
+        Document = $document
+        Json = ($document | ConvertTo-Json -Depth 4 -Compress)
+    }
+}
+
 function Get-InstanceCurrentReadiness {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -3729,21 +3865,52 @@ function Get-InstanceCurrentReadiness {
     try {
         $configured = [bool](Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot).Current
         if (-not $configured) {
-            return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $false; McpAvailable = $false; Reason = "Project MCP registration is missing or stale." }
+            return [pscustomobject]@{
+                Ready = $false
+                Installed = $true
+                Configured = $false
+                McpAvailable = $false
+                RuntimeTransitional = $false
+                Reason = "Project MCP registration is missing or stale."
+                OperationalObservation = $null
+            }
         }
-        $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $CurrentInstance.InstanceRoot
-        if (-not (Test-InstanceCoordinatorOperational -Evidence $evidence -ProjectRoot $ProjectRoot)) {
-            return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $true; McpAvailable = $false; Reason = "Selected instance coordinator is not operational." }
+        $operational = Get-ValidatedInstanceSupervisorOperationalReadiness `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -CurrentInstance $CurrentInstance
+        if (-not $operational.Present) {
+            return [pscustomobject]@{
+                Ready = $false
+                Installed = $true
+                Configured = $true
+                McpAvailable = $false
+                RuntimeTransitional = $true
+                Reason = $operational.Detail
+                OperationalObservation = $null
+            }
         }
-        if ($LiveProbe) {
-            $probe = Invoke-InstanceCandidateProbe -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRelativePath $CurrentInstance.InstanceRelativePath
-            $null = Write-InstanceAvailabilityEvidence -ProjectRoot $ProjectRoot -InstanceRoot $CurrentInstance.InstanceRoot -InstanceId $CurrentInstance.InstanceId -Probe $probe
+        if ($operational.State -ceq "core_ready") {
+            return [pscustomobject]@{
+                Ready = $true
+                Installed = $true
+                Configured = $true
+                McpAvailable = $true
+                RuntimeTransitional = $false
+                Reason = $operational.Detail
+                OperationalObservation = $operational
+            }
         }
-        $availability = Get-ValidatedInstanceAvailabilityEvidence -ProjectRoot $ProjectRoot -Instance $CurrentInstance
-        if ($null -eq $availability) {
-            return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $true; McpAvailable = $false; Reason = "Selected instance has no validated MCP availability evidence." }
+        $transitional = $operational.State -cin @("starting", "stopping")
+        return [pscustomobject]@{
+            Ready = $false
+            Installed = $true
+            Configured = $true
+            McpAvailable = $false
+            RuntimeTransitional = $transitional
+            Reason = $operational.Detail
+            OperationalObservation = $operational
         }
-        return [pscustomobject]@{ Ready = $true; Installed = $true; Configured = $true; McpAvailable = $true; Reason = "Selected instance registration, coordinator, status, and bounded query are current." }
     } catch {
         $reason = $_.Exception.Message
         if (-not $configured) {
@@ -3763,10 +3930,20 @@ function Get-InstanceCurrentReadiness {
                 Installed = $true
                 Configured = $true
                 McpAvailable = $false
+                RuntimeTransitional = $false
                 Reason = "Selected instance availability could not be verified: $reason"
+                OperationalObservation = $null
             }
         }
-        return [pscustomobject]@{ Ready = $false; Installed = $true; Configured = $false; McpAvailable = $false; Reason = $reason }
+        return [pscustomobject]@{
+            Ready = $false
+            Installed = $true
+            Configured = $false
+            McpAvailable = $false
+            RuntimeTransitional = $false
+            Reason = $reason
+            OperationalObservation = $null
+        }
     }
 }
 
@@ -4263,14 +4440,24 @@ function Write-InstanceProductStatus {
     }
     if ($readiness.McpAvailable) {
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT"
+    } elseif ($readiness.RuntimeTransitional) {
+        Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] PENDING"
     } else {
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"
     }
     if ($readiness.Ready) {
         Write-Host "[PRODUCT_STATE] READY"
+    } elseif ($readiness.RuntimeTransitional) {
+        Write-Host "[PRODUCT_STATE] STARTING"
+        Write-Host "[DETAIL] $($readiness.Reason)"
     } else {
         Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
         Write-Host "[DETAIL] $($readiness.Reason)"
+    }
+    if ($null -ne $readiness.OperationalObservation) {
+        Write-Host "[SUPERVISOR_OPERATIONAL_READINESS] $($readiness.OperationalObservation.Json)"
+    } else {
+        Write-Host "[SUPERVISOR_OPERATIONAL_READINESS] UNAVAILABLE"
     }
     Write-Host "[INSTANCE] $($current.InstanceId)"
     $cleanupState = Get-VersionedInstanceRetirementCleanupState -ProjectRoot $ProjectRoot -Manifest $Manifest

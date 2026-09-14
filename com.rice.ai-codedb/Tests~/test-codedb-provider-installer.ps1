@@ -20,9 +20,11 @@ $fixtureRoot = Join-Path $tempRoot "fixture"
 $archiveSourceRoot = Join-Path $tempRoot "archive-source"
 $distributionPath = Join-Path $tempRoot "distribution.json"
 $developmentDistributionPath = Join-Path $tempRoot "distribution-development.json"
-$archivePath = Join-Path $tempRoot "codedb-provider-0.5.0-28e3912-windows-x64.zip"
-$signaturePath = Join-Path $tempRoot "codedb-provider-0.5.0-28e3912-windows-x64.zip.sig"
+$archivePath = Join-Path $tempRoot "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip"
+$signaturePath = Join-Path $tempRoot "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip.sig"
 $localAppDataRoot = Join-Path $fixtureRoot "LocalAppData"
+$historicalProviderRoot = Join-Path $localAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912"
+$historicalProviderSentinelPath = Join-Path $historicalProviderRoot "historical-schema-1-sentinel.txt"
 $projectSentinel = Join-Path $fixtureRoot "project-sentinel.txt"
 
 function Assert-True {
@@ -54,16 +56,15 @@ function New-ProviderManifest {
     )
 
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         provider_id = "killop/codedb-mcp"
-        version = "0.5.0-28e3912"
+        version = "0.5.0-28e3912-c2"
         commit = "28e3912d5cd67ff3499734984f3e3d626a204796"
         executable = "codebase-mcp.exe"
         sha256 = $ExecutableHash
         protocol = "codedb-cli-v1"
+        capability_contract = "codedb-search-tools-v1"
         source = "https://github.com/killop/codedb-mcp"
-        supported_package_min_inclusive = "0.2.5-preview.5"
-        supported_package_max_exclusive = "0.2.6"
     }
     $path = Join-Path $Root "provider-manifest.json"
     Write-Utf8NoBom -Path $path -Text (($manifest | ConvertTo-Json -Compress))
@@ -79,20 +80,19 @@ function New-DistributionManifest {
     )
 
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         managed_by = "com.rice.ai-codedb"
         distribution_state = "READY"
         provider_id = "killop/codedb-mcp"
-        version = "0.5.0-28e3912"
+        version = "0.5.0-28e3912-c2"
         commit = "28e3912d5cd67ff3499734984f3e3d626a204796"
         protocol = "codedb-cli-v1"
+        capability_contract = "codedb-search-tools-v1"
         source = "https://github.com/killop/codedb-mcp"
-        supported_package_min_inclusive = "0.2.5-preview.5"
-        supported_package_max_exclusive = "0.2.6"
         release_base_url = ""
-        archive_name = "codedb-provider-0.5.0-28e3912-windows-x64.zip"
+        archive_name = "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip"
         archive_sha256 = $ArchiveHash
-        signature_name = "codedb-provider-0.5.0-28e3912-windows-x64.zip.sig"
+        signature_name = "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip.sig"
         signature_encoding = "base64"
         signature_sha256 = $SignatureHash
         signature_algorithm = "RSA-SHA256"
@@ -110,16 +110,15 @@ function New-DevelopmentDistributionManifest {
     )
 
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         managed_by = "com.rice.ai-codedb"
         distribution_state = "DEVELOPMENT_UPSTREAM"
         provider_id = "killop/codedb-mcp"
-        version = "0.5.0-28e3912"
+        version = "0.5.0-28e3912-c2"
         commit = "28e3912d5cd67ff3499734984f3e3d626a204796"
         protocol = "codedb-cli-v1"
+        capability_contract = "codedb-search-tools-v1"
         source = "https://github.com/killop/codedb-mcp"
-        supported_package_min_inclusive = "0.2.5-preview.5"
-        supported_package_max_exclusive = "0.2.6"
         release_base_url = ""
         archive_name = "codebase-mcp.exe"
         archive_sha256 = $ExecutableHash
@@ -143,7 +142,7 @@ function Invoke-Installer {
     )
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
-        '-PackageVersion', '0.2.5-preview.5', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
         '-LocalAppDataRoot', $localAppDataRoot,
         '-TestArchivePath', $archivePath,
         '-TestSignaturePath', $signaturePath
@@ -168,7 +167,7 @@ function Invoke-Installer {
 function Invoke-ProductionTestModeAttempt {
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $originalInstallerPath,
-        '-PackageVersion', '0.2.5-preview.5', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
         '-LocalAppDataRoot', $localAppDataRoot,
         '-TestArchivePath', $archivePath,
         '-TestSignaturePath', $signaturePath,
@@ -187,7 +186,7 @@ function Invoke-DevelopmentInstaller {
 
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
-        '-PackageVersion', '0.2.5-preview.5', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
         '-LocalAppDataRoot', $LocalAppDataPath,
         '-TestArchivePath', $ArtifactPath,
         '-TestDistributionManifestPath', $DistributionPath
@@ -209,9 +208,12 @@ try {
     [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory($testToolsRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory($testContractRoot) | Out-Null
+    [System.IO.Directory]::CreateDirectory($historicalProviderRoot) | Out-Null
     Copy-Item -LiteralPath $originalInstallerPath -Destination $installerPath
     Copy-Item -LiteralPath $providerContractPath -Destination (Join-Path $testContractRoot "codedb-machine-provider-contract.ps1")
     Write-Utf8NoBom -Path $projectSentinel -Text "project bytes must remain unchanged"
+    Write-Utf8NoBom -Path $historicalProviderSentinelPath -Text "immutable historical schema-1 Provider"
+    $historicalProviderSentinelHash = Get-Hash $historicalProviderSentinelPath
 
     $executablePath = Join-Path $archiveSourceRoot "codebase-mcp.exe"
     Write-Utf8NoBom -Path $executablePath -Text "fixed Provider fixture bytes"
@@ -250,7 +252,7 @@ try {
         -Condition ((($script:LastInstallerOutput | ForEach-Object { [string]$_ }) -join "`n") -match "PROVIDER_DOWNLOAD_TIMEOUT") `
         -Message "Provider download timeout did not report its bounded failure reason."
     Assert-True `
-        -Condition (-not (Test-Path -LiteralPath (Join-Path $localAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912"))) `
+        -Condition (-not (Test-Path -LiteralPath (Join-Path $localAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2"))) `
         -Message "Provider download timeout created an installation."
     Assert-Equal -Actual (Get-Content -LiteralPath $projectSentinel -Raw) -Expected "project bytes must remain unchanged" -Label "Download timeout project sentinel"
 
@@ -261,7 +263,7 @@ try {
         -DistributionPath $developmentDistributionPath `
         -LocalAppDataPath $developmentLocalAppDataRoot
     Assert-Equal -Actual $developmentExit -Expected 0 -Label "Development Provider installation exit code"
-    $developmentInstalledRoot = Join-Path $developmentLocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912"
+    $developmentInstalledRoot = Join-Path $developmentLocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2"
     Assert-Equal `
         -Actual (Get-Hash (Join-Path $developmentInstalledRoot "codebase-mcp.exe")) `
         -Expected (Get-Hash $executablePath) `
@@ -273,7 +275,10 @@ try {
             -Message "Development Provider installer did not report stage $stage."
     }
     $developmentManifest = Get-Content -LiteralPath (Join-Path $developmentInstalledRoot "provider-manifest.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $developmentManifest.schema_version -Expected 2 -Label "Development Provider schema"
+    Assert-Equal -Actual $developmentManifest.version -Expected "0.5.0-28e3912-c2" -Label "Development Provider distribution"
     Assert-Equal -Actual $developmentManifest.commit -Expected "28e3912d5cd67ff3499734984f3e3d626a204796" -Label "Development Provider commit"
+    Assert-Equal -Actual $developmentManifest.capability_contract -Expected "codedb-search-tools-v1" -Label "Development Provider capability"
     Assert-Equal -Actual $developmentManifest.sha256 -Expected (Get-Hash $executablePath) -Label "Development Provider manifest hash"
     Assert-Equal -Actual (Get-Content -LiteralPath $projectSentinel -Raw) -Expected "project bytes must remain unchanged" -Label "Development project sentinel"
     $developmentRepeatExit = Invoke-DevelopmentInstaller `
@@ -291,7 +296,7 @@ try {
         -LocalAppDataPath $developmentWrongHashRoot
     Assert-Equal -Actual $developmentWrongHashExit -Expected 4 -Label "Development Provider wrong hash exit code"
     Assert-True `
-        -Condition (-not (Test-Path -LiteralPath (Join-Path $developmentWrongHashRoot "Rice\CodeDB\providers\0.5.0-28e3912"))) `
+        -Condition (-not (Test-Path -LiteralPath (Join-Path $developmentWrongHashRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2"))) `
         -Message "Development Provider wrong hash created an installation."
 
     if (-not [string]::IsNullOrWhiteSpace($RealArtifactPath)) {
@@ -308,7 +313,7 @@ try {
             -LocalAppDataPath $realArtifactLocalAppDataRoot
         Assert-Equal -Actual $realArtifactExit -Expected 0 -Label "Real fixed Provider artifact installation exit code"
         Assert-Equal `
-            -Actual (Get-Hash (Join-Path $realArtifactLocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912\codebase-mcp.exe")) `
+            -Actual (Get-Hash (Join-Path $realArtifactLocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2\codebase-mcp.exe")) `
             -Expected "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7" `
             -Label "Installed real fixed Provider artifact hash"
     }
@@ -318,12 +323,42 @@ try {
     Assert-True `
         -Condition ((($script:LastInstallerOutput | ForEach-Object { [string]$_ }) -join "`n") -match "TEMPORARY_CLEANUP_DEFERRED") `
         -Message "Committed Provider cleanup warning was not reported."
-    $installedRoot = Join-Path $localAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912"
+    $installedRoot = Join-Path $localAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2"
     Assert-True -Condition (Test-Path -LiteralPath (Join-Path $installedRoot "codebase-mcp.exe") -PathType Leaf) -Message "Verified Provider executable was not installed."
     $installedExecutableHash = Get-Hash (Join-Path $installedRoot "codebase-mcp.exe")
     $installedManifestHash = Get-Hash (Join-Path $installedRoot "provider-manifest.json")
     $installedExecutablePath = Join-Path $installedRoot "codebase-mcp.exe"
     $installedExecutableBytes = [System.IO.File]::ReadAllBytes($installedExecutablePath)
+    Assert-Equal -Actual (Get-Hash $historicalProviderSentinelPath) -Expected $historicalProviderSentinelHash -Label "Historical schema-1 Provider after side-by-side install"
+
+    $strictDistributionCases = @(
+        [pscustomobject]@{ Label = "Schema"; Name = "schema_version"; Value = 1 },
+        [pscustomobject]@{ Label = "Artifact"; Name = "version"; Value = "0.5.0-28e3912" },
+        [pscustomobject]@{ Label = "Commit"; Name = "commit"; Value = ("0" * 40) },
+        [pscustomobject]@{ Label = "Source"; Name = "source"; Value = "https://example.invalid/provider" },
+        [pscustomobject]@{ Label = "Protocol"; Name = "protocol"; Value = "codedb-cli-v2" },
+        [pscustomobject]@{ Label = "Capability"; Name = "capability_contract"; Value = "codedb-search-tools-v2" },
+        [pscustomobject]@{ Label = "Hash"; Name = "executable_sha256"; Value = ("0" * 64) }
+    )
+    foreach ($strictCase in $strictDistributionCases) {
+        $invalidDistribution = Get-Content -LiteralPath $distributionPath -Raw | ConvertFrom-Json
+        $invalidDistribution.($strictCase.Name) = $strictCase.Value
+        $invalidDistributionPath = Join-Path $tempRoot ("distribution-invalid-{0}.json" -f $strictCase.Label.ToLowerInvariant())
+        Write-Utf8NoBom -Path $invalidDistributionPath -Text (($invalidDistribution | ConvertTo-Json -Compress))
+        $invalidDistributionExit = Invoke-Installer -DistributionOverride $invalidDistributionPath
+        Assert-Equal -Actual $invalidDistributionExit -Expected 4 -Label "$($strictCase.Label) distribution rejection exit code"
+        Assert-Equal -Actual (Get-Hash (Join-Path $installedRoot "provider-manifest.json")) -Expected $installedManifestHash -Label "$($strictCase.Label) rejection installed manifest"
+        Assert-Equal -Actual (Get-Hash $historicalProviderSentinelPath) -Expected $historicalProviderSentinelHash -Label "$($strictCase.Label) rejection historical Provider"
+    }
+
+    $packageCoupledDistribution = Get-Content -LiteralPath $distributionPath -Raw | ConvertFrom-Json
+    $packageCoupledDistribution | Add-Member -NotePropertyName "supported_package_min_inclusive" -NotePropertyValue "0.3.0-preview.1"
+    $packageCoupledDistributionPath = Join-Path $tempRoot "distribution-invalid-package-coupling.json"
+    Write-Utf8NoBom -Path $packageCoupledDistributionPath -Text (($packageCoupledDistribution | ConvertTo-Json -Compress))
+    $packageCoupledDistributionExit = Invoke-Installer -DistributionOverride $packageCoupledDistributionPath
+    Assert-Equal -Actual $packageCoupledDistributionExit -Expected 4 -Label "Package-coupled schema-2 distribution rejection exit code"
+    Assert-Equal -Actual (Get-Hash (Join-Path $installedRoot "provider-manifest.json")) -Expected $installedManifestHash -Label "Package-coupled rejection installed manifest"
+    Assert-Equal -Actual (Get-Hash $historicalProviderSentinelPath) -Expected $historicalProviderSentinelHash -Label "Package-coupled rejection historical Provider"
 
     $unexpectedEntryPath = Join-Path $installedRoot "unexpected-provider-file.txt"
     Write-Utf8NoBom -Path $unexpectedEntryPath -Text "unexpected Provider bytes"
@@ -340,7 +375,7 @@ try {
     [System.IO.File]::WriteAllBytes($installedExecutablePath, $installedExecutableBytes)
 
     $duplicateDistributionPath = Join-Path $tempRoot "distribution-duplicate.json"
-    Write-Utf8NoBom -Path $duplicateDistributionPath -Text '{"schema_version":1,"schema_version":1}'
+    Write-Utf8NoBom -Path $duplicateDistributionPath -Text '{"schema_version":2,"schema_version":2}'
     $duplicateExit = Invoke-Installer -DistributionOverride $duplicateDistributionPath
     Assert-Equal -Actual $duplicateExit -Expected 4 -Label "Duplicate distribution manifest exit code"
     Assert-Equal -Actual (Get-Hash (Join-Path $installedRoot "codebase-mcp.exe")) -Expected $installedExecutableHash -Label "Duplicate manifest executable bytes"
@@ -362,12 +397,13 @@ try {
     Assert-Equal -Actual (Get-Hash (Join-Path $installedRoot "provider-manifest.json")) -Expected $installedManifestHash -Label "Rollback manifest bytes"
 
     $providersRoot = Split-Path -Parent $installedRoot
-    $interruptedBackup = Join-Path $providersRoot ".0.5.0-28e3912.backup-interrupted"
+    $interruptedBackup = Join-Path $providersRoot ".0.5.0-28e3912-c2.backup-interrupted"
     Move-Item -LiteralPath $installedRoot -Destination $interruptedBackup
     $recoveryExit = Invoke-Installer
     Assert-Equal -Actual $recoveryExit -Expected 0 -Label "Interrupted Provider backup recovery exit code"
     Assert-True -Condition (Test-Path -LiteralPath $installedRoot -PathType Container) -Message "Interrupted Provider backup was not recovered."
     Assert-Equal -Actual (Get-Hash (Join-Path $installedRoot "codebase-mcp.exe")) -Expected $installedExecutableHash -Label "Recovered executable bytes"
+    Assert-Equal -Actual (Get-Hash $historicalProviderSentinelPath) -Expected $historicalProviderSentinelHash -Label "Historical schema-1 Provider final bytes"
     Assert-Equal -Actual (Get-Content -LiteralPath $projectSentinel -Raw) -Expected "project bytes must remain unchanged" -Label "Project sentinel"
 
     Write-Host "[OK] Provider installer focused regression passed."

@@ -51,7 +51,8 @@ $projectRoot = if ($isEmbeddedLayout) {
     [System.IO.Path]::GetFullPath((Join-Path $packageRoot ".."))
 }
 $materializerPath = Join-Path $packageRoot "Tools~\materialize-codedb-host-payload.ps1"
-$canonicalPayloadRoot = Join-Path $packageRoot "Payload~"
+$packagePayloadRoot = Join-Path $packageRoot "Payload~"
+$canonicalPayloadRoot = $packagePayloadRoot
 $pocRoot = Join-Path $projectRoot "AIWork\.runtime\codedb\materializer-poc"
 $runRoot = Join-Path $pocRoot ([guid]::NewGuid().ToString("N"))
 $hostRoot = Join-Path $runRoot "fixture"
@@ -67,7 +68,7 @@ $powershellPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.34"
+$generationId = "poc.35"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -1339,21 +1340,20 @@ public static class CodedbMaterializerFixtureProvider
 function New-FixtureMachineProvider {
     param([Parameter(Mandatory = $true)][string]$LocalAppDataRoot)
 
-    $providerRoot = Join-Path $LocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912"
+    $providerRoot = Join-Path $LocalAppDataRoot "Rice\CodeDB\providers\0.5.0-28e3912-c2"
     $providerExecutable = Join-Path $providerRoot "codebase-mcp.exe"
     $providerManifest = Join-Path $providerRoot "provider-manifest.json"
     New-FixtureProviderExecutable -Path $providerExecutable
     $document = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         provider_id = "killop/codedb-mcp"
-        version = "0.5.0-28e3912"
+        version = "0.5.0-28e3912-c2"
         commit = "28e3912d5cd67ff3499734984f3e3d626a204796"
         executable = "codebase-mcp.exe"
         sha256 = (Get-FileHash -LiteralPath $providerExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
         protocol = "codedb-cli-v1"
+        capability_contract = "codedb-search-tools-v1"
         source = "https://github.com/killop/codedb-mcp"
-        supported_package_min_inclusive = "0.2.5-preview.5"
-        supported_package_max_exclusive = "0.2.6"
     }
     Write-Utf8File -Path $providerManifest -Content (($document | ConvertTo-Json -Depth 4) + "`n")
     return [pscustomobject]@{
@@ -1361,6 +1361,107 @@ function New-FixtureMachineProvider {
         ExecutablePath = $providerExecutable
         ManifestPath = $providerManifest
     }
+}
+
+function New-FixtureCanonicalPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$ProviderSha256
+    )
+
+    if (Test-Path -LiteralPath $Root) {
+        Remove-Item -LiteralPath $Root -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    Get-ChildItem -LiteralPath $packagePayloadRoot -Force | Copy-Item -Destination $Root -Recurse -Force
+
+    $frozenProviderSha256 = "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7"
+    $providerIdentityPaths = @(
+        "AIWork\codedb\shared\codedb-machine-provider-contract.ps1",
+        "Generations\$generationId\shared\codedb-machine-provider-contract.ps1",
+        "Generations\$generationId\wrapper\codedb-project-instance-worker.mjs"
+    )
+    foreach ($relativePath in $providerIdentityPaths) {
+        $path = Join-Path $Root $relativePath
+        $text = [System.IO.File]::ReadAllText($path)
+        Assert-Equal `
+            -Actual ([regex]::Matches($text, [regex]::Escape($frozenProviderSha256)).Count) `
+            -Expected 1 `
+            -Message "Fixture Provider hash marker count mismatch for $relativePath."
+        Write-Utf8File -Path $path -Content ($text.Replace($frozenProviderSha256, $ProviderSha256))
+    }
+
+    $generationRoot = Join-Path $Root "Generations\$generationId"
+    $generationManifestPath = Join-Path $generationRoot "generation-manifest.json"
+    $generationManifest = Get-Content -LiteralPath $generationManifestPath -Raw | ConvertFrom-Json
+    foreach ($relativePath in @(
+        "shared/codedb-machine-provider-contract.ps1",
+        "wrapper/codedb-project-instance-worker.mjs"
+    )) {
+        $entries = @($generationManifest.files | Where-Object {
+            [string]::Equals([string]$_.path, $relativePath, [StringComparison]::Ordinal)
+        })
+        Assert-Equal -Actual $entries.Count -Expected 1 -Message "Fixture generation entry count mismatch for $relativePath."
+        $entries[0].sha256 = (Get-FileHash -LiteralPath (Join-Path $generationRoot $relativePath.Replace('/', '\')) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    Write-Utf8File -Path $generationManifestPath -Content (($generationManifest | ConvertTo-Json -Depth 8) + "`n")
+
+    $manifestPath = Join-Path $Root "payload-manifest.json"
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    foreach ($target in @(
+        "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
+        "${generationTargetPrefix}shared/codedb-machine-provider-contract.ps1",
+        "${generationTargetPrefix}wrapper/codedb-project-instance-worker.mjs",
+        "${generationTargetPrefix}generation-manifest.json"
+    )) {
+        $entries = @($manifest.files | Where-Object {
+            [string]::Equals([string]$_.target, $target, [StringComparison]::Ordinal)
+        })
+        Assert-Equal -Actual $entries.Count -Expected 1 -Message "Fixture payload entry count mismatch for $target."
+        $sourcePath = Get-PathFromRelative -Root $Root -RelativePath ([string]$entries[0].source)
+        $entries[0].sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    $pointerEntries = @($manifest.files | Where-Object {
+        [string]::Equals([string]$_.target, $currentPointerRelativePath, [StringComparison]::Ordinal)
+    })
+    Assert-Equal -Actual $pointerEntries.Count -Expected 1 -Message "Fixture current-pointer entry count mismatch."
+    $currentPointerPath = Get-PathFromRelative -Root $Root -RelativePath ([string]$pointerEntries[0].source)
+    $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
+    $currentPointer.generation_manifest_sha256 = (Get-FileHash -LiteralPath $generationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Utf8File -Path $currentPointerPath -Content (($currentPointer | ConvertTo-Json -Depth 8) + "`n")
+    $pointerEntries[0].sha256 = (Get-FileHash -LiteralPath $currentPointerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Utf8File -Path $manifestPath -Content (($manifest | ConvertTo-Json -Depth 8) + "`n")
+    return $Root
+}
+
+function Set-TestCanonicalPayloadRoot {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $script:canonicalPayloadRoot = $Root
+    $script:canonicalPayloadManifestPath = Join-Path $Root "payload-manifest.json"
+    $script:canonicalPayloadManifest = Get-Content -LiteralPath $script:canonicalPayloadManifestPath -Raw | ConvertFrom-Json
+    $script:canonicalPayloadContentSha256 = Get-TestPayloadContentIdentitySha256 `
+        -Manifest $script:canonicalPayloadManifest `
+        -CurrentPointerTarget $currentPointerRelativePath `
+        -GenerationTargetPrefix $generationTargetPrefix
+    $script:canonicalManagedEntries = @($script:canonicalPayloadManifest.files | ForEach-Object {
+        [pscustomobject]@{ Source = [string]$_.source; Target = [string]$_.target }
+    } | Sort-Object Target)
+    $script:canonicalSourceByTarget = @{}
+    foreach ($entry in $script:canonicalManagedEntries) {
+        $script:canonicalSourceByTarget[$entry.Target] = $entry.Source
+    }
+    $script:legacyManagedTargets = @($script:canonicalManagedEntries | Where-Object {
+        $_.Target.StartsWith("AIWork/codedb/", [StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object { $_.Target })
+    $script:generationManagedTargets = @($script:canonicalManagedEntries | Where-Object {
+        $_.Target.StartsWith($generationTargetPrefix, [StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object { $_.Target })
+    $script:pointerManagedTargets = @($script:canonicalManagedEntries | Where-Object {
+        [string]::Equals($_.Target, $currentPointerRelativePath, [StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object { $_.Target })
+    $script:managedTargets = @($script:canonicalManagedEntries | ForEach-Object { $_.Target })
 }
 
 function ConvertTo-TestProjectSlug {
@@ -4830,16 +4931,16 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Newer current Remove-boundary setup"
     $newerCurrent = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.35-review" `
-        -PriorPayloadSequence 35 `
-        -PriorPackageVersion "0.2.5-preview.6" `
+        -PriorGenerationId "poc.36-review" `
+        -PriorPayloadSequence 36 `
+        -PriorPackageVersion "0.3.0-preview.2" `
         -Root $repairHostRoot `
         -PreserveManagedState `
         -SkipMarker
     $newerCurrentBefore = Get-FileSnapshot -Root $repairHostRoot
     $newerCurrentRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $newerCurrentRemove -ExitCode 3 -Label "Newer current.json Remove refusal"
-    Assert-True -Condition ($newerCurrentRemove.Text.Contains("current.json selects newer generation poc.35-review")) -Message "Remove did not report the newer current.json boundary."
+    Assert-True -Condition ($newerCurrentRemove.Text.Contains("current.json selects newer generation poc.36-review")) -Message "Remove did not report the newer current.json boundary."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerCurrentBefore -Message "Older Remove changed a newer current generation or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $newerCurrent.GenerationRoot -PathType Container) -Message "Older Remove deleted the newer current generation."
 
@@ -4849,9 +4950,9 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Newer LKG Remove-boundary setup"
     $newerLkg = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.35-review" `
-        -PriorPayloadSequence 35 `
-        -PriorPackageVersion "0.2.5-preview.6" `
+        -PriorGenerationId "poc.36-review" `
+        -PriorPayloadSequence 36 `
+        -PriorPackageVersion "0.3.0-preview.2" `
         -Root $repairHostRoot `
         -PointerRelativePath $lastKnownGoodPointerRelativePath `
         -PreserveManagedState `
@@ -4859,7 +4960,7 @@ function Invoke-RepairAcceptanceScenarios {
     $newerLkgBefore = Get-FileSnapshot -Root $repairHostRoot
     $newerLkgRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $newerLkgRemove -ExitCode 3 -Label "Newer last-known-good Remove refusal"
-    Assert-True -Condition ($newerLkgRemove.Text.Contains("last-known-good.json selects newer generation poc.35-review")) -Message "Remove did not report the newer last-known-good boundary."
+    Assert-True -Condition ($newerLkgRemove.Text.Contains("last-known-good.json selects newer generation poc.36-review")) -Message "Remove did not report the newer last-known-good boundary."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerLkgBefore -Message "Older Remove changed a newer rollback generation or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $newerLkg.GenerationRoot -PathType Container) -Message "Older Remove deleted the newer rollback generation."
 
@@ -4869,16 +4970,16 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "Current identity-collision Remove-boundary setup"
     $collidingCurrent = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.34-collision" `
-        -PriorPayloadSequence 34 `
-        -PriorPackageVersion "0.2.5-preview.5-collision" `
+        -PriorGenerationId "poc.35-collision" `
+        -PriorPayloadSequence 35 `
+        -PriorPackageVersion "0.3.0-preview.1-collision" `
         -Root $repairHostRoot `
         -PreserveManagedState `
         -SkipMarker
     $collidingCurrentBefore = Get-FileSnapshot -Root $repairHostRoot
     $collidingCurrentRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $collidingCurrentRemove -ExitCode 3 -Label "Current identity-collision Remove refusal"
-    Assert-True -Condition ($collidingCurrentRemove.Text.Contains("SequenceCollision: current.json selects a different generation identity at sequence 34")) -Message "Remove did not report the current.json identity collision."
+    Assert-True -Condition ($collidingCurrentRemove.Text.Contains("SequenceCollision: current.json selects a different generation identity at sequence 35")) -Message "Remove did not report the current.json identity collision."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $collidingCurrentBefore -Message "Remove changed a same-sequence current identity collision or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $collidingCurrent.GenerationRoot -PathType Container) -Message "Remove deleted the same-sequence current identity collision."
 
@@ -4888,9 +4989,9 @@ function Invoke-RepairAcceptanceScenarios {
         -ExitCode 0 `
         -Label "LKG identity-collision Remove-boundary setup"
     $collidingLkg = Install-PriorGenerationFixture `
-        -PriorGenerationId "poc.34-collision" `
-        -PriorPayloadSequence 34 `
-        -PriorPackageVersion "0.2.5-preview.5-collision" `
+        -PriorGenerationId "poc.35-collision" `
+        -PriorPayloadSequence 35 `
+        -PriorPackageVersion "0.3.0-preview.1-collision" `
         -Root $repairHostRoot `
         -PointerRelativePath $lastKnownGoodPointerRelativePath `
         -PreserveManagedState `
@@ -4898,16 +4999,16 @@ function Invoke-RepairAcceptanceScenarios {
     $collidingLkgBefore = Get-FileSnapshot -Root $repairHostRoot
     $collidingLkgRemove = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
     Assert-Result -Result $collidingLkgRemove -ExitCode 3 -Label "LKG identity-collision Remove refusal"
-    Assert-True -Condition ($collidingLkgRemove.Text.Contains("SequenceCollision: last-known-good.json selects a different generation identity at sequence 34")) -Message "Remove did not report the last-known-good identity collision."
+    Assert-True -Condition ($collidingLkgRemove.Text.Contains("SequenceCollision: last-known-good.json selects a different generation identity at sequence 35")) -Message "Remove did not report the last-known-good identity collision."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $collidingLkgBefore -Message "Remove changed a same-sequence rollback identity collision or another project byte."
     Assert-True -Condition (Test-Path -LiteralPath $collidingLkg.GenerationRoot -PathType Container) -Message "Remove deleted the same-sequence rollback identity collision."
     Write-Host "[OK] Marker, current.json, and last-known-good.json enforce independent Remove version and identity upper bounds."
 
     $newerRemovalPayloadRoot = New-CanonicalIdentityPayload `
         -Root (Join-Path $syntheticRoot "remove-newer") `
-        -PackageVersion "0.2.5-preview.6" `
-        -PayloadVersion "poc.35-review" `
-        -PayloadSequence 35
+        -PackageVersion "0.3.0-preview.2" `
+        -PayloadVersion "poc.36-review" `
+        -PayloadSequence 36
     Reset-RepairFixture
     Assert-Result `
         -Result (Invoke-Materializer -Action "Sync" -PayloadRoot $newerRemovalPayloadRoot -TargetProjectRoot $repairHostRoot) `
@@ -4927,7 +5028,7 @@ function Invoke-RepairAcceptanceScenarios {
     $newerJournalPath = Join-Path $newerRemovalTransactions[0].FullName "transaction.json"
     $newerJournal = Get-Content -LiteralPath $newerJournalPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $newerJournal.schema_version -Expected 2 -Message "Newer Remove journal did not record schema 2 provenance."
-    Assert-Equal -Actual $newerJournal.payload_sequence -Expected 35 -Message "Newer Remove journal payload sequence mismatch."
+    Assert-Equal -Actual $newerJournal.payload_sequence -Expected 36 -Message "Newer Remove journal payload sequence mismatch."
     Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $repairHostRoot -RelativePath $markerRelativePath))) -Message "Newer Remove crash occurred before marker deletion."
     $newerJournalBefore = Get-FileSnapshot -Root $repairHostRoot
     $olderAgainstNewerJournal = Invoke-Materializer -Action "Remove" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $repairHostRoot
@@ -4935,9 +5036,9 @@ function Invoke-RepairAcceptanceScenarios {
     Assert-True -Condition ($olderAgainstNewerJournal.Text.Contains("pending transaction $($newerRemovalTransactions[0].Name) belongs to newer generation")) -Message "Older Remove did not report the newer pending journal identity."
     Assert-Equal -Actual (Get-FileSnapshot -Root $repairHostRoot) -Expected $newerJournalBefore -Message "Older Remove changed bytes or control state before rejecting a newer journal."
 
-    $newerJournal.package_version = "0.2.5-preview.5-collision"
-    $newerJournal.payload_version = "poc.34-collision"
-    $newerJournal.payload_sequence = 34
+    $newerJournal.package_version = "0.3.0-preview.1-collision"
+    $newerJournal.payload_version = "poc.35-collision"
+    $newerJournal.payload_sequence = 35
     $newerJournal.payload_content_sha256 = "1" * 64
     Write-Utf8File -Path $newerJournalPath -Content (($newerJournal | ConvertTo-Json -Depth 8) + "`n")
     $collisionJournalBefore = Get-FileSnapshot -Root $repairHostRoot
@@ -4988,9 +5089,9 @@ function Invoke-RepairAcceptanceScenarios {
             -ContinueEventName $continueEventName
         Assert-True -Condition $readyEvent.WaitOne(10000) -Message "Remove lock-race fixture did not acquire its lock."
         $newerRacePointer = Install-PriorGenerationFixture `
-            -PriorGenerationId "poc.35-lock-race" `
-            -PriorPayloadSequence 35 `
-            -PriorPackageVersion "0.2.5-preview.6" `
+            -PriorGenerationId "poc.36-lock-race" `
+            -PriorPayloadSequence 36 `
+            -PriorPackageVersion "0.3.0-preview.2" `
             -Root $repairHostRoot `
             -PreserveManagedState `
             -SkipMarker
@@ -4999,7 +5100,7 @@ function Invoke-RepairAcceptanceScenarios {
         $lockRaceRemove = Complete-MaterializerInvocation -Invocation $lockRaceInvocation
         $lockRaceInvocation = $null
         Assert-Result -Result $lockRaceRemove -ExitCode 3 -Label "Remove lock-race newer pointer refusal"
-        Assert-True -Condition ($lockRaceRemove.Text.Contains("current.json selects newer generation poc.35-lock-race")) -Message "Lock-race Remove did not report the concurrently inserted newer pointer."
+        Assert-True -Condition ($lockRaceRemove.Text.Contains("current.json selects newer generation poc.36-lock-race")) -Message "Lock-race Remove did not report the concurrently inserted newer pointer."
         Assert-Equal `
             -Actual (Get-FileSnapshotExcept -Root $repairHostRoot -ExcludedRelativePaths @($lockRelativePath)) `
             -Expected $lockRaceBefore `
@@ -6167,7 +6268,7 @@ function New-SyntheticPayload {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$PayloadVersion,
         [Parameter(Mandatory = $true)]$Entries,
-        [string]$PackageVersion = "0.2.5-preview.5",
+        [string]$PackageVersion = "0.3.0-preview.1",
         [int]$PayloadSequence = 0
     )
 
@@ -7722,7 +7823,7 @@ function Invoke-PortabilityAcceptanceScenarios {
 
     $layoutRoot = Join-Path $runRoot "package-layouts"
     $layouts = @(
-        [pscustomobject]@{ Name = "cached"; PackageRoot = Join-Path $layoutRoot "cached\Library\PackageCache\com.rice.ai-codedb@0.2.5-preview.5" },
+        [pscustomobject]@{ Name = "cached"; PackageRoot = Join-Path $layoutRoot "cached\Library\PackageCache\com.rice.ai-codedb@0.3.0-preview.1" },
         [pscustomobject]@{ Name = "local"; PackageRoot = Join-Path $layoutRoot "local\LocalPackages\com.rice.ai-codedb" },
         [pscustomobject]@{ Name = "embedded"; PackageRoot = Join-Path $layoutRoot "embedded\Packages\com.rice.ai-codedb" }
     )
@@ -7808,7 +7909,7 @@ function Assert-MachinePrerequisiteFailure {
 }
 
 function Invoke-MachinePrerequisiteContractScenarios {
-    $provider = New-FixtureMachineProvider -LocalAppDataRoot $fixtureLocalAppData
+    $provider = $fixtureMachineProvider
     $projectBefore = Get-FileSnapshot -Root $hostRoot
     $valid = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $valid -ExitCode 0 -Label "Current machine prerequisites"
@@ -7818,35 +7919,25 @@ function Invoke-MachinePrerequisiteContractScenarios {
     Assert-True -Condition ($currentPrerequisiteValue -eq "CURRENT" -or $currentPrerequisiteValue.StartsWith("CURRENT - ", [StringComparison]::Ordinal)) -Message "Current machine prerequisite marker was not CURRENT."
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBefore -Message "Valid prerequisite DryRun changed the project."
 
-    $preview6PayloadRoot = New-CanonicalIdentityPayload `
-        -Root (Join-Path $syntheticRoot "provider-range-preview-6") `
-        -PackageVersion "0.2.5-preview.6" `
+    $independentPreviewPayloadRoot = New-CanonicalIdentityPayload `
+        -Root (Join-Path $syntheticRoot "provider-package-independent-preview") `
+        -PackageVersion "9.8.7-preview.6" `
         -PayloadVersion $generationId `
-        -PayloadSequence 31
-    $preview6 = Invoke-Materializer -Action "DryRun" -PayloadRoot $preview6PayloadRoot
-    Assert-Result -Result $preview6 -ExitCode 0 -Label "Provider Package range in-window prerelease"
-    Assert-True -Condition ($preview6.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Provider Package range rejected preview.6 inside the reviewed window."
-    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBefore -Message "In-window Provider Package range DryRun changed the project."
+        -PayloadSequence 35
+    $independentPreview = Invoke-Materializer -Action "DryRun" -PayloadRoot $independentPreviewPayloadRoot
+    Assert-Result -Result $independentPreview -ExitCode 0 -Label "Provider capability independent from Package prerelease"
+    Assert-True -Condition ($independentPreview.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Provider capability admission compared the Package prerelease."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBefore -Message "Package-independent Provider DryRun changed the project."
 
-    $preview4PayloadRoot = New-CanonicalIdentityPayload `
-        -Root (Join-Path $syntheticRoot "provider-range-preview-4") `
-        -PackageVersion "0.2.5-preview.4" `
+    $independentStablePayloadRoot = New-CanonicalIdentityPayload `
+        -Root (Join-Path $syntheticRoot "provider-package-independent-stable") `
+        -PackageVersion "10.0.0" `
         -PayloadVersion $generationId `
-        -PayloadSequence 31
-    Assert-MachinePrerequisiteFailure `
-        -Label "Provider Package range lower-bound refusal" `
-        -ReasonCode "PROVIDER_PACKAGE_INCOMPATIBLE" `
-        -PayloadRoot $preview4PayloadRoot
-
-    $package026PayloadRoot = New-CanonicalIdentityPayload `
-        -Root (Join-Path $syntheticRoot "provider-range-0-2-6") `
-        -PackageVersion "0.2.6" `
-        -PayloadVersion $generationId `
-        -PayloadSequence 31
-    Assert-MachinePrerequisiteFailure `
-        -Label "Provider Package range exclusive upper-bound refusal" `
-        -ReasonCode "PROVIDER_PACKAGE_INCOMPATIBLE" `
-        -PayloadRoot $package026PayloadRoot
+        -PayloadSequence 35
+    $independentStable = Invoke-Materializer -Action "DryRun" -PayloadRoot $independentStablePayloadRoot
+    Assert-Result -Result $independentStable -ExitCode 0 -Label "Provider capability independent from stable Package version"
+    Assert-True -Condition ($independentStable.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Provider capability admission compared the stable Package version."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $projectBefore -Message "Stable Package-independent Provider DryRun changed the project."
 
     $missingNodePath = Join-Path $runRoot "missing-node-path"
     New-Item -ItemType Directory -Force -Path $missingNodePath | Out-Null
@@ -7893,18 +7984,33 @@ function Invoke-MachinePrerequisiteContractScenarios {
         $manifestText = [System.Text.UTF8Encoding]::new($false, $true).GetString($originalManifestBytes)
         $objectStart = $manifestText.IndexOf('{')
         Assert-True -Condition ($objectStart -ge 0) -Message "Fixture Provider manifest is not a JSON object."
-        $duplicateSchema = $manifestText.Insert($objectStart + 1, '"schema_version":1,')
+        $duplicateSchema = $manifestText.Insert($objectStart + 1, '"schema_version":2,')
         Write-Utf8File -Path $provider.ManifestPath -Content $duplicateSchema
         Assert-MachinePrerequisiteFailure -Label "Duplicate Provider manifest property" -ReasonCode "PROVIDER_INVALID"
 
         $wrongTypeSchema = [regex]::Replace(
             $manifestText,
-            '("schema_version"\s*:\s*)1',
+            '("schema_version"\s*:\s*)2',
             '${1}true',
             [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
         Assert-True -Condition (-not [string]::Equals($wrongTypeSchema, $manifestText, [StringComparison]::Ordinal)) -Message "Fixture Provider manifest schema type was not changed."
         Write-Utf8File -Path $provider.ManifestPath -Content $wrongTypeSchema
         Assert-MachinePrerequisiteFailure -Label "Wrong-type Provider manifest property" -ReasonCode "PROVIDER_INVALID"
+
+        $manifest = $manifestText | ConvertFrom-Json
+        $manifest.schema_version = 1
+        Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+        Assert-MachinePrerequisiteFailure -Label "Historical Provider schema refusal" -ReasonCode "PROVIDER_INCOMPATIBLE"
+
+        $manifest = $manifestText | ConvertFrom-Json
+        $manifest.version = "0.5.0-28e3912"
+        Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+        Assert-MachinePrerequisiteFailure -Label "Provider artifact identity mismatch" -ReasonCode "PROVIDER_INCOMPATIBLE"
+
+        $manifest = $manifestText | ConvertFrom-Json
+        $manifest.commit = "0" * 40
+        Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+        Assert-MachinePrerequisiteFailure -Label "Provider commit mismatch" -ReasonCode "PROVIDER_INCOMPATIBLE"
 
         $manifest = $manifestText | ConvertFrom-Json
         $manifest.sha256 = "0" * 64
@@ -7917,9 +8023,19 @@ function Invoke-MachinePrerequisiteContractScenarios {
         Assert-MachinePrerequisiteFailure -Label "Provider protocol mismatch" -ReasonCode "PROVIDER_INCOMPATIBLE"
 
         $manifest = $manifestText | ConvertFrom-Json
-        $manifest.supported_package_min_inclusive = "0.2.6"
+        $manifest.capability_contract = "codedb-search-tools-v2"
         Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
-        Assert-MachinePrerequisiteFailure -Label "Provider Package incompatibility" -ReasonCode "PROVIDER_PACKAGE_INCOMPATIBLE"
+        Assert-MachinePrerequisiteFailure -Label "Provider capability mismatch" -ReasonCode "PROVIDER_INCOMPATIBLE"
+
+        $manifest = $manifestText | ConvertFrom-Json
+        $manifest.source = "https://example.invalid/provider"
+        Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+        Assert-MachinePrerequisiteFailure -Label "Provider source mismatch" -ReasonCode "PROVIDER_INCOMPATIBLE"
+
+        $manifest = $manifestText | ConvertFrom-Json
+        $manifest | Add-Member -NotePropertyName "supported_package_min_inclusive" -NotePropertyValue "0.3.0-preview.1"
+        Write-Utf8File -Path $provider.ManifestPath -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+        Assert-MachinePrerequisiteFailure -Label "Provider Package-semver field rejection" -ReasonCode "PROVIDER_INVALID"
     } finally {
         [System.IO.File]::WriteAllBytes($provider.ManifestPath, $originalManifestBytes)
     }
@@ -7931,7 +8047,7 @@ function Invoke-MachinePrerequisiteContractScenarios {
     } finally {
         [System.IO.File]::Move($disabledManifestPath, $provider.ManifestPath)
     }
-    Write-Host "[OK] Machine prerequisite contract accepts the reviewed Node/Provider pair and blocks representative missing, invalid, hash, protocol, and Package failures before project mutation."
+    Write-Host "[OK] Machine prerequisite contract admits the exact schema-2 artifact by capability rather than Package semver and rejects strict schema, identity, hash, source, protocol, and capability mismatches before project mutation."
 }
 
 function Get-TestCurrentInstanceSelection {
@@ -8117,7 +8233,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $stableWrapperTarget = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
 
     # Candidate and activation failures keep the real v0.2.4 selection and
-    # flat execution closure usable. The verified poc.34 generation may remain
+    # flat execution closure usable. The verified poc.35 generation may remain
     # as an unselected Package-owned side-by-side closure.
     $prior = Install-PriorGenerationFixture @priorParameters
     $dryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
@@ -8150,7 +8266,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $ownerFreeInstance = Get-TestCurrentInstanceSelection
     Assert-TestStableInstanceWrapper
     $selectedHost = Get-Content -LiteralPath $prior.PointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual ([string]$selectedHost.generation_id) -Expected $generationId -Message "Owner-free retirement did not switch host/current to poc.34."
+    Assert-Equal -Actual ([string]$selectedHost.generation_id) -Expected $generationId -Message "Owner-free retirement did not switch host/current to poc.35."
     $lastKnownGoodPath = Get-PathFromRelative -Root $hostRoot -RelativePath $lastKnownGoodPointerRelativePath
     Assert-Equal -Actual (Get-FileHash -LiteralPath $lastKnownGoodPath -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $prior.PointerPath -Algorithm SHA256).Hash -Message "Owner-free retirement did not converge generation last-known-good."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Owner-free retirement retained the legacy marker."
@@ -8195,7 +8311,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
 
     # A real schema-1 flat MCP lease plus a generation request lease preserves
     # the old pointer, marker, scripts, process, lease, and generation. Future
-    # sessions still receive the independently selected poc.34 instance.
+    # sessions still receive the independently selected poc.35 instance.
     $prior = Install-PriorGenerationFixture @priorParameters
     $legacyGate = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/shared/codedb-host-use-gate.mjs"
     $flatMcp = $null
@@ -8260,7 +8376,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$unknownOwnerInstance.Selection.instance_id) -Message "Unknown-owner drain replaced the selected instance."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Unknown-owner drain retained poc.27."
     Assert-NoMaterializerResidue
-    Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.34 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
+    Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.35 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
 
     # A selected immutable instance from an exact Package-declared transition is
     # a valid automatic handoff source. Its live leases and generation remain
@@ -8301,7 +8417,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $forgedWrapperInstanceSnapshot = Get-FileSnapshot -Root $forgedWrapper.InstanceRoot
     $forgedWrapperGenerationSnapshot = Get-FileSnapshot -Root $forgedWrapper.GenerationRoot
     $currentGenerationRoot = Get-PathFromRelative -Root $hostRoot -RelativePath $generationTargetPrefix.TrimEnd([char]'/')
-    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Forged-wrapper fixture unexpectedly started with poc.34."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Forged-wrapper fixture unexpectedly started with poc.35."
     $forgedWrapperUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $forgedWrapperUpgrade -ExitCode 6 -Label "Forged previous stable wrapper refusal"
     Assert-True `
@@ -8311,7 +8427,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedWrapper.StableWrapperPath) -Expected $forgedWrapperBytes -Message "Rejected stable wrapper was overwritten."
     Assert-Equal -Actual (Get-FileSnapshot -Root $forgedWrapper.InstanceRoot) -Expected $forgedWrapperInstanceSnapshot -Message "Rejected stable wrapper changed the retained instance."
     Assert-Equal -Actual (Get-FileSnapshot -Root $forgedWrapper.GenerationRoot) -Expected $forgedWrapperGenerationSnapshot -Message "Rejected stable wrapper changed the retained generation."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Rejected stable wrapper published poc.34 before refusing activation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $currentGenerationRoot)) -Message "Rejected stable wrapper published poc.35 before refusing activation."
 
     $forgedPrevious = Install-TrustedPreviousInstanceFixture
     $forgedManifest = Get-Content -LiteralPath $forgedPrevious.InstanceManifestPath -Raw | ConvertFrom-Json
@@ -8521,11 +8637,15 @@ $sentinelSnapshot = $null
 try {
     $env:LOCALAPPDATA = $fixtureLocalAppData
     $fixtureMachineProvider = New-FixtureMachineProvider -LocalAppDataRoot $fixtureLocalAppData
+    $fixtureCanonicalPayloadRoot = New-FixtureCanonicalPayload `
+        -Root (Join-Path $runRoot "canonical-payload") `
+        -ProviderSha256 ((Get-FileHash -LiteralPath $fixtureMachineProvider.ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant())
+    Set-TestCanonicalPayloadRoot -Root $fixtureCanonicalPayloadRoot
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.2.5-preview.5" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.3.0-preview.1" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 34 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 35 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 22 -Message "Flat target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 23 -Message "Generation target count mismatch."
@@ -8839,9 +8959,9 @@ try {
     $marker = $markerText | ConvertFrom-Json
     Assert-Equal -Actual $marker.managed_by -Expected "com.rice.ai-codedb" -Message "Marker manager mismatch."
     Assert-Equal -Actual $marker.schema_version -Expected 2 -Message "Marker schema version mismatch."
-    Assert-Equal -Actual $marker.package_version -Expected "0.2.5-preview.5" -Message "Marker package version mismatch."
+    Assert-Equal -Actual $marker.package_version -Expected "0.3.0-preview.1" -Message "Marker package version mismatch."
     Assert-Equal -Actual $marker.payload_version -Expected $generationId -Message "Marker payload version mismatch."
-    Assert-Equal -Actual $marker.payload_sequence -Expected 34 -Message "Marker payload sequence mismatch."
+    Assert-Equal -Actual $marker.payload_sequence -Expected 35 -Message "Marker payload sequence mismatch."
     Assert-True -Condition ([string]$marker.payload_content_sha256 -match '^[0-9a-f]{64}$') -Message "Marker payload content identity mismatch."
     Assert-Equal -Actual $marker.host_use_gate_version -Expected 1 -Message "Marker host-use gate version mismatch."
     Assert-Equal -Actual $marker.generation_lease_version -Expected 2 -Message "Marker generation-lease version mismatch."
@@ -8851,7 +8971,7 @@ try {
     $currentPointerPath = Get-PathFromRelative -Root $hostRoot -RelativePath $currentPointerRelativePath
     Assert-LfOnlyFile -Path $currentPointerPath -Label "Current generation pointer"
     $currentPointer = Get-Content -LiteralPath $currentPointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual $currentPointer.package_version -Expected "0.2.5-preview.5" -Message "Current pointer package version mismatch."
+    Assert-Equal -Actual $currentPointer.package_version -Expected "0.3.0-preview.1" -Message "Current pointer package version mismatch."
     Assert-Equal -Actual $currentPointer.generation_id -Expected $generationId -Message "Current pointer generation id mismatch."
     Assert-Equal -Actual $currentPointer.generation_relative_path -Expected $generationTargetPrefix.TrimEnd([char]'/') -Message "Current pointer generation path mismatch."
     $installedGenerationManifest = Get-PathFromRelative -Root $hostRoot -RelativePath ($generationTargetPrefix + "generation-manifest.json")
@@ -9564,7 +9684,7 @@ try {
             "The provider executable is an external dependency.",
             "This project does not vendor, download, or commit the provider binary in this flow.",
             "Do not write user/global MCP client configuration from this setup flow.",
-            "[MISSING_PREREQUISITE] CodeDB Provider 0.5.0-28e3912 is missing."
+            "[MISSING_PREREQUISITE] CodeDB Provider 0.5.0-28e3912-c2 is missing."
         )) {
             Assert-True -Condition ($missingGuidanceResult.Text.Contains($expectedGuidance)) -Message "Provider guidance is missing '$expectedGuidance'."
         }
@@ -9578,7 +9698,7 @@ try {
         & $materializedProviderGuidance
     }
     Assert-Result -Result $availableGuidanceResult -ExitCode 0 -Label "Materialized provider guidance with machine Provider"
-    Assert-True -Condition ($availableGuidanceResult.Text.Contains("and CodeDB Provider 0.5.0-28e3912 are verified.")) -Message "Provider guidance did not verify the machine Provider fixture."
+    Assert-True -Condition ($availableGuidanceResult.Text.Contains("and CodeDB Provider 0.5.0-28e3912-c2 are verified.")) -Message "Provider guidance did not verify the machine Provider fixture."
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $beforeAvailableGuidance -Message "Provider guidance mutated the fixture after the executable was present."
     Write-Host "[OK] Materialized provider guidance remained read-only and registration-free."
 

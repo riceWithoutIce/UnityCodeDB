@@ -454,7 +454,12 @@ function writeQueuedMaintenanceMaterializer(fixture, actionLogPath) {
   ].join("\r\n"));
 }
 
-function writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCounterPath, verifySucceeds) {
+function writeRecoveredOperationMaterializer(
+  fixture,
+  probeCounterPath,
+  verifyCounterPath,
+  observationPath,
+  verifySucceeds) {
   const quote = (value) => String(value).replace(/'/g, "''");
   write(fixture.materializerScript, [
     "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
@@ -464,6 +469,16 @@ function writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCo
     "  exit 9",
     "}",
     "if ($Action -eq 'Verify') {",
+    "  if ([string]::IsNullOrWhiteSpace($env:RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS)) {",
+    "    Write-Error 'Recovered Verify received no Supervisor operational observation.'",
+    "    exit 12",
+    "  }",
+    "  $operational = $env:RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS | ConvertFrom-Json",
+    "  if ($operational.schema_version -ne 1 -or $operational.state -cne 'core_ready' -or $operational.coordinator_failure_category -cne 'NONE') {",
+    "    Write-Error 'Recovered Verify received an invalid Supervisor operational observation.'",
+    "    exit 13",
+    "  }",
+    `  [IO.File]::WriteAllText('${quote(observationPath)}', ($operational | ConvertTo-Json -Depth 4 -Compress))`,
     `  $counterPath = '${quote(verifyCounterPath)}'`,
     "  $count = if (Test-Path -LiteralPath $counterPath) { [int][IO.File]::ReadAllText($counterPath) } else { 0 }",
     "  [IO.File]::WriteAllText($counterPath, [string]($count + 1))",
@@ -1356,13 +1371,14 @@ async function verifyRecordedChildAlreadyAbsentFailsClosed() {
   try {
     const counterPath = path.join(fixture.root, "absent-recorded-child-retry-count.txt");
     const verifyCounterPath = path.join(fixture.root, "absent-recorded-child-verify-count.txt");
+    const observationPath = path.join(fixture.root, "absent-recorded-child-operational-observation.json");
     const operationId = crypto.randomUUID().replaceAll("-", "");
     const absentPid = 2147483647;
     assert.equal(
       isProcessAlive({ pid: absentPid, exitCode: null }),
       false,
       "The reserved fixture PID must be absent before recovery starts.");
-    writeRecoveredOperationMaterializer(fixture, counterPath, verifyCounterPath, false);
+    writeRecoveredOperationMaterializer(fixture, counterPath, verifyCounterPath, observationPath, false);
     json(path.join(fixture.runtime, "operation.json"), {
       schema_version: 1,
       managed_by: "com.rice.ai-codedb",
@@ -1414,6 +1430,14 @@ async function verifyRecordedChildAlreadyAbsentFailsClosed() {
       false,
       "An absent recorded child must never launch a replacement materializer.");
     assert.equal(fs.readFileSync(verifyCounterPath, "utf8"), "1");
+    const recoveredObservation = JSON.parse(fs.readFileSync(observationPath, "utf8"));
+    const terminalObservation = terminal.status.operational_readiness;
+    assert.deepEqual(recoveredObservation, terminalObservation);
+    assert.equal(terminalObservation.observation_id, recoveredObservation.observation_id);
+    assert.equal(terminalObservation.revision, recoveredObservation.revision);
+    assert.equal(terminalObservation.owner_epoch, state.owner_epoch);
+    assert.equal(terminalObservation.selected_instance_id, fixture.instanceId);
+    assert.equal(terminalObservation.selected_generation_id, TARGET.generationId);
     assert.ok(
       fixture.coordinatorStatusRequests > 0,
       "Coordinator status must be established before persisted operation recovery.");
@@ -1435,13 +1459,14 @@ async function verifyRecordedChildAlreadyAbsentUsesAuthoritativeVerifier() {
   try {
     const probeCounterPath = path.join(fixture.root, "verified-absent-child-probe-count.txt");
     const verifyCounterPath = path.join(fixture.root, "verified-absent-child-verify-count.txt");
+    const observationPath = path.join(fixture.root, "verified-absent-child-operational-observation.json");
     const operationId = crypto.randomUUID().replaceAll("-", "");
     const absentPid = 2147483647;
     assert.equal(
       isProcessAlive({ pid: absentPid, exitCode: null }),
       false,
       "The reserved fixture PID must be absent before recovery starts.");
-    writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCounterPath, true);
+    writeRecoveredOperationMaterializer(fixture, probeCounterPath, verifyCounterPath, observationPath, true);
     json(path.join(fixture.runtime, "operation.json"), {
       schema_version: 1,
       managed_by: "com.rice.ai-codedb",
@@ -1487,6 +1512,14 @@ async function verifyRecordedChildAlreadyAbsentUsesAuthoritativeVerifier() {
     assert.equal(terminal.ok, true, terminal.error || "Recovered operation verification failed.");
     assert.equal(fs.existsSync(probeCounterPath), false);
     assert.equal(fs.readFileSync(verifyCounterPath, "utf8"), "1");
+    const recoveredObservation = JSON.parse(fs.readFileSync(observationPath, "utf8"));
+    const terminalObservation = terminal.status.operational_readiness;
+    assert.deepEqual(recoveredObservation, terminalObservation);
+    assert.equal(terminalObservation.observation_id, recoveredObservation.observation_id);
+    assert.equal(terminalObservation.revision, recoveredObservation.revision);
+    assert.equal(terminalObservation.owner_epoch, state.owner_epoch);
+    assert.equal(terminalObservation.selected_instance_id, fixture.instanceId);
+    assert.equal(terminalObservation.selected_generation_id, TARGET.generationId);
     assert.ok(
       fixture.coordinatorStatusRequests > 0,
       "Coordinator status must be established before persisted operation recovery.");

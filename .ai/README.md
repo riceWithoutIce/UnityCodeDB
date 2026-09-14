@@ -52,7 +52,7 @@ release claims.
 ## Session Profiles
 
 The versioned logical profile catalog is
-`.ai/workflows/codedb-workflow-v1/profile-map.md`. Task cards reference a
+`.ai/workflows/codedb-workflow-v2/profile-map.md`. Task cards reference a
 profile key rather than a thread ID:
 
 ```text
@@ -85,19 +85,12 @@ as `BLOCKED` or `DEFERRED`.
 
 ## Test Scope
 
-Every `TASK.md` names its `L0` tests, directly affected `L1` tests, explicitly
-unrun tests, and the rationale for the boundary. A focused batch is one named
-filter or one tightly coupled harness for the same behavior, not a full
-repository suite.
-
-By default, Coder runs at most one `L0` batch and one `Affected L1` batch.
-Verifier runs at most one targeted read-only review batch and does not rerun
-unchanged Coder tests. A concrete failure may receive one corrected retry;
-additional batches require an authorized task-card exception. A completed
-failure remains in the same task while it serves the same accepted outcome;
-repeated repairs and structural signals are governed by the project workflow's
-route-reassessment gate. A checkpoint is used only for a real interruption,
-external block, or handoff.
+Every `TASK.md` names its evidence scenarios, `L0` tests, directly affected
+`L1` tests, explicitly unrun tests, and the rationale for the boundary. A
+focused scenario is one named filter or one tightly coupled harness for the
+same behavior, not a full repository suite. Attempt counts, correction rules,
+review limits, and route reassessment are defined by the project workflow and
+recorded through the v2 templates; this index does not duplicate them.
 
 ## Task Flow
 
@@ -161,56 +154,15 @@ the task documents.
 
 ## TASK.md Minimum Shape
 
-```text
-# Task: <task-id>
+Use the versioned recording templates instead of copying a historical task:
 
-## Metadata
-- Product:
-- Version:
-- Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
-- Planner:
-- Coder:
-- Verifier: optional
-- Review mode: NORMAL | GUARDED | RELEASE
-- Execution profile: <profile-id from the session profile map>
-- Session policy: REUSE_ONLY | MANUAL_PROVISION
-- Requirement source:
+- `.ai/workflows/codedb-workflow-v2/TASK.template.md`
+- `.ai/workflows/codedb-workflow-v2/RESULT.template.md`
+- `.ai/workflows/codedb-workflow-v2/VERIFICATION.template.md`
 
-## Objective
-- Single outcome:
-
-## Scope
-- In scope:
-- Out of scope:
-- Allowed files:
-- Protected state:
-- Snapshot binding: optional; only for GUARDED/RELEASE
-
-## Execution
-- Coder actions:
-- Focused tests:
-- EditMode authorization: NOT_REQUESTED | authorized
-- Stop conditions:
-- Escalation triggers:
-- Structural escalation guard: starting repair count <count>/2; starting consecutive diagnostic-only checkpoint count <count>/3; immediate structural triggers apply
-- Model escalation: none | request-only | human-approved
-
-## Definition Of Done
-- Expected result:
-- Required evidence:
-- Deferred risks:
-
-## Handoff
-- Current task:
-- Current status:
-- Next notification:
-- Next action:
-- Human decision or authorization required:
-```
-
-`RESULT.md` and `VERIFICATION.md` use only four sections: outcome, evidence,
-risks/findings, and handoff. The complete field rules live in the project
-workflow rather than being duplicated in every task.
+The templates do not define authority. Their field meanings, default budgets,
+continuation rules, and stop conditions come only from
+`com.rice.ai-codedb/Documentation~/development-workflow.md`.
 
 When the route-reassessment gate triggers, Coder stops the affected repair and
 records the frozen identity and evidence. Planner creates

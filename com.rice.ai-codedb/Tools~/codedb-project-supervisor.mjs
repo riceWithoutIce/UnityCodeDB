@@ -1557,7 +1557,15 @@ async function runDaemon(raw) {
       .catch(() => emitSafely("coordinator_start_failed", state.coordinator_failure_category));
     await refresh();
     if (startupOperationToRecover) {
-      void recoverPersistedOperation(startupOperationToRecover, context, finishOperation)
+      const recoveredOperationReadiness = state.operational_readiness;
+      if (recoveredOperationReadiness) {
+        operationReadiness.set(startupOperationToRecover, recoveredOperationReadiness);
+      }
+      void recoverPersistedOperation(
+        startupOperationToRecover,
+        context,
+        finishOperation,
+        recoveredOperationReadiness)
         .catch((error) => emitSafely("operation_recovery_error", error.message));
     }
     await new Promise((resolve) => server.once("close", resolve));
@@ -2021,7 +2029,7 @@ function validatePersistedChild(child) {
     throw new Error("Supervisor operation child command identity is invalid.");
 }
 
-async function recoverPersistedOperation(operation, context, finish) {
+async function recoverPersistedOperation(operation, context, finish, operationalReadiness) {
   if (!operation || operation.state !== "running") return;
   if (!operation.child) {
     await finish(operation, null, new Error("Supervisor operation was interrupted before its child identity was durably recorded."));
@@ -2040,7 +2048,7 @@ async function recoverPersistedOperation(operation, context, finish) {
     return;
   }
   if (!initial.exists) {
-    await finishRecoveredOperationAfterChildExit(operation, context, finish);
+    await finishRecoveredOperationAfterChildExit(operation, context, finish, operationalReadiness);
     return;
   }
   if (!processEvidenceMatches(expected, initial)) {
@@ -2057,7 +2065,7 @@ async function recoverPersistedOperation(operation, context, finish) {
       return;
     }
     if (!current.exists) {
-      await finishRecoveredOperationAfterChildExit(operation, context, finish);
+      await finishRecoveredOperationAfterChildExit(operation, context, finish, operationalReadiness);
       return;
     }
     if (!processEvidenceMatches(expected, current)) {
@@ -2067,10 +2075,10 @@ async function recoverPersistedOperation(operation, context, finish) {
   }
 }
 
-async function finishRecoveredOperationAfterChildExit(operation, context, finish) {
+async function finishRecoveredOperationAfterChildExit(operation, context, finish, operationalReadiness) {
   // Process disappearance is not success evidence. Recovery must obtain a
   // fresh authoritative postcondition before publishing a terminal result.
-  const verification = await verifyRecoveredOperation(context, operation);
+  const verification = await verifyRecoveredOperation(context, operation, operationalReadiness);
   if (!verification.ok) {
     await finish(operation, null, new Error(verification.error || "Recovered operation verification failed."));
     return;
@@ -2078,7 +2086,7 @@ async function finishRecoveredOperationAfterChildExit(operation, context, finish
   await finish(operation, verification.result || { code: 0, stdout: "", stderr: "", timedOut: false });
 }
 
-async function verifyRecoveredOperation(context, operation) {
+async function verifyRecoveredOperation(context, operation, operationalReadiness) {
   if (operation.name.startsWith("materialize:")) {
     const action = operation.name.slice("materialize:".length);
     const result = await runChild(
@@ -2086,7 +2094,11 @@ async function verifyRecoveredOperation(context, operation) {
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript,
         "-Action", "Verify", "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot],
       context.root,
-      120000);
+      120000,
+      null,
+      operationalReadiness
+        ? { [OPERATIONAL_READINESS_ENV]: JSON.stringify(operationalReadiness) }
+        : null);
     return {
       ok: result.code === 0,
       result,

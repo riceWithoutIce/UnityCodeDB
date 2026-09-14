@@ -316,15 +316,18 @@ namespace Rice.AI.Codedb.Editor
             if (_statusSnapshot == null && !IsPlayModeDisplaySuspended())
             {
                 AICodedbProductState persistedState;
+                AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure persistedTerminalFailure;
                 if (AICodedbEditorLifecycle.TryGetPersistedProductState(
                         _executionContext.ProjectRoot,
-                        out persistedState))
+                        out persistedState,
+                        out persistedTerminalFailure))
                 {
                     _statusSnapshot = AICodedbStatusSnapshot.CreateCachedState(
                         _executionContext.ProjectDisplayName,
                         persistedState,
                         AICodedbEditorLifecycle.IsReconcileInFlight,
-                        GetCachedCoordinatorFailureCategory());
+                        GetCachedCoordinatorFailureCategory(),
+                        persistedTerminalFailure);
                 }
             }
             if (_statusSnapshot == null)
@@ -559,25 +562,28 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus cachedProductStatus;
             bool hasProductStatus;
             AICodedbSupervisorSnapshot cachedSupervisorSnapshot;
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure cachedTerminalFailure;
             long revision;
             if (!AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
                     out cachedResult,
                     out cachedProductStatus,
                     out hasProductStatus,
                     out cachedSupervisorSnapshot,
+                    out cachedTerminalFailure,
                     out revision)
                 || revision <= _cachedLifecycleStatusRevision)
                 return false;
 
             _cachedLifecycleStatusRevision = revision;
-            if (hasProductStatus)
+            if (hasProductStatus || cachedTerminalFailure != null)
             {
                 ApplyStatusSnapshot(
                     AICodedbStatusSnapshot.CreateCachedStatus(
                         _executionContext.ProjectDisplayName,
                         cachedProductStatus,
                         AICodedbEditorLifecycle.IsReconcileInFlight,
-                        GetCoordinatorFailureCategory(cachedSupervisorSnapshot)),
+                        GetCoordinatorFailureCategory(cachedSupervisorSnapshot),
+                        cachedTerminalFailure),
                     true,
                     false);
                 Repaint();
@@ -1286,6 +1292,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostPayload);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.CurrentInstance);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.CoordinatorFailure);
+                AICodedbDetailRowView.DrawStatus(_statusSnapshot.TerminalConvergenceFailure);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ControlContractMigration);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.HostGeneration);
                 AICodedbDetailRowView.DrawStatus(_statusSnapshot.ProviderExecutable);

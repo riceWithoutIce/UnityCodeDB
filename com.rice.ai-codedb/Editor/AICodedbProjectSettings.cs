@@ -11,7 +11,7 @@ namespace Rice.AI.Codedb.Editor
         internal const string DisplayName = "Rice AI Codedb";
         internal const string MenuRoot = "Tools/Rice AI/Codedb/";
         internal const string DefaultToolProfile = "Discover Read";
-        internal const string MachineProviderVersion = "0.5.0-28e3912";
+        internal const string MachineProviderVersion = "0.5.0-28e3912-c2";
         internal const string LegacyPackageVersion = "0.2.2";
         internal const string LegacyPayloadVersion = "poc.21";
         internal const int LegacyPayloadSequence = 21;

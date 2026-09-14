@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$PackageVersion = "0.2.5-preview.5",
+    [string]$PackageVersion = "0.3.0-preview.1",
     [string]$LocalAppDataRoot = "",
     [switch]$TestMode,
     [string]$TestArchivePath = "",
@@ -23,12 +23,12 @@ try {
     # Result codes remain ASCII even when the host does not allow an encoding change.
 }
 
-$script:ProviderPackageVersion = "0.2.5-preview.5"
+$script:ProviderPackageVersion = "0.3.0-preview.1"
 $script:DistributionManifestPath = Join-Path $PSScriptRoot "codedb-provider-distribution.json"
 $script:ProviderContractPath = Join-Path $PSScriptRoot "..\Payload~\AIWork\codedb\shared\codedb-machine-provider-contract.ps1"
-$script:ExpectedReleaseBaseUrl = "https://github.com/riceWithoutIce/UnityCodeDB/releases/download/codedb-provider-v0.5.0-28e3912"
-$script:ExpectedArchiveName = "codedb-provider-0.5.0-28e3912-windows-x64.zip"
-$script:ExpectedSignatureName = "codedb-provider-0.5.0-28e3912-windows-x64.zip.sig"
+$script:ExpectedReleaseBaseUrl = "https://github.com/riceWithoutIce/UnityCodeDB/releases/download/codedb-provider-v0.5.0-28e3912-c2"
+$script:ExpectedArchiveName = "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip"
+$script:ExpectedSignatureName = "codedb-provider-0.5.0-28e3912-c2-windows-x64.zip.sig"
 $script:ExpectedDevelopmentReleaseBaseUrl = "https://raw.githubusercontent.com/killop/codedb-mcp/28e3912d5cd67ff3499734984f3e3d626a204796/skills/codedb-mcp/assets"
 $script:ExpectedDevelopmentArtifactName = "codebase-mcp.exe"
 $script:ExpectedDevelopmentExecutableSha256 = "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7"
@@ -136,23 +136,22 @@ function Read-ProviderDistributionManifest {
     $manifest = ConvertFrom-CodedbProviderManifestJson -Text $text -Label "Provider distribution manifest"
     $expectedNames = @(
         "schema_version", "managed_by", "distribution_state", "provider_id", "version", "commit",
-        "protocol", "source", "supported_package_min_inclusive", "supported_package_max_exclusive",
+        "protocol", "capability_contract", "source",
         "release_base_url", "archive_name", "archive_sha256", "signature_name", "signature_encoding", "signature_sha256",
         "signature_algorithm", "signature_public_key_xml", "executable_sha256", "license_status"
     )
     if ($manifest.Count -ne $expectedNames.Count -or
         @($manifest.Keys | Where-Object { $expectedNames -cnotcontains $_ }).Count -ne 0) {
-        throw "Provider distribution manifest properties do not match schema 1."
+        throw "Provider distribution manifest properties do not match schema 2."
     }
-    if ((Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 1 -or
+    if ((Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 2 -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "managed_by"), "com.rice.ai-codedb", [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "provider_id"), $script:CodedbRequiredProviderId, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "version"), $script:CodedbRequiredProviderVersion, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "commit"), $script:CodedbRequiredProviderCommit, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "protocol"), $script:CodedbRequiredProviderProtocol, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_min_inclusive"), $script:CodedbSupportedPackageMinInclusive, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_max_exclusive"), $script:CodedbSupportedPackageMaxExclusive, [StringComparison]::Ordinal)) {
+        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "capability_contract"), $script:CodedbRequiredProviderCapabilityContract, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal)) {
         throw "Provider distribution identity does not match this Package."
     }
     return $manifest
@@ -417,16 +416,15 @@ function New-DevelopmentProviderCandidate {
     $candidateExecutablePath = Join-Path $CandidateRoot "codebase-mcp.exe"
     Copy-Item -LiteralPath $ExecutablePath -Destination $candidateExecutablePath
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         provider_id = $script:CodedbRequiredProviderId
         version = $script:CodedbRequiredProviderVersion
         commit = $script:CodedbRequiredProviderCommit
         executable = "codebase-mcp.exe"
         sha256 = Get-CodedbProviderManifestString -Properties $Distribution -Name "executable_sha256"
         protocol = $script:CodedbRequiredProviderProtocol
+        capability_contract = $script:CodedbRequiredProviderCapabilityContract
         source = $script:CodedbRequiredProviderSource
-        supported_package_min_inclusive = $script:CodedbSupportedPackageMinInclusive
-        supported_package_max_exclusive = $script:CodedbSupportedPackageMaxExclusive
     }
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText(
@@ -495,22 +493,21 @@ function Assert-ProviderCandidate {
     $manifest = Read-CodedbProviderManifest -Path $manifestPath
     $expectedNames = @(
         "schema_version", "provider_id", "version", "commit", "executable", "sha256",
-        "protocol", "source", "supported_package_min_inclusive", "supported_package_max_exclusive"
+        "protocol", "capability_contract", "source"
     )
     if ($manifest.Count -ne $expectedNames.Count -or @($manifest.Keys | Where-Object { $expectedNames -cnotcontains $_ }).Count -ne 0) {
-        throw "Provider candidate manifest properties do not match schema 1."
+        throw "Provider candidate manifest properties do not match schema 2."
     }
     $executableSha256 = Get-CodedbProviderManifestString -Properties $Distribution -Name "executable_sha256"
-    if ((Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 1 -or
+    if ((Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 2 -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "provider_id"), $script:CodedbRequiredProviderId, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "version"), $script:CodedbRequiredProviderVersion, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "commit"), $script:CodedbRequiredProviderCommit, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "executable"), "codebase-mcp.exe", [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "sha256"), $executableSha256, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "protocol"), $script:CodedbRequiredProviderProtocol, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_min_inclusive"), $script:CodedbSupportedPackageMinInclusive, [StringComparison]::Ordinal) -or
-        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_max_exclusive"), $script:CodedbSupportedPackageMaxExclusive, [StringComparison]::Ordinal)) {
+        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "capability_contract"), $script:CodedbRequiredProviderCapabilityContract, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal)) {
         throw "Provider candidate identity does not match this Package."
     }
     Assert-FileSha256 -Path $executablePath -Expected $executableSha256 -Label "Provider executable"
@@ -554,20 +551,19 @@ function Test-ProviderRootOwnedForReplacement {
         $manifest = Read-CodedbProviderManifest -Path $manifestPath
         $expectedNames = @(
             "schema_version", "provider_id", "version", "commit", "executable", "sha256",
-            "protocol", "source", "supported_package_min_inclusive", "supported_package_max_exclusive"
+            "protocol", "capability_contract", "source"
         )
         if ($manifest.Count -ne $expectedNames.Count -or
             @($manifest.Keys | Where-Object { $expectedNames -cnotcontains $_ }).Count -ne 0 -or
             -not (Test-Path -LiteralPath $executablePath -PathType Leaf) -or
-            (Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 1 -or
+            (Get-CodedbProviderManifestInt32 -Properties $manifest -Name "schema_version") -ne 2 -or
             -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "provider_id"), $script:CodedbRequiredProviderId, [StringComparison]::Ordinal) -or
             -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "version"), $script:CodedbRequiredProviderVersion, [StringComparison]::Ordinal) -or
             -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "commit"), $script:CodedbRequiredProviderCommit, [StringComparison]::Ordinal) -or
             -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "executable"), "codebase-mcp.exe", [StringComparison]::Ordinal) -or
             -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "protocol"), $script:CodedbRequiredProviderProtocol, [StringComparison]::Ordinal) -or
-            -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal) -or
-            -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_min_inclusive"), $script:CodedbSupportedPackageMinInclusive, [StringComparison]::Ordinal) -or
-            -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "supported_package_max_exclusive"), $script:CodedbSupportedPackageMaxExclusive, [StringComparison]::Ordinal)) {
+            -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "capability_contract"), $script:CodedbRequiredProviderCapabilityContract, [StringComparison]::Ordinal) -or
+            -not [string]::Equals((Get-CodedbProviderManifestString -Properties $manifest -Name "source"), $script:CodedbRequiredProviderSource, [StringComparison]::Ordinal)) {
             return $false
         }
         $sha256 = Get-CodedbProviderManifestString -Properties $manifest -Name "sha256"

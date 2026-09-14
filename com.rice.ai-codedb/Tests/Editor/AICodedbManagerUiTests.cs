@@ -800,39 +800,57 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void CachedUninstalledSnapshot_PreservesInstallStateWithoutLiveScan()
         {
+            var seededFailure = CreateTerminalFailure();
+            var clearedFailure =
+                AICodedbEditorLifecycle.ResolveTerminalConvergenceFailureForProductState(
+                    seededFailure,
+                    AICodedbProductState.Uninstalled);
             var snapshot = AICodedbStatusSnapshot.CreateCachedState(
                 "FixtureProject",
-                AICodedbProductState.Uninstalled);
+                AICodedbProductState.Uninstalled,
+                false,
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+                clearedFailure);
 
             Assert.That(snapshot.IsProjectUninstalled, Is.True);
             Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.Uninstalled));
             Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Inactive));
             Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Uninstalled"));
+            Assert.That(clearedFailure, Is.Null);
+            Assert.That(snapshot.TerminalConvergenceFailureEvidence, Is.Null);
+            Assert.That(snapshot.TerminalConvergenceFailure.Summary, Is.EqualTo("Not retained"));
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(snapshot.ProductStatus), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(snapshot.ProductStatus, false, false), Is.True);
         }
 
         [Test]
-        public void CachedNeedsAttentionSnapshotIsTerminalAndDoesNotClaimChecking()
+        public void CachedNeedsAttentionSnapshotRetainsTerminalEvidenceAndDoesNotClaimChecking()
         {
+            var terminalFailure = CreateTerminalFailure();
             var snapshot = AICodedbStatusSnapshot.CreateCachedState(
                 "FixtureProject",
-                AICodedbProductState.NeedsAttention);
-            var publishedBeforeWorkerExit = AICodedbStatusSnapshot.CreateCachedState(
-                "FixtureProject",
-                AICodedbProductState.NeedsAttention,
-                true);
+                AICodedbProductState.Starting,
+                true,
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+                terminalFailure);
 
             Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
             Assert.That(snapshot.ProductStatus.IsReady, Is.False);
             Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Error));
-            Assert.That(snapshot.HostPayloadStatus.Summary, Is.EqualTo("Not evaluated"));
-            Assert.That(snapshot.CurrentInstance.Summary, Is.EqualTo("Not evaluated"));
-            Assert.That(snapshot.HostGeneration.Summary, Is.EqualTo("Not evaluated"));
-            Assert.That(snapshot.ProviderExecutable.Summary, Is.EqualTo("Not evaluated"));
-            Assert.That(snapshot.McpAvailability.Summary, Is.EqualTo("Not evaluated"));
             Assert.That(
-                publishedBeforeWorkerExit.CurrentInstance.Summary,
-                Is.EqualTo("Not evaluated"),
-                "A terminal cache published just before worker exit must not freeze Checking.");
+                snapshot.TerminalConvergenceFailureEvidence,
+                Is.SameAs(terminalFailure));
+            Assert.That(snapshot.TerminalConvergenceFailure.Summary, Is.EqualTo("MCP_UNAVAILABLE"));
+            Assert.That(snapshot.TerminalConvergenceFailure.Detail, Does.Contain("SupervisorOperationalReadiness"));
+            Assert.That(snapshot.ProductStatus.Prerequisite, Is.EqualTo(terminalFailure.ProductStatus.Prerequisite));
+            Assert.That(snapshot.ProductStatus.Installed, Is.EqualTo(terminalFailure.ProductStatus.Installed));
+            Assert.That(snapshot.ProductStatus.Configured, Is.EqualTo(terminalFailure.ProductStatus.Configured));
+            Assert.That(snapshot.ProductStatus.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Unavailable));
+            Assert.That(snapshot.McpAvailability.Summary, Is.EqualTo("Unavailable"));
+            Assert.That(snapshot.ProjectMcpConfig.Summary, Is.EqualTo("Current"));
+            Assert.That(snapshot.HostPayloadStatus.Summary, Is.EqualTo("Needs attention"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("MCP_UNAVAILABLE"));
+            Assert.That(snapshot.OverallDescription, Does.Not.Contain("Checking"));
         }
 
         [Test]
@@ -905,6 +923,67 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.Uninstalled));
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, false, false), Is.True);
+        }
+
+        private static AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure CreateTerminalFailure()
+        {
+            var root = AICodedbPaths.ProjectRoot;
+            var contract = AICodedbPackageRuntimeContractStore.Read(AICodedbPaths.PackageRootPath);
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                root,
+                contract.ControlContract);
+            var supervisor = AICodedbSupervisorSnapshot.Connected(
+                AICodedbSupervisorProtocol.CoordinatorStateSchemaVersion,
+                1234,
+                "manager-test",
+                runtime,
+                "ready",
+                string.Empty,
+                "disabled",
+                "disabled",
+                "enabled",
+                "online",
+                AICodedbSupervisorReadinessState.Degraded,
+                "MCP_UNAVAILABLE",
+                "sanitized terminal observation",
+                "provider_ready",
+                AICodedbSupervisorProtocol.SupervisorStateSchemaVersion,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                1234,
+                "0123456789abcdef0123456789abcdef",
+                AICodedbCoordinatorFailureCategory.None,
+                1,
+                "11111111111111111111111111111111",
+                7,
+                "manager-supervisor",
+                "abcdefabcdefabcdefabcdefabcdefab");
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.None,
+                "MCP layer did not become current.");
+            var result = new AICodedbCommandResult(
+                4,
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"BLOCKED\",\"phase\":\"VERIFY\",\"reason_code\":\"MCP_UNAVAILABLE\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Review the authenticated terminal evidence.\",\"exit_code\":4,\"detail\":\"MCP unavailable.\"}",
+                "MCP unavailable.",
+                false);
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    result,
+                    supervisor,
+                    out failure),
+                Is.True);
+            return failure;
         }
 
         private static AICodedbCommandResult Result(string output)

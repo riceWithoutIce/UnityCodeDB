@@ -13,10 +13,12 @@ namespace Rice.AI.Codedb.Editor
         internal string OverallDescription { get; }
         internal AICodedbProjectIntegrationStatus ProjectIntegrationStatus { get; }
         internal AICodedbProductStatus ProductStatus { get; }
+        internal AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure TerminalConvergenceFailureEvidence { get; }
         internal bool IsProjectUninstalled => ProjectIntegrationStatus.IsUninstalled;
         internal AICodedbCurrentInstanceStatus CurrentInstanceStatus { get; }
         internal AICodedbStatusItem CurrentInstance { get; }
         internal AICodedbStatusItem CoordinatorFailure { get; }
+        internal AICodedbStatusItem TerminalConvergenceFailure { get; }
         internal AICodedbStatusItem Cleanup { get; }
         internal AICodedbStatusItem ControlContractMigration { get; }
         internal AICodedbHostPayloadStatus HostPayloadStatus { get; }
@@ -80,6 +82,11 @@ namespace Rice.AI.Codedb.Editor
             Cleanup = CreateCleanupStatus(ProjectIntegrationStatus, ProductStatus.State);
             ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             HostPayload = HostPayloadStatus.ToStatusItem();
+            TerminalConvergenceFailureEvidence = null;
+            TerminalConvergenceFailure = AICodedbStatusItem.Inactive(
+                "Terminal convergence failure",
+                "Not retained",
+                string.Empty);
             HostUpdatePolicyValue = AICodedbHostUpdatePolicyStore.Read(context.ProjectRoot);
             HostGeneration = CreateHostGenerationStatus(HostGenerationSelection);
             HostLastKnownGood = CreateLastKnownGoodStatus(hostPayloadMarkerExists);
@@ -127,7 +134,8 @@ namespace Rice.AI.Codedb.Editor
                 default(AICodedbProductStatus),
                 false,
                 displayState == AICodedbProductState.Starting,
-                coordinatorFailureCategory)
+                coordinatorFailureCategory,
+                null)
         {
         }
 
@@ -141,7 +149,8 @@ namespace Rice.AI.Codedb.Editor
                 productStatus,
                 true,
                 false,
-                coordinatorFailureCategory)
+                coordinatorFailureCategory,
+                null)
         {
         }
 
@@ -151,10 +160,24 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus cachedProductStatus,
             bool hasCachedProductStatus,
             bool statusRefreshInFlight,
-            AICodedbCoordinatorFailureCategory coordinatorFailureCategory)
+            AICodedbCoordinatorFailureCategory coordinatorFailureCategory,
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure terminalFailure)
         {
             _context = default(AICodedbEditorExecutionContext);
             var productState = displayState;
+            var retainedFailure = terminalFailure != null && terminalFailure.IsValid
+                ? terminalFailure
+                : null;
+            if (retainedFailure != null)
+            {
+                // A validated terminal envelope is stronger than the coarse
+                // state key. Project it as an error and never as Checking or
+                // Ready while the lifecycle has no newer terminal evidence.
+                productState = AICodedbProductState.NeedsAttention;
+                cachedProductStatus = retainedFailure.ToProductStatus();
+                hasCachedProductStatus = true;
+                statusRefreshInFlight = false;
+            }
             var cachedReady = productState == AICodedbProductState.Ready;
             var cachedMissingPrerequisite = productState == AICodedbProductState.MissingPrerequisite;
             var cachedUninstalled = productState == AICodedbProductState.Uninstalled;
@@ -215,6 +238,16 @@ namespace Rice.AI.Codedb.Editor
                     layerState,
                     layerState,
                     detail);
+            TerminalConvergenceFailureEvidence = retainedFailure;
+            TerminalConvergenceFailure = retainedFailure == null
+                ? AICodedbStatusItem.Inactive(
+                    "Terminal convergence failure",
+                    "Not retained",
+                    string.Empty)
+                : AICodedbStatusItem.Error(
+                    "Terminal convergence failure",
+                    retainedFailure.ReasonCode,
+                    retainedFailure.DisplayDetail);
             CurrentInstanceStatus = cachedReady
                 ? new AICodedbCurrentInstanceStatus(
                     AICodedbCurrentInstanceState.Current,
@@ -229,7 +262,12 @@ namespace Rice.AI.Codedb.Editor
                     0,
                     detail)
                 : default(AICodedbCurrentInstanceStatus);
-            CurrentInstance = cachedReady
+            CurrentInstance = retainedFailure != null
+                ? AICodedbStatusItem.Error(
+                    "Current instance",
+                    "Needs attention",
+                    retainedFailure.DisplayDetail)
+                : cachedReady
                 ? AICodedbStatusItem.Inactive(
                     "Current instance",
                     "Last verified",
@@ -247,12 +285,20 @@ namespace Rice.AI.Codedb.Editor
             IndexRootRelativePath = cachedReady ? runtimeRelativePath + "/index" : string.Empty;
             TextAdapterRootRelativePath = cachedReady ? runtimeRelativePath + "/adapter/text-index" : string.Empty;
             WatchRootRelativePath = cachedReady ? runtimeRelativePath + "/watch" : string.Empty;
-            RuntimeContractTargetGenerationId = string.Empty;
-            HostPayloadStatus = new AICodedbHostPayloadStatus(
-                cachedReady ? AICodedbHostPayloadState.Current : AICodedbHostPayloadState.Unknown,
-                cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Warning,
-                cachedReady ? "Last verified" : showChecking ? "Checking" : "Not evaluated",
-                detail);
+            RuntimeContractTargetGenerationId = retainedFailure == null
+                ? string.Empty
+                : retainedFailure.TargetGenerationId;
+            HostPayloadStatus = retainedFailure != null
+                ? new AICodedbHostPayloadStatus(
+                    AICodedbHostPayloadState.Blocked,
+                    AICodedbStatusState.Error,
+                    "Needs attention",
+                    retainedFailure.DisplayDetail)
+                : new AICodedbHostPayloadStatus(
+                    cachedReady ? AICodedbHostPayloadState.Current : AICodedbHostPayloadState.Unknown,
+                    cachedReady ? AICodedbStatusState.Ok : AICodedbStatusState.Warning,
+                    cachedReady ? "Last verified" : showChecking ? "Checking" : "Not evaluated",
+                    detail);
             HostGenerationSelection = new AICodedbHostGenerationSelection(
                 cachedReady ? AICodedbHostGenerationState.Current : AICodedbHostGenerationState.Unavailable,
                 string.Empty,
@@ -282,10 +328,20 @@ namespace Rice.AI.Codedb.Editor
             HostUpdatePolicy = cachedReady
                 ? AICodedbStatusItem.Inactive("Automatic host updates", "Last verified", detail)
                 : CachedUnknown("Automatic host updates", showChecking, detail);
-            ProviderExecutable = cachedReady
+            ProviderExecutable = retainedFailure != null
+                ? CreateProductLayerStatus(
+                    "Provider executable",
+                    ProductStatus.Installed,
+                    retainedFailure.DisplayDetail)
+                : cachedReady
                 ? AICodedbStatusItem.Inactive("Provider executable", "Last verified", detail)
                 : CachedUnknown("Provider executable", showChecking, detail);
-            ProviderConfig = cachedReady
+            ProviderConfig = retainedFailure != null
+                ? CreateProductLayerStatus(
+                    "Provider config",
+                    ProductStatus.Configured,
+                    retainedFailure.DisplayDetail)
+                : cachedReady
                 ? AICodedbStatusItem.Inactive("Provider config", "Last verified", detail)
                 : CachedUnknown("Provider config", showChecking, detail);
             RuntimeConfigTemplate = cachedReady
@@ -306,10 +362,20 @@ namespace Rice.AI.Codedb.Editor
             TextAdapterManifest = cachedReady
                 ? AICodedbStatusItem.Inactive("Shader adapter manifest", "Not checked", detail)
                 : CachedUnknown("Shader adapter manifest", showChecking, detail);
-            ProjectMcpConfig = cachedReady
+            ProjectMcpConfig = retainedFailure != null
+                ? CreateProductLayerStatus(
+                    "Project MCP config",
+                    ProductStatus.Configured,
+                    retainedFailure.DisplayDetail)
+                : cachedReady
                 ? AICodedbStatusItem.Inactive("Project MCP config", "Last verified", detail)
                 : CachedUnknown("Project MCP config", showChecking, detail);
-            McpAvailability = cachedReady
+            McpAvailability = retainedFailure != null
+                ? CreateProductLayerStatus(
+                    "MCP availability",
+                    ProductStatus.McpAvailable,
+                    retainedFailure.DisplayDetail)
+                : cachedReady
                 ? AICodedbStatusItem.Inactive("MCP availability", "Last verified", detail)
                 : CachedUnknown("MCP availability", showChecking, detail);
             RuntimeBoundary = cachedReady
@@ -326,7 +392,9 @@ namespace Rice.AI.Codedb.Editor
                     ? AICodedbStatusState.Error
                     : AICodedbStatusState.Warning;
             OverallTitle = CreateOverallTitle(productState, projectDisplayName);
-            OverallDescription = cachedReady
+            OverallDescription = retainedFailure != null
+                ? retainedFailure.DisplayDetail
+                : cachedReady
                 ? "CodeDB was Ready before Play mode. Live checks resume when Play ends."
                 : productState == AICodedbProductState.Starting && !showChecking
                     ? detail
@@ -407,7 +475,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductState state,
             bool statusRefreshInFlight = false,
             AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
-                AICodedbCoordinatorFailureCategory.NotEvaluated)
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure terminalFailure = null)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
@@ -415,7 +484,8 @@ namespace Rice.AI.Codedb.Editor
                 default(AICodedbProductStatus),
                 false,
                 statusRefreshInFlight,
-                coordinatorFailureCategory);
+                coordinatorFailureCategory,
+                terminalFailure);
         }
 
         /// <summary>
@@ -428,7 +498,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus productStatus,
             bool statusRefreshInFlight = false,
             AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
-                AICodedbCoordinatorFailureCategory.NotEvaluated)
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure terminalFailure = null)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
@@ -436,7 +507,8 @@ namespace Rice.AI.Codedb.Editor
                 productStatus,
                 true,
                 statusRefreshInFlight,
-                coordinatorFailureCategory);
+                coordinatorFailureCategory,
+                terminalFailure);
         }
 
         internal static Task<AICodedbStatusSnapshot> RefreshAsync(

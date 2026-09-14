@@ -3,7 +3,6 @@
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "..\shared\codedb-machine-provider-contract.ps1")
 
-$script:CodedbHostPackageVersion = "0.2.5-preview.5"
 $script:CodedbMachineProviderCache = $null
 
 function ConvertTo-CodedbProjectSlug {
@@ -254,7 +253,7 @@ function Get-ProjectCodedbProviderPaths {
     )
 
     if ($null -eq $script:CodedbMachineProviderCache) {
-        $script:CodedbMachineProviderCache = Assert-CodedbMachineProvider -PackageVersion $script:CodedbHostPackageVersion
+        $script:CodedbMachineProviderCache = Assert-CodedbMachineProvider
     }
     [pscustomobject]@{
         ExecutablePath = $script:CodedbMachineProviderCache.ExecutablePath

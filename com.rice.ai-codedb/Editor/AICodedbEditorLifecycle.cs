@@ -38,6 +38,7 @@ namespace Rice.AI.Codedb.Editor
         private const string LastPackageFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastPackageFingerprint.";
         private const string LastVerifiedReadyFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.LastVerifiedReadyFingerprint.";
         private const string LeasePrerequisiteCurrentKeyPrefix = "Rice.AICodedb.EditorLifecycle.LeasePrerequisiteCurrent.";
+        private const string TerminalConvergenceFailureKeyPrefix = "Rice.AICodedb.EditorLifecycle.TerminalConvergenceFailure.";
         private const string PlayModeProductStateKeyPrefix = "Rice.AICodedb.EditorLifecycle.PlayModeProductState.";
         private const string PlayModePackageFingerprintKeyPrefix = "Rice.AICodedb.EditorLifecycle.PlayModePackageFingerprint.";
 
@@ -61,6 +62,7 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbCommandResult _cachedHostStatusResult;
         private static AICodedbProductStatus _cachedLifecycleProductStatus;
         private static AICodedbSupervisorSnapshot _cachedLifecycleSupervisorSnapshot;
+        private static AICodedbTerminalConvergenceFailure _cachedTerminalConvergenceFailure;
         private static bool _hasCachedLifecycleProductStatus;
         private static long _cachedHostStatusRevision;
         private static int _automaticSupervisorStartAllowed;
@@ -222,6 +224,24 @@ namespace Rice.AI.Codedb.Editor
                 _editorPid = prepared.EditorPid;
                 _processStartTicks = prepared.ProcessStartTicks;
                 _lastProductState = ReadPersistedProductState(_projectIdentity);
+                var persistedTerminalFailure = ReadPersistedTerminalConvergenceFailure(_projectIdentity);
+                if (persistedTerminalFailure != null)
+                {
+                    // A retained authenticated terminal failure is stronger
+                    // than a coarse or transient state restored from the
+                    // adjacent SessionState key. It remains fail-closed until
+                    // a newer authenticated terminal observation replaces it.
+                    _lastProductState = AICodedbProductState.NeedsAttention;
+                    lock (HostStatusCacheLock)
+                    {
+                        _cachedTerminalConvergenceFailure = persistedTerminalFailure;
+                        _cachedLifecycleProductStatus = persistedTerminalFailure.ToProductStatus();
+                        _cachedLifecycleSupervisorSnapshot = null;
+                        _cachedHostStatusResult = null;
+                        _hasCachedLifecycleProductStatus = true;
+                        _cachedHostStatusRevision++;
+                    }
+                }
                 _packageFingerprintChanged = HasPackageFingerprintChanged(_projectIdentity);
                 Interlocked.Exchange(
                     ref _leasePrerequisiteCurrent,
@@ -625,7 +645,21 @@ namespace Rice.AI.Codedb.Editor
                 if (result.HasProductState)
                 {
                     _lastProductState = result.ProductState;
+                    if (result.ProductState == AICodedbProductState.Uninstalled)
+                    {
+                        PublishAuthoritativeUninstalledCache();
+                        PersistTerminalConvergenceFailure(
+                            _projectIdentity,
+                            null);
+                    }
                     PersistProductState(_projectIdentity, result.ProductState);
+                    if (result.ProductState != AICodedbProductState.Uninstalled)
+                    {
+                        var terminalFailure = GetCachedTerminalConvergenceFailure();
+                        PersistTerminalConvergenceFailure(
+                            _projectIdentity,
+                            terminalFailure);
+                    }
                     PersistLeasePrerequisite(
                         _projectIdentity,
                         Volatile.Read(ref _leasePrerequisiteCurrent) != 0);
@@ -872,9 +906,15 @@ namespace Rice.AI.Codedb.Editor
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
                 if (!canContinue())
+                {
+                    RememberLifecycleProductStatus(
+                        AICodedbProductStatusBuilder.Build(integrationStatus, null));
                     return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
+                }
                 var cleanupResult = RememberHostStatusResult(
                     RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
+                RememberLifecycleProductStatus(
+                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
                 return cleanupResult.Succeeded
                     ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
                     : LifecycleReconcileResult.WithWarning(
@@ -887,6 +927,8 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbPostAdmissionDisposition.Uninstalled);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
+                RememberLifecycleProductStatus(
+                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
                 return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
             }
 
@@ -1900,6 +1942,36 @@ namespace Rice.AI.Codedb.Editor
                 : AICodedbProductState.Starting;
         }
 
+        private static AICodedbTerminalConvergenceFailure ReadPersistedTerminalConvergenceFailure(
+            string projectIdentity)
+        {
+            if (string.IsNullOrWhiteSpace(projectIdentity))
+                return null;
+
+            var serialized = SessionState.GetString(
+                TerminalConvergenceFailureKeyPrefix + projectIdentity,
+                string.Empty);
+            AICodedbTerminalConvergenceFailure failure;
+            return AICodedbTerminalConvergenceFailure.TryDeserialize(
+                       serialized,
+                       GetCurrentPackageFingerprint(),
+                       out failure)
+                ? failure
+                : null;
+        }
+
+        private static void PersistTerminalConvergenceFailure(
+            string projectIdentity,
+            AICodedbTerminalConvergenceFailure failure)
+        {
+            if (string.IsNullOrWhiteSpace(projectIdentity))
+                return;
+
+            SessionState.SetString(
+                TerminalConvergenceFailureKeyPrefix + projectIdentity,
+                failure == null || !failure.IsValid ? string.Empty : failure.Serialize());
+        }
+
         private static void PersistProductState(string projectIdentity, AICodedbProductState state)
         {
             if (string.IsNullOrWhiteSpace(projectIdentity))
@@ -2261,14 +2333,33 @@ namespace Rice.AI.Codedb.Editor
             out AICodedbSupervisorSnapshot supervisorSnapshot,
             out long revision)
         {
+            AICodedbTerminalConvergenceFailure ignored;
+            return TryGetCachedLifecycleStatus(
+                out result,
+                out productStatus,
+                out hasProductStatus,
+                out supervisorSnapshot,
+                out ignored,
+                out revision);
+        }
+
+        internal static bool TryGetCachedLifecycleStatus(
+            out AICodedbCommandResult result,
+            out AICodedbProductStatus productStatus,
+            out bool hasProductStatus,
+            out AICodedbSupervisorSnapshot supervisorSnapshot,
+            out AICodedbTerminalConvergenceFailure terminalFailure,
+            out long revision)
+        {
             lock (HostStatusCacheLock)
             {
                 result = _cachedHostStatusResult;
                 productStatus = _cachedLifecycleProductStatus;
                 hasProductStatus = _hasCachedLifecycleProductStatus;
                 supervisorSnapshot = _cachedLifecycleSupervisorSnapshot;
+                terminalFailure = _cachedTerminalConvergenceFailure;
                 revision = _cachedHostStatusRevision;
-                return result != null || hasProductStatus;
+                return result != null || hasProductStatus || terminalFailure != null;
             }
         }
 
@@ -2276,6 +2367,12 @@ namespace Rice.AI.Codedb.Editor
         {
             lock (HostStatusCacheLock)
                 return _cachedLifecycleSupervisorSnapshot;
+        }
+
+        internal static AICodedbTerminalConvergenceFailure GetCachedTerminalConvergenceFailure()
+        {
+            lock (HostStatusCacheLock)
+                return _cachedTerminalConvergenceFailure;
         }
 
         /// <summary>
@@ -2287,11 +2384,26 @@ namespace Rice.AI.Codedb.Editor
             string projectRoot,
             out AICodedbProductState state)
         {
+            AICodedbTerminalConvergenceFailure ignored;
             return TryGetPersistedProductState(
                 projectRoot,
                 _projectRoot,
                 _projectIdentity,
-                out state);
+                out state,
+                out ignored);
+        }
+
+        internal static bool TryGetPersistedProductState(
+            string projectRoot,
+            out AICodedbProductState state,
+            out AICodedbTerminalConvergenceFailure terminalFailure)
+        {
+            return TryGetPersistedProductState(
+                projectRoot,
+                _projectRoot,
+                _projectIdentity,
+                out state,
+                out terminalFailure);
         }
 
         internal static bool TryGetPersistedProductState(
@@ -2300,7 +2412,24 @@ namespace Rice.AI.Codedb.Editor
             string publishedProjectIdentity,
             out AICodedbProductState state)
         {
+            AICodedbTerminalConvergenceFailure ignored;
+            return TryGetPersistedProductState(
+                projectRoot,
+                publishedProjectRoot,
+                publishedProjectIdentity,
+                out state,
+                out ignored);
+        }
+
+        internal static bool TryGetPersistedProductState(
+            string projectRoot,
+            string publishedProjectRoot,
+            string publishedProjectIdentity,
+            out AICodedbProductState state,
+            out AICodedbTerminalConvergenceFailure terminalFailure)
+        {
             state = AICodedbProductState.Starting;
+            terminalFailure = null;
             string projectIdentity;
             if (!TryGetPublishedProjectIdentityForDisplay(
                     projectRoot,
@@ -2308,6 +2437,13 @@ namespace Rice.AI.Codedb.Editor
                     publishedProjectIdentity,
                     out projectIdentity))
                 return false;
+
+            terminalFailure = ReadPersistedTerminalConvergenceFailure(projectIdentity);
+            if (terminalFailure != null)
+            {
+                state = AICodedbProductState.NeedsAttention;
+                return true;
+            }
 
             var value = SessionState.GetString(
                 LastProductStateKeyPrefix + projectIdentity,
@@ -2333,12 +2469,55 @@ namespace Rice.AI.Codedb.Editor
             lock (HostStatusCacheLock)
             {
                 _cachedHostStatusResult = result;
-                _cachedLifecycleProductStatus = default(AICodedbProductStatus);
+                _cachedLifecycleProductStatus = _cachedTerminalConvergenceFailure == null
+                    ? default(AICodedbProductStatus)
+                    : _cachedTerminalConvergenceFailure.ToProductStatus();
                 _cachedLifecycleSupervisorSnapshot = null;
-                _hasCachedLifecycleProductStatus = false;
+                _hasCachedLifecycleProductStatus = _cachedTerminalConvergenceFailure != null;
                 _cachedHostStatusRevision++;
             }
             return result;
+        }
+
+        /// <summary>
+        /// Publishes one coherent lifecycle cache tuple and advances its
+        /// revision under the single cache lock.
+        /// </summary>
+        internal static void PublishLifecycleStatusCache(
+            AICodedbCommandResult result,
+            AICodedbProductStatus productStatus,
+            bool hasProductStatus,
+            AICodedbSupervisorSnapshot supervisorSnapshot,
+            AICodedbTerminalConvergenceFailure terminalFailure)
+        {
+            lock (HostStatusCacheLock)
+            {
+                _cachedHostStatusResult = result;
+                _cachedLifecycleProductStatus = productStatus;
+                _cachedLifecycleSupervisorSnapshot = supervisorSnapshot;
+                _cachedTerminalConvergenceFailure = terminalFailure;
+                _hasCachedLifecycleProductStatus = hasProductStatus;
+                _cachedHostStatusRevision++;
+            }
+        }
+
+        internal static void PublishAuthoritativeUninstalledCache()
+        {
+            PublishLifecycleStatusCache(
+                null,
+                new AICodedbProductStatus(
+                    AICodedbProductState.Uninstalled,
+                    AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown,
+                    "CodeDB is uninstalled from this project; live checks resume after installation.",
+                    default(AICodedbMaterializerCommandStatus),
+                    AICodedbProductAttentionReason.None,
+                    string.Empty),
+                true,
+                null,
+                null);
         }
 
         private static AICodedbProductStatus RememberLifecycleProductStatus(
@@ -2346,19 +2525,57 @@ namespace Rice.AI.Codedb.Editor
             AICodedbCommandResult result = null)
         {
             AICodedbSupervisorSnapshot supervisorSnapshot;
-            productStatus = BindProductStatusToSupervisorObservation(
+            var authoritativeUninstalled =
+                productStatus.State == AICodedbProductState.Uninstalled;
+            if (authoritativeUninstalled)
+                supervisorSnapshot = null;
+            else
+                productStatus = BindProductStatusToSupervisorObservation(
+                    productStatus,
+                    result,
+                    SupervisorBridge.CachedSnapshot,
+                    out supervisorSnapshot);
+
+            AICodedbTerminalConvergenceFailure existingFailure;
+            lock (HostStatusCacheLock)
+                existingFailure = _cachedTerminalConvergenceFailure;
+
+            AICodedbTerminalConvergenceFailure candidateFailure;
+            var hasCandidateFailure = TryCreateTerminalConvergenceFailure(
                 productStatus,
                 result,
-                SupervisorBridge.CachedSnapshot,
-                out supervisorSnapshot);
-            lock (HostStatusCacheLock)
+                supervisorSnapshot,
+                out candidateFailure);
+            var acceptedCandidate = hasCandidateFailure
+                && ShouldReplaceTerminalConvergenceFailure(existingFailure, candidateFailure);
+            var clearedFailure = ShouldClearTerminalConvergenceFailure(
+                existingFailure,
+                productStatus,
+                result,
+                supervisorSnapshot);
+
+            if (authoritativeUninstalled)
+                existingFailure = ResolveTerminalConvergenceFailureForProductState(
+                    existingFailure,
+                    productStatus.State);
+            else if (acceptedCandidate)
+                existingFailure = candidateFailure;
+            else if (clearedFailure)
+                existingFailure = null;
+            else if (existingFailure != null
+                     && productStatus.State != AICodedbProductState.Uninstalled)
             {
-                _cachedHostStatusResult = result;
-                _cachedLifecycleProductStatus = productStatus;
-                _cachedLifecycleSupervisorSnapshot = supervisorSnapshot;
-                _hasCachedLifecycleProductStatus = true;
-                _cachedHostStatusRevision++;
+                // Starting, missing, malformed, or stale observations are not
+                // authenticated replacements for the terminal envelope.
+                productStatus = existingFailure.ToProductStatus();
             }
+
+            PublishLifecycleStatusCache(
+                result,
+                productStatus,
+                true,
+                supervisorSnapshot,
+                existingFailure);
             return productStatus;
         }
 
@@ -2497,6 +2714,189 @@ namespace Rice.AI.Codedb.Editor
                 productStatus.Command,
                 AICodedbProductAttentionReason.None,
                 productStatus.DiagnosticDetail);
+        }
+
+        internal static bool TryCreateTerminalConvergenceFailure(
+            AICodedbProductStatus productStatus,
+            AICodedbCommandResult result,
+            AICodedbSupervisorSnapshot supervisorSnapshot,
+            out AICodedbTerminalConvergenceFailure failure)
+        {
+            failure = null;
+            if (productStatus.State != AICodedbProductState.NeedsAttention
+                || result == null
+                || result.TimedOut
+                || !IsAuthenticatedTerminalObservation(supervisorSnapshot))
+                return false;
+
+            var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+            var reasonCode = command.IsValid && !string.IsNullOrWhiteSpace(command.ReasonCode)
+                ? command.ReasonCode
+                : supervisorSnapshot.ReasonCode;
+            if (!IsBoundedTerminalToken(reasonCode))
+                reasonCode = "CONVERGENCE_FAILURE";
+
+            var boundedStatus = new AICodedbProductStatus(
+                productStatus.State,
+                productStatus.Prerequisite,
+                productStatus.Installed,
+                productStatus.Configured,
+                productStatus.McpAvailable,
+                BoundedEvidenceText(productStatus.Detail),
+                productStatus.Command,
+                productStatus.AttentionReason,
+                BoundedEvidenceText(productStatus.DiagnosticDetail));
+            failure = new AICodedbTerminalConvergenceFailure(
+                boundedStatus,
+                reasonCode,
+                AICodedbTerminalConvergenceFailure.ProducerName,
+                GetCurrentPackageFingerprint(),
+                supervisorSnapshot.TargetGenerationId,
+                supervisorSnapshot.SelectedGenerationId,
+                supervisorSnapshot.SelectedInstanceId,
+                supervisorSnapshot.RuntimeContractSha256,
+                supervisorSnapshot.OperationalObservationId,
+                supervisorSnapshot.SupervisorId,
+                supervisorSnapshot.OwnerEpoch,
+                supervisorSnapshot.OperationalObservationRevision);
+            return failure.IsValid;
+        }
+
+        internal static bool ShouldReplaceTerminalConvergenceFailure(
+            AICodedbTerminalConvergenceFailure existing,
+            AICodedbTerminalConvergenceFailure candidate)
+        {
+            if (candidate == null || !candidate.IsValid)
+                return false;
+            if (existing == null || !existing.IsValid)
+                return true;
+            if (!string.Equals(
+                    existing.PackageFingerprint,
+                    candidate.PackageFingerprint,
+                    StringComparison.Ordinal))
+                return false;
+            return !HasSameTerminalAuthority(
+                       existing,
+                       candidate.SupervisorId,
+                       candidate.OwnerEpoch)
+                   || candidate.Revision > existing.Revision;
+        }
+
+        internal static AICodedbTerminalConvergenceFailure
+            ResolveTerminalConvergenceFailureForProductState(
+                AICodedbTerminalConvergenceFailure existing,
+                AICodedbProductState productState)
+        {
+            return productState == AICodedbProductState.Uninstalled
+                ? null
+                : existing;
+        }
+
+        internal static bool IsAuthenticatedTerminalSuccess(
+            AICodedbProductStatus productStatus,
+            AICodedbCommandResult result,
+            AICodedbSupervisorSnapshot supervisorSnapshot)
+        {
+            return productStatus.State == AICodedbProductState.Ready
+                   && result != null
+                   && result.Succeeded
+                   && !result.TimedOut
+                   && productStatus.Prerequisite == AICodedbProductLayerState.Current
+                   && productStatus.Installed == AICodedbProductLayerState.Current
+                   && productStatus.Configured == AICodedbProductLayerState.Current
+                   && productStatus.McpAvailable == AICodedbProductLayerState.Current
+                   && IsAuthenticatedTerminalObservation(supervisorSnapshot)
+                   && supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.CoreReady;
+        }
+
+        internal static bool ShouldClearTerminalConvergenceFailure(
+            AICodedbTerminalConvergenceFailure existing,
+            AICodedbProductStatus productStatus,
+            AICodedbCommandResult result,
+            AICodedbSupervisorSnapshot supervisorSnapshot)
+        {
+            return existing != null
+                   && existing.IsValid
+                   && IsAuthenticatedTerminalSuccess(productStatus, result, supervisorSnapshot)
+                   && string.Equals(
+                       existing.PackageFingerprint,
+                       GetCurrentPackageFingerprint(),
+                       StringComparison.Ordinal)
+                   && (!HasSameTerminalAuthority(
+                           existing,
+                           supervisorSnapshot.SupervisorId,
+                           supervisorSnapshot.OwnerEpoch)
+                       || supervisorSnapshot.OperationalObservationRevision > existing.Revision);
+        }
+
+        private static bool HasSameTerminalAuthority(
+            AICodedbTerminalConvergenceFailure existing,
+            string supervisorId,
+            string ownerEpoch)
+        {
+            return existing != null
+                   && string.Equals(
+                       existing.SupervisorId,
+                       supervisorId,
+                       StringComparison.Ordinal)
+                   && string.Equals(
+                       existing.OwnerEpoch,
+                       ownerEpoch,
+                       StringComparison.Ordinal);
+        }
+
+        private static bool IsAuthenticatedTerminalObservation(
+            AICodedbSupervisorSnapshot supervisorSnapshot)
+        {
+            if (supervisorSnapshot == null
+                || !supervisorSnapshot.HasOperationalReadinessObservation
+                || supervisorSnapshot.OperationalObservationRevision <= 0
+                || supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.Unknown
+                || supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.Starting
+                || supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.Maintenance
+                || supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.Stopping
+                || supervisorSnapshot.ReadinessState == AICodedbSupervisorReadinessState.Stopped)
+                return false;
+
+            return IsBoundedTerminalToken(supervisorSnapshot.TargetGenerationId)
+                   && IsBoundedTerminalToken(supervisorSnapshot.SelectedGenerationId)
+                   && IsBoundedTerminalToken(supervisorSnapshot.RuntimeContractSha256)
+                   && IsBoundedTerminalToken(supervisorSnapshot.OperationalObservationId)
+                   && IsBoundedTerminalToken(supervisorSnapshot.SupervisorId)
+                   && IsBoundedTerminalToken(supervisorSnapshot.OwnerEpoch);
+        }
+
+        private static bool IsBoundedTerminalToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length > 128)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character >= 'a' && character <= 'z')
+                    || (character >= 'A' && character <= 'Z')
+                    || (character >= '0' && character <= '9')
+                    || character == '.'
+                    || character == '_'
+                    || character == '-')
+                    continue;
+                return false;
+            }
+            return true;
+        }
+
+        private static string BoundedEvidenceText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var builder = new StringBuilder(Math.Min(value.Length, 2048));
+            foreach (var character in value.Trim())
+            {
+                if (builder.Length >= 2048)
+                    break;
+                builder.Append(char.IsControl(character) ? ' ' : character);
+            }
+            return builder.ToString().Trim();
         }
 
         private static bool HasPackageFingerprintChanged(string projectIdentity)
@@ -3632,6 +4032,315 @@ namespace Rice.AI.Codedb.Editor
             MarkerProductStatusMismatch,
             TrustworthyCurrent,
             TrustworthyMissing
+        }
+
+        /// <summary>
+        /// The single lifecycle-owned terminal failure handoff. It is bound to
+        /// an authenticated Supervisor operational observation so a coarse
+        /// persisted product state can never manufacture actionable detail.
+        /// </summary>
+        internal sealed class AICodedbTerminalConvergenceFailure
+        {
+            internal const int SchemaVersion = 1;
+            internal const string ProducerName = "SupervisorOperationalReadiness";
+
+            private readonly AICodedbProductStatus _productStatus;
+            private readonly string _reasonCode;
+            private readonly string _producer;
+            private readonly string _packageFingerprint;
+            private readonly string _targetGenerationId;
+            private readonly string _selectedGenerationId;
+            private readonly string _selectedInstanceId;
+            private readonly string _runtimeContractSha256;
+            private readonly string _observationId;
+            private readonly string _supervisorId;
+            private readonly string _ownerEpoch;
+            private readonly long _revision;
+
+            internal AICodedbTerminalConvergenceFailure(
+                AICodedbProductStatus productStatus,
+                string reasonCode,
+                string producer,
+                string packageFingerprint,
+                string targetGenerationId,
+                string selectedGenerationId,
+                string selectedInstanceId,
+                string runtimeContractSha256,
+                string observationId,
+                string supervisorId,
+                string ownerEpoch,
+                long revision)
+            {
+                _productStatus = new AICodedbProductStatus(
+                    productStatus.State,
+                    productStatus.Prerequisite,
+                    productStatus.Installed,
+                    productStatus.Configured,
+                    productStatus.McpAvailable,
+                    BoundedEvidenceText(productStatus.Detail),
+                    productStatus.Command,
+                    productStatus.AttentionReason,
+                    BoundedEvidenceText(productStatus.DiagnosticDetail));
+                _reasonCode = reasonCode ?? string.Empty;
+                _producer = producer ?? string.Empty;
+                _packageFingerprint = packageFingerprint ?? string.Empty;
+                _targetGenerationId = targetGenerationId ?? string.Empty;
+                _selectedGenerationId = selectedGenerationId ?? string.Empty;
+                _selectedInstanceId = selectedInstanceId ?? string.Empty;
+                _runtimeContractSha256 = runtimeContractSha256 ?? string.Empty;
+                _observationId = observationId ?? string.Empty;
+                _supervisorId = supervisorId ?? string.Empty;
+                _ownerEpoch = ownerEpoch ?? string.Empty;
+                _revision = revision;
+            }
+
+            internal AICodedbProductStatus ProductStatus => _productStatus;
+            internal string ReasonCode => _reasonCode;
+            internal string Producer => _producer;
+            internal string PackageFingerprint => _packageFingerprint;
+            internal string TargetGenerationId => _targetGenerationId;
+            internal string SelectedGenerationId => _selectedGenerationId;
+            internal string SelectedInstanceId => _selectedInstanceId;
+            internal string RuntimeContractSha256 => _runtimeContractSha256;
+            internal string ObservationId => _observationId;
+            internal string SupervisorId => _supervisorId;
+            internal string OwnerEpoch => _ownerEpoch;
+            internal long Revision => _revision;
+
+            internal string Binding => string.Join(
+                "/",
+                _targetGenerationId,
+                _selectedGenerationId,
+                string.IsNullOrWhiteSpace(_selectedInstanceId) ? "-" : _selectedInstanceId,
+                _observationId,
+                _supervisorId,
+                _ownerEpoch,
+                _revision.ToString(CultureInfo.InvariantCulture));
+
+            internal string DisplayDetail
+            {
+                get
+                {
+                    var detail = string.IsNullOrWhiteSpace(_productStatus.Detail)
+                        ? "The authenticated Supervisor convergence attempt failed."
+                        : _productStatus.Detail;
+                    var diagnostic = string.IsNullOrWhiteSpace(_productStatus.DiagnosticDetail)
+                        ? string.Empty
+                        : " Diagnostic: " + _productStatus.DiagnosticDetail;
+                    return detail
+                           + diagnostic
+                           + " Reason: " + _reasonCode
+                           + "; Producer: " + _producer
+                           + "; Binding: " + Binding;
+                }
+            }
+
+            internal bool IsValid
+            {
+                get
+                {
+                    return _productStatus.State == AICodedbProductState.NeedsAttention
+                           && IsDefined(typeof(AICodedbProductLayerState), _productStatus.Prerequisite)
+                           && IsDefined(typeof(AICodedbProductLayerState), _productStatus.Installed)
+                           && IsDefined(typeof(AICodedbProductLayerState), _productStatus.Configured)
+                           && IsDefined(typeof(AICodedbProductLayerState), _productStatus.McpAvailable)
+                           && IsDefined(
+                               typeof(AICodedbProductAttentionReason),
+                               _productStatus.AttentionReason)
+                           && IsBoundedEvidenceToken(_reasonCode)
+                           && string.Equals(_producer, ProducerName, StringComparison.Ordinal)
+                           && IsBoundedEvidenceText(_packageFingerprint, 256)
+                           && IsBoundedEvidenceToken(_targetGenerationId)
+                           && IsBoundedEvidenceToken(_selectedGenerationId)
+                           && (string.IsNullOrWhiteSpace(_selectedInstanceId)
+                               || IsBoundedEvidenceToken(_selectedInstanceId))
+                           && IsBoundedEvidenceToken(_runtimeContractSha256)
+                           && IsBoundedEvidenceToken(_observationId)
+                           && IsBoundedEvidenceToken(_supervisorId)
+                           && IsBoundedEvidenceToken(_ownerEpoch)
+                           && _revision > 0
+                           && IsBoundedEvidenceText(_productStatus.Detail, 2048)
+                           && IsBoundedEvidenceText(_productStatus.DiagnosticDetail, 2048);
+                }
+            }
+
+            internal AICodedbProductStatus ToProductStatus()
+            {
+                return new AICodedbProductStatus(
+                    _productStatus.State,
+                    _productStatus.Prerequisite,
+                    _productStatus.Installed,
+                    _productStatus.Configured,
+                    _productStatus.McpAvailable,
+                    _productStatus.Detail,
+                    default(AICodedbMaterializerCommandStatus),
+                    _productStatus.AttentionReason,
+                    _productStatus.DiagnosticDetail);
+            }
+
+            internal string Serialize()
+            {
+                return JsonUtility.ToJson(new AICodedbTerminalConvergenceFailureDocument
+                {
+                    schema_version = SchemaVersion,
+                    package_fingerprint = _packageFingerprint,
+                    product_state = _productStatus.State.ToString(),
+                    prerequisite = _productStatus.Prerequisite.ToString(),
+                    installed = _productStatus.Installed.ToString(),
+                    configured = _productStatus.Configured.ToString(),
+                    mcp_available = _productStatus.McpAvailable.ToString(),
+                    attention_reason = _productStatus.AttentionReason.ToString(),
+                    reason_code = _reasonCode,
+                    producer = _producer,
+                    target_generation_id = _targetGenerationId,
+                    selected_generation_id = _selectedGenerationId,
+                    selected_instance_id = _selectedInstanceId,
+                    runtime_contract_sha256 = _runtimeContractSha256,
+                    observation_id = _observationId,
+                    supervisor_id = _supervisorId,
+                    owner_epoch = _ownerEpoch,
+                    revision = _revision,
+                    detail = _productStatus.Detail,
+                    diagnostic_detail = _productStatus.DiagnosticDetail
+                });
+            }
+
+            internal static bool TryDeserialize(
+                string serialized,
+                string expectedPackageFingerprint,
+                out AICodedbTerminalConvergenceFailure failure)
+            {
+                failure = null;
+                if (string.IsNullOrWhiteSpace(serialized)
+                    || string.IsNullOrWhiteSpace(expectedPackageFingerprint))
+                    return false;
+
+                try
+                {
+                    var document = JsonUtility.FromJson<AICodedbTerminalConvergenceFailureDocument>(serialized);
+                    if (document == null
+                        || document.schema_version != SchemaVersion
+                        || !string.Equals(
+                            document.package_fingerprint,
+                            expectedPackageFingerprint,
+                            StringComparison.Ordinal))
+                        return false;
+
+                    AICodedbProductState productState;
+                    AICodedbProductLayerState prerequisite;
+                    AICodedbProductLayerState installed;
+                    AICodedbProductLayerState configured;
+                    AICodedbProductLayerState mcpAvailable;
+                    AICodedbProductAttentionReason attentionReason;
+                    if (!TryParseDefinedEnum(document.product_state, out productState)
+                        || !TryParseDefinedEnum(document.prerequisite, out prerequisite)
+                        || !TryParseDefinedEnum(document.installed, out installed)
+                        || !TryParseDefinedEnum(document.configured, out configured)
+                        || !TryParseDefinedEnum(document.mcp_available, out mcpAvailable)
+                        || !TryParseDefinedEnum(document.attention_reason, out attentionReason))
+                        return false;
+
+                    failure = new AICodedbTerminalConvergenceFailure(
+                        new AICodedbProductStatus(
+                            productState,
+                            prerequisite,
+                            installed,
+                            configured,
+                            mcpAvailable,
+                            document.detail,
+                            default(AICodedbMaterializerCommandStatus),
+                            attentionReason,
+                            document.diagnostic_detail),
+                        document.reason_code,
+                        document.producer,
+                        document.package_fingerprint,
+                        document.target_generation_id,
+                        document.selected_generation_id,
+                        document.selected_instance_id,
+                        document.runtime_contract_sha256,
+                        document.observation_id,
+                        document.supervisor_id,
+                        document.owner_epoch,
+                        document.revision);
+                    return failure.IsValid;
+                }
+                catch (Exception)
+                {
+                    failure = null;
+                    return false;
+                }
+            }
+
+            private static bool TryParseDefinedEnum<T>(string value, out T parsed)
+                where T : struct
+            {
+                parsed = default(T);
+                if (string.IsNullOrWhiteSpace(value)
+                    || !Enum.TryParse(value, false, out parsed)
+                    || !Enum.IsDefined(typeof(T), parsed))
+                    return false;
+                return string.Equals(parsed.ToString(), value, StringComparison.Ordinal);
+            }
+
+            private static bool IsDefined(Type enumType, object value)
+            {
+                return Enum.IsDefined(enumType, value);
+            }
+
+            private static bool IsBoundedEvidenceToken(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value) || value.Length > 128)
+                    return false;
+                foreach (var character in value)
+                {
+                    if ((character >= 'a' && character <= 'z')
+                        || (character >= 'A' && character <= 'Z')
+                        || (character >= '0' && character <= '9')
+                        || character == '.'
+                        || character == '_'
+                        || character == '-')
+                        continue;
+                    return false;
+                }
+                return true;
+            }
+
+            private static bool IsBoundedEvidenceText(string value, int maximumLength)
+            {
+                if (value == null || value.Length > maximumLength)
+                    return false;
+                foreach (var character in value)
+                {
+                    if (char.IsControl(character))
+                        return false;
+                }
+                return true;
+            }
+
+            [Serializable]
+            private sealed class AICodedbTerminalConvergenceFailureDocument
+            {
+                public int schema_version;
+                public string package_fingerprint;
+                public string product_state;
+                public string prerequisite;
+                public string installed;
+                public string configured;
+                public string mcp_available;
+                public string attention_reason;
+                public string reason_code;
+                public string producer;
+                public string target_generation_id;
+                public string selected_generation_id;
+                public string selected_instance_id;
+                public string runtime_contract_sha256;
+                public string observation_id;
+                public string supervisor_id;
+                public string owner_epoch;
+                public long revision;
+                public string detail;
+                public string diagnostic_detail;
+            }
         }
 
         private sealed class LifecycleInitializationData

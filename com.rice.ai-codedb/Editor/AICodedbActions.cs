@@ -33,7 +33,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 EditorUtility.DisplayDialog(
                     "CodeDB Provider",
-                    "The machine Provider is not present. Use Configure Dependencies to install the fixed 0.5.0-28e3912 Provider, then let Unity recheck automatically.",
+                    "The machine Provider is not present. Use Configure Dependencies to install the fixed 0.5.0-28e3912-c2 Provider, then let Unity recheck automatically.",
                     "OK");
                 return;
             }

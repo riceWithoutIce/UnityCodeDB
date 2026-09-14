@@ -1,14 +1,15 @@
 # CodeDB Provider Installation Contract
 
-Status: frozen development-baseline decision for v0.2.5-preview.5 (2026-08-20).
+Status: local candidate decision for v0.3.0-preview.1 (2026-09-11).
 The Package includes a strict, Package-owned installer entry point and activates
-this identity through retained `poc.33` and active `poc.34`. The development installer
-remains separate from release approval: a production descriptor still requires
-the Rice artifact, license, hash, and signing review below.
+schema-2 identity `0.5.0-28e3912-c2` through active `poc.35`, beside the
+immutable schema-1 historical distribution. The development installer remains
+separate from release approval: a production descriptor still requires the
+Rice artifact, license, hash, and signing review below.
 
 ## Decision
 
-The preview.5 Provider identity is fixed to the reviewed upstream commit below.
+The preview.1 Provider identity is fixed to the reviewed upstream commit below.
 The package does not follow an upstream `latest` branch and does not silently
 upgrade the Provider when a newer upstream version appears. The upstream
 semantic version and the Rice machine-distribution identity are recorded
@@ -17,12 +18,18 @@ separately so two same-version upstream artifacts can never share a directory.
 ```text
 Provider ID:       killop/codedb-mcp
 Provider version:  0.5.0
-Rice distribution: 0.5.0-28e3912
+Rice distribution: 0.5.0-28e3912-c2
 Upstream commit:   28e3912d5cd67ff3499734984f3e3d626a204796
 Protocol:          codedb-cli-v1
-Package range:     >=0.2.5-preview.5 <0.2.6
+Capability:        codedb-search-tools-v1
+Manifest schema:   2
 Executable:        codebase-mcp.exe
 ```
+
+Schema 2 contains no supported-Package semver fields. Admission authenticates
+the exact Provider ID, Rice distribution, upstream commit, executable name and
+SHA-256, source, protocol, capability contract, path closure, and runtime tool
+surface. A Package version remains a Package identity, not Provider capability.
 
 A later upstream stable release or compatible version requires a separate
 identity, compatibility, license, artifact, and regression review. It is not an
@@ -55,8 +62,8 @@ different graph-first protocol surface. Its Windows artifact is
 not provide the required search tools. It must not be silently substituted for
 the frozen development baseline.
 
-The checked-in preview.5 development descriptor and `poc.33`/`poc.34` payloads
-use the frozen `28e3912` identity. The preserved `poc.31`/`poc.32` payloads continue
+The checked-in historical `poc.33`/`poc.34` payloads use schema-1 distribution
+`0.5.0-28e3912`. The preserved `poc.31`/`poc.32` payloads continue
 to describe the older `13de004` snapshot as immutable historical state. The
 installer only activates `28e3912` after downloading and verifying the exact
 Package-pinned executable bytes.
@@ -74,9 +81,10 @@ Package-pinned executable bytes.
    identity. A migration must publish a new generation and preserve older
    generation bytes and leases.
 5. The preview.5 `poc.31`/`poc.32` snapshots and their `13de004` references
-   remain immutable historical state. Retained `poc.33` and active `poc.34` use the
-   `0.5.0-28e3912` machine directory; no older generation is rewritten or
-   replaced in place.
+   remain immutable historical state. Retained `poc.33` and `poc.34` use the
+   schema-1 `0.5.0-28e3912` machine directory. Active `poc.35` uses the
+   side-by-side schema-2 `0.5.0-28e3912-c2` directory; no older generation is
+   rewritten or replaced in place.
 
 ## Distribution Boundary
 
@@ -87,7 +95,7 @@ The Git repository and the machine distribution have different ownership:
 | Source repository | Provider contract, installer and verifier code, expected identity, artifact metadata, tests, and notices | `UnityCodeDB` Git tree |
 | Development retrieval | Fixed upstream executable at the exact reviewed commit, verified by Package-pinned SHA-256 | Immutable `raw.githubusercontent.com` commit URL |
 | Official distribution | Versioned Windows x64 archive, `codebase-mcp.exe`, `provider-manifest.json`, checksums, signature, and third-party notices | Rice-owned GitHub Release asset |
-| Machine installation | Verified executable and manifest only | `%LOCALAPPDATA%\\Rice\\CodeDB\\providers\\0.5.0-28e3912` for the migrated baseline |
+| Machine installation | Verified executable and manifest only | `%LOCALAPPDATA%\\Rice\\CodeDB\\providers\\0.5.0-28e3912-c2` for schema 2; historical `0.5.0-28e3912` remains separate |
 | Unity project | Host instances, indexes, adapters, leases, logs, and project registration | Project-local runtime; never a Provider copy |
 
 The first distribution may use a Release asset attached to the
@@ -109,7 +117,7 @@ have:
 5. Added an authentic release signature and a package-pinned verification key
    or equivalent trust anchor.
 6. Included `provider-manifest.json` with exact schema, identity, protocol,
-   supported Package range, executable name, and SHA-256.
+   capability contract, source, executable name, and SHA-256.
 
 The GitHub blob SHA of an upstream file is not an executable SHA-256 and is not
 accepted as the Provider hash. The installer must hash the bytes it received.
@@ -158,7 +166,7 @@ artifact has passed all checks. Repeated installation of the same verified
 artifact is idempotent.
 
 Node.js remains a separate prerequisite. The Manager may link to the official
-Node.js installation guidance, but preview.5 does not silently download or
+Node.js installation guidance, but preview.1 does not silently download or
 install Node.js, alter PATH, or request an unrelated system upgrade.
 
 ## Manager State Contract
@@ -184,7 +192,7 @@ not replace the single contextual action.
 The focused installer and UI tests must prove:
 
 - missing archive, missing manifest, malformed manifest, wrong identity,
-  unsupported protocol or Package range, signature failure, and hash mismatch
+  unsupported protocol or capability, signature failure, and hash mismatch
   all remain `Missing prerequisite` with zero Unity-project writes;
 - a valid fixed Provider installs to the exact machine path and survives a
   repeated idempotent install;
@@ -205,7 +213,7 @@ does not prove tool injection into a new Codex task.
 ## Explicit Non-Goals
 
 - No automatic Provider version discovery or silent upgrade.
-- No automatic Node.js installation in preview.5.
+- No automatic Node.js installation in preview.1.
 - No Provider binary in the UPM Package or Git history.
 - No claim that the development upstream-download descriptor satisfies the production license or Rice signature gate.
 - No per-project Provider copy.

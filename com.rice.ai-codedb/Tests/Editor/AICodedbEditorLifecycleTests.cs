@@ -957,6 +957,409 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void TerminalConvergenceFailure_PreservesAuthenticatedLayersAndRoundTrips()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var snapshot = CreateTerminalObservation(
+                contract,
+                7,
+                AICodedbSupervisorReadinessState.Degraded,
+                "11111111111111111111111111111111");
+            var productStatus = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.None,
+                "MCP layer did not become current.");
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    productStatus,
+                    TerminalFailureResult(),
+                    snapshot,
+                    out failure),
+                Is.True);
+            Assert.That(failure.ReasonCode, Is.EqualTo("MCP_UNAVAILABLE"));
+            Assert.That(
+                failure.Producer,
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure.ProducerName));
+            Assert.That(failure.Revision, Is.EqualTo(7));
+            Assert.That(failure.TargetGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(failure.ProductStatus.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Unavailable));
+            Assert.That(failure.Binding, Does.Contain("11111111111111111111111111111111"));
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure restored;
+            Assert.That(
+                AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure.TryDeserialize(
+                    failure.Serialize(),
+                    failure.PackageFingerprint,
+                    out restored),
+                Is.True);
+            Assert.That(restored.ReasonCode, Is.EqualTo(failure.ReasonCode));
+            Assert.That(restored.Producer, Is.EqualTo(failure.Producer));
+            Assert.That(restored.Binding, Is.EqualTo(failure.Binding));
+            Assert.That(restored.ProductStatus.Detail, Is.EqualTo(failure.ProductStatus.Detail));
+            Assert.That(restored.ProductStatus.McpAvailable, Is.EqualTo(failure.ProductStatus.McpAvailable));
+        }
+
+        [Test]
+        public void TerminalConvergenceFailure_RejectsTransientMissingAndOlderEvidence()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.");
+            var currentObservation = CreateTerminalObservation(
+                contract,
+                7,
+                AICodedbSupervisorReadinessState.Degraded,
+                "11111111111111111111111111111111");
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure current;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    currentObservation,
+                    out current),
+                Is.True);
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure transient;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    new AICodedbProductStatus(
+                        AICodedbProductState.Starting,
+                        AICodedbProductLayerState.Pending,
+                        AICodedbProductLayerState.Pending,
+                        AICodedbProductLayerState.Pending,
+                        AICodedbProductLayerState.Pending,
+                        "still starting"),
+                    TerminalFailureResult(),
+                    currentObservation,
+                    out transient),
+                Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    null,
+                    currentObservation,
+                    out transient),
+                Is.False);
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure older;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        6,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "22222222222222222222222222222222"),
+                    out older),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldReplaceTerminalConvergenceFailure(current, older),
+                Is.False);
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure sameRevisionDifferentBinding;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        7,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "33333333333333333333333333333333"),
+                    out sameRevisionDifferentBinding),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldReplaceTerminalConvergenceFailure(
+                    current,
+                    sameRevisionDifferentBinding),
+                Is.False);
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure newer;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        8,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "44444444444444444444444444444444"),
+                    out newer),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldReplaceTerminalConvergenceFailure(
+                    current,
+                    newer),
+                Is.True);
+
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure newAuthority;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        1,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "55555555555555555555555555555555",
+                        "new-supervisor",
+                        "new-owner"),
+                    out newAuthority),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldReplaceTerminalConvergenceFailure(
+                    current,
+                    newAuthority),
+                Is.True);
+        }
+
+        [Test]
+        public void TerminalConvergenceFailure_ClearsOnlyForNewerAuthenticatedReadyEvidence()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var failureStatus = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.");
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    failureStatus,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        7,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "11111111111111111111111111111111"),
+                    out failure),
+                Is.True);
+
+            var readyStatus = new AICodedbProductStatus(
+                AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                "CodeDB is ready.");
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldClearTerminalConvergenceFailure(
+                    failure,
+                    readyStatus,
+                    ReadyResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        7,
+                        AICodedbSupervisorReadinessState.CoreReady,
+                        "11111111111111111111111111111111")),
+                Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldClearTerminalConvergenceFailure(
+                    failure,
+                    readyStatus,
+                    ReadyResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        6,
+                        AICodedbSupervisorReadinessState.CoreReady,
+                        "66666666666666666666666666666666")),
+                Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldClearTerminalConvergenceFailure(
+                    failure,
+                    readyStatus,
+                    ReadyResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        1,
+                        AICodedbSupervisorReadinessState.CoreReady,
+                        "77777777777777777777777777777777",
+                        "new-supervisor",
+                        "new-owner")),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldClearTerminalConvergenceFailure(
+                    failure,
+                    readyStatus,
+                    ReadyResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        8,
+                        AICodedbSupervisorReadinessState.CoreReady,
+                        "44444444444444444444444444444444")),
+                Is.True);
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldClearTerminalConvergenceFailure(
+                    failure,
+                    readyStatus,
+                    null,
+                    CreateTerminalObservation(
+                        contract,
+                        9,
+                        AICodedbSupervisorReadinessState.CoreReady,
+                        "55555555555555555555555555555555")),
+                Is.False);
+        }
+
+        [Test]
+        public void TerminalConvergenceFailure_AuthoritativeUninstalledClearsEnvelope()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.");
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure seeded;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    status,
+                    TerminalFailureResult(),
+                    CreateTerminalObservation(
+                        contract,
+                        7,
+                        AICodedbSupervisorReadinessState.Degraded,
+                        "88888888888888888888888888888888"),
+                    out seeded),
+                Is.True);
+
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveTerminalConvergenceFailureForProductState(
+                    seeded,
+                    AICodedbProductState.Uninstalled),
+                Is.Null);
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveTerminalConvergenceFailureForProductState(
+                    seeded,
+                    AICodedbProductState.NeedsAttention),
+                Is.SameAs(seeded));
+        }
+
+        [Test]
+        public void AuthoritativeUninstalledCompletion_PublishesCoherentCacheRevision()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var failureStatus = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Unavailable,
+                "MCP handshake unavailable.");
+            var terminalObservation = CreateTerminalObservation(
+                contract,
+                11,
+                AICodedbSupervisorReadinessState.Degraded,
+                "99999999999999999999999999999999");
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure seededFailure;
+            Assert.That(
+                AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    failureStatus,
+                    TerminalFailureResult(),
+                    terminalObservation,
+                    out seededFailure),
+                Is.True);
+
+            AICodedbCommandResult priorResult;
+            AICodedbProductStatus priorProductStatus;
+            bool priorHasProductStatus;
+            AICodedbSupervisorSnapshot priorSupervisorSnapshot;
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure priorFailure;
+            long priorRevision;
+            AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
+                out priorResult,
+                out priorProductStatus,
+                out priorHasProductStatus,
+                out priorSupervisorSnapshot,
+                out priorFailure,
+                out priorRevision);
+            try
+            {
+                AICodedbEditorLifecycle.PublishLifecycleStatusCache(
+                    TerminalFailureResult(),
+                    failureStatus,
+                    true,
+                    terminalObservation,
+                    seededFailure);
+
+                AICodedbCommandResult seededResult;
+                AICodedbProductStatus seededProductStatus;
+                bool seededHasProductStatus;
+                AICodedbSupervisorSnapshot seededSupervisorSnapshot;
+                AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure seededCachedFailure;
+                long seededRevision;
+                Assert.That(
+                    AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
+                        out seededResult,
+                        out seededProductStatus,
+                        out seededHasProductStatus,
+                        out seededSupervisorSnapshot,
+                        out seededCachedFailure,
+                        out seededRevision),
+                    Is.True);
+                Assert.That(seededHasProductStatus, Is.True);
+                Assert.That(
+                    seededProductStatus.State,
+                    Is.EqualTo(AICodedbProductState.NeedsAttention));
+                Assert.That(seededCachedFailure, Is.SameAs(seededFailure));
+                Assert.That(seededSupervisorSnapshot, Is.SameAs(terminalObservation));
+
+                AICodedbEditorLifecycle.PublishAuthoritativeUninstalledCache();
+
+                AICodedbCommandResult uninstalledResult;
+                AICodedbProductStatus uninstalledProductStatus;
+                bool uninstalledHasProductStatus;
+                AICodedbSupervisorSnapshot uninstalledSupervisorSnapshot;
+                AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure uninstalledFailure;
+                long uninstalledRevision;
+                Assert.That(
+                    AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
+                        out uninstalledResult,
+                        out uninstalledProductStatus,
+                        out uninstalledHasProductStatus,
+                        out uninstalledSupervisorSnapshot,
+                        out uninstalledFailure,
+                        out uninstalledRevision),
+                    Is.True);
+                Assert.That(uninstalledHasProductStatus, Is.True);
+                Assert.That(
+                    uninstalledProductStatus.State,
+                    Is.EqualTo(AICodedbProductState.Uninstalled));
+                Assert.That(uninstalledResult, Is.Null);
+                Assert.That(uninstalledFailure, Is.Null);
+                Assert.That(uninstalledSupervisorSnapshot, Is.Null);
+                Assert.That(uninstalledRevision, Is.EqualTo(seededRevision + 1));
+            }
+            finally
+            {
+                AICodedbEditorLifecycle.PublishLifecycleStatusCache(
+                    priorResult,
+                    priorProductStatus,
+                    priorHasProductStatus,
+                    priorSupervisorSnapshot,
+                    priorFailure);
+            }
+        }
+
+        [Test]
         public void SupervisorReconnect_InFlightSnapshotDoesNotEraseAttemptClassification()
         {
             var root = _projectRoot;
@@ -1267,7 +1670,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var legacyDocument = legacyEvidence.Capture("legacy");
             AssertPostAdmissionEvidenceNotEvaluated(legacyDocument);
 
-            document.post_admission_disposition = "C:\\machine\\detail";
+            document.post_admission_disposition = "C" + @":\machine\detail";
             document.post_admission_prerequisite_state = "raw detail";
             document.post_admission_installed_state = "stdout/stderr";
             document.post_admission_configured_state = "token=value";
@@ -1945,9 +2348,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Path.GetTempPath(),
                 "Rice-AICodedb-Prerequisite-Lifecycle-Tests",
                 Guid.NewGuid().ToString("N"));
-            var providerRoot = Path.Combine(machineRoot, "Rice", "CodeDB", "providers", "0.5.0-28e3912");
+            var providerRoot = Path.Combine(machineRoot, "Rice", "CodeDB", "providers", "0.5.0-28e3912-c2");
             var providerManifestPath = Path.Combine(providerRoot, "provider-manifest.json");
             var providerExecutablePath = Path.Combine(providerRoot, "codebase-mcp.exe");
+            var providerFixturePackageRoot = Path.Combine(machineRoot, "package");
             var windowsRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
             var pathWithoutNode = Path.Combine(
                                       windowsRoot,
@@ -2043,6 +2447,14 @@ namespace Rice.AI.Codedb.Editor.Tests
                     originalPath,
                     EnvironmentVariableTarget.Process);
                 WriteProviderFixture(providerRoot, false, false);
+                WriteProviderFixturePackage(
+                    providerFixturePackageRoot,
+                    GetSha256(providerExecutablePath));
+                var suppliedContext = new AICodedbEditorExecutionContext(
+                    UnityEngine.RuntimePlatform.WindowsEditor,
+                    _projectRoot,
+                    providerFixturePackageRoot,
+                    new DirectoryInfo(_projectRoot).Name);
                 var suppliedFingerprint = AICodedbEditorLifecycle.CreateMachinePrerequisiteEvidenceFingerprint(
                     Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Process),
                     string.Empty,
@@ -2056,7 +2468,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     Is.True);
 
                 var recheckCount = 0;
-                var suppliedResult = AICodedbHostPayloadMaterializer.ReadStatus(context);
+                var suppliedResult = AICodedbHostPayloadMaterializer.ReadStatus(suppliedContext);
                 recheckCount++;
                 Assert.That(suppliedResult.ExitCode, Is.Zero, suppliedResult.StandardError);
                 var suppliedProductStatus = AICodedbProductStatusBuilder.Build(
@@ -4350,6 +4762,67 @@ namespace Rice.AI.Codedb.Editor.Tests
                 false);
         }
 
+        private AICodedbSupervisorSnapshot CreateTerminalObservation(
+            AICodedbPackageRuntimeContract contract,
+            long revision,
+            AICodedbSupervisorReadinessState readinessState,
+            string observationId,
+            string supervisorId = "unity-bridge",
+            string ownerEpoch = "abcdefabcdefabcdefabcdefabcdefab")
+        {
+            var runtime = AICodedbControlContract.GetSupervisorRuntimePath(
+                _projectRoot,
+                contract.ControlContract);
+            return AICodedbSupervisorSnapshot.Connected(
+                AICodedbSupervisorProtocol.CoordinatorStateSchemaVersion,
+                1234,
+                "lifecycle-test",
+                runtime,
+                "ready",
+                string.Empty,
+                "disabled",
+                "disabled",
+                "enabled",
+                "online",
+                readinessState,
+                readinessState == AICodedbSupervisorReadinessState.CoreReady
+                    ? "COORDINATOR_OPERATIONAL"
+                    : "MCP_UNAVAILABLE",
+                "sanitized terminal observation",
+                "provider_ready",
+                AICodedbSupervisorProtocol.SupervisorStateSchemaVersion,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                1234,
+                "0123456789abcdef0123456789abcdef",
+                AICodedbCoordinatorFailureCategory.None,
+                1,
+                observationId,
+                revision,
+                supervisorId,
+                ownerEpoch);
+        }
+
+        private static AICodedbCommandResult TerminalFailureResult()
+        {
+            return new AICodedbCommandResult(
+                4,
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"BLOCKED\",\"phase\":\"VERIFY\",\"reason_code\":\"MCP_UNAVAILABLE\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"Review the authenticated terminal evidence.\",\"exit_code\":4,\"detail\":\"MCP unavailable.\"}",
+                "MCP unavailable.",
+                false);
+        }
+
+        private static AICodedbCommandResult ReadyResult()
+        {
+            return new AICodedbCommandResult(
+                0,
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"READY\",\"phase\":\"COMPLETE\",\"reason_code\":\"READY\",\"mutated_scopes\":[],\"cleanup_state\":\"COMPLETE\",\"next_action\":\"No action required.\",\"exit_code\":0,\"detail\":\"Ready.\"}",
+                string.Empty,
+                false);
+        }
+
         private static AICodedbCommandResult Result(string output)
         {
             return new AICodedbCommandResult(0, output, string.Empty, false);
@@ -4805,24 +5278,136 @@ namespace Rice.AI.Codedb.Editor.Tests
             WriteUtf8NoBom(executablePath, "fixture Provider bytes\n");
             if (invalidManifest)
             {
-                WriteUtf8NoBom(manifestPath, "{\"schema_version\":1}\n");
+                WriteUtf8NoBom(manifestPath, "{\"schema_version\":2}\n");
                 return;
             }
 
             var sha256 = hashMismatch ? new string('0', 64) : GetSha256(executablePath);
             var manifest = "{"
-                           + "\"schema_version\":1,"
+                           + "\"schema_version\":2,"
                            + "\"provider_id\":\"killop/codedb-mcp\","
-                           + "\"version\":\"0.5.0-28e3912\","
+                           + "\"version\":\"0.5.0-28e3912-c2\","
                            + "\"commit\":\"28e3912d5cd67ff3499734984f3e3d626a204796\","
                            + "\"executable\":\"codebase-mcp.exe\","
                            + "\"sha256\":\"" + sha256 + "\","
                            + "\"protocol\":\"codedb-cli-v1\","
-                           + "\"source\":\"https://github.com/killop/codedb-mcp\","
-                           + "\"supported_package_min_inclusive\":\"0.2.5-preview.5\","
-                           + "\"supported_package_max_exclusive\":\"0.2.6\"}"
+                           + "\"capability_contract\":\"codedb-search-tools-v1\","
+                           + "\"source\":\"https://github.com/killop/codedb-mcp\"}"
                            + "\n";
             WriteUtf8NoBom(manifestPath, manifest);
+        }
+
+        private static void WriteProviderFixturePackage(
+            string packageRoot,
+            string providerSha256)
+        {
+            const string frozenProviderSha256 =
+                "38c7d07dde2fa9e322ac0dcbb5ca8961921c8ea6aad548e6bd36e2277752e5e7";
+            var sourcePackageRoot = AICodedbPaths.PackageRootPath;
+            var sourcePayloadRoot = Path.Combine(sourcePackageRoot, "Payload~");
+            var payloadRoot = Path.Combine(packageRoot, "Payload~");
+            var toolsRoot = Path.Combine(packageRoot, "Tools~");
+            Directory.CreateDirectory(toolsRoot);
+            foreach (var toolName in new[]
+                     {
+                         "materialize-codedb-host-payload.ps1",
+                         "codedb-instance-engine.ps1"
+                     })
+            {
+                File.Copy(
+                    Path.Combine(sourcePackageRoot, "Tools~", toolName),
+                    Path.Combine(toolsRoot, toolName),
+                    true);
+            }
+            CopyDirectory(sourcePayloadRoot, payloadRoot);
+
+            const string generationId = "poc.35";
+            var providerIdentityPaths = new[]
+            {
+                Path.Combine(payloadRoot, "AIWork", "codedb", "shared", "codedb-machine-provider-contract.ps1"),
+                Path.Combine(payloadRoot, "Generations", generationId, "shared", "codedb-machine-provider-contract.ps1"),
+                Path.Combine(payloadRoot, "Generations", generationId, "wrapper", "codedb-project-instance-worker.mjs")
+            };
+            foreach (var providerIdentityPath in providerIdentityPaths)
+            {
+                var source = File.ReadAllText(providerIdentityPath);
+                Assert.That(
+                    Regex.Matches(source, Regex.Escape(frozenProviderSha256)).Count,
+                    Is.EqualTo(1),
+                    "The Provider fixture SHA target must occur exactly once: " + providerIdentityPath);
+                WriteUtf8NoBom(
+                    providerIdentityPath,
+                    source.Replace(frozenProviderSha256, providerSha256));
+            }
+
+            var generationRoot = Path.Combine(payloadRoot, "Generations", generationId);
+            var generationManifestPath = Path.Combine(generationRoot, "generation-manifest.json");
+            var generationManifest = File.ReadAllText(generationManifestPath);
+            generationManifest = RewriteManifestEntryHash(
+                generationManifest,
+                "path",
+                "shared/codedb-machine-provider-contract.ps1",
+                GetSha256(providerIdentityPaths[1]));
+            generationManifest = RewriteManifestEntryHash(
+                generationManifest,
+                "path",
+                "wrapper/codedb-project-instance-worker.mjs",
+                GetSha256(providerIdentityPaths[2]));
+            WriteUtf8NoBom(generationManifestPath, generationManifest);
+
+            var currentPointerPath = Path.Combine(payloadRoot, "host-current.json");
+            var currentPointer = File.ReadAllText(currentPointerPath);
+            currentPointer = ReplaceRequiredJsonMatch(
+                currentPointer,
+                "(?<prefix>\\\"generation_manifest_sha256\\\"\\s*:\\s*\\\")[0-9a-fA-F]{64}(?<suffix>\\\")",
+                "${prefix}" + GetSha256(generationManifestPath) + "${suffix}");
+            WriteUtf8NoBom(currentPointerPath, currentPointer);
+
+            var payloadManifestPath = Path.Combine(payloadRoot, "payload-manifest.json");
+            var payloadManifest = File.ReadAllText(payloadManifestPath);
+            payloadManifest = RewriteManifestEntryHash(
+                payloadManifest,
+                "target",
+                "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
+                GetSha256(providerIdentityPaths[0]));
+            payloadManifest = RewriteManifestEntryHash(
+                payloadManifest,
+                "target",
+                "AIWork/.runtime/codedb/host/generations/poc.35/shared/codedb-machine-provider-contract.ps1",
+                GetSha256(providerIdentityPaths[1]));
+            payloadManifest = RewriteManifestEntryHash(
+                payloadManifest,
+                "target",
+                "AIWork/.runtime/codedb/host/generations/poc.35/wrapper/codedb-project-instance-worker.mjs",
+                GetSha256(providerIdentityPaths[2]));
+            payloadManifest = RewriteManifestEntryHash(
+                payloadManifest,
+                "target",
+                "AIWork/.runtime/codedb/host/generations/poc.35/generation-manifest.json",
+                GetSha256(generationManifestPath));
+            payloadManifest = RewriteManifestEntryHash(
+                payloadManifest,
+                "target",
+                AICodedbProjectSettings.HostCurrentPointerRelativePath,
+                GetSha256(currentPointerPath));
+            WriteUtf8NoBom(payloadManifestPath, payloadManifest);
+        }
+
+        private static string RewriteManifestEntryHash(
+            string json,
+            string identityProperty,
+            string identityValue,
+            string sha256)
+        {
+            var pattern = "(?<prefix>\\\""
+                          + Regex.Escape(identityProperty)
+                          + "\\\"\\s*:\\s*\\\""
+                          + Regex.Escape(identityValue)
+                          + "\\\"\\s*,\\s*\\\"sha256\\\"\\s*:\\s*\\\")[0-9a-fA-F]{64}(?<suffix>\\\")";
+            return ReplaceRequiredJsonMatch(
+                json,
+                pattern,
+                "${prefix}" + sha256 + "${suffix}");
         }
 
         private void RewriteCurrentPointerManifestHash(string manifestPath)

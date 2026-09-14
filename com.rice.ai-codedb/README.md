@@ -9,11 +9,11 @@
 `com.rice.ai-codedb` is an Editor-only Unity Package Manager package for the
 reusable CodeDB Manager, project-local indexing workflow, Shader/HLSL adapter,
 and bounded MCP discovery surface. The active `v0.3.0` development line targets
-Unity `2022.3` on Windows and advances the immutable Host to `poc.34` while
+Unity `2022.3` on Windows and advances the immutable Host to `poc.35` while
 retaining historical generations; stable remains `0.2.4`.
 
 Install the validation prerelease from the repository subfolder with
-`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.2.5-preview.5`.
+`https://github.com/riceWithoutIce/UnityCodeDB.git?path=/com.rice.ai-codedb#v0.3.0-preview.1`.
 Use `#main` only when intentionally validating unreleased development changes.
 
 ## Version Support
@@ -31,7 +31,7 @@ validated against a fixed v0.3 package artifact before release. The historical
 v0.2 artifacts remain available for read-only compatibility investigation and
 are not silently upgraded by this policy.
 
-The `0.2.5-preview.5` Package keeps a tracked stable wrapper and byte-exact
+The `0.3.0-preview.1` candidate keeps a tracked stable wrapper and byte-exact
 published compatibility files
 under `AIWork/codedb/`, then materializes immutable
 implementation generations under ignored
@@ -42,12 +42,13 @@ watcher state, generation leases, and rollback evidence remain under ignored
 `killop/codedb-mcp` `0.5.0` Provider are prerequisites and are not bundled or
 copied into the project. The selected byte-exact baseline is commit
 `28e3912d5cd67ff3499734984f3e3d626a204796`, with Rice distribution identity
-`0.5.0-28e3912` and machine path
-`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912`. The preserved
-`poc.31`/`poc.32` generations may still use their historical Provider identity;
-they are not rewritten in place. The retained `poc.33` and active `poc.34`
-generations use the reviewed `0.5.0-28e3912` baseline. The preview.5
-development descriptor lets
+`0.5.0-28e3912-c2` and machine path
+`%LOCALAPPDATA%\Rice\CodeDB\providers\0.5.0-28e3912-c2`. Its strict schema-2
+manifest binds protocol `codedb-cli-v1` and capability contract
+`codedb-search-tools-v1`; Package semver is not a Provider capability. The
+preserved `poc.31` through `poc.34` generations and historical schema-1
+distribution `0.5.0-28e3912` are not rewritten in place. Active `poc.35` uses
+the side-by-side schema-2 distribution. The preview.1 development descriptor lets
 the Manager's `Configure Dependencies` action retrieve the executable from the
 exact upstream commit and verify its Package-pinned SHA-256 before installing
 it into the machine-scoped directory. This is a development-only integration

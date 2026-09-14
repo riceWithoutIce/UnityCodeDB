@@ -1,6 +1,6 @@
-# Development Workflow
+# Development Workflow v2
 
-Status: active project workflow.
+Status: active project workflow (`codedb-workflow-v2`).
 
 This document defines how development and validation work is executed. It is
 not a product requirements document. Version roadmaps remain the authority for
@@ -18,6 +18,13 @@ Use the following precedence when rules appear to overlap:
    contract.
 5. Historical notes and prior test results as context only, never as new
    requirements.
+
+A roadmap, companion document, or task card may narrow product scope, changed
+files, evidence, side effects, or execution time. It must not silently weaken
+this workflow's safety boundaries or redefine a mechanical command-construction
+error as a product-test attempt. A stricter task-local stop or retry rule is
+valid only when it names the semantic or side-effect risk and the user approves
+that exception explicitly.
 
 For the active v0.3 line, the sole product requirement source is
 `Documentation~/v0.3.0-roadmap.md`. Companion documents may clarify an item
@@ -94,7 +101,7 @@ separate human-gated operations.
 ## Session Profile Routing
 
 Each task selects one logical execution profile before dispatch. The versioned
-profile catalog is `.ai/workflows/codedb-workflow-v1/profile-map.md`. It is a
+profile catalog is `.ai/workflows/codedb-workflow-v2/profile-map.md`. It is a
 routing catalog, not a second requirements source and not permission to create
 or modify a session.
 
@@ -145,6 +152,14 @@ Every task declares one review mode:
   but Verifier performs one targeted, read-only review of the declared risk.
 - `RELEASE`: release, migration, user-data safety, or formal acceptance. An
   independent Verifier review and the exact acceptance evidence are required.
+
+Verifier scope is always narrower than implementation scope. A Verifier admits
+the frozen identity once, reads only the declared claims, changed paths, and
+directly adjacent evidence, and reports all material in-scope findings in one
+review. It does not perform exploratory repository auditing, rerun unchanged
+Coder tests, or convert theoretical hardening and unrelated observations into
+release blockers. A repair review covers only the original findings and their
+nearest regressions.
 
 Trust is escalated to `GUARDED` when scope changes, evidence is missing, a
 result is `PARTIAL`/`BLOCKED`/`DEFERRED`, a test fails beyond the allowed retry,
@@ -218,6 +233,7 @@ The minimum `TASK.md` shape is:
 ## Metadata
 - Product:
 - Version:
+- Workflow: codedb-workflow-v2
 - Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Planner:
 - Coder:
@@ -233,20 +249,30 @@ The minimum `TASK.md` shape is:
 ## Scope
 - In scope:
 - Out of scope:
-- Allowed files:
+- Change allowlist:
+- Read-only dependency closure: DIRECT_REFERENCES_ONLY | <exact paths>
 - Protected state:
 - Snapshot binding: optional; only for GUARDED/RELEASE
 
-## Execution
+## Execution Envelope
+- Mode: CONTINUOUS_WITHIN_SCOPE
 - Coder actions:
-- Focused tests:
+- Evidence scenarios:
+- L0 tests:
+- Affected L1 tests:
+- Explicitly not run:
+- Test rationale:
 - EditMode authorization: NOT_REQUESTED | authorized
-- Continuous repair: allowed scope and same-cause correction boundary
-- Validation attempts: exact per evidence class; Unity must be explicit
+- Mechanical corrections per scenario: 2
+- Corrected semantic attempts per local evidence scenario: 2
+- Independent product causes before reassessment: 2
+- Active time budget: STANDARD_30M | DEEP_60M | <explicit exception>
+- Output budget: V2_DEFAULT | <explicit exception>
+- Broad search/full diff/full regression: FORBIDDEN | <exact exception>
 - Side-effect authorization: external process, persistent state, or none
 - Stop conditions:
 - Escalation triggers:
-- Structural escalation guard: starting repair count <count>/2; starting consecutive diagnostic-only checkpoint count <count>/3; immediate structural triggers apply
+- Structural escalation guard: starting repair count <count>/2; starting independent product-cause count <count>/2; starting consecutive diagnostic-only checkpoint count <count>/3; immediate structural triggers apply
 - Model escalation: none | request-only | human-approved
 
 ## Definition Of Done
@@ -295,6 +321,34 @@ side effects, and risk. Create a new task only when the outcome changes, work
 crosses into an independently owned subsystem, a new high-risk authority is
 needed, or the current result is independently acceptable and the next work is
 a separate deliverable.
+
+The reusable skeletons live under `.ai/workflows/codedb-workflow-v2/`. Use
+`TASK.template.md`, `RESULT.template.md`, and `VERIFICATION.template.md`
+instead of copying a historical task. Those templates are recording aids; this
+document remains the normative workflow source.
+
+## Closed Execution Envelope
+
+One human authorization covers diagnosis, implementation, local repair,
+mechanical correction, focused evidence, and result consolidation while all of
+them remain inside the frozen objective, change allowlist, read closure,
+side-effect authority, evidence scenarios, and budgets. A Coder must not return
+an acknowledgement or a plan in place of executing that envelope.
+
+| Event | Required action | Planner/User handoff |
+| --- | --- | --- |
+| Parser, escaping, quoting, path, marker, command-loading, or evidence-expression error before the intended assertion starts | Correct mechanically and continue within the mechanical-correction budget. | No |
+| Fixture or assertion drift caused by the accepted design and inside the test allowlist | Correct the directly coupled assertion family, then continue the declared evidence scenario. | No |
+| Product or contract defect inside the accepted outcome and change allowlist | Diagnose, repair, and run only its adjacent declared evidence within the semantic-repair budget. | No |
+| Stable declared evidence passes | Write one consolidated terminal `RESULT.md`. | Yes |
+| Objective, architecture, change allowlist, evidence class, side-effect authority, or protected state must expand | Preserve the stable snapshot and request a route decision before crossing the boundary. | Yes |
+| A human-owned environment or external prerequisite is absent, evidence is unavailable/corrupt, or an authorized external attempt is exhausted | Stop the affected path and report the exact prerequisite or evidence gap. | Yes |
+| Structural escalation threshold or active-time budget is reached | Start no new investigation, repair, or test; consolidate the current causal evidence and return `ROUTE_REASSESSMENT_REQUIRED` or the applicable terminal status. | Yes |
+
+Continuous execution is not broad autonomy. The Coder may inspect only the
+allowlist and its declared direct-reference closure, may edit only the change
+allowlist, and may run only the named evidence scenarios. A `deep` profile adds
+reasoning and active-time budget; it never widens authority or coverage.
 
 ## Read-Only Preflight
 
@@ -367,6 +421,8 @@ defect and the same user acceptance path is advancing. The task must enter
 
 - the same user acceptance path remains blocked after `2` local repair
   iterations;
+- more than `2` causally independent product defects emerge inside the same
+  execution envelope;
 - `3` consecutive checkpoints improve diagnostics without advancing that
   acceptance path.
 
@@ -464,14 +520,16 @@ task identity. This document does not install an automatic wrapper or hook.
 
 | Budget | Default guard | Required action |
 | --- | --- | --- |
-| Active implementation time | Review progress near `60 minutes` | Narrow or summarize the current approach. Continue the same task while the objective and execution envelope remain valid; elapsed time alone does not require a checkpoint or split. |
-| A normal command's captured output (stdout and stderr) | `64 KiB` | Mark the output `TRUNCATED`, retain a concise summary, and narrow the next command. |
-| A log, session record, or broad `rg` result | `16 KiB` or `120` lines, whichever is reached first | Keep only the relevant excerpt or an aggregate summary. This lower limit takes precedence over the normal command guard. |
-| Cumulative captured output in one working window | `256 KiB` | Stop expanding inspection, summarize what is known, and continue with narrower commands inside the same task. |
+| Active role time | Coder `standard`: `30 minutes`; Coder `deep`: `60 minutes`; Verifier `standard`: `15 minutes`; Verifier `deep`: `30 minutes` | Finish only the current bounded, non-side-effecting operation. Start no new investigation, repair, or test; write the consolidated result or review and hand off. Reaching the limit does not create a new task. |
+| A normal command's captured output (stdout and stderr) | `32 KiB` or `200` lines, whichever is reached first | Mark the output `TRUNCATED`, retain a concise summary, and narrow the next command. |
+| A log, session record, or `rg` result | `16 KiB` or `50` matches, whichever is reached first | Keep only the relevant excerpt or an aggregate summary. Every `rg` must name a path, symbol, or file filter; an unbounded repository search is not permitted by default. |
+| Cumulative captured output in one working window | `128 KiB` | Stop expanding inspection, summarize what is known, and continue only with narrower commands already required by the envelope. |
+| A consolidated `RESULT.md` | `16 KiB` | Keep terminal facts and one correction summary. Put exceptional release evidence in a separately named, explicitly reviewed artifact and link it; do not append command transcripts. |
 | A normal non-test command's wall-clock wait | Warn at `60 seconds`; stop waiting at `120 seconds` | Record `TIMEOUT`. Do not automatically terminate the process. |
 | A focused test command's wall-clock wait | Warn at `120 seconds`; stop waiting at `300 seconds` | Record `TIMEOUT`. Do not automatically terminate Unity or another external process. |
 | Parser, escaping, path-normalization, or admission command construction before side effects | Initial attempt plus at most `2` mechanical corrections | Record the concrete construction error and correction. These attempts do not consume the test or Unity invocation budget. Repeating the same uncorrected error is not allowed. |
-| Test or external validation attempts | Exact count declared per evidence class in `TASK.md` | One human authorization covers the declared envelope. Every rerun requires a concrete same-cause repair or changed prerequisite; exhausted attempts return to Planner/User but do not create a new task. |
+| Local non-Unity evidence attempts | Initial attempt plus at most `2` corrected semantic attempts per declared scenario | One human authorization covers the full scenario envelope. A rerun requires a concrete repair or changed prerequisite. Mechanical command corrections do not consume these attempts. |
+| Unity or other externally stateful validation attempts | Exact count declared per evidence class in `TASK.md` | No implicit attempt exists. Each run must remain inside the human-authorized external envelope and cleanup ownership. |
 | Context compaction | Summarize after a compaction | Continue the same task from a concise state record. Create a file checkpoint only if execution stops, ownership changes, or evidence needs a durable recovery point. |
 
 Count output limits in UTF-8 bytes when the tool exposes a byte count; otherwise
@@ -481,6 +539,13 @@ changes. Warnings narrow the next action but do not authorize a blind rerun. A
 timeout stops waiting, not ownership or lifecycle cleanup: starting, pausing,
 and closing Unity or another external process still requires explicit
 authorization and a recorded cleanup plan.
+
+A task-local `retry 0/0`, `single attempt`, or `stop on first failure` clause
+applies only to the explicitly named semantic assertion or external side effect
+and must state its risk rationale. It never consumes or disables the two
+pre-side-effect mechanical corrections. When no such approved exception is
+present, an in-scope product failure returns to bounded diagnosis and repair;
+it is not an automatic Planner checkpoint.
 
 Unity and other expensive or externally stateful invocations have no implicit
 budget. Their exact maximum count must be human-authorized in the task card.
@@ -569,9 +634,9 @@ collection of unrelated neighboring tests.
 
 The default evidence ownership is:
 
-- Coder: one initial `L0` batch and one initial `Affected L1` batch when
-  applicable, plus only the same-cause corrected attempts declared by the task
-  envelope;
+- Coder: one initial `L0` scenario and one initial `Affected L1` scenario when
+  applicable, plus up to two causally justified corrected semantic attempts
+  already covered by the task envelope;
 - Verifier: at most one targeted, read-only review batch, with no rerun of
   unchanged Coder tests.
 

@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased v0.3.0 development
+## 0.3.0-preview.1 - 2026-09-11
+
+- Added immutable generation `poc.35` and moved active Provider admission to
+  strict manifest schema 2 with side-by-side Rice distribution
+  `0.5.0-28e3912-c2`. Compatibility now authenticates the exact reviewed
+  executable, `codedb-cli-v1`, and `codedb-search-tools-v1` capability instead
+  of coupling Provider admission to the Package semantic version. Historical
+  schema-1 Provider identities and every `poc.34` byte remain unchanged.
+- Forwarded the authenticated Supervisor operational-readiness observation to
+  recovered materializer verification, matching the ordinary admitted path
+  without creating a second readiness authority.
 
 - Bound every reviewed previous-generation transition to its exact stable
   wrapper SHA-256. A legitimate `poc.33` instance now hands off to `poc.34`
