@@ -2732,22 +2732,30 @@ function Get-InstanceActivationEntries {
     $wrapperTarget = "$($script:TargetPrefix)wrapper/codedb-project-wrapper.mjs"
     $wrapperBytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $wrapperTarget
 
-    $generationPointerPath = ConvertTo-AbsoluteChildPath `
-        -Root $ProjectRoot `
-        -RelativePath $script:CurrentPointerRelativePath `
-        -Label "legacy generation pointer"
-    if (Test-Path -LiteralPath $generationPointerPath) {
-        if (-not (Test-Path -LiteralPath $generationPointerPath -PathType Leaf) -or
-            $null -eq (Get-ValidatedInstalledGenerationPointer -PointerPath $generationPointerPath -ProjectRoot $ProjectRoot)) {
-            throw "Existing generation pointer cannot be retained for the legacy execution closure."
+    $generationPointerBytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $script:CurrentPointerRelativePath
+    foreach ($pointerTarget in @($script:CurrentPointerRelativePath, $script:LastKnownGoodPointerRelativePath)) {
+        $pointerLabel = if ([string]::Equals($pointerTarget, $script:CurrentPointerRelativePath, [StringComparison]::Ordinal)) {
+            "current generation pointer"
+        } else {
+            "last-known-good generation pointer"
         }
-    } else {
-        # A clean install has no legacy process that can observe host/current.
-        # Publish the Package pointer for Editor diagnostics; upgrades retain the
-        # old pointer until the legacy owner/lease window has drained.
-        $generationPointerBytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $script:CurrentPointerRelativePath
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:CurrentPointerRelativePath -Mutation "Write" -DesiredBytes $generationPointerBytes
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:LastKnownGoodPointerRelativePath -Mutation "Write" -DesiredBytes $generationPointerBytes
+        $pointerPath = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath $pointerTarget `
+            -Label $pointerLabel
+        if (Test-Path -LiteralPath $pointerPath) {
+            if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf) -or
+                $null -eq (Get-ValidatedInstalledGenerationPointer -PointerPath $pointerPath -ProjectRoot $ProjectRoot)) {
+                throw "Existing $pointerLabel cannot be replaced by the activation transaction."
+            }
+        }
+        Add-InstanceTransactionEntryIfNeeded `
+            -Entries $entries `
+            -ProjectRoot $ProjectRoot `
+            -OperationRoot $OperationRoot `
+            -Target $pointerTarget `
+            -Mutation "Write" `
+            -DesiredBytes $generationPointerBytes
     }
 
     $mcpPlanParameters = @{ ProjectRoot = $ProjectRoot }
@@ -3356,8 +3364,17 @@ function Remove-ValidatedRetiredInstance {
         foreach ($stale in @($leases.Stale + $editorLeases.Stale)) {
             Remove-Item -LiteralPath $stale.Path -Force -ErrorAction Stop
         }
+        $finalControl = @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest | Where-Object {
+            [string]::Equals($_.InstanceId, $Evidence.InstanceId, [StringComparison]::Ordinal)
+        })
+        if ($finalControl.Count -ne 1 -or
+            -not [string]::Equals([string]$finalControl[0].ManifestSha256, $manifestSha256, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$finalControl[0].Path), [System.IO.Path]::GetFullPath($retiredControlPath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Retired instance control changed before the validated instance could be removed."
+        }
         Remove-Item -LiteralPath $rechecked.InstanceRoot -Recurse -Force -ErrorAction Stop
         Add-MaterializerMutationScope -Scope "instance_cleanup"
+        Remove-Item -LiteralPath $finalControl[0].Path -Force -ErrorAction Stop
         return $true
     } catch {
         Write-Warning "Retired instance cleanup remains pending: $($_.Exception.Message)"
@@ -4160,8 +4177,30 @@ function Invoke-InstanceConvergence {
             -UninstallStateId $(if ($ActionName -eq "Install") { $desiredLocked.StateId } else { $null }) `
             -VerifyBeforeCommit $verification
 
-        $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
-        $cleanupState = if ($null -ne $previous) { "PENDING" } else { "COMPLETE" }
+        $cleanupState = "PENDING"
+        $requestedExitCodeBeforeCleanup = $script:RequestedExitCode
+        try {
+            $cleanupState = Get-CombinedInstanceCleanupState `
+                -ProjectRoot $ProjectRoot `
+                -Manifest $Manifest `
+                -Lock $lock `
+                -MarkerPath $MarkerPath `
+                -CurrentInstance $candidate `
+                -PerformCleanup
+            $desiredAfterActivation = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+            if ($desiredAfterActivation.CleanupState -ne $cleanupState) {
+                Update-InstanceDesiredCleanupState `
+                    -ProjectRoot $ProjectRoot `
+                    -Lock $lock `
+                    -DesiredState "INSTALLED" `
+                    -StateId $activation.StateId `
+                    -CleanupState $cleanupState
+            }
+        } catch {
+            $script:RequestedExitCode = $requestedExitCodeBeforeCleanup
+            $cleanupState = "PENDING"
+            Write-Warning "Post-activation cleanup remains pending: $($_.Exception.Message)"
+        }
         $outcome = switch ($ActionName) { "Install" { "INSTALLED" }; "Reinstall" { "REINSTALLED" }; default { "UPGRADED" } }
         Write-Host "[PRODUCT_LAYER INSTALLED] CURRENT"
         Write-Host "[PRODUCT_LAYER CONFIGURED] CURRENT"
@@ -4170,9 +4209,14 @@ function Invoke-InstanceConvergence {
         Write-Host "[RESULT] $outcome"
         Write-Host "[INSTANCE] $($candidate.InstanceId)"
         Write-Host "[CLEANUP_STATE] $cleanupState"
-        Write-Host "[NEXT] Start a new Codex task so it reads the selected project instance."
+        $nextAction = if ($cleanupState -eq "PENDING") {
+            "Start a new Codex task so it reads the selected project instance; maintenance convergence will recheck authenticated holders and retry retired cleanup."
+        } else {
+            "Start a new Codex task so it reads the selected project instance."
+        }
+        Write-Host "[NEXT] $nextAction"
         Set-MaterializerCommandPhase -Phase "COMPLETE"
-        Set-MaterializerCommandOutcome -Outcome $outcome -ReasonCode "INSTANCE_ACTIVATED" -CleanupState $cleanupState -NextAction "Start a new Codex task so it reads the selected project instance."
+        Set-MaterializerCommandOutcome -Outcome $outcome -ReasonCode "INSTANCE_ACTIVATED" -CleanupState $cleanupState -NextAction $nextAction
     } catch {
         $originalError = $_.Exception
         if ($null -ne $candidate) {
@@ -4415,6 +4459,9 @@ function Write-InstanceProductStatus {
         return $true
     }
     if (-not [string]::Equals([string]$current.GenerationDisposition, "CURRENT", [StringComparison]::Ordinal)) {
+        if ($null -eq $script:MachinePrerequisiteStatus) {
+            Write-Host "[PRODUCT_LAYER PREREQUISITE] CURRENT - $($prerequisite.Detail)"
+        }
         Write-Host "[PRODUCT_LAYER INSTALLED] MISSING"
         Write-Host "[PRODUCT_LAYER CONFIGURED] PENDING"
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"

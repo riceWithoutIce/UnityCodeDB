@@ -65,7 +65,14 @@ $fixtureGitIndexPath = Join-Path $runRoot "fixture-git-index"
 $fixtureGitObjectRoot = Join-Path $runRoot "fixture-git-objects"
 $productionProjectRoot = Join-Path $runRoot "production-project"
 $powershellPath = (Get-Process -Id $PID).Path
-$nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$nodeSelection = @(Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1)
+if ($nodeSelection.Count -ne 1) {
+    throw "Node application resolution did not yield one executable."
+}
+$nodePath = [string]$nodeSelection[0].Source
+if ([string]::IsNullOrWhiteSpace($nodePath) -or -not [System.IO.File]::Exists($nodePath)) {
+    throw "The selected Node application is not one existing executable file."
+}
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
 $generationId = "poc.35"
@@ -448,7 +455,7 @@ setInterval(() => {}, 1000);
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $nodePath
     $startInfo.Arguments = "`"$holderPath`""
-    $startInfo.WorkingDirectory = $Root
+    $startInfo.WorkingDirectory = Split-Path -Parent $holderPath
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true
@@ -2626,7 +2633,8 @@ function Assert-StructuredCommandResult {
         [Parameter(Mandatory = $true)][string]$Outcome,
         [Parameter(Mandatory = $true)][ValidateSet("COMPLETE", "PENDING")][string]$CleanupState,
         [Parameter(Mandatory = $true)][string]$Label,
-        [string[]]$RequiredScopes = @()
+        [string[]]$RequiredScopes = @(),
+        [string]$RequiredNextActionText = ""
     )
 
     $lines = @($Result.Text -split '\r?\n' | Where-Object { $_.StartsWith("[COMMAND_RESULT] ", [StringComparison]::Ordinal) })
@@ -2641,6 +2649,11 @@ function Assert-StructuredCommandResult {
     Assert-True -Condition ([string]$document.phase -cmatch '^[A-Z][A-Z0-9_]{0,63}$') -Message "$Label command-result phase is invalid."
     Assert-True -Condition ([string]$document.reason_code -cmatch '^[A-Z][A-Z0-9_]{0,63}$') -Message "$Label command-result reason is invalid."
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$document.next_action)) -Message "$Label command-result omitted its one next action."
+    if (-not [string]::IsNullOrWhiteSpace($RequiredNextActionText)) {
+        Assert-True `
+            -Condition ([string]$document.next_action).Contains($RequiredNextActionText) `
+            -Message "$Label command-result next action omitted '$RequiredNextActionText'."
+    }
     foreach ($scope in $RequiredScopes) {
         Assert-True -Condition (@($document.mutated_scopes) -ccontains $scope) -Message "$Label command-result omitted mutation scope $scope."
     }
@@ -8080,6 +8093,80 @@ function Assert-TestStableInstanceWrapper {
     Assert-Equal -Actual (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash -Message "Stable instance wrapper does not match the Package activation identity."
 }
 
+function Assert-TestCandidateHostSelection {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [string]$Root = $hostRoot
+    )
+
+    $currentPath = Get-PathFromRelative -Root $Root -RelativePath $currentPointerRelativePath
+    $lastKnownGoodPath = Get-PathFromRelative -Root $Root -RelativePath $lastKnownGoodPointerRelativePath
+    Assert-True -Condition (Test-Path -LiteralPath $currentPath -PathType Leaf) -Message "$Label did not publish host/current.json."
+    Assert-True -Condition (Test-Path -LiteralPath $lastKnownGoodPath -PathType Leaf) -Message "$Label did not publish host/last-known-good.json."
+    $current = Get-Content -LiteralPath $currentPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$current.generation_id) -Expected $generationId -Message "$Label did not select the candidate generation."
+    $canonicalPath = Get-CanonicalPayloadSourcePath -TargetRelativePath $currentPointerRelativePath
+    $canonicalSha256 = (Get-FileHash -LiteralPath $canonicalPath -Algorithm SHA256).Hash
+    Assert-Equal -Actual (Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash -Expected $canonicalSha256 -Message "$Label host/current.json does not match the candidate pointer."
+    Assert-Equal -Actual (Get-FileHash -LiteralPath $lastKnownGoodPath -Algorithm SHA256).Hash -Expected $canonicalSha256 -Message "$Label host/last-known-good.json does not match the candidate pointer."
+}
+
+function New-TestSupervisorOperationalReadinessObservation {
+    param(
+        [Parameter(Mandatory = $true)]$CurrentInstance,
+        [string]$Root = $hostRoot
+    )
+
+    $supervisorRuntime = Get-PathFromRelative `
+        -Root $Root `
+        -RelativePath ("AIWork/.runtime/codedb/control/contracts/{0}/v{1}/supervisor" -f
+            [string]$canonicalPayloadManifest.control_contract.id,
+            [int]$canonicalPayloadManifest.control_contract.version)
+    return [ordered]@{
+        schema_version = [int64]1
+        observation_id = [guid]::NewGuid().ToString("N")
+        revision = [int64]1
+        observed_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+        state = "core_ready"
+        reason_code = "COORDINATOR_OPERATIONAL"
+        detail = "The selected fixture instance Coordinator is operational."
+        coordinator_failure_category = "NONE"
+        project_root = [System.IO.Path]::GetFullPath($Root)
+        project_identity = Get-TestProjectIdentity -Root $Root
+        runtime = $supervisorRuntime
+        selected_instance_id = [string]$CurrentInstance.Selection.instance_id
+        selected_generation_id = [string]$CurrentInstance.Selection.generation_id
+        target_generation_id = $generationId
+        runtime_contract_sha256 = (Get-FileHash -LiteralPath $canonicalPayloadManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        generation_disposition = "CURRENT"
+        lifecycle_id = "fixture-lifecycle-$($CurrentInstance.Selection.instance_id)"
+        supervisor_id = "fixture-supervisor"
+        owner_epoch = [guid]::NewGuid().ToString("N")
+        supervisor_pid = [int64]$PID
+    }
+}
+
+function Invoke-WithTestSupervisorOperationalReadiness {
+    param(
+        [Parameter(Mandatory = $true)]$CurrentInstance,
+        [Parameter(Mandatory = $true)][scriptblock]$Operation,
+        [string]$Root = $hostRoot
+    )
+
+    $environmentVariable = "RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS"
+    $previousValue = [Environment]::GetEnvironmentVariable($environmentVariable, [EnvironmentVariableTarget]::Process)
+    $observation = New-TestSupervisorOperationalReadinessObservation -CurrentInstance $CurrentInstance -Root $Root
+    try {
+        [Environment]::SetEnvironmentVariable(
+            $environmentVariable,
+            ($observation | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
+        return & $Operation
+    } finally {
+        [Environment]::SetEnvironmentVariable($environmentVariable, $previousValue, [EnvironmentVariableTarget]::Process)
+    }
+}
+
 function Install-TrustedPreviousInstanceFixture {
     $previousGenerationId = "poc.33"
     $previousPackageVersion = "0.2.5-preview.5"
@@ -8242,6 +8329,7 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $rollbackPaths = @($prior.OwnedTargets + @(
         $markerRelativePath,
         ".codex/config.toml",
+        $lastKnownGoodPointerRelativePath,
         $instanceCurrentRelativePath,
         $instanceLkgRelativePath,
         $instanceDesiredRelativePath
@@ -8259,59 +8347,109 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-Result -Result $activationFailure -ExitCode 6 -Label "v0.2.4 activation rollback"
     Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $rollbackPaths) -Expected $beforeActivationFailure -Message "Activation rollback changed the selected v0.2.4 installation."
     Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $instanceCurrentRelativePath))) -Message "Activation failure retained an unverified current instance."
+    $activationFailureRetiredControlRoot = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/retired-instances"
+    Assert-Equal -Actual @(Get-ChildItem -LiteralPath $activationFailureRetiredControlRoot -Force -File -ErrorAction SilentlyContinue).Count -Expected 0 -Message "Activation failure retained an unbound retired-instance control."
 
+    $ownerFreeMarkerBytes = Get-ByteSnapshot -Path $prior.MarkerPath
+    $ownerFreeGenerationSnapshot = Get-FileSnapshot -Root $prior.GenerationRoot
+    $ownerFreeFlatPaths = @($prior.InstalledFlatTargets | Where-Object { -not [string]::Equals($_, $stableWrapperTarget, [StringComparison]::OrdinalIgnoreCase) })
+    $ownerFreeFlatSnapshot = Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $ownerFreeFlatPaths
     $ownerFreeUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $ownerFreeUpgrade -ExitCode 0 -Label "v0.2.4 owner-free instance Upgrade"
-    Assert-StructuredCommandResult -Result $ownerFreeUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "COMPLETE" -Label "v0.2.4 owner-free instance Upgrade"
+    $ownerFreeCommandResultLines = @($ownerFreeUpgrade.Text -split '\r?\n' | Where-Object { $_.StartsWith("[COMMAND_RESULT] ", [StringComparison]::Ordinal) })
+    Assert-Equal -Actual $ownerFreeCommandResultLines.Count -Expected 1 -Message "v0.2.4 owner-free instance Upgrade did not emit exactly one structured command result."
+    $ownerFreeCommandResult = $ownerFreeCommandResultLines[0].Substring("[COMMAND_RESULT] ".Length) | ConvertFrom-Json
+    $ownerFreeCleanupState = [string]$ownerFreeCommandResult.cleanup_state
+    Assert-True -Condition (@("PENDING", "COMPLETE") -ccontains $ownerFreeCleanupState) -Message "v0.2.4 owner-free instance Upgrade reported an illegal cleanup state."
+    Assert-StructuredCommandResult -Result $ownerFreeUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState $ownerFreeCleanupState -Label "v0.2.4 owner-free instance Upgrade"
     $ownerFreeInstance = Get-TestCurrentInstanceSelection
     Assert-TestStableInstanceWrapper
-    $selectedHost = Get-Content -LiteralPath $prior.PointerPath -Raw | ConvertFrom-Json
-    Assert-Equal -Actual ([string]$selectedHost.generation_id) -Expected $generationId -Message "Owner-free retirement did not switch host/current to poc.35."
-    $lastKnownGoodPath = Get-PathFromRelative -Root $hostRoot -RelativePath $lastKnownGoodPointerRelativePath
-    Assert-Equal -Actual (Get-FileHash -LiteralPath $lastKnownGoodPath -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $prior.PointerPath -Algorithm SHA256).Hash -Message "Owner-free retirement did not converge generation last-known-good."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Owner-free retirement retained the legacy marker."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Owner-free retirement retained poc.27."
-    foreach ($target in $prior.InstalledFlatTargets) {
-        if ([string]::Equals($target, $stableWrapperTarget, [StringComparison]::OrdinalIgnoreCase)) { continue }
-        Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $target))) -Message "Owner-free retirement retained legacy flat target $target."
+    Assert-TestCandidateHostSelection -Label "Owner-free Upgrade"
+    if ($ownerFreeCleanupState -eq "PENDING") {
+        Assert-True -Condition ($ownerFreeCommandResult.next_action.Contains("authenticated holders")) -Message "Pending owner-free Upgrade did not identify holder-aware maintenance convergence."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $prior.MarkerPath) -Expected $ownerFreeMarkerBytes -Message "Pending owner-free Upgrade changed the legacy marker."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $ownerFreeGenerationSnapshot -Message "Pending owner-free Upgrade changed poc.27 bytes."
+        Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $ownerFreeFlatPaths) -Expected $ownerFreeFlatSnapshot -Message "Pending owner-free Upgrade changed legacy flat scripts."
+    } else {
+        Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Complete owner-free Upgrade retained the legacy marker."
+        Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Complete owner-free Upgrade retained poc.27."
+        foreach ($target in $ownerFreeFlatPaths) {
+            Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $target))) -Message "Complete owner-free Upgrade retained legacy flat target $target."
+        }
     }
 
-    # A transiently unreadable availability document must not make the
-    # still-selected, correctly registered instance look unconfigured. The
-    # next convergence pass should recover availability in place and retain
-    # the same immutable instance identity.
+    # The authenticated Supervisor observation is the final readiness
+    # authority. Corrupt lower-level candidate evidence independently, then
+    # republish its previously verified bytes before the next Probe.
     $availabilityPath = Join-Path $ownerFreeInstance.Root "logs\mcp-availability.json"
     $availabilityBytes = [System.IO.File]::ReadAllBytes($availabilityPath)
+    $availabilitySha256 = (Get-FileHash -LiteralPath $availabilityPath -Algorithm SHA256).Hash
     $availabilityRecovered = $false
+    $supervisorObservationEnvironmentVariable = "RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS"
+    $previousSupervisorObservation = [Environment]::GetEnvironmentVariable(
+        $supervisorObservationEnvironmentVariable,
+        [EnvironmentVariableTarget]::Process)
+    $supervisorObservation = New-TestSupervisorOperationalReadinessObservation -CurrentInstance $ownerFreeInstance
+    $supervisorObservationId = [string]$supervisorObservation.observation_id
     try {
+        [Environment]::SetEnvironmentVariable(
+            $supervisorObservationEnvironmentVariable,
+            ($supervisorObservation | ConvertTo-Json -Depth 4 -Compress),
+            [EnvironmentVariableTarget]::Process)
         Write-Utf8File -Path $availabilityPath -Content "{invalid availability evidence`n"
         $transientRead = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
         Assert-Result -Result $transientRead -ExitCode 0 -Label "Transient instance availability read"
         Assert-True -Condition ($transientRead.Text.Contains("[PRODUCT_LAYER CONFIGURED] CURRENT")) -Message "Transient availability failure downgraded the current MCP registration."
-        Assert-True -Condition ($transientRead.Text.Contains("[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE")) -Message "Transient availability failure was not isolated to MCP availability."
-        Assert-True -Condition ($transientRead.Text.Contains("[PRODUCT_STATE] NEEDS_ATTENTION")) -Message "Transient availability failure was incorrectly reported as Ready."
+        Assert-True -Condition ($transientRead.Text.Contains("[PRODUCT_LAYER MCP_AVAILABLE] CURRENT")) -Message "Valid Supervisor authority did not preserve current MCP availability."
+        Assert-True -Condition ($transientRead.Text.Contains("[PRODUCT_STATE] READY")) -Message "Valid Supervisor authority did not preserve Ready."
+        Assert-True -Condition ($transientRead.Text.Contains($supervisorObservationId)) -Message "DryRun did not forward the explicit Supervisor observation identity."
+        Assert-True -Condition ([System.IO.File]::ReadAllText($availabilityPath).StartsWith("{invalid availability evidence", [StringComparison]::Ordinal)) -Message "DryRun rewrote lower-level availability evidence instead of consuming Supervisor authority."
+
+        [System.IO.File]::WriteAllBytes($availabilityPath, $availabilityBytes)
         $recoveredTransient = Invoke-Materializer -Action "Probe" -PayloadRoot $canonicalPayloadRoot
         Assert-Result -Result $recoveredTransient -ExitCode 0 -Label "Transient current-instance availability Probe"
-        Assert-True -Condition ($recoveredTransient.Text.Contains("[PHASE CANDIDATE_VERIFY] READY")) -Message "Current-instance Probe did not verify the selected immutable instance."
+        Assert-True -Condition ($recoveredTransient.Text.Contains("[PRODUCT_LAYER CONFIGURED] CURRENT")) -Message "Current-instance Probe lost the selected registration."
         Assert-True -Condition ($recoveredTransient.Text.Contains("[PRODUCT_LAYER MCP_AVAILABLE] CURRENT")) -Message "Current-instance Probe did not restore MCP availability."
         Assert-True -Condition ($recoveredTransient.Text.Contains("[PRODUCT_STATE] READY")) -Message "Current-instance Probe did not restore Ready."
-        Assert-True -Condition (-not $recoveredTransient.Text.Contains("current Package-owned Host runtime")) -Message "Current-instance Probe incorrectly used the legacy flat Host availability path."
+        Assert-True -Condition ($recoveredTransient.Text.Contains($supervisorObservationId)) -Message "Current-instance Probe did not preserve the Supervisor authority identity."
+        Assert-Equal -Actual (Get-FileHash -LiteralPath $availabilityPath -Algorithm SHA256).Hash -Expected $availabilitySha256 -Message "Current-instance Probe changed the recovered lower-level evidence."
+        $recoveredAvailability = Get-Content -LiteralPath $availabilityPath -Raw | ConvertFrom-Json
+        Assert-Equal -Actual ([string]$recoveredAvailability.instance_id) -Expected ([string]$ownerFreeInstance.Selection.instance_id) -Message "Recovered lower-level evidence selected the wrong instance."
+        Assert-Equal -Actual ([string]$recoveredAvailability.generation_id) -Expected $generationId -Message "Recovered lower-level evidence selected the wrong generation."
+        Assert-Equal -Actual ([string]$recoveredAvailability.availability) -Expected "AVAILABLE" -Message "Recovered lower-level evidence did not report AVAILABLE."
+        Assert-True -Condition ([bool]$recoveredAvailability.codedb_status_usable -and [bool]$recoveredAvailability.codedb_text_search_callable) -Message "Recovered lower-level evidence did not retain usable candidate probes."
         $availabilityRecovered = $true
     } finally {
+        [Environment]::SetEnvironmentVariable(
+            $supervisorObservationEnvironmentVariable,
+            $previousSupervisorObservation,
+            [EnvironmentVariableTarget]::Process)
         if (-not $availabilityRecovered) {
             [System.IO.File]::WriteAllBytes($availabilityPath, $availabilityBytes)
         }
     }
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$ownerFreeInstance.Selection.instance_id) -Message "Current-instance Probe replaced the selected immutable instance."
+    Assert-Equal `
+        -Actual ([Environment]::GetEnvironmentVariable($supervisorObservationEnvironmentVariable, [EnvironmentVariableTarget]::Process)) `
+        -Expected $previousSupervisorObservation `
+        -Message "Transient availability scenario did not restore the prior Supervisor observation environment."
 
-    $repeatOwnerFree = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    $repeatOwnerFree = Invoke-WithTestSupervisorOperationalReadiness `
+        -CurrentInstance $ownerFreeInstance `
+        -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
     Assert-Result -Result $repeatOwnerFree -ExitCode 0 -Label "v0.2.4 owner-free repeated Upgrade"
     Assert-StructuredCommandResult -Result $repeatOwnerFree -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "v0.2.4 owner-free repeated Upgrade"
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$ownerFreeInstance.Selection.instance_id) -Message "Repeated Upgrade replaced an already-ready instance."
+    Assert-TestCandidateHostSelection -Label "Repeated owner-free Upgrade"
+    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Owner-free convergence retained the legacy marker."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Owner-free convergence retained poc.27."
+    foreach ($target in $ownerFreeFlatPaths) {
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $target))) -Message "Owner-free convergence retained legacy flat target $target."
+    }
 
     # A real schema-1 flat MCP lease plus a generation request lease preserves
-    # the old pointer, marker, scripts, process, lease, and generation. Future
-    # sessions still receive the independently selected poc.35 instance.
+    # the old marker, scripts, process, lease, and generation while activation
+    # atomically selects poc.35 for future sessions.
     $prior = Install-PriorGenerationFixture @priorParameters
     $legacyGate = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/codedb/shared/codedb-host-use-gate.mjs"
     $flatMcp = $null
@@ -8319,7 +8457,6 @@ function Invoke-PriorGenerationUpgradeScenarios {
     try {
         $flatMcp = Start-LegacyHostUseLeaseProcess -GatePath $legacyGate -Owner "mcp"
         $generationLease = New-TestGenerationLease -Owner "mcp" -LeaseGenerationId "poc.27"
-        $oldPointerBytes = Get-ByteSnapshot -Path $prior.PointerPath
         $oldMarkerBytes = Get-ByteSnapshot -Path $prior.MarkerPath
         $oldGenerationSnapshot = Get-FileSnapshot -Root $prior.GenerationRoot
         $oldFlatPaths = @($prior.InstalledFlatTargets | Where-Object { -not [string]::Equals($_, $stableWrapperTarget, [StringComparison]::OrdinalIgnoreCase) })
@@ -8328,10 +8465,10 @@ function Invoke-PriorGenerationUpgradeScenarios {
 
         $activeUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
         Assert-Result -Result $activeUpgrade -ExitCode 0 -Label "v0.2.4 active-owner instance Upgrade"
-        Assert-StructuredCommandResult -Result $activeUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "v0.2.4 active-owner instance Upgrade"
+        Assert-StructuredCommandResult -Result $activeUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "v0.2.4 active-owner instance Upgrade" -RequiredNextActionText "authenticated holders"
         $activeInstance = Get-TestCurrentInstanceSelection
         Assert-TestStableInstanceWrapper
-        Assert-Equal -Actual (Get-ByteSnapshot -Path $prior.PointerPath) -Expected $oldPointerBytes -Message "Active-owner Upgrade changed the legacy Host pointer."
+        Assert-TestCandidateHostSelection -Label "Active-owner Upgrade"
         Assert-Equal -Actual (Get-ByteSnapshot -Path $prior.MarkerPath) -Expected $oldMarkerBytes -Message "Active-owner Upgrade changed the legacy marker."
         Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $oldGenerationSnapshot -Message "Active-owner Upgrade changed poc.27 bytes."
         Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $oldFlatPaths) -Expected $oldFlatSnapshot -Message "Active-owner Upgrade changed legacy flat scripts."
@@ -8339,42 +8476,66 @@ function Invoke-PriorGenerationUpgradeScenarios {
         Assert-True -Condition (-not $flatMcp.HasExited) -Message "Active-owner Upgrade terminated the external fixture MCP."
         Assert-True -Condition (-not $activeUpgrade.Text.Contains("[STOPPING]")) -Message "Active-owner Upgrade attempted to Stop an external MCP."
 
-        $repeatActive = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+        $repeatActive = Invoke-WithTestSupervisorOperationalReadiness `
+            -CurrentInstance $activeInstance `
+            -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
         Assert-Result -Result $repeatActive -ExitCode 0 -Label "v0.2.4 repeated active-owner Upgrade"
-        Assert-StructuredCommandResult -Result $repeatActive -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "v0.2.4 repeated active-owner Upgrade"
+        Assert-StructuredCommandResult -Result $repeatActive -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "PENDING" -Label "v0.2.4 repeated active-owner Upgrade" -RequiredNextActionText "authenticated holders"
         Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$activeInstance.Selection.instance_id) -Message "Pending cleanup replaced the selected instance."
     } finally {
         if ($null -ne $generationLease -and (Test-Path -LiteralPath $generationLease)) { Remove-Item -LiteralPath $generationLease -Force }
         if ($null -ne $flatMcp) { Stop-LegacyHostUseLeaseProcess -Process $flatMcp -Owner "mcp" }
     }
-    $drainedUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    $drainedUpgrade = Invoke-WithTestSupervisorOperationalReadiness `
+        -CurrentInstance $activeInstance `
+        -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
     Assert-Result -Result $drainedUpgrade -ExitCode 0 -Label "v0.2.4 drained owner cleanup"
     Assert-StructuredCommandResult -Result $drainedUpgrade -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "v0.2.4 drained owner cleanup"
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Drained cleanup retained poc.27."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Drained cleanup retained the v0.2.4 marker."
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$activeInstance.Selection.instance_id) -Message "Drain cleanup replaced the selected instance."
+    Assert-TestCandidateHostSelection -Label "Drained active-owner cleanup"
+    foreach ($target in $oldFlatPaths) {
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $target))) -Message "Drained cleanup retained legacy flat target $target."
+    }
 
     # A live but unauthenticated coordinator state is retirement evidence, not
     # an activation dependency. It is never stopped and only keeps cleanup pending.
     $prior = Install-PriorGenerationFixture @priorParameters
     $unknownStatePath = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/codedb-fixture/watch/coordinator/coordinator-state.json"
     Write-Utf8File -Path $unknownStatePath -Content (([ordered]@{ coordinator_pid = $PID } | ConvertTo-Json) + "`n")
+    $unknownMarkerBytes = Get-ByteSnapshot -Path $prior.MarkerPath
+    $unknownGenerationSnapshot = Get-FileSnapshot -Root $prior.GenerationRoot
+    $unknownFlatPaths = @($prior.InstalledFlatTargets | Where-Object { -not [string]::Equals($_, $stableWrapperTarget, [StringComparison]::OrdinalIgnoreCase) })
+    $unknownFlatSnapshot = Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $unknownFlatPaths
+    $unknownStateBytes = Get-ByteSnapshot -Path $unknownStatePath
     try {
         $unknownOwnerUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
         Assert-Result -Result $unknownOwnerUpgrade -ExitCode 0 -Label "v0.2.4 unknown-owner non-blocking Upgrade"
-        Assert-StructuredCommandResult -Result $unknownOwnerUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "v0.2.4 unknown-owner non-blocking Upgrade"
+        Assert-StructuredCommandResult -Result $unknownOwnerUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "v0.2.4 unknown-owner non-blocking Upgrade" -RequiredNextActionText "authenticated holders"
         $unknownOwnerInstance = Get-TestCurrentInstanceSelection
+        Assert-TestCandidateHostSelection -Label "Unknown-owner Upgrade"
         Assert-True -Condition ($unknownOwnerUpgrade.Text.Contains("[ACTIVE]")) -Message "Unknown-owner Upgrade did not report retained coordinator evidence."
         Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Unknown-owner Upgrade terminated the unrelated fixture process."
-        Assert-Equal -Actual ([string](Get-Content -LiteralPath $prior.PointerPath -Raw | ConvertFrom-Json).generation_id) -Expected "poc.27" -Message "Unknown-owner Upgrade changed the legacy Host pointer before drain."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $prior.MarkerPath) -Expected $unknownMarkerBytes -Message "Unknown-owner Upgrade changed the legacy marker."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $unknownGenerationSnapshot -Message "Unknown-owner Upgrade changed poc.27 bytes."
+        Assert-Equal -Actual (Get-ManagedPayloadSnapshot -Root $hostRoot -Paths $unknownFlatPaths) -Expected $unknownFlatSnapshot -Message "Unknown-owner Upgrade changed legacy flat scripts."
+        Assert-Equal -Actual (Get-ByteSnapshot -Path $unknownStatePath) -Expected $unknownStateBytes -Message "Unknown-owner Upgrade changed the unauthenticated coordinator evidence."
     } finally {
         if (Test-Path -LiteralPath $unknownStatePath) { Remove-Item -LiteralPath $unknownStatePath -Force }
     }
-    $unknownDrained = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    $unknownDrained = Invoke-WithTestSupervisorOperationalReadiness `
+        -CurrentInstance $unknownOwnerInstance `
+        -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
     Assert-Result -Result $unknownDrained -ExitCode 0 -Label "v0.2.4 unknown-owner drained cleanup"
     Assert-StructuredCommandResult -Result $unknownDrained -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "v0.2.4 unknown-owner drained cleanup"
     Assert-Equal -Actual ([string](Get-TestCurrentInstanceSelection).Selection.instance_id) -Expected ([string]$unknownOwnerInstance.Selection.instance_id) -Message "Unknown-owner drain replaced the selected instance."
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.GenerationRoot)) -Message "Unknown-owner drain retained poc.27."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.MarkerPath)) -Message "Unknown-owner drain retained the v0.2.4 marker."
+    Assert-TestCandidateHostSelection -Label "Unknown-owner drained cleanup"
+    foreach ($target in $unknownFlatPaths) {
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $hostRoot -RelativePath $target))) -Message "Unknown-owner drain retained legacy flat target $target."
+    }
     Assert-NoMaterializerResidue
     Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.35 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
 
@@ -8382,6 +8543,11 @@ function Invoke-PriorGenerationUpgradeScenarios {
     # a valid automatic handoff source. Its live leases and generation remain
     # byte-exact until they drain; an undeclared identity still fails closed.
     $trustedPrevious = Install-TrustedPreviousInstanceFixture
+    $trustedDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $trustedDryRun -ExitCode 0 -Label "Package-declared previous instance DryRun"
+    Assert-True -Condition ($trustedDryRun.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Trusted-previous DryRun did not prove the current prerequisite."
+    Assert-True -Condition ($trustedDryRun.Text.Contains("[INSTANCE] TRUSTED_PREVIOUS")) -Message "Trusted-previous DryRun did not identify the retained instance."
+    Assert-True -Condition ($trustedDryRun.Text.Contains("[PRODUCT_STATE] NEEDS_ATTENTION")) -Message "Trusted-previous DryRun did not retain the handoff-needed product state."
     Assert-Equal `
         -Actual (Get-FileHash -LiteralPath $trustedPrevious.StableWrapperPath -Algorithm SHA256).Hash.ToLowerInvariant() `
         -Expected $trustedPrevious.StableWrapperSha256 `
@@ -8392,10 +8558,11 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $previousGenerationLeaseBytes = Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath
     $trustedUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $trustedUpgrade -ExitCode 0 -Label "Package-declared previous instance Upgrade"
-    Assert-StructuredCommandResult -Result $trustedUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "Package-declared previous instance Upgrade"
+    Assert-StructuredCommandResult -Result $trustedUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "Package-declared previous instance Upgrade" -RequiredNextActionText "authenticated holders"
     $trustedCurrent = Get-TestCurrentInstanceSelection
     Assert-True -Condition (-not [string]::Equals([string]$trustedCurrent.Selection.instance_id, $trustedPrevious.InstanceId, [StringComparison]::Ordinal)) -Message "Previous-instance Upgrade did not activate a new immutable instance."
     Assert-TestStableInstanceWrapper
+    Assert-TestCandidateHostSelection -Label "Package-declared previous instance Upgrade"
     Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.InstanceRoot) -Expected $previousInstanceSnapshot -Message "Previous-instance Upgrade changed the retained instance closure."
     Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.GenerationRoot) -Expected $previousGenerationSnapshot -Message "Previous-instance Upgrade changed the retained generation closure."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath) -Expected $previousInstanceLeaseBytes -Message "Previous-instance Upgrade changed its live instance lease."
@@ -8404,7 +8571,9 @@ function Invoke-PriorGenerationUpgradeScenarios {
 
     Remove-Item -LiteralPath $trustedPrevious.InstanceLeasePath -Force
     Remove-Item -LiteralPath $trustedPrevious.GenerationLeasePath -Force
-    $trustedDrain = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
+    $trustedDrain = Invoke-WithTestSupervisorOperationalReadiness `
+        -CurrentInstance $trustedCurrent `
+        -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
     Assert-Result -Result $trustedDrain -ExitCode 0 -Label "Package-declared previous instance drain"
     Assert-StructuredCommandResult -Result $trustedDrain -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "Package-declared previous instance drain"
     Assert-True -Condition (-not (Test-Path -LiteralPath $trustedPrevious.InstanceRoot)) -Message "Drained previous instance was not retired."
@@ -8445,6 +8614,10 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Assert-Equal -Actual (Get-ByteSnapshot -Path $forgedPrevious.SelectionPath) -Expected $forgedSelectionBytes -Message "Rejected previous instance changed its selection."
     Assert-Equal -Actual (Get-FileSnapshot -Root $forgedPrevious.InstanceRoot) -Expected $forgedInstanceSnapshot -Message "Rejected previous instance changed its closure."
     Assert-Equal -Actual (Get-FileSnapshot -Root $forgedPrevious.GenerationRoot) -Expected $forgedGenerationSnapshot -Message "Rejected previous instance changed its generation."
+    Assert-Equal `
+        -Actual ([Environment]::GetEnvironmentVariable($supervisorObservationEnvironmentVariable, [EnvironmentVariableTarget]::Process)) `
+        -Expected $previousSupervisorObservation `
+        -Message "UpgradeOnly fixture did not restore the prior Supervisor observation environment."
     Write-Host "[OK] Exact Package-declared immutable instances hand off automatically, retain live owners, drain idempotently, and reject undeclared identities before activation."
 }
 
