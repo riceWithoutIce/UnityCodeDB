@@ -18,7 +18,7 @@ namespace Rice.AI.Codedb.Editor
     {
         internal const int CurrentSchemaVersion = 1;
         internal const string DefaultId = "v0.3-control";
-        internal const int DefaultVersion = 1;
+        internal const int DefaultVersion = 2;
 
         internal string Id { get; }
         internal int Version { get; }
@@ -234,6 +234,7 @@ namespace Rice.AI.Codedb.Editor
         private const int LegacySupervisorStateSchemaVersion = 3;
         private const int LegacySupervisorProtocolVersion = 2;
         private const int LegacySupervisorProtocolVersionV1 = 1;
+        private const int VersionedV1ControlContractVersion = 1;
 
         // The pre-control-contract Supervisor wrote two different documents.
         // Keep the shared owner identity separate from the state-only fields so
@@ -328,9 +329,17 @@ namespace Rice.AI.Codedb.Editor
             }
 
             var currentPath = AICodedbControlContract.GetSupervisorRuntimePath(projectRoot, contract);
+            var versionedV1Contract = CreateVersionedV1Identity();
+            var versionedV1Path = AICodedbControlContract.GetSupervisorRuntimePath(
+                projectRoot,
+                versionedV1Contract);
             var legacyPath = AICodedbControlContract.GetLegacySupervisorRuntimePath(projectRoot);
             try
             {
+                ValidateKnownContractNamespaces(
+                    projectRoot,
+                    contract,
+                    versionedV1Contract);
                 var current = InspectNamespace(
                     projectRoot,
                     packageRoot,
@@ -341,38 +350,12 @@ namespace Rice.AI.Codedb.Editor
                 if (current.Kind == NamespaceEvidenceKind.Invalid)
                     return Invalid(contract, projectRoot, current.Diagnostic);
 
-                if (current.Kind == NamespaceEvidenceKind.Current)
-                {
-                    // A valid current namespace is authoritative.  Legacy
-                    // evidence is inspected only for diagnostics and can
-                    // never downgrade the authenticated current result.
-                    var legacyEvidence = InspectLegacyNamespace(
-                        projectRoot,
-                        packageRoot,
-                        legacyPath,
-                        contract,
-                        runtimeContract);
-                    var diagnostic = current.Diagnostic;
-                    if (legacyEvidence.Kind == NamespaceEvidenceKind.Invalid
-                        || legacyEvidence.Kind == NamespaceEvidenceKind.Obsolete)
-                    {
-                        diagnostic = AppendDiagnostic(
-                            diagnostic,
-                            "Legacy namespace evidence was retained for diagnostics and ignored: "
-                            + legacyEvidence.Diagnostic);
-                    }
-                    return new AICodedbControlContractMigrationStatus(
-                        current.OwnerAlive
-                            ? AICodedbControlContractMigrationState.Current
-                            : AICodedbControlContractMigrationState.CompatibleStale,
-                        contract,
-                        currentPath,
-                        legacyPath,
-                        current.OwnerAlive
-                            ? "The current CodeDB control contract is active."
-                            : "The current CodeDB control contract is valid and its previous owner has exited.",
-                        diagnostic);
-                }
+                var versionedV1 = InspectVersionedV1Namespace(
+                    projectRoot,
+                    versionedV1Path,
+                    versionedV1Contract);
+                if (versionedV1.Kind == NamespaceEvidenceKind.Invalid)
+                    return Invalid(contract, projectRoot, versionedV1.Diagnostic);
 
                 var legacy = InspectLegacyNamespace(
                     projectRoot,
@@ -383,15 +366,46 @@ namespace Rice.AI.Codedb.Editor
                 if (legacy.Kind == NamespaceEvidenceKind.Invalid)
                     return Invalid(contract, projectRoot, legacy.Diagnostic);
 
-                if (legacy.Kind == NamespaceEvidenceKind.Obsolete)
+                var olderAuthorityCount =
+                    (versionedV1.Kind == NamespaceEvidenceKind.Obsolete ? 1 : 0)
+                    + (legacy.Kind == NamespaceEvidenceKind.Obsolete ? 1 : 0);
+                if ((current.Kind == NamespaceEvidenceKind.Current && olderAuthorityCount > 0)
+                    || olderAuthorityCount > 1)
                 {
+                    return Invalid(
+                        contract,
+                        projectRoot,
+                        "Multiple Supervisor control authorities are present; explicit removal cannot select one safely.");
+                }
+
+                if (current.Kind == NamespaceEvidenceKind.Current)
+                {
+                    return new AICodedbControlContractMigrationStatus(
+                        current.OwnerAlive
+                            ? AICodedbControlContractMigrationState.Current
+                            : AICodedbControlContractMigrationState.CompatibleStale,
+                        contract,
+                        currentPath,
+                        legacyPath,
+                        current.OwnerAlive
+                            ? "The current CodeDB control contract is active."
+                            : "The current CodeDB control contract is valid and its previous owner has exited.",
+                        current.Diagnostic);
+                }
+
+                if (versionedV1.Kind == NamespaceEvidenceKind.Obsolete
+                    || legacy.Kind == NamespaceEvidenceKind.Obsolete)
+                {
+                    var obsolete = versionedV1.Kind == NamespaceEvidenceKind.Obsolete
+                        ? versionedV1
+                        : legacy;
                     return new AICodedbControlContractMigrationStatus(
                         AICodedbControlContractMigrationState.ObsoleteReinstallRequired,
                         contract,
                         currentPath,
                         legacyPath,
-                        "This CodeDB installation needs attention. Reinstall CodeDB once to continue.",
-                        legacy.Diagnostic);
+                        "This CodeDB installation uses Owner Identity v1. Remove CodeDB Integration explicitly before reinstalling the Package.",
+                        obsolete.Diagnostic);
                 }
 
                 return new AICodedbControlContractMigrationStatus(
@@ -405,6 +419,135 @@ namespace Rice.AI.Codedb.Editor
             catch (Exception exception)
             {
                 return Invalid(contract, projectRoot, exception.Message);
+            }
+        }
+
+        private static AICodedbControlContractIdentity CreateVersionedV1Identity()
+        {
+            var canonical = AICodedbControlContract.BuildCanonicalIdentity(
+                AICodedbControlContractIdentity.DefaultId,
+                VersionedV1ControlContractVersion,
+                AICodedbControlContractIdentity.CurrentSchemaVersion);
+            return new AICodedbControlContractIdentity(
+                AICodedbControlContractIdentity.DefaultId,
+                VersionedV1ControlContractVersion,
+                AICodedbControlContractIdentity.CurrentSchemaVersion,
+                AICodedbControlContract.ComputeSha256(canonical),
+                false);
+        }
+
+        private static void ValidateKnownContractNamespaces(
+            string projectRoot,
+            AICodedbControlContractIdentity current,
+            AICodedbControlContractIdentity versionedV1)
+        {
+            var contractsRoot = AICodedbPaths.NormalizePath(Path.Combine(
+                projectRoot,
+                AICodedbControlContract.NamespaceRootRelativePath));
+            if (!Directory.Exists(contractsRoot))
+            {
+                if (File.Exists(contractsRoot))
+                    throw new InvalidOperationException("The Supervisor contracts root is not a directory.");
+                return;
+            }
+
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, contractsRoot);
+            var expectedIdRoot = AICodedbPaths.NormalizePath(Path.Combine(
+                contractsRoot,
+                AICodedbControlContractIdentity.DefaultId));
+            foreach (var entry in Directory.GetFileSystemEntries(contractsRoot))
+            {
+                if (!Directory.Exists(entry)
+                    || !AICodedbSupervisorProtocol.PathsEqual(entry, expectedIdRoot))
+                {
+                    throw new InvalidOperationException(
+                        "An unknown Supervisor control-contract authority is present.");
+                }
+            }
+
+            if (!Directory.Exists(expectedIdRoot))
+                return;
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, expectedIdRoot);
+            var currentVersionRoot = Directory.GetParent(
+                AICodedbControlContract.GetSupervisorRuntimePath(projectRoot, current)).FullName;
+            var v1VersionRoot = Directory.GetParent(
+                AICodedbControlContract.GetSupervisorRuntimePath(projectRoot, versionedV1)).FullName;
+            foreach (var entry in Directory.GetFileSystemEntries(expectedIdRoot))
+            {
+                if (!Directory.Exists(entry)
+                    || (!AICodedbSupervisorProtocol.PathsEqual(entry, currentVersionRoot)
+                        && !AICodedbSupervisorProtocol.PathsEqual(entry, v1VersionRoot)))
+                {
+                    throw new InvalidOperationException(
+                        "An unknown Supervisor control-contract version is present.");
+                }
+            }
+
+            foreach (var versionRoot in new[] { currentVersionRoot, v1VersionRoot })
+            {
+                if (!Directory.Exists(versionRoot))
+                    continue;
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, versionRoot);
+                var expectedSupervisor = AICodedbPaths.NormalizePath(Path.Combine(versionRoot, "supervisor"));
+                foreach (var entry in Directory.GetFileSystemEntries(versionRoot))
+                {
+                    var name = Path.GetFileName(entry);
+                    var isSupervisor = Directory.Exists(entry)
+                                       && AICodedbSupervisorProtocol.PathsEqual(entry, expectedSupervisor);
+                    var isActivationFile = File.Exists(entry)
+                                           && (string.Equals(name, "activation.json", StringComparison.Ordinal)
+                                               || string.Equals(name, "operation.json", StringComparison.Ordinal));
+                    var isActivationDirectory = Directory.Exists(entry)
+                                                && (string.Equals(name, "operations", StringComparison.Ordinal)
+                                                    || string.Equals(name, "retirements", StringComparison.Ordinal));
+                    if (!isSupervisor && !isActivationFile && !isActivationDirectory)
+                    {
+                        throw new InvalidOperationException(
+                            "A control-contract version contains an unknown authority entry.");
+                    }
+                }
+            }
+        }
+
+        private static NamespaceEvidence InspectVersionedV1Namespace(
+            string projectRoot,
+            string namespacePath,
+            AICodedbControlContractIdentity contract)
+        {
+            var statePath = Path.Combine(namespacePath, "supervisor-state.json");
+            var lockPath = Path.Combine(namespacePath, "supervisor.lock");
+            var stateExists = File.Exists(statePath) || Directory.Exists(statePath);
+            var lockExists = File.Exists(lockPath) || Directory.Exists(lockPath);
+            if (!stateExists && !lockExists)
+                return new NamespaceEvidence(NamespaceEvidenceKind.Missing, false, string.Empty);
+            if (!stateExists || !lockExists)
+            {
+                return new NamespaceEvidence(
+                    NamespaceEvidenceKind.Invalid,
+                    false,
+                    "Owner Identity v1 must publish both state and lock evidence.");
+            }
+
+            try
+            {
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, namespacePath);
+                var state = ReadEvidence(statePath, "Owner Identity v1 Supervisor state");
+                var owner = ReadEvidence(lockPath, "Owner Identity v1 Supervisor lock");
+                if (!SameOwner(state, owner))
+                    throw new InvalidOperationException("Owner Identity v1 state and lock identify different owners.");
+                ValidateVersionedV1Evidence(projectRoot, namespacePath, contract, state, true);
+                ValidateVersionedV1Evidence(projectRoot, namespacePath, contract, owner, false);
+                return new NamespaceEvidence(
+                    NamespaceEvidenceKind.Obsolete,
+                    false,
+                    "A complete Package-owned Owner Identity v1 pair is present in its versioned namespace.");
+            }
+            catch (Exception exception)
+            {
+                return new NamespaceEvidence(
+                    NamespaceEvidenceKind.Invalid,
+                    false,
+                    exception.Message);
             }
         }
 
@@ -434,6 +577,206 @@ namespace Rice.AI.Codedb.Editor
                     NamespaceEvidenceKind.Invalid,
                     false,
                     exception.Message);
+            }
+        }
+
+        private static void ValidateVersionedV1Evidence(
+            string projectRoot,
+            string namespacePath,
+            AICodedbControlContractIdentity contract,
+            Dictionary<string, object> evidence,
+            bool stateDocument)
+        {
+            var label = stateDocument
+                ? "Owner Identity v1 Supervisor state"
+                : "Owner Identity v1 Supervisor lock";
+            if (evidence == null)
+                throw new InvalidOperationException(label + " is missing.");
+            if (evidence.ContainsKey("owner_identity_version")
+                || evidence.ContainsKey("activation_epoch"))
+            {
+                throw new InvalidOperationException(
+                    label + " mixes Owner Identity v1 with v2-only fields.");
+            }
+            if (!stateDocument
+                && (evidence.ContainsKey("protocol_version")
+                    || evidence.ContainsKey("auth_token")))
+            {
+                throw new InvalidOperationException(
+                    "Owner Identity v1 lock evidence has the state-document shape.");
+            }
+
+            var schemaVersion = AICodedbStrictJson.GetRequiredInt32(evidence, "schema_version", label);
+            var evidenceSchemaVersion = AICodedbStrictJson.GetRequiredInt32(
+                evidence,
+                "evidence_schema_version",
+                label);
+            var managedBy = AICodedbStrictJson.GetRequiredString(evidence, "managed_by", label);
+            var role = AICodedbStrictJson.GetRequiredString(evidence, "role", label);
+            var root = AICodedbStrictJson.GetRequiredString(evidence, "root", label);
+            var projectIdentity = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "project_identity",
+                label);
+            var runtime = AICodedbStrictJson.GetRequiredString(evidence, "runtime", label);
+            var contractId = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "control_contract_id",
+                label);
+            var contractVersion = AICodedbStrictJson.GetRequiredInt32(
+                evidence,
+                "control_contract_version",
+                label);
+            var contractSchemaVersion = AICodedbStrictJson.GetRequiredInt32(
+                evidence,
+                "control_contract_schema_version",
+                label);
+            var contractSha256 = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "control_contract_sha256",
+                label);
+            var controlNamespace = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "control_namespace",
+                label);
+            var pipeValue = AICodedbStrictJson.GetRequiredString(evidence, "pipe_name", label);
+            var generationId = AICodedbStrictJson.GetRequiredString(evidence, "generation_id", label);
+            var targetGenerationId = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "target_generation_id",
+                label);
+            var selectedGenerationId = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "selected_generation_id",
+                label);
+            var selectedInstanceId = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "selected_instance_id",
+                label);
+            var runtimeContractSha256 = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "runtime_contract_sha256",
+                label);
+            var supervisorProtocol = AICodedbStrictJson.GetRequiredInt32(
+                evidence,
+                "supervisor_protocol_version",
+                label);
+            var generationDisposition = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "generation_disposition",
+                label);
+            var lifecycleId = AICodedbStrictJson.GetRequiredString(evidence, "lifecycle_id", label);
+            var supervisorId = AICodedbStrictJson.GetRequiredString(evidence, "supervisor_id", label);
+            var ownerEpoch = AICodedbStrictJson.GetRequiredString(evidence, "owner_epoch", label);
+            var supervisorPid = AICodedbStrictJson.GetRequiredInt32(evidence, "supervisor_pid", label);
+            var publicationPhase = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "publication_phase",
+                label);
+            AICodedbStrictJson.GetRequiredString(evidence, "owner_started_at_utc", label);
+            if (!evidence.TryGetValue("owner_evidence", out var ownerEvidenceValue))
+                throw new InvalidOperationException(label + " is missing owner evidence.");
+            var ownerEvidence = AICodedbStrictJson.RequireObject(
+                ownerEvidenceValue,
+                label + " process evidence");
+            ValidateLegacyOwnerEvidenceFieldSet(ownerEvidence, label + " process evidence");
+            var ownerEvidenceSchema = AICodedbStrictJson.GetRequiredInt32(
+                ownerEvidence,
+                "schema_version",
+                label + " process evidence");
+            var evidencePid = AICodedbStrictJson.GetRequiredInt32(
+                ownerEvidence,
+                "pid",
+                label + " process evidence");
+            var processStartIdentity = AICodedbStrictJson.GetRequiredString(
+                ownerEvidence,
+                "process_start_identity",
+                label + " process evidence");
+            var executablePath = AICodedbStrictJson.GetRequiredString(
+                ownerEvidence,
+                "executable_path",
+                label + " process evidence");
+            var argvSha256 = AICodedbStrictJson.GetRequiredString(
+                ownerEvidence,
+                "argv_sha256",
+                label + " process evidence");
+            var commandLineSha256 = AICodedbStrictJson.GetRequiredString(
+                ownerEvidence,
+                "command_line_sha256",
+                label + " process evidence");
+
+            if (stateDocument)
+            {
+                var protocolVersion = AICodedbStrictJson.GetRequiredInt32(
+                    evidence,
+                    "protocol_version",
+                    label);
+                var authToken = AICodedbStrictJson.GetRequiredString(
+                    evidence,
+                    "auth_token",
+                    label);
+                AICodedbStrictJson.GetRequiredString(evidence, "desired_state", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "editor_demand", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "readiness_state", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "reason_code", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "detail", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "last_event", label);
+                AICodedbStrictJson.GetRequiredString(evidence, "last_event_detail", label);
+                if (protocolVersion != AICodedbSupervisorProtocol.Version
+                    || !AICodedbControlContract.IsSha256(authToken))
+                {
+                    throw new InvalidOperationException(
+                        "Owner Identity v1 state protocol or authentication evidence is invalid.");
+                }
+            }
+
+            if (!AICodedbSupervisorProtocol.TryGetWindowsPipeName(pipeValue, out var pipeName)
+                || !AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
+                    projectRoot,
+                    namespacePath,
+                    out var expectedPipe)
+                || !string.Equals(pipeName, expectedPipe, StringComparison.OrdinalIgnoreCase)
+                || schemaVersion != LegacySupervisorStateSchemaVersion
+                || evidenceSchemaVersion != 1
+                || !string.Equals(managedBy, ManagedBy, StringComparison.Ordinal)
+                || !string.Equals(role, AICodedbSupervisorProtocol.SupervisorRole, StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(root, projectRoot)
+                || !string.Equals(
+                    projectIdentity,
+                    AICodedbEditorLifecycle.CreateProjectIdentity(projectRoot),
+                    StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(runtime, namespacePath)
+                || !string.Equals(contractId, contract.Id, StringComparison.Ordinal)
+                || contractVersion != contract.Version
+                || contractSchemaVersion != contract.SchemaVersion
+                || !string.Equals(contractSha256, contract.Sha256, StringComparison.OrdinalIgnoreCase)
+                || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, namespacePath)
+                || !IsBoundedId(generationId, 64)
+                || !IsBoundedId(targetGenerationId, 64)
+                || !string.Equals(generationId, selectedGenerationId, StringComparison.Ordinal)
+                || !IsLowerHex(selectedInstanceId, 32)
+                || !AICodedbControlContract.IsSha256(runtimeContractSha256)
+                || (supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
+                    && supervisorProtocol != LegacySupervisorProtocolVersion
+                    && supervisorProtocol != LegacySupervisorProtocolVersionV1)
+                || !IsOneOf(generationDisposition, "CURRENT", "TRUSTED_PREVIOUS")
+                || (string.Equals(generationDisposition, "CURRENT", StringComparison.Ordinal)
+                    ? !string.Equals(generationId, targetGenerationId, StringComparison.Ordinal)
+                    : string.Equals(generationId, targetGenerationId, StringComparison.Ordinal))
+                || !IsOwnerId(lifecycleId)
+                || !IsOwnerId(supervisorId)
+                || !IsOwnerId(ownerEpoch)
+                || supervisorPid <= 0
+                || !IsOneOf(publicationPhase, "state_published", "listening", "retiring")
+                || ownerEvidenceSchema != 1
+                || evidencePid != supervisorPid
+                || !IsProcessStartIdentity(processStartIdentity)
+                || !Path.IsPathRooted(executablePath)
+                || !AICodedbControlContract.IsSha256(argvSha256)
+                || !AICodedbControlContract.IsSha256(commandLineSha256))
+            {
+                throw new InvalidOperationException(
+                    label + " does not match the reviewed Package-owned Owner Identity v1 contract.");
             }
         }
 
@@ -676,6 +1019,14 @@ namespace Rice.AI.Codedb.Editor
                 evidence,
                 "control_namespace",
                 label);
+            var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
+                evidence,
+                "owner_identity_version",
+                label);
+            var activationEpoch = AICodedbStrictJson.GetRequiredString(
+                evidence,
+                "activation_epoch",
+                label);
             var pipeValue = AICodedbStrictJson.GetRequiredString(evidence, "pipe_name", label);
             var generationId = AICodedbStrictJson.GetRequiredString(evidence, "generation_id", label);
             var targetGenerationId = AICodedbStrictJson.GetRequiredString(
@@ -787,13 +1138,16 @@ namespace Rice.AI.Codedb.Editor
                     runtimeContract.ControlContract.Sha256,
                     StringComparison.OrdinalIgnoreCase)
                 || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, namespacePath)
+                || ownerIdentityVersion != runtimeContract.OwnerIdentityVersion
+                || ownerIdentityVersion != selection.OwnerIdentityVersion
+                || !string.Equals(activationEpoch, selection.ActivationEpoch, StringComparison.Ordinal)
+                || !IsActivationEpoch(activationEpoch)
                 || !string.Equals(generationId, selection.GenerationId, StringComparison.Ordinal)
                 || !string.Equals(targetGenerationId, runtimeContract.Target.GenerationId, StringComparison.Ordinal)
                 || !string.Equals(selectedGenerationId, selection.GenerationId, StringComparison.Ordinal)
                 || !string.Equals(selectedInstanceId, selection.InstanceId, StringComparison.Ordinal)
                 || !string.Equals(runtimeContractSha256, runtimeContract.Sha256, StringComparison.OrdinalIgnoreCase)
-                || (supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
-                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersion)
+                || supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
                 || !string.Equals(generationDisposition, expectedDisposition, StringComparison.Ordinal)
                 || !string.Equals(lifecycleId, AICodedbSupervisorProtocol.ClientKind, StringComparison.Ordinal)
                 || !string.Equals(supervisorId, AICodedbSupervisorProtocol.ClientKind, StringComparison.Ordinal)
@@ -876,8 +1230,8 @@ namespace Rice.AI.Codedb.Editor
                         exception);
                 }
 
-                // WMIC exposes process creation time at microsecond precision;
-                // keep the C# comparison at the same canonical granularity.
+                // Owner Identity v2 persists UTC DateTime ticks at the shared
+                // 10-tick (microsecond) comparison boundary.
                 var canonicalTicks = actualStartTime.Ticks / 10L * 10L;
                 var actualStartIdentity = canonicalTicks.ToString(CultureInfo.InvariantCulture);
                 if (!string.Equals(actualStartIdentity, expectedStartIdentity, StringComparison.Ordinal)
@@ -976,6 +1330,12 @@ namespace Rice.AI.Codedb.Editor
                 || !AICodedbSupervisorProtocol.PathsEqual(
                     AICodedbStrictJson.GetRequiredString(status, "control_namespace", label),
                     namespacePath)
+                || AICodedbStrictJson.GetRequiredInt32(status, "owner_identity_version", label)
+                    != runtimeContract.OwnerIdentityVersion
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(status, "activation_epoch", label),
+                    selection.ActivationEpoch,
+                    StringComparison.Ordinal)
                 || !string.Equals(
                     AICodedbStrictJson.GetRequiredString(status, "generation_id", label),
                     selection.GenerationId,
@@ -1063,6 +1423,95 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException(
                     "Authenticated Supervisor status does not match the current owner and selection evidence.");
             }
+
+            ValidateCoreReadyObservation(
+                projectRoot,
+                namespacePath,
+                runtimeContract,
+                selection,
+                state,
+                status,
+                label);
+        }
+
+        private static void ValidateCoreReadyObservation(
+            string projectRoot,
+            string namespacePath,
+            AICodedbPackageRuntimeContract runtimeContract,
+            AICodedbCurrentInstanceStatus selection,
+            Dictionary<string, object> state,
+            Dictionary<string, object> status,
+            string label)
+        {
+            object value;
+            if (!status.TryGetValue("operational_readiness", out value))
+                throw new InvalidOperationException("Authenticated Supervisor status has no operational readiness.");
+            var observation = AICodedbStrictJson.RequireObject(
+                value,
+                "Authenticated Supervisor operational readiness");
+            if (!AICodedbSupervisorProtocol.HasExactOperationalReadinessFields(observation))
+                throw new InvalidOperationException("Authenticated Supervisor operational readiness fields are invalid.");
+
+            const string observationLabel = "Authenticated Supervisor operational readiness";
+            if (AICodedbStrictJson.GetRequiredInt32(observation, "schema_version", observationLabel)
+                    != AICodedbSupervisorProtocol.OperationalReadinessSchemaVersion
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "state", observationLabel),
+                    "core_ready",
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "reason_code", observationLabel),
+                    "COORDINATOR_OPERATIONAL",
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        observation,
+                        "coordinator_failure_category",
+                        observationLabel),
+                    "NONE",
+                    StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(
+                    AICodedbStrictJson.GetRequiredString(observation, "project_root", observationLabel),
+                    projectRoot)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "project_identity", observationLabel),
+                    AICodedbEditorLifecycle.CreateProjectIdentity(projectRoot),
+                    StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(
+                    AICodedbStrictJson.GetRequiredString(observation, "runtime", observationLabel),
+                    namespacePath)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "selected_instance_id", observationLabel),
+                    selection.InstanceId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "selected_generation_id", observationLabel),
+                    selection.GenerationId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "target_generation_id", observationLabel),
+                    runtimeContract.Target.GenerationId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "runtime_contract_sha256", observationLabel),
+                    runtimeContract.Sha256,
+                    StringComparison.OrdinalIgnoreCase)
+                || AICodedbStrictJson.GetRequiredInt32(observation, "owner_identity_version", observationLabel)
+                    != runtimeContract.OwnerIdentityVersion
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "activation_epoch", observationLabel),
+                    selection.ActivationEpoch,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(observation, "owner_epoch", observationLabel),
+                    AICodedbStrictJson.GetRequiredString(state, "owner_epoch", "Supervisor state"),
+                    StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(observation, "supervisor_pid", observationLabel)
+                    != AICodedbStrictJson.GetRequiredInt32(state, "supervisor_pid", "Supervisor state"))
+            {
+                throw new InvalidOperationException(
+                    "Authenticated Supervisor status is not an owner-bound core_ready observation.");
+            }
         }
 
         private static bool IsOneOf(string value, params string[] accepted)
@@ -1095,6 +1544,19 @@ namespace Rice.AI.Codedb.Editor
             return true;
         }
 
+        private static bool IsActivationEpoch(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 32)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < '0' || character > '9')
+                    && (character < 'a' || character > 'f'))
+                    return false;
+            }
+            return true;
+        }
+
         private static bool IsProcessStartIdentity(string value)
         {
             if (string.IsNullOrEmpty(value) || value.Length > 32)
@@ -1122,6 +1584,7 @@ namespace Rice.AI.Codedb.Editor
                          "target_generation_id",
                          "runtime_contract_sha256",
                          "generation_disposition",
+                         "activation_epoch",
                          "lifecycle_id",
                          "supervisor_id",
                          "owner_epoch"
@@ -1155,6 +1618,7 @@ namespace Rice.AI.Codedb.Editor
                      {
                          "control_contract_version",
                          "control_contract_schema_version",
+                         "owner_identity_version",
                          "supervisor_protocol_version"
                      })
             {

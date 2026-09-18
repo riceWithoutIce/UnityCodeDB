@@ -17,7 +17,9 @@ const PREVIOUS_SUPERVISOR_PROTOCOL_VERSION = 2;
 const SUPERVISOR_PROTOCOL_VERSION = 3;
 const STATE_SCHEMA_VERSION = 3;
 const EVIDENCE_SCHEMA_VERSION = 1;
+const OWNER_IDENTITY_VERSION = 2;
 const OPERATIONAL_READINESS_SCHEMA_VERSION = 1;
+const OPERATIONAL_READINESS_MAX_AGE_MS = 30000;
 const OPERATIONAL_READINESS_ENV = "RICE_CODEDB_SUPERVISOR_OPERATIONAL_READINESS";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_RUNTIME_CONTRACT_BYTES = 4 * 1024 * 1024;
@@ -88,6 +90,8 @@ const OPERATIONAL_READINESS_FIELDS = new Set([
   "target_generation_id",
   "runtime_contract_sha256",
   "generation_disposition",
+  "owner_identity_version",
+  "activation_epoch",
   "lifecycle_id",
   "supervisor_id",
   "owner_epoch",
@@ -289,6 +293,8 @@ function buildContext(raw) {
     selectedGenerationId: selectedInstance.generationId,
     runtimeContractSha256: runtimeContract.sha256,
     generationDisposition: selectedInstance.disposition,
+    ownerIdentityVersion: runtimeContract.ownerIdentityVersion,
+    activationEpoch: selectedInstance.activationEpoch,
     lifecycleId: validId(raw.lifecycleId) || supervisorId,
     startupTimeoutMs: positiveInt(raw.startupTimeoutMs, START_TIMEOUT_MS)
   };
@@ -343,7 +349,10 @@ async function prepareSupervisorStart(context) {
       continue;
     }
 
-    if (inspection.response?.ok && authenticatedStatusMatches(inspection.state, inspection.response.status)) {
+    if ((inspection.classification === "LIVE_AUTHENTICATED"
+        || inspection.classification === "TRANSITIONAL_AUTHENTICATED")
+        && inspection.response?.ok
+        && authenticatedStatusMatches(inspection.state, inspection.response.status)) {
       return inspection;
     }
     // A state file can be durable before the named pipe is listening. Keep
@@ -593,8 +602,14 @@ async function inspectExistingSupervisor(context) {
       reason: "Authenticated Supervisor process is live but its published pipe is unavailable outside the startup window."
     };
   }
+  const coreReady = response?.ok
+    && response.status?.operational_readiness?.state === "core_ready";
   return {
-    classification: starting ? "STARTING_OWNED" : "LIVE_AUTHENTICATED",
+    classification: starting
+      ? "STARTING_OWNED"
+      : coreReady
+        ? "LIVE_AUTHENTICATED"
+        : "TRANSITIONAL_AUTHENTICATED",
     state,
     lock,
     response,
@@ -616,6 +631,8 @@ function ownerRecordFingerprint(value) {
     value.control_contract_schema_version,
     value.control_contract_sha256,
     value.control_namespace,
+    value.owner_identity_version,
+    value.activation_epoch,
     value.selected_instance_id,
     value.selected_generation_id,
     value.runtime_contract_sha256
@@ -765,6 +782,8 @@ function createOwnerLockRecord(context, evidence) {
     control_contract_schema_version: context.controlContract.schemaVersion,
     control_contract_sha256: context.controlContract.sha256,
     control_namespace: context.controlNamespace,
+    owner_identity_version: context.ownerIdentityVersion,
+    activation_epoch: context.activationEpoch,
     pipe_name: context.pipeName,
     generation_id: context.selectedGenerationId,
     target_generation_id: context.targetGenerationId,
@@ -797,20 +816,21 @@ function validateSupervisorOwnerRecord(context, value, label) {
       || value.control_contract_schema_version !== context.controlContract.schemaVersion
       || value.control_contract_sha256 !== context.controlContract.sha256
       || !pathsEqual(value.control_namespace, context.controlNamespace)
+      || value.owner_identity_version !== context.ownerIdentityVersion
+      || value.activation_epoch !== context.activationEpoch
       || value.pipe_name !== context.pipeName
       || value.generation_id !== context.selectedGenerationId
       || value.target_generation_id !== context.targetGenerationId
       || value.selected_generation_id !== context.selectedGenerationId
       || value.selected_instance_id !== context.selectedInstance.instanceId
       || value.runtime_contract_sha256 !== context.runtimeContractSha256
-      || (value.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
-          && value.supervisor_protocol_version !== PREVIOUS_SUPERVISOR_PROTOCOL_VERSION
-          && value.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
+      || value.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
       || value.generation_disposition !== context.generationDisposition
       || value.lifecycle_id !== context.lifecycleId
       || value.supervisor_id !== context.supervisorId)
     throw new Error(`${label} identity does not match the reviewed project runtime.`);
-  if (!validId(value.owner_epoch)) throw new Error(`${label} owner epoch is invalid.`);
+  if (!/^[0-9a-f]{32}$/.test(value.activation_epoch)
+      || !validId(value.owner_epoch)) throw new Error(`${label} owner epoch is invalid.`);
   if (!Number.isSafeInteger(value.supervisor_pid) || value.supervisor_pid <= 0)
     throw new Error(`${label} Supervisor PID is invalid.`);
   const evidence = value.owner_evidence;
@@ -872,7 +892,8 @@ async function runStart(raw) {
   fs.mkdirSync(context.runtime, { recursive: true });
   const preparation = await prepareSupervisorStart(context);
   const startClaim = preparation?.claim;
-  if (preparation?.classification === "LIVE_AUTHENTICATED") {
+  if (preparation?.classification === "LIVE_AUTHENTICATED"
+      || preparation?.classification === "TRANSITIONAL_AUTHENTICATED") {
     print("ATTACHED", { action: "attached", status: preparation.response.status });
     return;
   }
@@ -916,7 +937,8 @@ async function runStatus(raw) {
     print("OK", { action: "running", owner_classification: inspection.classification, ...inspection.response.status });
     return;
   }
-  if (inspection.classification === "STARTING_OWNED") {
+  if (inspection.classification === "STARTING_OWNED"
+      || inspection.classification === "TRANSITIONAL_AUTHENTICATED") {
     print("STARTING", {
       action: "starting",
       owner_classification: inspection.classification,
@@ -940,6 +962,8 @@ async function runStatus(raw) {
     control_contract_schema_version: context.controlContract.schemaVersion,
     control_contract_sha256: context.controlContract.sha256,
     control_namespace: context.controlNamespace,
+    owner_identity_version: context.ownerIdentityVersion,
+    activation_epoch: context.activationEpoch,
     target_generation_id: context.targetGenerationId,
     selected_generation_id: context.selectedGenerationId,
     runtime_contract_sha256: context.runtimeContractSha256,
@@ -957,7 +981,8 @@ async function runStop(raw) {
     return;
   }
   const inspection = await inspectExistingSupervisor(context);
-  if (inspection.classification !== "LIVE_AUTHENTICATED"
+  if ((inspection.classification !== "LIVE_AUTHENTICATED"
+      && inspection.classification !== "TRANSITIONAL_AUTHENTICATED")
       || !inspection.response?.ok) {
     throw new Error(`Supervisor shutdown requires a live authenticated owner; observed ${inspection.classification}.`);
   }
@@ -1592,6 +1617,8 @@ function createInitialState(context, ownerEvidence) {
     control_contract_schema_version: context.controlContract.schemaVersion,
     control_contract_sha256: context.controlContract.sha256,
     control_namespace: context.controlNamespace,
+    owner_identity_version: context.ownerIdentityVersion,
+    activation_epoch: context.activationEpoch,
     pipe_name: context.pipeName,
     generation_id: context.selectedGenerationId,
     target_generation_id: context.targetGenerationId,
@@ -1640,6 +1667,8 @@ function publicStatus(
     control_contract_schema_version: state.control_contract_schema_version,
     control_contract_sha256: state.control_contract_sha256,
     control_namespace: state.control_namespace,
+    owner_identity_version: state.owner_identity_version,
+    activation_epoch: state.activation_epoch,
     pipe_name: state.pipe_name,
     generation_id: state.generation_id,
     target_generation_id: state.target_generation_id,
@@ -1720,6 +1749,8 @@ function publishOperationalReadiness(state, coordinatorStatus, override = null) 
     target_generation_id: state.target_generation_id,
     runtime_contract_sha256: state.runtime_contract_sha256,
     generation_disposition: state.generation_disposition,
+    owner_identity_version: state.owner_identity_version,
+    activation_epoch: state.activation_epoch,
     lifecycle_id: state.lifecycle_id,
     supervisor_id: state.supervisor_id,
     owner_epoch: state.owner_epoch,
@@ -2304,13 +2335,12 @@ function getProcessEvidenceSync(pid) {
 }
 
 function getWindowsProcessEvidenceSync(pid) {
-  const wmi = getWindowsWmiProcessEvidenceSync(pid);
-  if (wmi) return wmi;
   const script = [
     "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
     `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop`,
     "if ($null -eq $p) { [Console]::Write('{\"exists\":false}'); exit 0 }",
-    "$ticks = ([DateTime]$p.CreationDate).ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)",
+    "$ticks = ([DateTime]$p.CreationDate).ToUniversalTime().Ticks",
+    "$ticks = ($ticks - ($ticks % 10)).ToString([Globalization.CultureInfo]::InvariantCulture)",
     "$result = [ordered]@{ exists = $true; process_start_identity = $ticks; executable_path = [string]$p.ExecutablePath; command_line = [string]$p.CommandLine }",
     "[Console]::Write(($result | ConvertTo-Json -Compress))"
   ].join("\r\n");
@@ -2349,49 +2379,6 @@ function getWindowsProcessEvidenceSync(pid) {
   } catch (error) {
     return { available: false, exists: null, pid, error: error instanceof Error ? error.message : String(error) };
   }
-}
-
-function getWindowsWmiProcessEvidenceSync(pid) {
-  try {
-    const output = execFileSync(
-      "wmic.exe",
-      ["process", "where", `ProcessId=${pid}`, "get", "CreationDate,ExecutablePath,CommandLine", "/format:list"],
-      { encoding: "utf8", timeout: PROCESS_QUERY_TIMEOUT_MS, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const fields = Object.create(null);
-    for (const line of String(output).split(/\r?\n/)) {
-      const separator = line.indexOf("=");
-      if (separator <= 0) continue;
-      fields[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
-    }
-    if (!fields.creationdate && !fields.executablepath && !fields.commandline)
-      return { available: true, exists: false, pid };
-    if (!fields.creationdate || !fields.executablepath || !fields.commandline)
-      return { available: false, exists: true, pid, error: "WMIC returned incomplete process identity." };
-    const argv = parseWindowsCommandLine(fields.commandline);
-    if (argv.length < 2)
-      return { available: false, exists: true, pid, error: "WMIC returned an invalid process command line." };
-    const normalizedArgv = normalizeProcessArgv(argv.slice(1));
-    const processStartIdentity = normalizeStartIdentity(fields.creationdate);
-    if (!/^\d{1,32}$/.test(processStartIdentity))
-      return { available: false, exists: true, pid, error: "WMIC returned an invalid process start identity." };
-    return {
-      available: true,
-      exists: true,
-      pid,
-      processStartIdentity,
-      executablePath: path.resolve(fields.executablepath),
-      normalizedArgv,
-      argvSha256: hashArgv(normalizedArgv),
-      commandLineSha256: hash(normalizeCommandLine(fields.commandline))
-    };
-  } catch {
-    return null;
-  }
-}
-
-function normalizeStartIdentity(value) {
-  const normalized = String(value || "").replace(/[^0-9]/g, "");
-  return normalized;
 }
 
 function getProcProcessEvidenceSync(pid) {
@@ -2586,8 +2573,8 @@ function processEvidenceMatches(expected, actual) {
     && expected.commandLineSha256 === actual.commandLineSha256;
 }
 
-function authenticatedStatusMatches(state, status) {
-  const identityMatches = status
+function stableSupervisorIdentityMatches(state, status) {
+  return Boolean(state && status
     && status.owner_epoch === state.owner_epoch
     && status.supervisor_pid === state.supervisor_pid
     && status.project_identity === state.project_identity
@@ -2597,11 +2584,22 @@ function authenticatedStatusMatches(state, status) {
     && status.control_contract_schema_version === state.control_contract_schema_version
     && status.control_contract_sha256 === state.control_contract_sha256
     && status.control_namespace === state.control_namespace
+    && status.owner_identity_version === state.owner_identity_version
+    && status.activation_epoch === state.activation_epoch
     && status.selected_instance_id === state.selected_instance_id
     && status.selected_generation_id === state.selected_generation_id
+    && status.target_generation_id === state.target_generation_id
+    && status.generation_id === state.generation_id
+    && status.generation_disposition === state.generation_disposition
     && status.runtime_contract_sha256 === state.runtime_contract_sha256
-    && status.pipe_name === state.pipe_name;
-  if (!identityMatches) return false;
+    && status.supervisor_protocol_version === state.supervisor_protocol_version
+    && status.supervisor_id === state.supervisor_id
+    && status.lifecycle_id === state.lifecycle_id
+    && status.pipe_name === state.pipe_name);
+}
+
+function authenticatedStatusMatches(state, status) {
+  if (!stableSupervisorIdentityMatches(state, status)) return false;
   if (state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION)
     return true;
   try {
@@ -2613,10 +2611,19 @@ function authenticatedStatusMatches(state, status) {
       status.operational_readiness,
       state,
       "Supervisor status operational readiness");
-    return status.operational_readiness.observation_id
-        === state.operational_readiness.observation_id
-      && status.operational_readiness.revision
-        === state.operational_readiness.revision;
+    const previous = state.operational_readiness;
+    const current = status.operational_readiness;
+    const previousAt = Date.parse(previous.observed_at_utc);
+    const currentAt = Date.parse(current.observed_at_utc);
+    const age = Date.now() - currentAt;
+    if (age < 0 || age > OPERATIONAL_READINESS_MAX_AGE_MS
+        || currentAt < previousAt || current.revision < previous.revision)
+      return false;
+    if (current.revision === previous.revision)
+      return [...OPERATIONAL_READINESS_FIELDS].every((field) => current[field] === previous[field]);
+    // Process inspection and IPC can span a normal refresh. Only the same
+    // authenticated owner may advance its fully bound, time-ordered snapshot.
+    return current.observation_id !== previous.observation_id;
   } catch {
     return false;
   }
@@ -2649,6 +2656,8 @@ function validateOperationalReadinessObservation(value, identity, label) {
       || value.target_generation_id !== identity.target_generation_id
       || value.runtime_contract_sha256 !== identity.runtime_contract_sha256
       || value.generation_disposition !== identity.generation_disposition
+      || value.owner_identity_version !== identity.owner_identity_version
+      || value.activation_epoch !== identity.activation_epoch
       || value.lifecycle_id !== identity.lifecycle_id
       || value.supervisor_id !== identity.supervisor_id
       || value.owner_epoch !== identity.owner_epoch
@@ -2674,14 +2683,14 @@ function validateSupervisorState(context, state) {
       || state.control_contract_schema_version !== context.controlContract.schemaVersion
       || state.control_contract_sha256 !== context.controlContract.sha256
       || !pathsEqual(state.control_namespace, context.controlNamespace)
+      || state.owner_identity_version !== context.ownerIdentityVersion
+      || state.activation_epoch !== context.activationEpoch
       || state.generation_id !== context.selectedGenerationId
       || state.target_generation_id !== context.targetGenerationId
       || state.selected_generation_id !== context.selectedGenerationId
       || state.selected_instance_id !== context.selectedInstance.instanceId
       || state.runtime_contract_sha256 !== context.runtimeContractSha256
-      || (state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
-          && state.supervisor_protocol_version !== PREVIOUS_SUPERVISOR_PROTOCOL_VERSION
-          && state.supervisor_protocol_version !== LEGACY_SUPERVISOR_PROTOCOL_VERSION)
+      || state.supervisor_protocol_version !== SUPERVISOR_PROTOCOL_VERSION
       || state.generation_disposition !== context.generationDisposition
       || state.lifecycle_id !== context.lifecycleId
       || state.pipe_name !== context.pipeName
@@ -2730,7 +2739,8 @@ function selectedInstanceChanged(context) {
   if (!isFile(selectionPath)) return true;
   const selected = readSelectedInstance(context.root, context.runtimeContract);
   return selected.instanceId !== context.selectedInstance.instanceId
-    || selected.generationId !== context.selectedInstance.generationId;
+    || selected.generationId !== context.selectedInstance.generationId
+    || selected.activationEpoch !== context.selectedInstance.activationEpoch;
 }
 
 function handleClient(socket, authToken, dispatch) {
@@ -2863,13 +2873,20 @@ function readPackageRuntimeContract(payloadRoot) {
   const payloadSequence = requiredInteger(value, "payload_sequence", "Package runtime contract");
   const generationId = requiredGenerationId(value, "generation_id", "Package runtime contract");
   const bootstrapProtocol = requiredInteger(value, "bootstrap_protocol", "Package runtime contract");
+  const ownerIdentityVersion = requiredInteger(
+    value,
+    "owner_identity_version",
+    "Package runtime contract");
   if (requiredInteger(value, "schema_version", "Package runtime contract") !== 1
       || requiredString(value, "managed_by", "Package runtime contract") !== "com.rice.ai-codedb"
       || payloadSequence < 1
-      || bootstrapProtocol < 1) {
+      || bootstrapProtocol < 1
+      || ownerIdentityVersion !== OWNER_IDENTITY_VERSION) {
     throw new Error("Package runtime contract identity or protocol is invalid.");
   }
   const controlContract = readControlContract(value, "Package runtime contract");
+  if (controlContract.version !== OWNER_IDENTITY_VERSION)
+    throw new Error("Package runtime contract does not declare the Owner Identity v2 namespace.");
   const packageFiles = requiredArray(value, "files", "Package runtime contract");
   const seenTargets = new Set();
   let stableWrapperSha256 = null;
@@ -2936,6 +2953,7 @@ function readPackageRuntimeContract(payloadRoot) {
     payloadSequence,
     generationId,
     bootstrapProtocol,
+    ownerIdentityVersion,
     controlContract,
     stableWrapperSha256,
     transitions
@@ -2952,10 +2970,20 @@ function readSelectedInstance(root, contract) {
   const instanceId = requiredString(selection, "instance_id", "current instance selection");
   const instanceRelativePath = normalizeRelativePath(requiredString(selection, "instance_relative_path", "current instance selection"));
   const selectedGenerationId = requiredGenerationId(selection, "generation_id", "current instance selection");
+  const ownerIdentityVersion = requiredInteger(
+    selection,
+    "owner_identity_version",
+    "current instance selection");
+  const activationEpoch = requiredString(
+    selection,
+    "activation_epoch",
+    "current instance selection");
   const expectedProjectIdentity = createProjectIdentity(root);
   if (requiredInteger(selection, "schema_version", "current instance selection") !== 1
       || requiredString(selection, "managed_by", "current instance selection") !== "com.rice.ai-codedb"
       || requiredString(selection, "project_identity", "current instance selection") !== expectedProjectIdentity
+      || ownerIdentityVersion !== contract.ownerIdentityVersion
+      || !/^[0-9a-f]{32}$/.test(activationEpoch)
       || !/^[0-9a-f]{32}$/.test(instanceId)
       || instanceRelativePath !== `AIWork/.runtime/codedb/instances/${instanceId}`) {
     throw new Error("Current instance selection identity is invalid.");
@@ -3040,6 +3068,8 @@ function readSelectedInstance(root, contract) {
     generationId,
     generationRoot,
     disposition,
+    ownerIdentityVersion,
+    activationEpoch,
     stableWrapperPath,
     stableWrapperSha256: expectedStableWrapperSha256
   };

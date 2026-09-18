@@ -60,9 +60,9 @@ $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
-$expectedUpmPackageVersion = "0.3.0-preview.1"
-$expectedHostCompatibilityPackageVersion = "0.3.0-preview.1"
-$expectedGenerationId = "poc.35"
+$expectedUpmPackageVersion = "0.3.0-preview.2"
+$expectedHostCompatibilityPackageVersion = "0.3.0-preview.2"
+$expectedGenerationId = "poc.36"
 
 # v0.3 P1-B moves command ownership to the project-local Supervisor. Keep
 # these paths in the package boundary so a package cannot silently fall back to
@@ -343,13 +343,13 @@ Assert-Equal `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
 Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 35 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 36 -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
 $bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
-Assert-Equal -Actual $bootstrapTransitions.Count -Expected 4 -Label "Reviewed bootstrap transition count"
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 5 -Label "Reviewed bootstrap transition count"
 $v024Transition = $bootstrapTransitions[0]
 Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
 Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
@@ -396,6 +396,19 @@ Assert-Equal -Actual ([int]$poc34Transition.source_generation_lease_version) -Ex
 Assert-Equal -Actual ([int]$poc34Transition.source_flat_file_count) -Expected 22 -Label "Reviewed poc.34 bootstrap transition flat file count"
 Assert-Equal -Actual ([string]$poc34Transition.source_flat_closure_sha256) -Expected "83a620d62a467e2a138e09d449dfc785f1115f21140291117ab282ebaa73c93f" -Label "Reviewed poc.34 bootstrap transition closure"
 Assert-Equal -Actual ([string]$poc34Transition.source_stable_wrapper_sha256) -Expected "01d9012c649df61056e469ad4382d004dccb89773997a9eb4ce8821ec01ae0ac" -Label "Reviewed poc.34 bootstrap transition stable wrapper"
+$poc35Transition = $bootstrapTransitions[4]
+Assert-Equal -Actual ([string]$poc35Transition.source_tag) -Expected "v0.3.0-preview.1" -Label "Reviewed poc.35 bootstrap transition tag"
+Assert-Equal -Actual ([string]$poc35Transition.source_package_version) -Expected "0.3.0-preview.1" -Label "Reviewed poc.35 bootstrap transition Package"
+Assert-Equal -Actual ([string]$poc35Transition.source_payload_version) -Expected "poc.35" -Label "Reviewed poc.35 bootstrap transition payload"
+Assert-Equal -Actual ([int]$poc35Transition.source_payload_sequence) -Expected 35 -Label "Reviewed poc.35 bootstrap transition sequence"
+Assert-Equal -Actual ([string]$poc35Transition.source_generation_id) -Expected "poc.35" -Label "Reviewed poc.35 bootstrap transition generation"
+Assert-Equal -Actual ([int]$poc35Transition.source_bootstrap_protocol) -Expected 1 -Label "Reviewed poc.35 bootstrap transition protocol"
+Assert-Equal -Actual ([int]$poc35Transition.source_marker_schema_version) -Expected 2 -Label "Reviewed poc.35 bootstrap transition marker schema"
+Assert-Equal -Actual ([int]$poc35Transition.source_host_use_gate_version) -Expected 1 -Label "Reviewed poc.35 bootstrap transition host-use gate"
+Assert-Equal -Actual ([int]$poc35Transition.source_generation_lease_version) -Expected 2 -Label "Reviewed poc.35 bootstrap transition generation lease"
+Assert-Equal -Actual ([int]$poc35Transition.source_flat_file_count) -Expected 22 -Label "Reviewed poc.35 bootstrap transition flat file count"
+Assert-Equal -Actual ([string]$poc35Transition.source_flat_closure_sha256) -Expected "132c09b1c2d63b1e8425479b8774addd41bbe363bf598294b923699778563ba4" -Label "Reviewed poc.35 bootstrap transition closure"
+Assert-Equal -Actual ([string]$poc35Transition.source_stable_wrapper_sha256) -Expected "01d9012c649df61056e469ad4382d004dccb89773997a9eb4ce8821ec01ae0ac" -Label "Reviewed poc.35 bootstrap transition stable wrapper"
 
 $flatTargetPrefix = "AIWork/codedb/"
 $generationSourcePrefix = "Generations/$expectedGenerationId/"
@@ -467,6 +480,11 @@ $poc34RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc34Retire
     Get-RelativePath -Root $poc34RetiredGenerationSourceRoot -Path $_.FullName
 } | Sort-Object)
 Assert-Equal -Actual $poc34RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.34 retired generation closure"
+$poc35RetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.35"
+$poc35RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc35RetiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $poc35RetiredGenerationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual $poc35RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.35 retired generation closure"
 $expectedRetiredTargets = @(
     foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
         foreach ($generationSuffix in $legacyRetiredGenerationRelativePaths) {
@@ -482,6 +500,9 @@ $expectedRetiredTargets = @(
     foreach ($generationSuffix in $poc34RetiredGenerationRelativePaths) {
         "AIWork/.runtime/codedb/host/generations/poc.34/$generationSuffix"
     }
+    foreach ($generationSuffix in $poc35RetiredGenerationRelativePaths) {
+        "AIWork/.runtime/codedb/host/generations/poc.35/$generationSuffix"
+    }
 ) | Sort-Object
 $actualRetiredTargets = New-Object System.Collections.Generic.List[string]
 $seenRetiredTargets = @{}
@@ -493,7 +514,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 258 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 281 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -525,7 +546,7 @@ Assert-Equal -Actual @($generationManifest.files).Count -Expected 22 -Label "Gen
 $generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
 $generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
 Assert-Equal `
-    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.35";$').Count) `
+    -Actual ([regex]::Matches($generationHostUseGate, '(?m)^export const GENERATION_ID = "poc\.36";$').Count) `
     -Expected 1 `
     -Label "Generation lease identity closure"
 
@@ -774,14 +795,14 @@ $currentNamespacePriority = [regex]::Match(
 $legacyInvalidFallback = [regex]::Match(
     $controlContractSource,
     '(?s)if\s*\(\s*legacy\.Kind\s*==\s*NamespaceEvidenceKind\.Invalid\s*\)\s*return\s+Invalid')
-Assert-True -Condition $currentNamespacePriority.Success -Message "Control contract classifier does not prioritize the current namespace."
+Assert-True -Condition $currentNamespacePriority.Success -Message "Control contract classifier does not recognize the current namespace result."
 Assert-True -Condition $legacyInvalidFallback.Success -Message "Control contract classifier is missing the legacy invalid fallback."
 Assert-True `
-    -Condition ($currentNamespacePriority.Index -lt $legacyInvalidFallback.Index) `
-    -Message "Malformed legacy evidence is evaluated before the current namespace result."
+    -Condition ($legacyInvalidFallback.Index -lt $currentNamespacePriority.Index) `
+    -Message "Malformed legacy evidence must fail closed before current namespace selection."
 Assert-True `
-    -Condition ($controlContractSource.IndexOf("Legacy namespace evidence was retained for diagnostics and ignored", [StringComparison]::Ordinal) -ge 0) `
-    -Message "Current namespace classification does not explicitly ignore malformed legacy evidence."
+    -Condition ($controlContractSource.IndexOf("Multiple Supervisor control authorities are present", [StringComparison]::Ordinal) -ge 0) `
+    -Message "Current namespace classification does not retain the conflicting-authority fail-closed boundary."
 
 $migrationTestsSourcePath = Join-Path $packageRoot "Tests\Editor\AICodedbManagerUiTests.cs"
 Assert-True -Condition (Test-Path -LiteralPath $migrationTestsSourcePath -PathType Leaf) -Message "Control contract migration tests are missing."
@@ -799,7 +820,7 @@ foreach ($requiredMigrationTest in @(
     "Read_RejectsStateSpecificFieldOnLegacyLock",
     "Read_RejectsUnknownLegacyFieldWithoutCurrentNamespace",
     "Read_RejectsLegacyCurrentContractLookalike",
-    "Read_PreservesAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed",
+    "Read_RejectsAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed",
     "AICodedbControlContractMigrationStore.Read("
 )) {
     Assert-True `
@@ -1361,7 +1382,7 @@ foreach ($confirmedAction in @("Redeploy", "Uninstall", "Install")) {
         -Message "Editor $confirmedAction is missing from the second-level confirmation gate."
 }
 Assert-True `
-    -Condition ([regex]::IsMatch($materializerSource, 'ValidateSet\("Redeploy",\s*"Sync",\s*"Remove",\s*"Repair",\s*"Reinstall",\s*"Uninstall",\s*"Install"\)\]\[string\]\$MutationAction')) `
+    -Condition ([regex]::IsMatch($materializerSource, 'ValidateSet\("Redeploy",\s*"Sync",\s*"Remove",\s*"RemoveIntegration",\s*"Repair",\s*"Reinstall",\s*"Uninstall",\s*"Install"\)\]\[string\]\$MutationAction')) `
     -Message "PowerShell user mutations are missing from the second-level confirmation contract."
 $materializerTokens = $null
 $materializerParseErrors = $null
@@ -1373,7 +1394,7 @@ Assert-Equal -Actual $materializerParseErrors.Count -Expected 0 -Label "Material
 $confirmationDispatchGates = @($materializerAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text.IndexOf('$Action -in @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")', [StringComparison]::Ordinal) -ge 0 -and
+        $node.Extent.Text.IndexOf('$Action -in @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")', [StringComparison]::Ordinal) -ge 0 -and
         $node.Extent.Text.IndexOf('Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action', [StringComparison]::Ordinal) -ge 0
 }, $true))
 Assert-True `

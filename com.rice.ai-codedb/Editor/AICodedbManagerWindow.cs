@@ -54,14 +54,12 @@ namespace Rice.AI.Codedb.Editor
         private const double ReadySnapshotCacheSeconds = 120d;
         private const double TransientStatusRetrySeconds = 1.5d;
         private const int MaximumTransientStatusRetries = 3;
-        internal const string ReinstallCodeDBConfirmationTitle = "Reinstall CodeDB";
-        internal const string ReinstallCodeDBConfirmationMessage =
-            "Reinstall CodeDB integration for this Unity project?\n\n"
-            + "CodeDB will create and validate a fresh project-local instance, update only its owned project MCP registration keys, "
-            + "and switch future sessions only after initialize, tools/list, codedb_status, and a bounded query succeed.\n\n"
-            + "The machine Provider, reviewed custom runtime configuration, business files, user policy, unrelated MCP content, "
-            + "comments, ordering, and existing immutable instances are preserved. Retired Package-owned state is cleaned in the background. "
-            + "External MCP clients and unrelated processes are never terminated.";
+        internal const string RemoveIntegrationConfirmationTitle = "Remove CodeDB Integration";
+        internal const string RemoveIntegrationConfirmationMessage =
+            "Remove the obsolete CodeDB integration from this Unity project?\n\n"
+            + "CodeDB will remove only an exact Package-owned control selection, Owner Identity evidence, and generated MCP registration after proving the recorded owner has exited.\n\n"
+            + "Existing instances, indexes, leases, user Assets and source, unrelated MCP content, and external processes are preserved. "
+            + "After removal, reinstall the Unity Package through Package Manager to create a fresh Owner Identity v2 integration.";
         internal const string McpConfigurationReadyMessage = "Project configuration is ready";
         internal const string McpConfigurationAttentionMessage = "Project configuration needs attention";
         internal const string McpClientUnobservedLabel = "Not observed";
@@ -1258,13 +1256,13 @@ namespace Rice.AI.Codedb.Editor
                 string.Empty,
                 null,
                 false);
-            var reinstallAvailable = IsReinstallCodeDBAvailable(
+            var removeIntegrationAvailable = IsRemoveIntegrationAvailable(
                 _statusSnapshot.HostGenerationSelection.State,
                 _statusSnapshot.HostPayloadStatus.State,
                 _statusSnapshot.HostUpgradeStatus.Phase);
             var primaryAction = ResolvePrimaryAction(
                 _statusSnapshot.ProductStatus,
-                reinstallAvailable,
+                removeIntegrationAvailable,
                 _userActionInFlight)
                     || ResolveProviderInstallAction(
                         _statusSnapshot.ProductStatus,
@@ -1531,7 +1529,7 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbActionButton.Create("Stop now", hasCurrentGeneration ? (Action)(() => RunAction("Stop Now", AICodedbActions.RunStopWatcher)) : null),
                     AICodedbActionButton.Create("Restart", hasCurrentGeneration ? (Action)(() => RunAction("Restart", AICodedbActions.RunRestartWatcher)) : null));
                 if (!hasCurrentGeneration)
-                    EditorGUILayout.HelpBox("Lifecycle controls require the current selected instance. Return to Overview and use Reinstall CodeDB.", MessageType.Info);
+                    EditorGUILayout.HelpBox("Lifecycle controls require the current selected instance. Return to Overview and use Remove CodeDB Integration when an obsolete identity is reported.", MessageType.Info);
 
                 var repairLabel = GetWatcherRepairLabel();
                 if (!string.IsNullOrWhiteSpace(repairLabel))
@@ -1902,7 +1900,7 @@ namespace Rice.AI.Codedb.Editor
                     return "Install CodeDB";
                 case AICodedbProductState.NeedsAttention:
                     return _statusSnapshot.ProductStatus.RequiresReinstall
-                        ? "Reinstall CodeDB"
+                        ? "Remove CodeDB Integration"
                         : string.Empty;
                 case AICodedbProductState.MissingPrerequisite:
                     return IsProviderInstallAvailable(_statusSnapshot.ProductStatus)
@@ -1927,36 +1925,36 @@ namespace Rice.AI.Codedb.Editor
             if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
                 RunInstallCodeDBWithConfirmation();
             else if (_statusSnapshot != null && _statusSnapshot.ProductStatus.RequiresReinstall)
-                RunReinstallCodeDBWithConfirmation();
+                RunRemoveIntegrationWithConfirmation();
         }
 
-        private void RunReinstallCodeDBWithConfirmation()
+        private void RunRemoveIntegrationWithConfirmation()
         {
             var cachedProductStatus = _statusSnapshot.ProductStatus;
-            ConfirmAndRunReinstallCodeDB(
+            ConfirmAndRunRemoveIntegration(
                 () => EditorUtility.DisplayDialog(
-                    ReinstallCodeDBConfirmationTitle,
-                    ReinstallCodeDBConfirmationMessage,
-                    "Reinstall CodeDB",
+                    RemoveIntegrationConfirmationTitle,
+                    RemoveIntegrationConfirmationMessage,
+                    "Remove Integration",
                     "Cancel"),
                 confirmedProjectMutation => RunUserActionAsync(
-                    "Reinstall CodeDB",
-                    () => AICodedbActions.RunReinstallCodeDBAsync(
+                    "Remove CodeDB Integration",
+                    () => AICodedbActions.RunRemoveIntegrationCodeDBAsync(
                         cachedProductStatus,
                         confirmedProjectMutation),
                     false));
         }
 
-        internal static bool ConfirmAndRunReinstallCodeDB(Func<bool> confirm, Action<bool> reinstall)
+        internal static bool ConfirmAndRunRemoveIntegration(Func<bool> confirm, Action<bool> remove)
         {
             if (confirm == null)
                 throw new ArgumentNullException(nameof(confirm));
-            if (reinstall == null)
-                throw new ArgumentNullException(nameof(reinstall));
+            if (remove == null)
+                throw new ArgumentNullException(nameof(remove));
             if (!confirm())
                 return false;
 
-            reinstall(true);
+            remove(true);
             return true;
         }
 
@@ -2005,14 +2003,13 @@ namespace Rice.AI.Codedb.Editor
             return true;
         }
 
-        internal static bool IsReinstallCodeDBAvailable(
+        internal static bool IsRemoveIntegrationAvailable(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
             AICodedbHostUpgradePhase upgradePhase)
         {
-            // Reinstall provisions a disjoint Package-owned candidate and
-            // performs its own fail-closed preflight, so historical Host
-            // readiness never disables this recovery entry point.
+            // Removal performs its own fail-closed ownership preflight, so
+            // historical Host readiness never disables this recovery entry.
             return Enum.IsDefined(typeof(AICodedbHostGenerationState), generationState)
                    && Enum.IsDefined(typeof(AICodedbHostPayloadState), payloadState)
                    && Enum.IsDefined(typeof(AICodedbHostUpgradePhase), upgradePhase);
@@ -2020,14 +2017,14 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool ResolvePrimaryAction(
             AICodedbProductStatus productStatus,
-            bool reinstallAvailable,
+            bool recoveryAvailable,
             bool actionInFlight)
         {
             if (actionInFlight)
                 return false;
             if (productStatus.State == AICodedbProductState.Uninstalled)
                 return true;
-            return productStatus.RequiresReinstall && reinstallAvailable;
+            return productStatus.RequiresReinstall && recoveryAvailable;
         }
 
         internal static bool ResolveProviderInstallAction(

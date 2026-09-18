@@ -26,6 +26,8 @@ param(
 
     [switch]$ControlContractReinstallOnly,
 
+    [switch]$OwnerIdentityRemovalOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -34,8 +36,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, OperationalReadinessOnly, ControlContractReinstallOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, OperationalReadinessOnly, ControlContractReinstallOnly, OwnerIdentityRemovalOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -75,7 +77,7 @@ if ([string]::IsNullOrWhiteSpace($nodePath) -or -not [System.IO.File]::Exists($n
 }
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.35"
+$generationId = "poc.36"
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -6404,8 +6406,8 @@ function Invoke-ActivationContractFoundationScenarios {
         -Label "focused Package runtime contract" `
         -MaximumBytes (1024 * 1024)
     $controlContract = Read-InstanceControlContractIdentity -ManifestDocument $manifestJson.Document
-    Assert-Equal -Actual $controlContract.CanonicalIdentity -Expected "com.rice.ai-codedb`ncontrol-contract`nv0.3-control`n1`n1" -Message "PowerShell control-contract canonical identity diverged from C#/Node."
-    Assert-Equal -Actual $controlContract.Sha256 -Expected "7c85ebc534091fcb53d40eedd9eadf869c09caf77fb56a35aeb22e0e8aea09a1" -Message "PowerShell control-contract SHA-256 diverged from C#/Node."
+    Assert-Equal -Actual $controlContract.CanonicalIdentity -Expected "com.rice.ai-codedb`ncontrol-contract`nv0.3-control`n2`n1" -Message "PowerShell control-contract canonical identity diverged from C#/Node."
+    Assert-Equal -Actual $controlContract.Sha256 -Expected "e535dd2ef7a120578178d8e8db608e765e29b0a09a619db31c4a39f53b9fcaf2" -Message "PowerShell control-contract SHA-256 diverged from C#/Node."
     Assert-Equal `
         -Actual $manifestJson.Sha256 `
         -Expected (Get-FileHash -LiteralPath $canonicalPayloadManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() `
@@ -7403,6 +7405,294 @@ function Write-AuthenticatedObsoleteControlContractFixture {
         StatePath = $statePath
         LockPath = $lockPath
     }
+}
+
+function Get-TestSupervisorPipeName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Runtime
+    )
+
+    $identity = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant() +
+        "`n" +
+        [System.IO.Path]::GetFullPath($Runtime).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
+        return "\\.\pipe\codedb-supervisor-" + ([BitConverter]::ToString($digest)).Replace("-", "").ToLowerInvariant().Substring(0, 20)
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-OwnerIdentityV2RemovalAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [string]$OwnerEpoch = ([guid]::NewGuid().ToString("N"))
+    )
+
+    $selectionPath = Get-PathFromRelative -Root $Root -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $selection = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    $runtime = Get-PathFromRelative -Root $Root -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor"
+    $ownerEvidence = [ordered]@{
+        schema_version = 1
+        pid = $ProcessId
+        process_start_identity = "638000000000000000"
+        executable_path = $powershellPath
+        argv_sha256 = "b" * 64
+        command_line_sha256 = "c" * 64
+    }
+    $common = [ordered]@{
+        schema_version = 3
+        evidence_schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        role = "project-local-supervisor"
+        root = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+        project_identity = Get-TestProjectIdentity -Root $Root
+        runtime = $runtime
+        control_contract_id = [string]$canonicalPayloadManifest.control_contract.id
+        control_contract_version = [int]$canonicalPayloadManifest.control_contract.version
+        control_contract_schema_version = [int]$canonicalPayloadManifest.control_contract.schema_version
+        control_contract_sha256 = [string]$canonicalPayloadManifest.control_contract.sha256
+        control_namespace = $runtime
+        owner_identity_version = 2
+        activation_epoch = [string]$selection.activation_epoch
+        pipe_name = Get-TestSupervisorPipeName -Root $Root -Runtime $runtime
+        generation_id = [string]$selection.generation_id
+        target_generation_id = $generationId
+        selected_generation_id = [string]$selection.generation_id
+        selected_instance_id = [string]$selection.instance_id
+        runtime_contract_sha256 = (Get-FileHash -LiteralPath $canonicalPayloadManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        supervisor_protocol_version = 3
+        generation_disposition = "CURRENT"
+        lifecycle_id = "removal-fixture-lifecycle"
+        supervisor_id = "removal-fixture-supervisor"
+        owner_epoch = $OwnerEpoch
+        owner_evidence = $ownerEvidence
+        supervisor_pid = $ProcessId
+        publication_phase = "listening"
+        owner_started_at_utc = "2026-09-15T00:00:00.0000000Z"
+    }
+    $state = [ordered]@{}
+    $lock = [ordered]@{}
+    foreach ($entry in $common.GetEnumerator()) {
+        $state[$entry.Key] = $entry.Value
+        $lock[$entry.Key] = $entry.Value
+    }
+    $state.protocol_version = 1
+    $state.auth_token = "d" * 64
+    $state.desired_state = "enabled"
+    $state.editor_demand = "online"
+    $state.readiness_state = "core_ready"
+    $state.reason_code = "COORDINATOR_OPERATIONAL"
+    $state.detail = "Owner Identity v2 removal fixture"
+    $state.last_event = "provider_ready"
+    $state.last_event_detail = ""
+    $statePath = Join-Path $runtime "supervisor-state.json"
+    $lockPath = Join-Path $runtime "supervisor.lock"
+    Write-Utf8File -Path $statePath -Content (($state | ConvertTo-Json -Depth 10) + "`n")
+    Write-Utf8File -Path $lockPath -Content (($lock | ConvertTo-Json -Depth 10) + "`n")
+    Write-Utf8File -Path (Join-Path $runtime "supervisor-events.jsonl") -Content "{`"event`":`"fixture`"}`n"
+    Write-Utf8File -Path (Join-Path $runtime "supervisor-error.json") -Content "{}`n"
+    return [pscustomobject]@{
+        Runtime = $runtime
+        StatePath = $statePath
+        LockPath = $lockPath
+        Selection = $selection
+    }
+}
+
+function New-OwnerIdentityV2RemovalFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [int]$ProcessId = 2147483000
+    )
+
+    if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
+    New-TestHost -Root $Root
+    $installed = Invoke-Materializer `
+        -Action "Upgrade" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TargetProjectRoot $Root
+    Assert-Result -Result $installed -ExitCode 0 -Label "Owner Identity v2 removal fixture activation"
+    $selection = Get-TestCurrentInstanceSelection -Root $Root
+    Assert-Equal -Actual ([int]$selection.Selection.owner_identity_version) -Expected 2 -Message "Removal fixture selection is not Owner Identity v2."
+    Assert-True -Condition ([string]$selection.Selection.activation_epoch -cmatch '^[0-9a-f]{32}$') -Message "Removal fixture activation epoch is invalid."
+
+    $indexSentinelPath = Join-Path $selection.Root "index\removal-preserved.sentinel"
+    Write-Utf8File -Path $indexSentinelPath -Content "preserved index sentinel`n"
+    $leaseId = [guid]::NewGuid().ToString("N")
+    $leasePath = Join-Path $selection.Root "leases\mcp-2147483000-$leaseId.json"
+    $lease = [ordered]@{
+        schema_version = 1
+        instance_lease_version = 1
+        managed_by = "com.rice.ai-codedb"
+        owner = "mcp"
+        lease_id = "mcp-2147483000-$leaseId"
+        instance_id = [string]$selection.Selection.instance_id
+        generation_id = $generationId
+        pid = 2147483000
+        process_start_identity = "638000000000000000"
+        project_root = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+        project_identity = Get-TestProjectIdentity -Root $Root
+        created_at_utc = [DateTime]::UtcNow.AddMinutes(-10).ToString("o")
+        heartbeat_at_utc = [DateTime]::UtcNow.AddMinutes(-5).ToString("o")
+    }
+    Write-Utf8File -Path $leasePath -Content (($lease | ConvertTo-Json -Depth 6) + "`n")
+
+    $retiredId = [guid]::NewGuid().ToString("N")
+    $retiredControlPath = Get-PathFromRelative -Root $Root -RelativePath "AIWork/.runtime/codedb/control/retired-instances/$retiredId.json"
+    $retiredControl = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        project_identity = Get-TestProjectIdentity -Root $Root
+        instance_id = $retiredId
+        generation_id = $generationId
+        instance_manifest_sha256 = [string]$selection.Selection.instance_manifest_sha256
+        created_at_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    Write-Utf8File -Path $retiredControlPath -Content (($retiredControl | ConvertTo-Json -Depth 5) + "`n")
+    $userSentinelPath = Get-PathFromRelative -Root $Root -RelativePath "AIWork/codedb/removal-user.sentinel"
+    Write-Utf8File -Path $userSentinelPath -Content "preserved user sentinel`n"
+    $authority = Write-OwnerIdentityV2RemovalAuthority -Root $Root -ProcessId $ProcessId
+    return [pscustomobject]@{
+        Root = $Root
+        Selection = $selection
+        Authority = $authority
+        IndexSentinelPath = $indexSentinelPath
+        LeasePath = $leasePath
+        RetiredControlPath = $retiredControlPath
+        UserSentinelPath = $userSentinelPath
+        ConfigPath = Join-Path $Root ".codex\config.toml"
+    }
+}
+
+function Invoke-OwnerIdentityRemovalScenarios {
+    $safeRoot = Join-Path $runRoot "owner-v2-removal-safe"
+    $safe = New-OwnerIdentityV2RemovalFixture -Root $safeRoot -ProcessId $PID
+    $blockedBefore = Get-FileSnapshot -Root $safeRoot
+    $live = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $safeRoot
+    Assert-Result -Result $live -ExitCode 4 -Label "Live Owner Identity v2 removal rejection"
+    Assert-True -Condition ($live.Text.Contains("owner PID is live or unverifiable")) -Message "Live removal did not report its ownership gate.`n$($live.Text)"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $safeRoot) -Expected $blockedBefore -Message "Live-owner removal changed project state."
+
+    $unknown = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TestProcessIdentityUnavailableForPid $PID `
+        -TargetProjectRoot $safeRoot
+    Assert-Result -Result $unknown -ExitCode 4 -Label "Unverifiable Owner Identity v2 removal rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $safeRoot) -Expected $blockedBefore -Message "Unverifiable-owner removal changed project state."
+
+    $safe = New-OwnerIdentityV2RemovalFixture -Root $safeRoot
+    $lockDocument = Get-Content -LiteralPath $safe.Authority.LockPath -Raw | ConvertFrom-Json
+    $originalOwnerEpoch = [string]$lockDocument.owner_epoch
+    $lockDocument.owner_epoch = [guid]::NewGuid().ToString("N")
+    Write-Utf8File -Path $safe.Authority.LockPath -Content (($lockDocument | ConvertTo-Json -Depth 10) + "`n")
+    $ambiguousBefore = Get-FileSnapshot -Root $safeRoot
+    $ambiguous = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $safeRoot
+    Assert-Result -Result $ambiguous -ExitCode 4 -Label "Ambiguous Owner Identity v2 removal rejection"
+    Assert-True -Condition ($ambiguous.Text.Contains("state and lock identify different owners")) -Message "Ambiguous removal did not report the state/lock conflict."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $safeRoot) -Expected $ambiguousBefore -Message "Ambiguous-owner removal changed project state."
+    $lockDocument.owner_epoch = $originalOwnerEpoch
+    Write-Utf8File -Path $safe.Authority.LockPath -Content (($lockDocument | ConvertTo-Json -Depth 10) + "`n")
+
+    $instanceRootBefore = Get-FileSnapshotExcept `
+        -Root $safe.Selection.Root `
+        -ExcludedRelativePaths @("logs/mcp-availability.json")
+    $indexBefore = Get-ByteSnapshot -Path $safe.IndexSentinelPath
+    $leaseBefore = Get-ByteSnapshot -Path $safe.LeasePath
+    $retiredBefore = Get-ByteSnapshot -Path $safe.RetiredControlPath
+    $userBefore = Get-ByteSnapshot -Path $safe.UserSentinelPath
+    $configBefore = Get-Content -LiteralPath $safe.ConfigPath -Raw
+    $removed = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $safeRoot
+    Assert-Result -Result $removed -ExitCode 0 -Label "Dead Owner Identity v2 integration removal"
+    Assert-StructuredCommandResult -Result $removed -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "COMPLETE" -Label "Dead Owner Identity v2 integration removal" -RequiredScopes @("instance_activation")
+    foreach ($removedPath in @(
+            $safe.Authority.StatePath,
+            $safe.Authority.LockPath,
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"),
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/last-known-good-instance.json"),
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/activation.json"),
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/operation.json"),
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"),
+            (Join-Path $safe.Selection.Root "logs\mcp-availability.json"))) {
+        Assert-True -Condition (-not (Test-Path -LiteralPath $removedPath)) -Message "Owned integration evidence remains after removal: $removedPath"
+    }
+    Assert-Equal -Actual (Get-FileSnapshotExcept -Root $safe.Selection.Root -ExcludedRelativePaths @("logs/mcp-availability.json")) -Expected $instanceRootBefore -Message "Removal changed the preserved immutable instance closure."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.IndexSentinelPath) -Expected $indexBefore -Message "Removal changed the instance index sentinel."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.LeasePath) -Expected $leaseBefore -Message "Removal changed the stale instance lease."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.RetiredControlPath) -Expected $retiredBefore -Message "Removal changed a retirement sentinel."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.UserSentinelPath) -Expected $userBefore -Message "Removal changed user data."
+    $configAfter = Get-Content -LiteralPath $safe.ConfigPath -Raw
+    Assert-True -Condition ($configAfter.Contains("# config sentinel")) -Message "Removal changed unrelated TOML content."
+    Assert-True -Condition ($configAfter.Contains("[mcp_servers.codedb-fixture]")) -Message "Removal deleted an unrelated MCP registration."
+    Assert-True -Condition (-not [string]::Equals($configBefore, $configAfter, [StringComparison]::Ordinal)) -Message "Removal did not disable its generated MCP registration."
+    $desired = Get-Content -LiteralPath (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/desired-state.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$desired.desired_state) -Expected "UNINSTALLED" -Message "Removal desired state mismatch."
+    Assert-Equal -Actual ([string]$desired.cleanup_state) -Expected "COMPLETE" -Message "Removal cleanup state mismatch."
+    $afterFirstRemoval = Get-FileSnapshot -Root $safeRoot
+    $repeated = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $safeRoot
+    Assert-Result -Result $repeated -ExitCode 0 -Label "Idempotent integration removal"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $safeRoot) -Expected $afterFirstRemoval -Message "Idempotent removal changed the completed state."
+
+    $crashRoot = $repairHostRoot
+    $crash = New-OwnerIdentityV2RemovalFixture -Root $crashRoot
+    $crashed = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TestCrashAfterMutation 2 `
+        -TargetProjectRoot $crashRoot
+    Assert-Result -Result $crashed -ExitCode 86 -Label "Interrupted integration removal"
+    Assert-True -Condition ($crashed.Text.Contains("Injected POC process crash after mutation 2")) -Message "Interrupted removal did not preserve its fault evidence."
+    Assert-True -Condition (Test-Path -LiteralPath (Get-PathFromRelative -Root $crashRoot -RelativePath "AIWork/.runtime/codedb/control/operation.json") -PathType Leaf) -Message "Interrupted removal did not retain its recovery journal."
+    $recovered = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -TargetProjectRoot $crashRoot
+    Assert-Result -Result $recovered -ExitCode 0 -Label "Recovered integration removal"
+    Assert-True -Condition ($recovered.Text.Contains("[RECOVERY]")) -Message "Removal retry did not report journal recovery."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $crash.Authority.StatePath)) -Message "Recovered removal retained Supervisor evidence."
+
+    $orphanRoot = Join-Path $runRoot "owner-v2-removal-orphan"
+    $orphan = New-OwnerIdentityV2RemovalFixture -Root $orphanRoot
+    $orphanOperationRoot = Get-PathFromRelative `
+        -Root $orphanRoot `
+        -RelativePath ("AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/operations/" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $orphanOperationRoot | Out-Null
+    $orphanBefore = Get-FileSnapshot -Root $orphanRoot
+    $orphanRejected = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $orphanRoot
+    Assert-Result -Result $orphanRejected -ExitCode 4 -Label "Orphan activation evidence rejection"
+    Assert-True -Condition ($orphanRejected.Text.Contains("operation evidence does not match")) -Message "Ordinary orphan rejection did not report the activation boundary."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $orphanRoot) -Expected $orphanBefore -Message "Orphan rejection changed project state."
+
+    Write-Host "[OK] Owner Identity v2 removal blocks live, unverifiable, mismatched, and orphaned authority; removes only exact Package-owned integration state; preserves instances, indexes, leases, retirement sentinels, user data, unrelated TOML, and processes; and recovers idempotently after interruption."
 }
 
 function Invoke-ControlContractReinstallFixtureRequest {
@@ -8816,9 +9106,9 @@ try {
     Set-TestCanonicalPayloadRoot -Root $fixtureCanonicalPayloadRoot
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.3.0-preview.1" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.3.0-preview.2" -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 35 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 36 -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 22 -Message "Flat target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 23 -Message "Generation target count mismatch."
@@ -8882,6 +9172,14 @@ try {
         Invoke-OperationalReadinessAuthorityScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused operational readiness acceptance modified package source files."
         Write-Host "[OK] Focused operational readiness authority scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($OwnerIdentityRemovalOnly) {
+        Invoke-OwnerIdentityRemovalScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused Owner Identity v2 removal acceptance modified package source files."
+        Write-Host "[OK] Focused Owner Identity v2 removal scenarios passed."
         $fixturePassed = $true
         return
     }

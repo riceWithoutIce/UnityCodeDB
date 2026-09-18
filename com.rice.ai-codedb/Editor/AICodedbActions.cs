@@ -199,7 +199,7 @@ namespace Rice.AI.Codedb.Editor
             return result;
         }
 
-        internal static bool IsExplicitReinstallAdmissionAllowed(
+        internal static bool IsExplicitRemoveIntegrationAdmissionAllowed(
             AICodedbProductStatus cachedProductStatus,
             AICodedbProjectIntegrationStatus currentIntegrationStatus,
             AICodedbControlContractMigrationStatus currentMigrationStatus,
@@ -213,17 +213,18 @@ namespace Rice.AI.Codedb.Editor
                    == AICodedbControlContractMigrationState.ObsoleteReinstallRequired;
         }
 
-        internal static async Task<AICodedbCommandResult> RunReinstallCodeDBAsync(
+        internal static async Task<AICodedbCommandResult> RunRemoveIntegrationCodeDBAsync(
             AICodedbProductStatus cachedProductStatus,
             bool confirmedProjectMutation)
         {
             if (!confirmedProjectMutation)
-                return ReinstallAdmissionRejected("Reinstall requires explicit project mutation confirmation.");
+                return RemoveIntegrationAdmissionRejected(
+                    "Removing CodeDB integration requires explicit project mutation confirmation.");
             if (!cachedProductStatus.RequiresReinstall
                 || cachedProductStatus.Prerequisite != AICodedbProductLayerState.Current)
             {
-                return ReinstallAdmissionRejected(
-                    "The cached CodeDB state does not admit Reinstall. Refresh the Manager before trying again.");
+                return RemoveIntegrationAdmissionRejected(
+                    "The cached CodeDB state does not admit integration removal. Refresh the Manager before trying again.");
             }
 
             var context = AICodedbPaths.CaptureExecutionContext();
@@ -233,7 +234,7 @@ namespace Rice.AI.Codedb.Editor
                 var migrationStatus = AICodedbControlContractMigrationStore.Read(
                     context.ProjectRoot,
                     context.PackageRoot);
-                return IsExplicitReinstallAdmissionAllowed(
+                return IsExplicitRemoveIntegrationAdmissionAllowed(
                     cachedProductStatus,
                     integrationStatus,
                     migrationStatus,
@@ -241,40 +242,18 @@ namespace Rice.AI.Codedb.Editor
             });
             if (!currentAdmission)
             {
-                return ReinstallAdmissionRejected(
-                    "The current project or control-contract state no longer admits Reinstall. Refresh the Manager before trying again.");
+                return RemoveIntegrationAdmissionRejected(
+                    "The current project or control-contract state no longer admits integration removal. Refresh the Manager before trying again.");
             }
 
-            return await RunSingleConfirmedReinstallCommandAsync(
-                confirmedProjectMutation,
-                () => RunSupervisorCommandWithFallbackAsync(
-                    "Reinstall",
-                    confirmedProjectMutation,
-                    () => AICodedbHostPayloadMaterializer.RunReinstallAsync(
-                        confirmedProjectMutation)),
-                AICodedbEditorLifecycle.RequestReconcile);
-        }
-
-        internal static async Task<AICodedbCommandResult> RunSingleConfirmedReinstallCommandAsync(
-            bool confirmedProjectMutation,
-            Func<Task<AICodedbCommandResult>> command,
-            Action requestReconcile)
-        {
-            if (!confirmedProjectMutation)
-                return ReinstallAdmissionRejected("Reinstall requires explicit project mutation confirmation.");
-            if (command == null)
-                throw new ArgumentNullException(nameof(command));
-            if (requestReconcile == null)
-                throw new ArgumentNullException(nameof(requestReconcile));
-
-            var result = await command();
+            var result = await AICodedbHostPayloadMaterializer.RunRemoveIntegrationAsync();
             if (result != null && result.Succeeded)
-                requestReconcile();
-            return result ?? ReinstallAdmissionRejected(
-                "The Reinstall command returned no result; no automatic retry was requested.");
+                AICodedbEditorLifecycle.RequestReconcile();
+            return result ?? RemoveIntegrationAdmissionRejected(
+                "The Remove CodeDB Integration command returned no result; no automatic retry was requested.");
         }
 
-        private static AICodedbCommandResult ReinstallAdmissionRejected(string detail)
+        private static AICodedbCommandResult RemoveIntegrationAdmissionRejected(string detail)
         {
             return new AICodedbCommandResult(4, string.Empty, detail, false);
         }

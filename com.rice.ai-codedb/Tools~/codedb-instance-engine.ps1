@@ -16,6 +16,7 @@ $script:InstanceLeaseDirectoryName = "leases"
 $script:InstanceAllowedDirectories = @("config", "index", "adapter", "watch", "leases", "logs", "tmp")
 $script:InstanceOptionalDirectories = @("leases")
 $script:InstanceControlContractSchemaVersion = 1
+$script:InstanceOwnerIdentityVersion = 2
 $script:InstanceActivationRecordSchemaVersion = 1
 $script:InstanceActivationOperationSchemaVersion = 1
 $script:InstanceRetirementIntentSchemaVersion = 1
@@ -111,7 +112,7 @@ function Read-InstanceControlContractIdentity {
     $schemaVersion = Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "payload control contract"
     $sha256 = Get-RequiredJsonString -Object $document -Name "sha256" -Label "payload control contract"
     if ($id -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
-        $version -le 0 -or
+        $version -ne $script:InstanceOwnerIdentityVersion -or
         $schemaVersion -ne $script:InstanceControlContractSchemaVersion) {
         throw "Payload control contract identity is invalid."
     }
@@ -984,6 +985,10 @@ function Assert-InstanceActivationContractNamespace {
             if (-not $entry.PSIsContainer) { throw "Activation contract child namespace is not a directory: $($entry.Name)" }
             continue
         }
+        if ($entry.Name -ceq "supervisor") {
+            if (-not $entry.PSIsContainer) { throw "Activation contract Supervisor namespace is not a directory." }
+            continue
+        }
         throw "Activation contract namespace contains unexpected entry: $($entry.Name)"
     }
     $operationsRoot = Join-Path $ContractRoot "operations"
@@ -1572,6 +1577,7 @@ function Publish-InstanceActivationTransaction {
             -ProjectRoot $ProjectRoot `
             -Candidate $Candidate `
             -OperationRoot $context.Paths.OperationRoot `
+            -ActivationEpoch $attempt.ActivationEpoch `
             -ActionName $ActionName `
             -PreviousInstance $PreviousInstance `
             -UninstallStateId $UninstallStateId `
@@ -1852,10 +1858,15 @@ function Get-ValidatedCurrentInstance {
     $instanceId = Get-RequiredJsonString -Object $selection -Name "instance_id" -Label "current instance selection"
     $instanceRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $selection -Name "instance_relative_path" -Label "current instance selection") -Label "instance selection path"
     $selectionGenerationId = Get-RequiredJsonString -Object $selection -Name "generation_id" -Label "current instance selection"
+    $ownerIdentityVersion = Get-RequiredJsonInt32 -Object $selection -Name "owner_identity_version" -Label "current instance selection"
+    $activationEpoch = Get-RequiredJsonString -Object $selection -Name "activation_epoch" -Label "current instance selection"
     $expectedRelativePath = "$($script:InstancesRelativePath)/$instanceId"
     if ((Get-RequiredJsonInt32 -Object $selection -Name "schema_version" -Label "current instance selection") -ne 1 -or
         -not [string]::Equals((Get-RequiredJsonString -Object $selection -Name "managed_by" -Label "current instance selection"), $script:ManagedBy, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-RequiredJsonString -Object $selection -Name "project_identity" -Label "current instance selection"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        $ownerIdentityVersion -ne $script:InstanceOwnerIdentityVersion -or
+        $ownerIdentityVersion -ne [int]$Manifest.OwnerIdentityVersion -or
+        $activationEpoch -cnotmatch '^[0-9a-f]{32}$' -or
         $instanceId -cnotmatch '^[0-9a-f]{32}$' -or
         -not [string]::Equals($instanceRelativePath, $expectedRelativePath, [StringComparison]::Ordinal) -or
         $selectionGenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$') {
@@ -1900,6 +1911,8 @@ function Get-ValidatedCurrentInstance {
         Manifest = $instanceManifestDocument
         Generation = $generation
         GenerationDisposition = $generation.Disposition
+        OwnerIdentityVersion = $ownerIdentityVersion
+        ActivationEpoch = $activationEpoch
     }
 }
 
@@ -2292,6 +2305,20 @@ function Assert-InstanceTransactionTarget {
         $script:AllowedTargetPaths.ContainsKey($normalized)) {
         return $normalized
     }
+    if ($normalized -in @(
+            $script:McpAvailabilityRelativePath,
+            "$($script:InstanceControlRelativePath)/supervisor/supervisor-state.json",
+            "$($script:InstanceControlRelativePath)/supervisor/supervisor.lock",
+            "$($script:InstanceControlRelativePath)/supervisor/supervisor-events.jsonl",
+            "$($script:InstanceControlRelativePath)/supervisor/supervisor-error.json")) {
+        return $normalized
+    }
+    if ($normalized -cmatch '^AIWork/\.runtime/codedb/control/contracts/v0\.3-control/v[12]/(?:activation\.json|operation\.json|supervisor/(?:supervisor-state\.json|supervisor\.lock|supervisor-events\.jsonl|supervisor-error\.json))$') {
+        return $normalized
+    }
+    if ($normalized -cmatch '^AIWork/\.runtime/codedb/instances/[0-9a-f]{32}/logs/mcp-availability\.json$') {
+        return $normalized
+    }
     throw "Instance transaction target is outside the reviewed activation surface: $normalized"
 }
 
@@ -2396,7 +2423,7 @@ function Read-InstanceOperationJournal {
         -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "project_identity" -Label "instance operation journal"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
         $operationId -cnotmatch '^[0-9a-f]{32}$' -or
         $candidateId -cnotmatch '^[0-9a-f]{32}$' -or
-        $operation -cnotin @("INSTALL", "UPGRADE", "REINSTALL", "UNINSTALL") -or
+        $operation -cnotin @("INSTALL", "UPGRADE", "REINSTALL", "UNINSTALL", "REMOVEINTEGRATION") -or
         $state -cnotin @("PREPARED", "ACTIVATING", "COMMITTED") -or
         (-not $operationRootRelative.StartsWith("$($script:InstancesRelativePath)/$candidateId/tmp/operation-", [StringComparison]::Ordinal) -and
          -not [string]::Equals($operationRootRelative, "$($script:InstanceOperationsRelativePath)/operation-$operationId", [StringComparison]::Ordinal))) {
@@ -2543,6 +2570,7 @@ function Publish-InstanceOperation {
         [Parameter(Mandatory = $true)]$Entries,
         [Parameter(Mandatory = $true)][string]$StageRoot,
         [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [AllowNull()][scriptblock]$VerifyBeforeMutation,
         [AllowNull()][scriptblock]$VerifyBeforeCommit,
         [AllowNull()][string]$OperationId
     )
@@ -2553,6 +2581,7 @@ function Publish-InstanceOperation {
     Write-InstanceOperationJournal -ProjectRoot $ProjectRoot -OperationId $journalOperationId -State "ACTIVATING" -ActionName $ActionName -CandidateInstanceId $CandidateInstanceId -OperationRoot $OperationRoot -Entries $Entries -StageRoot $StageRoot
     $publishedEntries = New-Object System.Collections.Generic.List[object]
     try {
+        if ($null -ne $VerifyBeforeMutation) { & $VerifyBeforeMutation }
         foreach ($entry in @($Entries)) {
             Assert-NoReparsePoint -Path $entry.TargetPath -Root $ProjectRoot -Label "instance activation target"
             if ($entry.ExistedBefore) {
@@ -2643,8 +2672,11 @@ function Get-InstanceActivationBytes {
 function New-InstanceSelectionDocument {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)]$Candidate
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $true)][string]$ActivationEpoch
     )
+
+    $null = Assert-InstanceAttemptId -Value $ActivationEpoch -Label "activation_epoch"
 
     return [ordered]@{
         schema_version = 1
@@ -2654,6 +2686,8 @@ function New-InstanceSelectionDocument {
         instance_relative_path = $Candidate.InstanceRelativePath
         instance_manifest_sha256 = $Candidate.ManifestSha256
         generation_id = $script:GenerationId
+        owner_identity_version = $script:InstanceOwnerIdentityVersion
+        activation_epoch = $ActivationEpoch
         activated_at_utc = [DateTime]::UtcNow.ToString("o")
     }
 }
@@ -2722,6 +2756,7 @@ function Get-InstanceActivationEntries {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$Candidate,
         [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [Parameter(Mandatory = $true)][string]$ActivationEpoch,
         [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName,
         [AllowNull()]$PreviousInstance,
         [AllowNull()][string]$UninstallStateId,
@@ -2779,7 +2814,10 @@ function Get-InstanceActivationEntries {
         Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:IntegrationStateRelativePath -Mutation "Delete" -DesiredBytes $null
     }
 
-    $selection = New-InstanceSelectionDocument -ProjectRoot $ProjectRoot -Candidate $Candidate
+    $selection = New-InstanceSelectionDocument `
+        -ProjectRoot $ProjectRoot `
+        -Candidate $Candidate `
+        -ActivationEpoch $ActivationEpoch
     $selectionBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $selection))
     $lkgTarget = $script:InstanceLastKnownGoodRelativePath
     Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $lkgTarget -Mutation "Write" -DesiredBytes $selectionBytes
@@ -3778,6 +3816,8 @@ function Get-ValidatedInstanceSupervisorOperationalReadiness {
             "target_generation_id",
             "runtime_contract_sha256",
             "generation_disposition",
+            "owner_identity_version",
+            "activation_epoch",
             "lifecycle_id",
             "supervisor_id",
             "owner_epoch",
@@ -3846,6 +3886,8 @@ function Get-ValidatedInstanceSupervisorOperationalReadiness {
         -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "target_generation_id" -Label $label), [string]$Manifest.TargetGenerationId, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "runtime_contract_sha256" -Label $label), [string]$Manifest.RuntimeContractSha256, [StringComparison]::Ordinal) -or
         -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_disposition" -Label $label), [string]$CurrentInstance.GenerationDisposition, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonInt32 -Object $document -Name "owner_identity_version" -Label $label) -ne [int]$CurrentInstance.OwnerIdentityVersion -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "activation_epoch" -Label $label), [string]$CurrentInstance.ActivationEpoch, [StringComparison]::Ordinal) -or
         (Get-RequiredJsonString -Object $document -Name "lifecycle_id" -Label $label) -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
         (Get-RequiredJsonString -Object $document -Name "supervisor_id" -Label $label) -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
         (Get-RequiredJsonString -Object $document -Name "owner_epoch" -Label $label) -cnotmatch '^[0-9a-f]{32}$' -or

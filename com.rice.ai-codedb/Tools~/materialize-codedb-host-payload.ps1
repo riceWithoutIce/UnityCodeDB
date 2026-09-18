@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")]
+    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -112,6 +112,8 @@ $script:UpgradeStateRelativePath = "$($script:RuntimeRelativePath)/$($script:Upg
 $script:HostUseLeaseDirectoryName = "host-use-leases"
 $script:TransactionPrefix = "txn-v1-"
 $script:TransactionJournalName = "transaction.json"
+$script:RemoveIntegrationTransactionPrefix = "remove-integration-v2-"
+$script:RemoveIntegrationIntentName = "intent.json"
 $script:RequestedExitCode = 0
 $script:MutationCount = 0
 $script:MachinePrerequisiteStatus = $null
@@ -184,7 +186,7 @@ $script:AllowedTargetPaths[$script:CurrentPointerRelativePath] = $true
 function Test-MaterializerMutationAction {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    return $Name -cin @("Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")
+    return $Name -cin @("Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")
 }
 
 function Set-MaterializerCommandPhase {
@@ -237,6 +239,7 @@ function Write-MaterializerCommandResult {
                 "Install" { "INSTALLED" }
                 "Uninstall" { "UNINSTALLED" }
                 "Remove" { "REMOVED" }
+                "RemoveIntegration" { "INTEGRATION_REMOVED" }
                 default { "CONVERGED" }
             }
         }
@@ -1355,6 +1358,7 @@ function Read-PayloadManifest {
     $payloadSequence = Get-RequiredJsonInt32 -Object $document -Name "payload_sequence" -Label "payload manifest"
     $generationId = Get-RequiredJsonString -Object $document -Name "generation_id" -Label "payload manifest"
     $bootstrapProtocol = Get-RequiredJsonInt32 -Object $document -Name "bootstrap_protocol" -Label "payload manifest"
+    $ownerIdentityVersion = Get-RequiredJsonInt32 -Object $document -Name "owner_identity_version" -Label "payload manifest"
     $bootstrapTransitionDocuments = Get-RequiredJsonArray -Object $document -Name "bootstrap_transitions" -Label "payload manifest"
     $currentPointerTarget = Assert-TargetRelativePath -Path (Get-RequiredJsonString -Object $document -Name "current_pointer_target" -Label "payload manifest")
     $retiredTargets = Get-RequiredJsonArray -Object $document -Name "retired_targets" -Label "payload manifest"
@@ -1367,6 +1371,8 @@ function Read-PayloadManifest {
         $payloadSequence -lt 1 -or
         $generationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
         $bootstrapProtocol -ne $script:SupportedBootstrapProtocol -or
+        $ownerIdentityVersion -ne 2 -or
+        [int]$controlContract.Version -ne 2 -or
         -not [string]::Equals($currentPointerTarget, $script:CurrentPointerRelativePath, [StringComparison]::Ordinal) -or
         $manifestFiles.Count -eq 0) {
         Throw-MaterializerError -Message "Payload manifest identity, version, or file list is invalid." -ExitCode 2
@@ -1488,6 +1494,7 @@ function Read-PayloadManifest {
         SchemaVersion = $schemaVersion
         ManagedBy = $managedBy
         ControlContract = $controlContract
+        OwnerIdentityVersion = $ownerIdentityVersion
         RuntimeContractSha256 = $manifestJson.Sha256
         PackageVersion = $packageVersion
         PayloadVersion = $payloadVersion
@@ -1688,7 +1695,7 @@ function Assert-MutationConfirmation {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][ValidateSet("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")][string]$MutationAction
+        [Parameter(Mandatory = $true)][ValidateSet("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")][string]$MutationAction
     )
 
     if ($PocFixture) {
@@ -10119,6 +10126,849 @@ function Get-MarkerlessInstanceClosureFiles {
     return $files.ToArray()
 }
 
+function Test-RemoveIntegrationPathEqual {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    try {
+        $normalizedLeft = [System.IO.Path]::GetFullPath($Left).TrimEnd('\', '/').Replace('\', '/')
+        $normalizedRight = [System.IO.Path]::GetFullPath($Right).TrimEnd('\', '/').Replace('\', '/')
+        return [string]::Equals($normalizedLeft, $normalizedRight, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Assert-RemoveIntegrationJsonFields {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Required,
+        [string[]]$Optional = @(),
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $null = Assert-JsonObject -Value $Object -Label $Label
+    $allowed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in @($Required) + @($Optional)) { $null = $allowed.Add($name) }
+    foreach ($name in $Required) {
+        if ($null -eq $Object.PSObject.Properties[$name]) {
+            throw "$Label is missing required property $name."
+        }
+    }
+    foreach ($property in @($Object.PSObject.Properties)) {
+        if (-not $allowed.Contains($property.Name)) {
+            throw "$Label contains unknown property $($property.Name)."
+        }
+    }
+}
+
+function Get-RemoveIntegrationControlContractSha256 {
+    param([Parameter(Mandatory = $true)][int]$Version)
+
+    return Get-TextSha256 -Text (@(
+        $script:ManagedBy
+        "control-contract"
+        "v0.3-control"
+        $Version
+        1
+    ) -join "`n")
+}
+
+function Get-RemoveIntegrationExpectedPipeName {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$NamespacePath
+    )
+
+    $rootIdentity = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant()
+    $runtimeIdentity = [System.IO.Path]::GetFullPath($NamespacePath).TrimEnd('\', '/').Replace('\', '/').ToLowerInvariant()
+    $digest = Get-TextSha256 -Text "$rootIdentity`n$runtimeIdentity"
+    return "\\.\pipe\codedb-supervisor-$($digest.Substring(0, 20))"
+}
+
+function Get-RemoveIntegrationNamespaceInventory {
+    param(
+        [Parameter(Mandatory = $true)][string]$NamespacePath,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    Assert-NoReparsePoint -Path $NamespacePath -Root $ProjectRoot -Label "Supervisor control namespace"
+    $allowed = @{
+        "supervisor-state.json" = 256 * 1024
+        "supervisor.lock" = 256 * 1024
+        "supervisor-events.jsonl" = 4 * 1024 * 1024
+        "supervisor-error.json" = 256 * 1024
+    }
+    $files = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @(Get-ChildItem -LiteralPath $NamespacePath -Force -ErrorAction Stop | Sort-Object Name)) {
+        Assert-NoReparsePoint -Path $item.FullName -Root $NamespacePath -Label "Supervisor control namespace entry"
+        if ($item.PSIsContainer) {
+            throw "Supervisor control namespace contains an unexpected directory: $($item.Name)"
+        }
+        if ($item.Name -in @("operation.json", "supervisor-takeover.claim")) {
+            throw "Supervisor control namespace contains in-flight ownership evidence: $($item.Name)"
+        }
+        if (-not $allowed.ContainsKey($item.Name)) {
+            throw "Supervisor control namespace contains unknown evidence: $($item.Name)"
+        }
+        if ($item.Length -lt 0 -or $item.Length -gt [int64]$allowed[$item.Name]) {
+            throw "Supervisor control namespace evidence exceeds its bounded size: $($item.Name)"
+        }
+        $files.Add([pscustomobject]@{
+            Name = $item.Name
+            Path = $item.FullName
+            Sha256 = Get-FileSha256 -Path $item.FullName
+        }) | Out-Null
+    }
+    $names = @($files | ForEach-Object { $_.Name })
+    if ($names -cnotcontains "supervisor-state.json" -or $names -cnotcontains "supervisor.lock") {
+        throw "Supervisor control namespace must contain one complete state and lock pair."
+    }
+    return $files.ToArray()
+}
+
+function Get-ValidatedRemoveIntegrationSelection {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][ValidateSet(1, 2)][int]$OwnerIdentityVersion,
+        [switch]$LastKnownGood,
+        [switch]$AllowMissing
+    )
+
+    $relativePath = if ($LastKnownGood) { $script:InstanceLastKnownGoodRelativePath } else { $script:InstanceCurrentRelativePath }
+    $label = if ($LastKnownGood) { "last-known-good instance selection" } else { "current instance selection" }
+    $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label $label
+    Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label $label
+    if (-not (Test-Path -LiteralPath $path)) {
+        if ($AllowMissing) { return $null }
+        throw "$label is missing."
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$label is not a regular file." }
+
+    $json = Read-BoundedJsonDocument -Path $path -Label $label -MaximumBytes (64 * 1024)
+    $document = $json.Document
+    $required = @(
+        "schema_version", "managed_by", "project_identity", "instance_id",
+        "instance_relative_path", "instance_manifest_sha256", "generation_id",
+        "activated_at_utc"
+    )
+    if ($OwnerIdentityVersion -eq 2) { $required += @("owner_identity_version", "activation_epoch") }
+    Assert-RemoveIntegrationJsonFields -Object $document -Required $required -Label $label
+
+    $instanceId = Get-RequiredJsonString -Object $document -Name "instance_id" -Label $label
+    $instanceRelativePath = ConvertTo-SafeRelativePath `
+        -Path (Get-RequiredJsonString -Object $document -Name "instance_relative_path" -Label $label) `
+        -Label "$label path"
+    $generationId = Get-RequiredJsonString -Object $document -Name "generation_id" -Label $label
+    $manifestSha256 = Get-RequiredJsonString -Object $document -Name "instance_manifest_sha256" -Label $label
+    $activatedAtText = Get-RequiredJsonString -Object $document -Name "activated_at_utc" -Label $label
+    [DateTimeOffset]$activatedAt = [DateTimeOffset]::MinValue
+    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label $label) -ne 1 -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "project_identity" -Label $label), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        $instanceId -cnotmatch '^[0-9a-f]{32}$' -or
+        -not [string]::Equals($instanceRelativePath, "$($script:InstancesRelativePath)/$instanceId", [StringComparison]::Ordinal) -or
+        $manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $generationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        -not [DateTimeOffset]::TryParse($activatedAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$activatedAt)) {
+        throw "$label identity or schema is invalid."
+    }
+
+    $activationEpoch = $null
+    if ($OwnerIdentityVersion -eq 2) {
+        if ((Get-RequiredJsonInt32 -Object $document -Name "owner_identity_version" -Label $label) -ne 2) {
+            throw "$label does not use Owner Identity v2."
+        }
+        $activationEpoch = Get-RequiredJsonString -Object $document -Name "activation_epoch" -Label $label
+        if ($activationEpoch -cnotmatch '^[0-9a-f]{32}$') { throw "$label activation epoch is invalid." }
+    }
+
+    $instanceRoot = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $instanceRelativePath -Label "$label instance root"
+    $instance = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instanceRoot
+    if (-not [string]::Equals($instance.InstanceId, $instanceId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($instance.Generation.GenerationId, $generationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-FileSha256 -Path $instance.ManifestPath), $manifestSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$label does not match its Package-owned instance closure."
+    }
+    return [pscustomobject]@{
+        Path = $path
+        Text = $json.Text
+        Document = $document
+        InstanceId = $instanceId
+        GenerationId = $generationId
+        ActivationEpoch = $activationEpoch
+        InstanceRoot = $instance.InstanceRoot
+        ManifestPath = $instance.ManifestPath
+        InstanceManifestSha256 = $manifestSha256.ToLowerInvariant()
+        GenerationManifestSha256 = (Get-RequiredJsonString `
+            -Object $instance.Manifest `
+            -Name "generation_manifest_sha256" `
+            -Label $label).ToLowerInvariant()
+        Instance = $instance
+        Generation = $instance.Generation
+        LeaseRoot = $instance.LeaseRoot
+        EditorLeaseRoot = $instance.EditorLeaseRoot
+        CoordinatorStatePath = $instance.CoordinatorStatePath
+    }
+}
+
+function Assert-RemoveIntegrationOwnerRecord {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][ValidateSet("VERSIONED_V1", "VERSIONED_V2", "LEGACY_FIXED")][string]$Kind,
+        [Parameter(Mandatory = $true)][bool]$StateDocument,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$NamespacePath,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Selection,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $common = @(
+        "schema_version", "evidence_schema_version", "managed_by", "role", "root",
+        "project_identity", "runtime", "pipe_name", "generation_id",
+        "target_generation_id", "selected_generation_id", "selected_instance_id",
+        "runtime_contract_sha256", "supervisor_protocol_version", "generation_disposition",
+        "lifecycle_id", "supervisor_id", "owner_epoch", "owner_evidence",
+        "supervisor_pid", "publication_phase", "owner_started_at_utc"
+    )
+    if ($Kind -ne "LEGACY_FIXED") {
+        $common += @(
+            "control_contract_id", "control_contract_version", "control_contract_schema_version",
+            "control_contract_sha256", "control_namespace"
+        )
+    }
+    if ($Kind -eq "VERSIONED_V2") { $common += @("owner_identity_version", "activation_epoch") }
+    $stateOnly = @(
+        "protocol_version", "auth_token", "desired_state", "editor_demand", "readiness_state",
+        "reason_code", "detail", "last_event", "last_event_detail"
+    )
+    $optional = if ($StateDocument) {
+        @("started_at_utc", "operation", "event_sequence", "coordinator_status", "updated_at_utc", "coordinator_failure_category", "operational_readiness")
+    } else { @() }
+    Assert-RemoveIntegrationJsonFields `
+        -Object $Document `
+        -Required ($common + $(if ($StateDocument) { $stateOnly } else { @() })) `
+        -Optional $optional `
+        -Label $Label
+
+    $ownerEvidence = Get-RequiredJsonPropertyValue -Object $Document -Name "owner_evidence" -Label $Label
+    Assert-RemoveIntegrationJsonFields `
+        -Object $ownerEvidence `
+        -Required @("schema_version", "pid", "process_start_identity", "executable_path", "argv_sha256", "command_line_sha256") `
+        -Label "$Label process evidence"
+
+    $supervisorProcessId = Get-RequiredJsonInt32 -Object $Document -Name "supervisor_pid" -Label $Label
+    $evidencePid = Get-RequiredJsonInt32 -Object $ownerEvidence -Name "pid" -Label "$Label process evidence"
+    $generationId = Get-RequiredJsonString -Object $Document -Name "generation_id" -Label $Label
+    $targetGenerationId = Get-RequiredJsonString -Object $Document -Name "target_generation_id" -Label $Label
+    $selectedGenerationId = Get-RequiredJsonString -Object $Document -Name "selected_generation_id" -Label $Label
+    $selectedInstanceId = Get-RequiredJsonString -Object $Document -Name "selected_instance_id" -Label $Label
+    $disposition = Get-RequiredJsonString -Object $Document -Name "generation_disposition" -Label $Label
+    $runtimeContractSha256 = Get-RequiredJsonString -Object $Document -Name "runtime_contract_sha256" -Label $Label
+    $processStartIdentity = Get-RequiredJsonString -Object $ownerEvidence -Name "process_start_identity" -Label "$Label process evidence"
+    $executablePath = Get-RequiredJsonString -Object $ownerEvidence -Name "executable_path" -Label "$Label process evidence"
+    $argvSha256 = Get-RequiredJsonString -Object $ownerEvidence -Name "argv_sha256" -Label "$Label process evidence"
+    $commandLineSha256 = Get-RequiredJsonString -Object $ownerEvidence -Name "command_line_sha256" -Label "$Label process evidence"
+    $publicationPhase = Get-RequiredJsonString -Object $Document -Name "publication_phase" -Label $Label
+    $ownerStartedAtText = Get-RequiredJsonString -Object $Document -Name "owner_started_at_utc" -Label $Label
+    [DateTimeOffset]$ownerStartedAt = [DateTimeOffset]::MinValue
+    $expectedPipe = Get-RemoveIntegrationExpectedPipeName -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath
+    if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $Label) -ne 3 -or
+        (Get-RequiredJsonInt32 -Object $Document -Name "evidence_schema_version" -Label $Label) -ne 1 -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $Label), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "role" -Label $Label), "project-local-supervisor", [StringComparison]::Ordinal) -or
+        -not (Test-RemoveIntegrationPathEqual -Left (Get-RequiredJsonString -Object $Document -Name "root" -Label $Label) -Right $ProjectRoot) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "project_identity" -Label $Label), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not (Test-RemoveIntegrationPathEqual -Left (Get-RequiredJsonString -Object $Document -Name "runtime" -Label $Label) -Right $NamespacePath) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "pipe_name" -Label $Label), $expectedPipe, [StringComparison]::OrdinalIgnoreCase) -or
+        $generationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $targetGenerationId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        -not [string]::Equals($generationId, $selectedGenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($selectedGenerationId, $Selection.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($selectedInstanceId, $Selection.InstanceId, [StringComparison]::Ordinal) -or
+        $runtimeContractSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $disposition -cnotin @("CURRENT", "TRUSTED_PREVIOUS") -or
+        (($disposition -ceq "CURRENT") -ne [string]::Equals($generationId, $targetGenerationId, [StringComparison]::Ordinal)) -or
+        (Get-RequiredJsonString -Object $Document -Name "lifecycle_id" -Label $Label) -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
+        (Get-RequiredJsonString -Object $Document -Name "supervisor_id" -Label $Label) -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
+        (Get-RequiredJsonString -Object $Document -Name "owner_epoch" -Label $Label) -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
+        $supervisorProcessId -le 0 -or $evidencePid -ne $supervisorProcessId -or
+        $publicationPhase -cnotin @("state_published", "listening", "retiring") -or
+        -not [DateTimeOffset]::TryParse($ownerStartedAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$ownerStartedAt) -or
+        (Get-RequiredJsonInt32 -Object $ownerEvidence -Name "schema_version" -Label "$Label process evidence") -ne 1 -or
+        $processStartIdentity -cnotmatch '^[0-9]{1,32}$' -or
+        -not [System.IO.Path]::IsPathRooted($executablePath) -or
+        $argvSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $commandLineSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "$Label does not match the reviewed Package-owned owner identity."
+    }
+    if ($StateDocument) {
+        if ((Get-RequiredJsonInt32 -Object $Document -Name "protocol_version" -Label $Label) -ne 1 -or
+            (Get-RequiredJsonString -Object $Document -Name "auth_token" -Label $Label) -cnotmatch '^[0-9a-f]{64}$') {
+            throw "$Label protocol or authentication evidence is invalid."
+        }
+    }
+
+    $expectedContractVersion = if ($Kind -eq "VERSIONED_V1") { 1 } elseif ($Kind -eq "VERSIONED_V2") { 2 } else { 0 }
+    if ($Kind -ne "LEGACY_FIXED") {
+        $expectedContractSha256 = Get-RemoveIntegrationControlContractSha256 -Version $expectedContractVersion
+        if (-not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "control_contract_id" -Label $Label), "v0.3-control", [StringComparison]::Ordinal) -or
+            (Get-RequiredJsonInt32 -Object $Document -Name "control_contract_version" -Label $Label) -ne $expectedContractVersion -or
+            (Get-RequiredJsonInt32 -Object $Document -Name "control_contract_schema_version" -Label $Label) -ne 1 -or
+            -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "control_contract_sha256" -Label $Label), $expectedContractSha256, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-RemoveIntegrationPathEqual -Left (Get-RequiredJsonString -Object $Document -Name "control_namespace" -Label $Label) -Right $NamespacePath)) {
+            throw "$Label control-contract identity is invalid."
+        }
+    }
+    if ($Kind -eq "VERSIONED_V2") {
+        $activationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $Label
+        if ((Get-RequiredJsonInt32 -Object $Document -Name "owner_identity_version" -Label $Label) -ne 2 -or
+            $activationEpoch -cnotmatch '^[0-9a-f]{32}$' -or
+            -not [string]::Equals($activationEpoch, $Selection.ActivationEpoch, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($targetGenerationId, $Manifest.TargetGenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($runtimeContractSha256, $Manifest.RuntimeContractSha256, [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-RequiredJsonInt32 -Object $Document -Name "supervisor_protocol_version" -Label $Label) -ne 3) {
+            throw "$Label does not match the Owner Identity v2 Package contract."
+        }
+    } elseif ((Get-RequiredJsonInt32 -Object $Document -Name "supervisor_protocol_version" -Label $Label) -notin @(1, 2, 3)) {
+        throw "$Label uses an unsupported Owner Identity v1 Supervisor protocol."
+    }
+
+    $fingerprintParts = @(
+        (Get-RequiredJsonString -Object $Document -Name "project_identity" -Label $Label),
+        $generationId, $targetGenerationId, $selectedGenerationId, $selectedInstanceId,
+        $runtimeContractSha256.ToLowerInvariant(), $disposition,
+        (Get-RequiredJsonString -Object $Document -Name "lifecycle_id" -Label $Label),
+        (Get-RequiredJsonString -Object $Document -Name "supervisor_id" -Label $Label),
+        (Get-RequiredJsonString -Object $Document -Name "owner_epoch" -Label $Label),
+        $supervisorProcessId, $processStartIdentity,
+        ([System.IO.Path]::GetFullPath($executablePath).Replace('\', '/').ToLowerInvariant()),
+        $argvSha256.ToLowerInvariant(), $commandLineSha256.ToLowerInvariant(),
+        ([System.IO.Path]::GetFullPath($NamespacePath).Replace('\', '/').ToLowerInvariant()),
+        $expectedPipe.ToLowerInvariant(), $expectedContractVersion,
+        $(if ($Kind -eq "VERSIONED_V2") { Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $Label } else { "" })
+    )
+    return [pscustomobject]@{
+        Document = $Document
+        ProcessId = $supervisorProcessId
+        Fingerprint = Get-TextSha256 -Text ($fingerprintParts -join "`n")
+        OwnerEvidence = $ownerEvidence
+    }
+}
+
+function Assert-RemoveIntegrationContractHierarchy {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $contractsRoot = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath "$($script:InstanceControlRelativePath)/contracts" `
+        -Label "control-contract root"
+    if (-not (Test-Path -LiteralPath $contractsRoot)) { return }
+    if (-not (Test-Path -LiteralPath $contractsRoot -PathType Container)) {
+        throw "Control-contract root is not a directory."
+    }
+    Assert-NoReparsePoint -Path $contractsRoot -Root $ProjectRoot -Label "control-contract root"
+    foreach ($entry in @(Get-ChildItem -LiteralPath $contractsRoot -Force -ErrorAction Stop)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $contractsRoot -Label "control-contract id"
+        if (-not $entry.PSIsContainer -or $entry.Name -cne "v0.3-control") {
+            throw "An unknown control-contract authority is present: $($entry.Name)"
+        }
+    }
+
+    $idRoot = Join-Path $contractsRoot "v0.3-control"
+    if (-not (Test-Path -LiteralPath $idRoot)) { return }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $idRoot -Force -ErrorAction Stop)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $idRoot -Label "control-contract version"
+        if (-not $entry.PSIsContainer -or $entry.Name -cnotin @("v1", "v2")) {
+            throw "An unknown control-contract version is present: $($entry.Name)"
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $entry.FullName -Force -ErrorAction Stop)) {
+            Assert-NoReparsePoint -Path $child.FullName -Root $entry.FullName -Label "control-contract entry"
+            $valid = if ($child.Name -ceq "supervisor") {
+                $child.PSIsContainer
+            } elseif ($child.Name -cin @("activation.json", "operation.json")) {
+                -not $child.PSIsContainer
+            } elseif ($child.Name -cin @("operations", "retirements")) {
+                $child.PSIsContainer
+            } else {
+                $false
+            }
+            if (-not $valid) {
+                throw "A control-contract version contains an unknown entry: $($child.Name)"
+            }
+        }
+    }
+}
+
+function Get-RemoveIntegrationAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$AllowMissing,
+        [switch]$IgnoreInstanceOperationJournal
+    )
+
+    Assert-RemoveIntegrationContractHierarchy -ProjectRoot $ProjectRoot
+    $topLevelOperation = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath $script:InstanceOperationRelativePath `
+        -Label "instance operation journal"
+    if (-not $IgnoreInstanceOperationJournal -and (Test-Path -LiteralPath $topLevelOperation)) {
+        throw "Remove CodeDB Integration is blocked by an in-flight instance operation journal."
+    }
+    $null = @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest)
+
+    $candidates = @(
+        [pscustomobject]@{
+            Kind = "VERSIONED_V1"
+            OwnerIdentityVersion = 1
+            RelativePath = "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/supervisor"
+        },
+        [pscustomobject]@{
+            Kind = "VERSIONED_V2"
+            OwnerIdentityVersion = 2
+            RelativePath = "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v2/supervisor"
+        },
+        [pscustomobject]@{
+            Kind = "LEGACY_FIXED"
+            OwnerIdentityVersion = 1
+            RelativePath = "$($script:InstanceControlRelativePath)/supervisor"
+        }
+    )
+    $present = New-Object System.Collections.Generic.List[object]
+    foreach ($candidate in $candidates) {
+        $namespacePath = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath $candidate.RelativePath `
+            -Label "Supervisor control namespace"
+        if (-not (Test-Path -LiteralPath $namespacePath)) { continue }
+        if (-not (Test-Path -LiteralPath $namespacePath -PathType Container)) {
+            throw "Supervisor control namespace is not a directory: $($candidate.RelativePath)"
+        }
+        $present.Add([pscustomobject]@{
+            Kind = $candidate.Kind
+            OwnerIdentityVersion = $candidate.OwnerIdentityVersion
+            RelativePath = $candidate.RelativePath
+            Path = $namespacePath
+        }) | Out-Null
+    }
+    if ($present.Count -eq 0) {
+        if ($AllowMissing) { return $null }
+        throw "No removable Package-owned Supervisor control authority is present."
+    }
+    if ($present.Count -ne 1) {
+        throw "Multiple Supervisor control authorities are present; removal cannot select one safely."
+    }
+
+    $authority = $present[0]
+    $inventory = @(Get-RemoveIntegrationNamespaceInventory -NamespacePath $authority.Path -ProjectRoot $ProjectRoot)
+    $selection = Get-ValidatedRemoveIntegrationSelection `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -OwnerIdentityVersion $authority.OwnerIdentityVersion
+    $lastKnownGood = Get-ValidatedRemoveIntegrationSelection `
+        -Manifest $Manifest `
+        -ProjectRoot $ProjectRoot `
+        -OwnerIdentityVersion $authority.OwnerIdentityVersion `
+        -LastKnownGood `
+        -AllowMissing
+
+    $statePath = Join-Path $authority.Path "supervisor-state.json"
+    $lockPath = Join-Path $authority.Path "supervisor.lock"
+    $state = (Read-BoundedJsonDocument -Path $statePath -Label "Supervisor state" -MaximumBytes (256 * 1024)).Document
+    $owner = (Read-BoundedJsonDocument -Path $lockPath -Label "Supervisor lock" -MaximumBytes (256 * 1024)).Document
+    $validatedState = Assert-RemoveIntegrationOwnerRecord `
+        -Document $state `
+        -Kind $authority.Kind `
+        -StateDocument $true `
+        -ProjectRoot $ProjectRoot `
+        -NamespacePath $authority.Path `
+        -Manifest $Manifest `
+        -Selection $selection `
+        -Label "Supervisor state"
+    $validatedOwner = Assert-RemoveIntegrationOwnerRecord `
+        -Document $owner `
+        -Kind $authority.Kind `
+        -StateDocument $false `
+        -ProjectRoot $ProjectRoot `
+        -NamespacePath $authority.Path `
+        -Manifest $Manifest `
+        -Selection $selection `
+        -Label "Supervisor lock"
+    if (-not [string]::Equals($validatedState.Fingerprint, $validatedOwner.Fingerprint, [StringComparison]::Ordinal)) {
+        throw "Supervisor state and lock identify different owners."
+    }
+    $processIdentity = Get-MaterializerProcessIdentity -ProcessId $validatedState.ProcessId
+    if ($processIdentity.Alive) {
+        throw "Remove CodeDB Integration is blocked while the Supervisor owner PID is live or unverifiable."
+    }
+
+    foreach ($instance in @($selection, $lastKnownGood) | Where-Object { $null -ne $_ }) {
+        $holders = Get-InstanceRetirementHolderEvidence -Evidence $instance -ProjectRoot $ProjectRoot
+        if (-not $holders.Clear) {
+            throw "Remove CodeDB Integration is blocked while a selected instance owner is live or ambiguous."
+        }
+    }
+
+    $activationState = Get-RemoveIntegrationActivationState `
+        -AuthorityKind $authority.Kind `
+        -OwnerIdentityVersion $authority.OwnerIdentityVersion `
+        -ProjectRoot $ProjectRoot `
+        -Selection $selection `
+        -RuntimeContractSha256 (Get-RequiredJsonString `
+            -Object $validatedState.Document `
+            -Name "runtime_contract_sha256" `
+            -Label "Supervisor state")
+
+    return [pscustomobject]@{
+        Kind = $authority.Kind
+        OwnerIdentityVersion = $authority.OwnerIdentityVersion
+        RelativePath = $authority.RelativePath
+        Path = $authority.Path
+        OwnerFingerprint = $validatedState.Fingerprint
+        Selection = $selection
+        LastKnownGood = $lastKnownGood
+        Inventory = $inventory
+        ActivationState = $activationState
+        RuntimeContractSha256 = (Get-RequiredJsonString `
+            -Object $validatedState.Document `
+            -Name "runtime_contract_sha256" `
+            -Label "Supervisor state").ToLowerInvariant()
+    }
+}
+
+function Get-RemoveIntegrationActivationState {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("VERSIONED_V1", "VERSIONED_V2", "LEGACY_FIXED")][string]$AuthorityKind,
+        [Parameter(Mandatory = $true)][ValidateSet(1, 2)][int]$OwnerIdentityVersion,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Selection,
+        [Parameter(Mandatory = $true)][string]$RuntimeContractSha256
+    )
+
+    if ($AuthorityKind -eq "LEGACY_FIXED") { return $null }
+    $contract = [pscustomobject]@{
+        Id = "v0.3-control"
+        Version = $OwnerIdentityVersion
+        SchemaVersion = 1
+        Sha256 = Get-RemoveIntegrationControlContractSha256 -Version $OwnerIdentityVersion
+    }
+    $trustedManifest = [pscustomobject]@{
+        ControlContract = $contract
+        RuntimeContractSha256 = $RuntimeContractSha256.ToLowerInvariant()
+        TargetGenerationId = $Selection.GenerationId
+        TargetGenerationManifestSha256 = $Selection.GenerationManifestSha256
+    }
+    $state = Get-InstanceActivationContractState -Manifest $trustedManifest -ProjectRoot $ProjectRoot
+    if ($null -eq $state) {
+        if ($OwnerIdentityVersion -eq 2) {
+            throw "Owner Identity v2 removal requires committed activation evidence."
+        }
+        return $null
+    }
+    if ($state.Operation.Phase -cne "COMMITTED" -or $state.Activation.Phase -cne "COMMITTED") {
+        throw "Remove CodeDB Integration requires committed activation evidence."
+    }
+    $selectionEvidence = New-InstanceActivationEvidence `
+        -InstanceId $Selection.InstanceId `
+        -GenerationId $Selection.GenerationId `
+        -InstanceManifestSha256 $Selection.InstanceManifestSha256 `
+        -GenerationManifestSha256 $Selection.GenerationManifestSha256 `
+        -GenerationDisposition "CURRENT"
+    if (-not (Test-InstanceActivationEvidenceEqual -Left $state.Operation.Candidate -Right $selectionEvidence) -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $state.Activation.Current -Right $selectionEvidence) -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $state.Activation.Candidate -Right $selectionEvidence)) {
+        throw "Committed activation evidence does not match the removable current selection."
+    }
+    if (Test-Path -LiteralPath $state.Context.Paths.OperationRoot) {
+        if (-not (Test-Path -LiteralPath $state.Context.Paths.OperationRoot -PathType Container)) {
+            throw "Committed activation operation evidence is not a directory."
+        }
+        Assert-NoReparsePoint `
+            -Path $state.Context.Paths.OperationRoot `
+            -Root $ProjectRoot `
+            -Label "committed activation operation directory"
+        if (@(Get-ChildItem -LiteralPath $state.Context.Paths.OperationRoot -Force).Count -ne 0) {
+            throw "Committed activation operation directory is not empty."
+        }
+    }
+    return $state
+}
+
+function Get-RemoveIntegrationInstanceAvailabilityTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Selection
+    )
+
+    $relativePath = "$($script:InstancesRelativePath)/$($Selection.InstanceId)/$($script:InstanceAvailabilityRelativePath)"
+    $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "instance MCP availability state"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Instance MCP availability state is not a regular file."
+    }
+    Assert-NoReparsePoint -Path $path -Root $Selection.InstanceRoot -Label "instance MCP availability state"
+    $document = (Read-BoundedJsonDocument -Path $path -Label "instance MCP availability state" -MaximumBytes (64 * 1024)).Document
+    Assert-RemoveIntegrationJsonFields `
+        -Object $document `
+        -Required @(
+            "schema_version", "managed_by", "project_identity", "instance_id",
+            "generation_id", "availability", "codedb_status_usable",
+            "codedb_text_search_callable", "verified_at_utc") `
+        -Label "instance MCP availability state"
+    [DateTimeOffset]$verifiedAt = [DateTimeOffset]::MinValue
+    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "instance MCP availability state") -ne 1 -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "managed_by" -Label "instance MCP availability state"), $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "project_identity" -Label "instance MCP availability state"), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "instance_id" -Label "instance MCP availability state"), $Selection.InstanceId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $document -Name "generation_id" -Label "instance MCP availability state"), $Selection.GenerationId, [StringComparison]::Ordinal) -or
+        (Get-RequiredJsonString -Object $document -Name "availability" -Label "instance MCP availability state") -cnotin @("AVAILABLE", "UNAVAILABLE") -or
+        -not [DateTimeOffset]::TryParse(
+            (Get-RequiredJsonString -Object $document -Name "verified_at_utc" -Label "instance MCP availability state"),
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$verifiedAt)) {
+        throw "Instance MCP availability state identity or schema is invalid."
+    }
+    return [pscustomobject]@{ RelativePath = $relativePath; Path = $path }
+}
+
+function Remove-EmptyRemoveIntegrationDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()]$Authority
+    )
+
+    $relativePaths = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $Authority -and $null -ne $Authority.ActivationState) {
+        $relativePaths.Add([string]$Authority.ActivationState.Context.Paths.OperationRootRelativePath)
+    }
+    foreach ($version in @(1, 2)) {
+        $operationsRelative = "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v$version/operations"
+        $operationsPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $operationsRelative -Label "activation operations root"
+        if (Test-Path -LiteralPath $operationsPath -PathType Container) {
+            foreach ($entry in @(Get-ChildItem -LiteralPath $operationsPath -Force)) {
+                if ($entry.PSIsContainer -and
+                    $entry.Name -cmatch '^[0-9a-f]{32}$' -and
+                    @(Get-ChildItem -LiteralPath $entry.FullName -Force).Count -eq 0) {
+                    $relativePaths.Add("$operationsRelative/$($entry.Name)")
+                }
+            }
+        }
+        $relativePaths.Add("$($script:InstanceControlRelativePath)/contracts/v0.3-control/v$version/supervisor")
+        $relativePaths.Add($operationsRelative)
+        $relativePaths.Add("$($script:InstanceControlRelativePath)/contracts/v0.3-control/v$version")
+    }
+    $relativePaths.Add("$($script:InstanceControlRelativePath)/supervisor")
+    $relativePaths.Add("$($script:InstanceControlRelativePath)/contracts/v0.3-control")
+    $relativePaths.Add("$($script:InstanceControlRelativePath)/contracts")
+
+    foreach ($relativePath in @($relativePaths | Select-Object -Unique)) {
+        $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "empty integration directory"
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+            throw "Integration directory cleanup found a non-directory: $relativePath"
+        }
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label "empty integration directory"
+        if (@(Get-ChildItem -LiteralPath $path -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+}
+
+function Assert-RemoveIntegrationCompletedState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$DesiredState,
+        [switch]$AllowEmptyCleanupDirectories
+    )
+
+    if (-not $DesiredState.Present -or $DesiredState.Legacy -or
+        $DesiredState.DesiredState -cne "UNINSTALLED" -or
+        $DesiredState.CleanupState -cne "COMPLETE" -or
+        $DesiredState.StateId -cnotmatch '^[0-9a-f]{32}$') {
+        throw "Idempotent integration removal requires the exact authenticated UNINSTALLED / COMPLETE desired state."
+    }
+    foreach ($relativePath in @(
+            $script:InstanceCurrentRelativePath,
+            $script:InstanceLastKnownGoodRelativePath,
+            $script:IntegrationStateRelativePath,
+            $script:McpAvailabilityRelativePath,
+            "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/activation.json",
+            "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/operation.json",
+            "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v2/activation.json",
+            "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v2/operation.json")) {
+        $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "removed integration evidence"
+        if (Test-Path -LiteralPath $path) {
+            throw "Completed integration removal retains authoritative evidence: $relativePath"
+        }
+    }
+    foreach ($version in @(1, 2)) {
+        $operationsPath = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v$version/operations" `
+            -Label "activation operations root"
+        if (Test-Path -LiteralPath $operationsPath) {
+            if (-not (Test-Path -LiteralPath $operationsPath -PathType Container)) {
+                throw "Completed integration removal retains invalid activation operation evidence."
+            }
+            $operationEntries = @(Get-ChildItem -LiteralPath $operationsPath -Force)
+            if ($AllowEmptyCleanupDirectories) {
+                foreach ($entry in $operationEntries) {
+                    if (-not $entry.PSIsContainer -or
+                        $entry.Name -cnotmatch '^[0-9a-f]{32}$' -or
+                        @(Get-ChildItem -LiteralPath $entry.FullName -Force).Count -ne 0) {
+                        throw "Completed integration removal retains activation operation evidence."
+                    }
+                }
+            } elseif ($operationEntries.Count -ne 0) {
+                throw "Completed integration removal retains activation operation evidence."
+            }
+        }
+    }
+    $mcpPlan = Get-RepairMcpConfigPlan `
+        -ProjectRoot $ProjectRoot `
+        -RemoveManagedKeys `
+        -UninstallStateId $DesiredState.StateId
+    if (-not $mcpPlan.Current) {
+        throw "Completed integration removal retains an active generated MCP registration."
+    }
+}
+
+function Invoke-RemoveIntegration {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $lock = $null
+    Set-MaterializerCommandPhase -Phase "PREFLIGHT"
+    try {
+        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
+        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
+        $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        if ($desiredBefore.Present -and -not $desiredBefore.Legacy -and
+            $desiredBefore.DesiredState -ceq "UNINSTALLED" -and
+            $desiredBefore.CleanupState -ceq "COMPLETE") {
+            Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $null
+        }
+        $authority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+        if ($null -eq $authority) {
+            Assert-RemoveIntegrationCompletedState -ProjectRoot $ProjectRoot -DesiredState $desiredBefore
+            Write-Host "[RESULT] UNINSTALLED"
+            Write-Host "[CLEANUP_STATE] COMPLETE"
+            Write-Host "[NEXT] Remove or reinstall the Unity Package through Package Manager."
+            Set-MaterializerCommandPhase -Phase "COMPLETE"
+            Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_CURRENT" -CleanupState "COMPLETE" -NextAction "Remove or reinstall the Unity Package through Package Manager."
+            return
+        }
+
+        $operationId = [guid]::NewGuid().ToString("N")
+        $operationRoot = Get-InstanceProjectPath `
+            -ProjectRoot $ProjectRoot `
+            -RelativePath "$($script:InstanceOperationsRelativePath)/operation-$operationId" `
+            -Label "integration removal operation root"
+        New-Item -ItemType Directory -Force -Path $operationRoot | Out-Null
+        $entries = New-Object System.Collections.Generic.List[object]
+        $stateId = [guid]::NewGuid().ToString("N")
+        $desired = New-InstanceDesiredStateDocument `
+            -ProjectRoot $ProjectRoot `
+            -DesiredState "UNINSTALLED" `
+            -StateId $stateId `
+            -CleanupState "COMPLETE"
+        $desiredBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
+        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
+
+        $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId $stateId
+        if (-not $mcpPlan.Current) {
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:McpConfigRelativePath -Mutation "Write" -DesiredBytes $mcpPlan.DesiredBytes
+        }
+        $legacyState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+        if ($legacyState.Present) {
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:IntegrationStateRelativePath -Mutation "Delete" -DesiredBytes $null
+        }
+        $globalAvailabilityPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpAvailabilityRelativePath -Label "MCP availability state"
+        if (Test-Path -LiteralPath $globalAvailabilityPath) {
+            $null = Assert-McpAvailabilityStateArtifact -Path $globalAvailabilityPath -ProjectRoot $ProjectRoot
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:McpAvailabilityRelativePath -Mutation "Delete" -DesiredBytes $null
+        }
+        foreach ($selection in @($authority.Selection, $authority.LastKnownGood) | Where-Object { $null -ne $_ } | Sort-Object InstanceId -Unique) {
+            $availability = Get-RemoveIntegrationInstanceAvailabilityTarget -ProjectRoot $ProjectRoot -Selection $selection
+            if ($null -ne $availability) {
+                Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $availability.RelativePath -Mutation "Delete" -DesiredBytes $null
+            }
+        }
+        foreach ($target in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath)) {
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $target -Mutation "Delete" -DesiredBytes $null
+        }
+        foreach ($item in @($authority.Inventory | Sort-Object Name)) {
+            $relativePath = [IO.Path]::GetFullPath($item.Path).Substring([IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Length + 1).Replace('\', '/')
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $relativePath -Mutation "Delete" -DesiredBytes $null
+        }
+        if ($null -ne $authority.ActivationState) {
+            foreach ($target in @(
+                    $authority.ActivationState.Context.Paths.ActivationRelativePath,
+                    $authority.ActivationState.Context.Paths.OperationRelativePath)) {
+                Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $target -Mutation "Delete" -DesiredBytes $null
+            }
+        }
+
+        $expectedFingerprint = [string]$authority.OwnerFingerprint
+        $verifyBeforeMutation = {
+            $currentAuthority = Get-RemoveIntegrationAuthority `
+                -Manifest $Manifest `
+                -ProjectRoot $ProjectRoot `
+                -IgnoreInstanceOperationJournal
+            if (-not [string]::Equals($currentAuthority.OwnerFingerprint, $expectedFingerprint, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($currentAuthority.Selection.InstanceId, $authority.Selection.InstanceId, [StringComparison]::Ordinal)) {
+                throw "Remove CodeDB Integration authority changed before mutation."
+            }
+        }.GetNewClosure()
+        $verifyBeforeCommit = {
+            $state = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+            Assert-RemoveIntegrationCompletedState `
+                -ProjectRoot $ProjectRoot `
+                -DesiredState $state `
+                -AllowEmptyCleanupDirectories
+            foreach ($entry in @($entries | Where-Object { $_.Mutation -eq "Delete" })) {
+                if (Test-Path -LiteralPath $entry.TargetPath) {
+                    throw "Remove CodeDB Integration retained an owned target: $($entry.Target)"
+                }
+            }
+        }.GetNewClosure()
+
+        Set-MaterializerCommandPhase -Phase "ACTIVATION"
+        Publish-InstanceOperation `
+            -ProjectRoot $ProjectRoot `
+            -ActionName "RemoveIntegration" `
+            -CandidateInstanceId $operationId `
+            -Entries $entries.ToArray() `
+            -StageRoot $lock.Root `
+            -OperationRoot $operationRoot `
+            -VerifyBeforeMutation $verifyBeforeMutation `
+            -VerifyBeforeCommit $verifyBeforeCommit `
+            -OperationId $operationId
+        Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $authority
+        $finalState = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        Assert-RemoveIntegrationCompletedState -ProjectRoot $ProjectRoot -DesiredState $finalState
+        Write-Host "[RESULT] UNINSTALLED"
+        Write-Host "[CLEANUP_STATE] COMPLETE"
+        Write-Host "[NEXT] Remove or reinstall the Unity Package through Package Manager."
+        Set-MaterializerCommandPhase -Phase "COMPLETE"
+        Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_COMPLETE" -CleanupState "COMPLETE" -NextAction "Remove or reinstall the Unity Package through Package Manager."
+    } catch {
+        if ($script:RequestedExitCode -ne 0) { throw }
+        Set-MaterializerCommandOutcome -Outcome "BLOCKED" -ReasonCode "INTEGRATION_REMOVAL_BLOCKED" -CleanupState "PENDING" -NextAction "Resolve the reported ownership ambiguity before retrying removal."
+        Throw-MaterializerError -Message "Remove CodeDB Integration was blocked without deleting unverified state. $($_.Exception.Message)" -ExitCode 4
+    } finally {
+        Exit-MaterializerLock -Lock $lock
+    }
+}
+
 function Invoke-Remove {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -10424,8 +11274,8 @@ function Invoke-Remove {
 . (Join-Path $PSScriptRoot "codedb-instance-engine.ps1")
 
 try {
-    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")) {
-        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, Repair, Reinstall, Uninstall, or Install." -ExitCode 4
+    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")) {
+        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, RemoveIntegration, Repair, Reinstall, Uninstall, or Install." -ExitCode 4
     }
     if ($PocFixture -and $ConfirmedProjectMutation) {
         Throw-MaterializerError -Message "Fixture and confirmed project mutation modes are mutually exclusive." -ExitCode 4
@@ -10494,8 +11344,8 @@ try {
         Throw-MaterializerError -Message "Automatic cleanup state-captured signal requires a fixture-only Upgrade action." -ExitCode 4
     }
     if (($TestFailAfterMutation -gt 0 -or $TestCrashAfterMutation -gt 0) -and
-        (-not $PocFixture -or $Action -notin @("Upgrade", "Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install"))) {
-        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Redeploy, Sync, Remove, Repair, Reinstall, Uninstall, or Install action." -ExitCode 4
+        (-not $PocFixture -or $Action -notin @("Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install"))) {
+        Throw-MaterializerError -Message "Materializer test faults require a fixture-only Upgrade, Redeploy, Sync, Remove, RemoveIntegration, Repair, Reinstall, Uninstall, or Install action." -ExitCode 4
     }
 
     $projectRootPath = [System.IO.Path]::GetFullPath($ProjectRoot)
@@ -10514,7 +11364,7 @@ try {
         $PayloadRoot = Join-Path $packageRoot "Payload~"
     }
     $payload = Read-PayloadManifest -Root $PayloadRoot -ProjectRoot $projectRootPath
-    if ($Action -in @("Redeploy", "Sync", "Remove", "Repair", "Reinstall", "Uninstall", "Install")) {
+    if ($Action -in @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")) {
         Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action
     }
     $targetRoot = ConvertTo-AbsoluteChildPath -Root $projectRootPath -RelativePath "AIWork/codedb" -Label "host payload root"
@@ -10540,6 +11390,11 @@ try {
             }
             "Remove" {
                 Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -AutomaticCleanup
+                Write-MaterializerCommandResult -ExitCode 0
+                exit 0
+            }
+            "RemoveIntegration" {
+                Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
                 Write-MaterializerCommandResult -ExitCode 0
                 exit 0
             }
@@ -10571,7 +11426,7 @@ try {
         if (-not $script:MachinePrerequisiteStatus.Current) {
             exit 0
         }
-    } elseif ($Action -notin @("Remove", "Uninstall")) {
+    } elseif ($Action -notin @("Remove", "RemoveIntegration", "Uninstall")) {
         $null = Assert-MachinePrerequisiteForAction -Manifest $payload -ActionName $Action
     }
 
@@ -10689,6 +11544,9 @@ try {
         }
         "Remove" {
             Invoke-Remove -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath
+        }
+        "RemoveIntegration" {
+            Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
         }
         "Repair" {
             Invoke-Repair -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath

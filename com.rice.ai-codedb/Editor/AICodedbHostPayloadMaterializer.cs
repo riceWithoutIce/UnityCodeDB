@@ -19,6 +19,7 @@ namespace Rice.AI.Codedb.Editor
         Repair,
         Sync,
         Remove,
+        RemoveIntegration,
         Uninstall,
         Install,
         Reinstall
@@ -153,6 +154,14 @@ namespace Rice.AI.Codedb.Editor
             return Run(AICodedbHostPayloadAction.Remove, true, true);
         }
 
+        internal static Task<AICodedbCommandResult> RunRemoveIntegrationAsync()
+        {
+            return RunAsync(
+                AICodedbHostPayloadAction.RemoveIntegration,
+                true,
+                MutationTimeoutMilliseconds);
+        }
+
         internal static AICodedbCommandResult RunUninstall()
         {
             return Run(AICodedbHostPayloadAction.Uninstall, true, true);
@@ -202,7 +211,7 @@ namespace Rice.AI.Codedb.Editor
             if (requiresConfirmation != confirmedProjectMutation)
                 throw new ArgumentException(
                     requiresConfirmation
-                         ? "Redeploy, Repair, Sync, Remove, Uninstall, Install, and Reinstall require second-level project mutation confirmation."
+                         ? "Redeploy, Repair, Sync, Remove, RemoveIntegration, Uninstall, Install, and Reinstall require second-level project mutation confirmation."
                         : "DryRun, Probe, Verify, and Upgrade do not accept project mutation confirmation.",
                     nameof(confirmedProjectMutation));
 
@@ -226,6 +235,7 @@ namespace Rice.AI.Codedb.Editor
                    || action == AICodedbHostPayloadAction.Repair
                    || action == AICodedbHostPayloadAction.Sync
                    || action == AICodedbHostPayloadAction.Remove
+                   || action == AICodedbHostPayloadAction.RemoveIntegration
                    || action == AICodedbHostPayloadAction.Uninstall
                    || action == AICodedbHostPayloadAction.Install
                    || action == AICodedbHostPayloadAction.Reinstall;
@@ -239,6 +249,7 @@ namespace Rice.AI.Codedb.Editor
                    || action == AICodedbHostPayloadAction.Repair
                    || action == AICodedbHostPayloadAction.Sync
                    || action == AICodedbHostPayloadAction.Remove
+                   || action == AICodedbHostPayloadAction.RemoveIntegration
                    || action == AICodedbHostPayloadAction.Uninstall
                    || action == AICodedbHostPayloadAction.Install
                    || action == AICodedbHostPayloadAction.Reinstall;
@@ -465,7 +476,7 @@ namespace Rice.AI.Codedb.Editor
             new Regex("^[a-z][a-z0-9_]{0,63}$", RegexOptions.CultureInvariant);
         private static readonly HashSet<string> Actions = new HashSet<string>(StringComparer.Ordinal)
         {
-            "UPGRADE", "REDEPLOY", "SYNC", "REMOVE", "REPAIR", "UNINSTALL", "INSTALL", "REINSTALL"
+            "UPGRADE", "REDEPLOY", "SYNC", "REMOVE", "REMOVEINTEGRATION", "REPAIR", "UNINSTALL", "INSTALL", "REINSTALL"
         };
         private static readonly HashSet<string> Properties = new HashSet<string>(StringComparer.Ordinal)
         {

@@ -90,10 +90,13 @@ namespace Rice.AI.Codedb.Editor
 
     internal sealed class AICodedbPackageRuntimeContract
     {
+        internal const int CurrentOwnerIdentityVersion = 2;
+
         private readonly Dictionary<string, AICodedbRuntimeTransition> _transitions;
 
         internal AICodedbRuntimeIdentity Target { get; }
         internal AICodedbControlContractIdentity ControlContract { get; }
+        internal int OwnerIdentityVersion { get; }
         internal string TargetStableWrapperSha256 { get; }
         internal string Sha256 { get; }
 
@@ -102,12 +105,14 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbPackageRuntimeContract(
             AICodedbRuntimeIdentity target,
             AICodedbControlContractIdentity controlContract,
+            int ownerIdentityVersion,
             string sha256,
             string targetStableWrapperSha256,
             IEnumerable<AICodedbRuntimeTransition> transitions)
         {
             Target = target;
             ControlContract = controlContract;
+            OwnerIdentityVersion = ownerIdentityVersion;
             TargetStableWrapperSha256 = targetStableWrapperSha256 ?? string.Empty;
             Sha256 = sha256 ?? string.Empty;
             _transitions = new Dictionary<string, AICodedbRuntimeTransition>(StringComparer.Ordinal);
@@ -202,6 +207,16 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException("Package runtime contract schema or owner is invalid.");
 
             var controlContract = ReadControlContract(document, label);
+            var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
+                document,
+                "owner_identity_version",
+                label);
+            if (ownerIdentityVersion != AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
+                || controlContract.Version != AICodedbControlContractIdentity.DefaultVersion)
+            {
+                throw new InvalidOperationException(
+                    "Package runtime contract does not declare the current Owner Identity contract.");
+            }
             var target = ReadIdentity(document, string.Empty, label);
             ValidateIdentity(target, true, target.PayloadSequence);
             var targetStableWrapperSha256 = ReadTargetStableWrapperSha256(
@@ -268,6 +283,7 @@ namespace Rice.AI.Codedb.Editor
             return new AICodedbPackageRuntimeContract(
                 target,
                 controlContract,
+                ownerIdentityVersion,
                 GetSha256(bytes),
                 targetStableWrapperSha256,
                 transitions);

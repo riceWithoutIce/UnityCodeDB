@@ -223,17 +223,17 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void ActionsSource_RechecksCurrentReinstallEvidenceOnAWorker()
+        public void ActionsSource_RechecksCurrentRemoveIntegrationEvidenceOnAWorker()
         {
             var source = File.ReadAllText(Path.Combine(
                 AICodedbPaths.PackageRootPath,
                 "Editor",
                 "AICodedbActions.cs"));
             var start = source.IndexOf(
-                "RunReinstallCodeDBAsync(",
+                "RunRemoveIntegrationCodeDBAsync(",
                 StringComparison.Ordinal);
             var end = source.IndexOf(
-                "RunSingleConfirmedReinstallCommandAsync(",
+                "private static AICodedbCommandResult RemoveIntegrationAdmissionRejected(",
                 start + 1,
                 StringComparison.Ordinal);
             Assert.That(start, Is.GreaterThanOrEqualTo(0));
@@ -1200,7 +1200,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void Read_PreservesAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed()
+        public void Read_RejectsAuthenticatedCurrentResultWhenLegacyEvidenceIsMalformed()
         {
             var current = CreateCurrentEvidence();
             PublishEvidence(current);
@@ -1211,10 +1211,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot);
 
-            Assert.That(
-                status.State,
-                Is.EqualTo(AICodedbControlContractMigrationState.CompatibleStale));
-            Assert.That(status.DiagnosticDetail, Does.Contain("ignored"));
+            AssertInvalid(status);
         }
 
         private sealed class EvidenceFixture
@@ -1335,6 +1332,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             var workerHash = HashFile(workerPath);
             var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
             var instanceManifestPath = Path.Combine(instanceRoot, "instance.json");
+            const string activationEpoch = "0123456789abcdef0123456789abcdef";
             WriteJson(
                 instanceManifestPath,
                 new Dictionary<string, object>(StringComparer.Ordinal)
@@ -1371,6 +1369,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                     { "instance_relative_path", instanceRelativePath },
                     { "instance_manifest_sha256", HashFile(instanceManifestPath) },
                     { "generation_id", target.GenerationId },
+                    { "owner_identity_version", AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion },
+                    { "activation_epoch", activationEpoch },
                     { "activated_at_utc", "2026-08-31T00:00:02.0000000Z" }
                 });
 
@@ -1408,6 +1408,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 { "control_contract_schema_version", runtimeContract.ControlContract.SchemaVersion },
                 { "control_contract_sha256", runtimeContract.ControlContract.Sha256 },
                 { "control_namespace", runtimePath },
+                { "owner_identity_version", AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion },
+                { "activation_epoch", activationEpoch },
                 { "pipe_name", "\\\\.\\pipe\\" + pipeName },
                 { "generation_id", target.GenerationId },
                 { "target_generation_id", target.GenerationId },
@@ -3139,24 +3141,24 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Conflict, AICodedbHostUpgradePhase.CheckFailed)]
         [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Rollback)]
         [TestCase(AICodedbHostGenerationState.Current, AICodedbHostPayloadState.Current, AICodedbHostUpgradePhase.Current)]
-        public void ReinstallCodeDB_RemainsAvailableAcrossRecoveryStates(
+        public void RemoveIntegration_RemainsAvailableAcrossRecoveryStates(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
             AICodedbHostUpgradePhase upgradePhase)
         {
             Assert.That(
-                AICodedbManagerWindow.IsReinstallCodeDBAvailable(generationState, payloadState, upgradePhase),
+                AICodedbManagerWindow.IsRemoveIntegrationAvailable(generationState, payloadState, upgradePhase),
                 Is.True);
         }
 
         [Test]
-        public void ReinstallCodeDB_CancelDoesNotInvokeRecoveryAction()
+        public void RemoveIntegration_CancelDoesNotInvokeRecoveryAction()
         {
             var confirmationCount = 0;
-            var reinstallCount = 0;
+            var removeCount = 0;
             var confirmedProjectMutation = false;
 
-            var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
+            var ran = AICodedbManagerWindow.ConfirmAndRunRemoveIntegration(
                 () =>
                 {
                     confirmationCount++;
@@ -3164,41 +3166,41 @@ namespace Rice.AI.Codedb.Editor.Tests
                 },
                 confirmed =>
                 {
-                    reinstallCount++;
+                    removeCount++;
                     confirmedProjectMutation = confirmed;
                 });
 
             Assert.That(ran, Is.False);
             Assert.That(confirmationCount, Is.EqualTo(1));
-            Assert.That(reinstallCount, Is.Zero);
+            Assert.That(removeCount, Is.Zero);
             Assert.That(confirmedProjectMutation, Is.False);
         }
 
         [Test]
-        public void ReinstallCodeDB_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
+        public void RemoveIntegration_ConfirmationRunsExactlyOnePackageOwnedRecoveryAction()
         {
-            var reinstallCount = 0;
+            var removeCount = 0;
             var confirmedProjectMutation = false;
 
-            var ran = AICodedbManagerWindow.ConfirmAndRunReinstallCodeDB(
+            var ran = AICodedbManagerWindow.ConfirmAndRunRemoveIntegration(
                 () => true,
                 confirmed =>
                 {
-                    reinstallCount++;
+                    removeCount++;
                     confirmedProjectMutation = confirmed;
                 });
 
             Assert.That(ran, Is.True);
-            Assert.That(reinstallCount, Is.EqualTo(1));
+            Assert.That(removeCount, Is.EqualTo(1));
             Assert.That(confirmedProjectMutation, Is.True);
-            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationTitle, Is.EqualTo("Reinstall CodeDB"));
-            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("fresh project-local instance"));
-            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("unrelated MCP content"));
-            Assert.That(AICodedbManagerWindow.ReinstallCodeDBConfirmationMessage, Does.Contain("External MCP clients and unrelated processes are never terminated"));
+            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationTitle, Is.EqualTo("Remove CodeDB Integration"));
+            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("fresh Owner Identity v2 integration"));
+            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("unrelated MCP content"));
+            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("external processes"));
         }
 
         [Test]
-        public void ReinstallCodeDB_AdmissionRequiresExactCachedAndCurrentEvidence()
+        public void RemoveIntegration_AdmissionRequiresExactCachedAndCurrentEvidence()
         {
             var cached = new AICodedbProductStatus(
                 AICodedbProductState.NeedsAttention,
@@ -3256,14 +3258,14 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "attention");
 
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     cached,
                     installed,
                     obsolete,
                     true),
                 Is.True);
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     cached,
                     installed,
                     obsolete,
@@ -3271,103 +3273,40 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Is.False,
                 "Confirmation must not be inferred from the cached reason.");
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     missingPrerequisite,
                     installed,
                     obsolete,
                     true),
                 Is.False);
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     genericAttention,
                     installed,
                     obsolete,
                     true),
                 Is.False);
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     cached,
                     uninstalled,
                     obsolete,
                     true),
                 Is.False);
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     cached,
                     invalidIntegration,
                     obsolete,
                     true),
                 Is.False);
             Assert.That(
-                AICodedbActions.IsExplicitReinstallAdmissionAllowed(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
                     cached,
                     installed,
                     ambiguous,
                     true),
                 Is.False);
-        }
-
-        [Test]
-        public void ReinstallCodeDB_OneConfirmedCommandRequestsOneReconcileOnlyAfterSuccess()
-        {
-            var commandCount = 0;
-            var reconcileCount = 0;
-            var success = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
-                    true,
-                    () =>
-                    {
-                        commandCount++;
-                        return Task.FromResult(new AICodedbCommandResult(
-                            0,
-                            "success",
-                            string.Empty,
-                            false));
-                    },
-                    () => reconcileCount++)
-                .GetAwaiter()
-                .GetResult();
-
-            Assert.That(success.Succeeded, Is.True);
-            Assert.That(commandCount, Is.EqualTo(1));
-            Assert.That(reconcileCount, Is.EqualTo(1));
-
-            commandCount = 0;
-            reconcileCount = 0;
-            var unconfirmed = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
-                    false,
-                    () =>
-                    {
-                        commandCount++;
-                        return Task.FromResult(new AICodedbCommandResult(
-                            0,
-                            "unexpected",
-                            string.Empty,
-                            false));
-                    },
-                    () => reconcileCount++)
-                .GetAwaiter()
-                .GetResult();
-            Assert.That(unconfirmed.Succeeded, Is.False);
-            Assert.That(commandCount, Is.Zero);
-            Assert.That(reconcileCount, Is.Zero);
-
-            var failure = AICodedbActions.RunSingleConfirmedReinstallCommandAsync(
-                    true,
-                    () =>
-                    {
-                        commandCount++;
-                        return Task.FromResult(new AICodedbCommandResult(
-                            4,
-                            string.Empty,
-                            "blocked",
-                            false));
-                    },
-                    () => reconcileCount++)
-                .GetAwaiter()
-                .GetResult();
-            Assert.That(failure.Succeeded, Is.False);
-            Assert.That(commandCount, Is.EqualTo(1));
-            Assert.That(reconcileCount, Is.Zero);
         }
 
         [Test]

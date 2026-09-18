@@ -228,6 +228,8 @@ namespace Rice.AI.Codedb.Editor
         internal string PayloadVersion { get; }
         internal int PayloadSequence { get; }
         internal int BootstrapProtocol { get; }
+        internal int OwnerIdentityVersion { get; }
+        internal string ActivationEpoch { get; }
         internal string EditorLeaseRelativePath => CanPublishEditorLease
             ? InstanceRelativePath + "/watch/lifecycle/editor-leases"
             : string.Empty;
@@ -244,7 +246,9 @@ namespace Rice.AI.Codedb.Editor
             string payloadVersion,
             int payloadSequence,
             int bootstrapProtocol,
-            string detail)
+            string detail,
+            int ownerIdentityVersion = 0,
+            string activationEpoch = "")
         {
             State = state;
             InstanceId = instanceId ?? string.Empty;
@@ -256,6 +260,8 @@ namespace Rice.AI.Codedb.Editor
             PayloadVersion = payloadVersion ?? string.Empty;
             PayloadSequence = payloadSequence;
             BootstrapProtocol = bootstrapProtocol;
+            OwnerIdentityVersion = ownerIdentityVersion;
+            ActivationEpoch = activationEpoch ?? string.Empty;
             Detail = detail ?? string.Empty;
         }
 
@@ -317,6 +323,14 @@ namespace Rice.AI.Codedb.Editor
                     pointer,
                     "generation_id",
                     pointerLabel);
+                var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
+                    pointer,
+                    "owner_identity_version",
+                    pointerLabel);
+                var activationEpoch = AICodedbStrictJson.GetRequiredString(
+                    pointer,
+                    "activation_epoch",
+                    pointerLabel);
                 var activatedAtText = AICodedbStrictJson.GetRequiredString(pointer, "activated_at_utc", pointerLabel);
                 DateTimeOffset activatedAt;
                 Guid parsedInstanceId;
@@ -334,6 +348,8 @@ namespace Rice.AI.Codedb.Editor
                     || !string.Equals(instanceRelativePath, expectedInstanceRelativePath, StringComparison.Ordinal)
                     || !IsSha256(manifestHash)
                     || !IsGenerationId(pointerGenerationId)
+                    || ownerIdentityVersion != AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
+                    || !IsAttemptId(activationEpoch)
                     || !DateTimeOffset.TryParse(
                         activatedAtText,
                         CultureInfo.InvariantCulture,
@@ -408,6 +424,8 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
+                if (ownerIdentityVersion != runtimeContract.OwnerIdentityVersion)
+                    throw new InvalidOperationException("Current CodeDB instance Owner Identity version is not current.");
                 var selectedIdentity = new AICodedbRuntimeIdentity(
                     packageVersion,
                     payloadVersion,
@@ -432,7 +450,9 @@ namespace Rice.AI.Codedb.Editor
                     payloadVersion,
                     payloadSequence,
                     bootstrapProtocol,
-                    string.Empty);
+                    string.Empty,
+                    ownerIdentityVersion,
+                    activationEpoch);
                 hasValidatedSelection = true;
 
                 // Authenticate the stable router before the more involved
@@ -488,7 +508,9 @@ namespace Rice.AI.Codedb.Editor
                     bootstrapProtocol,
                     state == AICodedbCurrentInstanceState.Current
                         ? "The selected CodeDB instance identity and generation closure are current."
-                        : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.");
+                        : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.",
+                    ownerIdentityVersion,
+                    activationEpoch);
             }
             catch (Exception exception)
             {
@@ -505,7 +527,9 @@ namespace Rice.AI.Codedb.Editor
                         validatedSelection.PayloadVersion,
                         validatedSelection.PayloadSequence,
                         validatedSelection.BootstrapProtocol,
-                        exception.Message);
+                        exception.Message,
+                        validatedSelection.OwnerIdentityVersion,
+                        validatedSelection.ActivationEpoch);
                 }
 
                 return new AICodedbCurrentInstanceStatus(
@@ -634,6 +658,19 @@ namespace Rice.AI.Codedb.Editor
                     && character != '.'
                     && character != '_'
                     && character != '-')
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool IsAttemptId(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 32)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < '0' || character > '9')
+                    && (character < 'a' || character > 'f'))
                     return false;
             }
             return true;

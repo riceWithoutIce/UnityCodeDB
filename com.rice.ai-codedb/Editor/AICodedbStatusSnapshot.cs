@@ -731,7 +731,7 @@ namespace Rice.AI.Codedb.Editor
                         == AICodedbProductAttentionReason.ControlContractReinstallRequired)
                     {
                         return string.IsNullOrWhiteSpace(status.Detail)
-                            ? "This CodeDB installation needs attention. Reinstall CodeDB once to continue."
+                            ? "This project uses obsolete CodeDB owner evidence. Remove CodeDB Integration, then reinstall the Package to continue."
                             : status.Detail;
                     }
                     if (status.AttentionReason
@@ -756,7 +756,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductAttentionReason.ControlContractReinstallRequired:
                     return AICodedbStatusItem.Warning(
                         "Control contract migration",
-                        "Reinstall required",
+                        "Removal required",
                         diagnostic);
                 case AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous:
                     return AICodedbStatusItem.Error(

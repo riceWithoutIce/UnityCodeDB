@@ -70,6 +70,8 @@ namespace Rice.AI.Codedb.Editor
         internal string GenerationDisposition { get; }
         internal int SupervisorProcessId { get; }
         internal string SelectedInstanceId { get; }
+        internal int OwnerIdentityVersion { get; }
+        internal string ActivationEpoch { get; }
         internal int OperationalObservationSchemaVersion { get; }
         internal string OperationalObservationId { get; }
         internal long OperationalObservationRevision { get; }
@@ -122,6 +124,8 @@ namespace Rice.AI.Codedb.Editor
             long operationalObservationRevision = 0,
             string supervisorId = "",
             string ownerEpoch = "",
+            int ownerIdentityVersion = 0,
+            string activationEpoch = "",
             DateTimeOffset? observedAtUtc = null)
         {
             ConnectionState = connectionState;
@@ -152,6 +156,8 @@ namespace Rice.AI.Codedb.Editor
             OperationalObservationRevision = operationalObservationRevision;
             SupervisorId = supervisorId ?? string.Empty;
             OwnerEpoch = ownerEpoch ?? string.Empty;
+            OwnerIdentityVersion = ownerIdentityVersion;
+            ActivationEpoch = activationEpoch ?? string.Empty;
             CoordinatorFailureCategory = coordinatorFailureCategory;
             ObservedAtUtc = observedAtUtc ?? DateTimeOffset.UtcNow;
         }
@@ -273,6 +279,8 @@ namespace Rice.AI.Codedb.Editor
             long operationalObservationRevision = 0,
             string supervisorId = "",
             string ownerEpoch = "",
+            int ownerIdentityVersion = 0,
+            string activationEpoch = "",
             DateTimeOffset? observedAtUtc = null)
         {
             return new AICodedbSupervisorSnapshot(
@@ -305,6 +313,8 @@ namespace Rice.AI.Codedb.Editor
                 operationalObservationRevision,
                 supervisorId,
                 ownerEpoch,
+                ownerIdentityVersion,
+                activationEpoch,
                 observedAtUtc);
         }
 
@@ -348,6 +358,8 @@ namespace Rice.AI.Codedb.Editor
                 previousSnapshot.OperationalObservationRevision,
                 previousSnapshot.SupervisorId,
                 previousSnapshot.OwnerEpoch,
+                previousSnapshot.OwnerIdentityVersion,
+                previousSnapshot.ActivationEpoch,
                 previousSnapshot.ObservedAtUtc);
         }
     }
@@ -449,6 +461,8 @@ namespace Rice.AI.Codedb.Editor
                 "target_generation_id",
                 "runtime_contract_sha256",
                 "generation_disposition",
+                "owner_identity_version",
+                "activation_epoch",
                 "lifecycle_id",
                 "supervisor_id",
                 "owner_epoch",
@@ -908,18 +922,8 @@ namespace Rice.AI.Codedb.Editor
         {
             if (string.IsNullOrWhiteSpace(actualPipeName))
                 return false;
-            if (TryGetExpectedSupervisorPipeName(projectRoot, runtime, out var canonical)
-                && string.Equals(actualPipeName, canonical, StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            // Protocol v1 originally hashed the native serialized Windows
-            // paths. Recognize that exact identity only long enough to request
-            // an authenticated handoff to the canonical path derivation.
-            return TryGetLegacySupervisorPipeName(
-                       serializedProjectRoot,
-                       serializedRuntime,
-                       out var legacy)
-                   && string.Equals(actualPipeName, legacy, StringComparison.OrdinalIgnoreCase);
+            return TryGetExpectedSupervisorPipeName(projectRoot, runtime, out var canonical)
+                   && string.Equals(actualPipeName, canonical, StringComparison.OrdinalIgnoreCase);
         }
 
         internal static bool PathsEqual(string left, string right)
@@ -1026,6 +1030,8 @@ namespace Rice.AI.Codedb.Editor
             internal string RuntimeContractSha256 { get; }
             internal AICodedbControlContractIdentity ControlContract { get; }
             internal string GenerationDisposition { get; }
+            internal int OwnerIdentityVersion { get; }
+            internal string ActivationEpoch { get; }
             internal int SupervisorProtocolVersion { get; }
             internal string OwnerEpoch { get; }
             internal int SupervisorProcessId { get; }
@@ -1043,6 +1049,8 @@ namespace Rice.AI.Codedb.Editor
                 string runtimeContractSha256,
                 AICodedbControlContractIdentity controlContract,
                 string generationDisposition,
+                int ownerIdentityVersion,
+                string activationEpoch,
                 int supervisorProtocolVersion,
                 string ownerEpoch,
                 int supervisorProcessId,
@@ -1059,6 +1067,8 @@ namespace Rice.AI.Codedb.Editor
                 RuntimeContractSha256 = runtimeContractSha256;
                 ControlContract = controlContract;
                 GenerationDisposition = generationDisposition;
+                OwnerIdentityVersion = ownerIdentityVersion;
+                ActivationEpoch = activationEpoch ?? string.Empty;
                 SupervisorProtocolVersion = supervisorProtocolVersion;
                 OwnerEpoch = ownerEpoch;
                 SupervisorProcessId = supervisorProcessId;
@@ -1340,6 +1350,7 @@ namespace Rice.AI.Codedb.Editor
                         return ConnectSupervisorWorker(
                             normalizedRoot,
                             supervisorStatePath,
+                            context.PackageRoot,
                             runtimeContract,
                             cancellationToken);
                     }
@@ -1352,6 +1363,7 @@ namespace Rice.AI.Codedb.Editor
                 return ConnectSupervisorWorker(
                     normalizedRoot,
                     supervisorStatePath,
+                    context.PackageRoot,
                     runtimeContract,
                     cancellationToken);
             }
@@ -1368,6 +1380,7 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbSupervisorSnapshot ConnectSupervisorWorker(
             string normalizedRoot,
             string statePath,
+            string packageRoot,
             AICodedbPackageRuntimeContract runtimeContract,
             CancellationToken cancellationToken)
         {
@@ -1376,14 +1389,11 @@ namespace Rice.AI.Codedb.Editor
                 var observedIdentity = ReadSupervisorRuntimeIdentity(
                     normalizedRoot,
                     statePath,
+                    packageRoot,
                     runtimeContract);
                 SupervisorRuntimeIdentity identity;
                 if (!TryEnsureCurrentSupervisorProtocol(
-                        normalizedRoot,
-                        statePath,
                         observedIdentity,
-                        runtimeContract,
-                        cancellationToken,
                         out identity,
                         out var protocolError))
                 {
@@ -1415,6 +1425,8 @@ namespace Rice.AI.Codedb.Editor
                     identity.Runtime,
                     identity.ControlContract,
                     identity.SelectedInstanceId,
+                    identity.OwnerIdentityVersion,
+                    identity.ActivationEpoch,
                     identity.SupervisorProcessId);
             }
             catch (OperationCanceledException)
@@ -1432,11 +1444,7 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static bool TryEnsureCurrentSupervisorProtocol(
-            string normalizedRoot,
-            string statePath,
             SupervisorRuntimeIdentity observedIdentity,
-            AICodedbPackageRuntimeContract runtimeContract,
-            CancellationToken cancellationToken,
             out SupervisorRuntimeIdentity identity,
             out string error)
         {
@@ -1444,106 +1452,8 @@ namespace Rice.AI.Codedb.Editor
             error = string.Empty;
             if (observedIdentity.SupervisorProtocolVersion == AICodedbSupervisorProtocol.SupervisorVersion)
                 return true;
-            if (observedIdentity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.LegacySupervisorVersion
-                && observedIdentity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.LegacySupervisorVersionV1)
-            {
-                error = "The running project Supervisor uses an unsupported command protocol.";
-                return false;
-            }
-
-            try
-            {
-                if (!WaitForLegacySupervisorIdle(
-                        normalizedRoot,
-                        statePath,
-                        AICodedbSupervisorProtocol.LegacySupervisorDrainTimeoutMilliseconds,
-                        cancellationToken))
-                {
-                    error = "The legacy project Supervisor did not finish its admitted maintenance operation before protocol handoff.";
-                    return false;
-                }
-
-                if (File.Exists(statePath))
-                {
-                    var shutdownLine = SendPipeRequest(
-                        observedIdentity.PipeName,
-                        AICodedbSupervisorProtocol.BuildCommandRequest(
-                            observedIdentity.AuthToken,
-                            Guid.NewGuid().ToString("N"),
-                            "shutdown",
-                            null,
-                            null,
-                            false),
-                        cancellationToken);
-                    if (string.IsNullOrWhiteSpace(shutdownLine))
-                        throw new InvalidOperationException("The legacy Supervisor closed protocol handoff without a response.");
-                    var shutdown = AICodedbStrictJson.ParseObject(
-                        shutdownLine,
-                        "CodeDB legacy Supervisor handoff response");
-                    if (!AICodedbStrictJson.GetRequiredBoolean(
-                            shutdown,
-                            "ok",
-                            "CodeDB legacy Supervisor handoff response"))
-                    {
-                        throw new InvalidOperationException(
-                            AICodedbStrictJson.GetOptionalNullableString(
-                                shutdown,
-                                "error",
-                                "CodeDB legacy Supervisor handoff response")
-                            ?? "The legacy Supervisor refused protocol handoff.");
-                    }
-                }
-
-                if (!WaitForSupervisorRetirement(
-                        normalizedRoot,
-                        statePath,
-                        observedIdentity.Runtime,
-                        AICodedbSupervisorProtocol.HandoffTimeoutMilliseconds,
-                        cancellationToken))
-                {
-                    error = "The authenticated legacy Supervisor did not retire within the bounded protocol handoff window.";
-                    return false;
-                }
-
-                var context = AICodedbPaths.CaptureExecutionContext();
-                if (!AICodedbSupervisorProtocol.PathsEqual(context.ProjectRoot, normalizedRoot))
-                {
-                    error = "The Unity execution context changed during Supervisor protocol handoff.";
-                    return false;
-                }
-                var launch = AICodedbSupervisorLauncher.EnsureStartedAsync(
-                        context,
-                        cancellationToken)
-                    .GetAwaiter()
-                    .GetResult();
-                if (!launch.Succeeded)
-                {
-                    error = string.IsNullOrWhiteSpace(launch.StandardError)
-                        ? launch.StandardOutput
-                        : launch.StandardError;
-                    return false;
-                }
-
-                identity = ReadSupervisorRuntimeIdentity(
-                    normalizedRoot,
-                    statePath,
-                    runtimeContract);
-                if (identity.SupervisorProtocolVersion != AICodedbSupervisorProtocol.SupervisorVersion)
-                {
-                    error = "The restarted project Supervisor did not publish the current operation protocol.";
-                    return false;
-                }
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception exception)
-            {
-                error = exception.Message;
-                return false;
-            }
+            error = "Owner Identity v1 Supervisor evidence requires explicit integration removal; protocol handoff is disabled.";
+            return false;
         }
 
         internal static bool WaitForLegacySupervisorIdle(
@@ -1582,6 +1492,7 @@ namespace Rice.AI.Codedb.Editor
         private static SupervisorRuntimeIdentity ReadSupervisorRuntimeIdentity(
             string normalizedRoot,
             string statePath,
+            string packageRoot,
             AICodedbPackageRuntimeContract runtimeContract)
         {
             const string label = "CodeDB Supervisor state";
@@ -1610,6 +1521,14 @@ namespace Rice.AI.Codedb.Editor
                 "control_contract_sha256",
                 label);
             var controlNamespace = AICodedbStrictJson.GetRequiredString(state, "control_namespace", label);
+            var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
+                state,
+                "owner_identity_version",
+                label);
+            var activationEpoch = AICodedbStrictJson.GetRequiredString(
+                state,
+                "activation_epoch",
+                label);
             var stateGenerationId = AICodedbStrictJson.GetRequiredString(state, "generation_id", label);
             var targetGenerationId = AICodedbStrictJson.GetRequiredString(state, "target_generation_id", label);
             var selectedGenerationId = AICodedbStrictJson.GetRequiredString(state, "selected_generation_id", label);
@@ -1665,12 +1584,6 @@ namespace Rice.AI.Codedb.Editor
                                     expectedRuntime,
                                     out var expectedPipeName)
                                 && string.Equals(pipeName, expectedPipeName, StringComparison.OrdinalIgnoreCase);
-            var legacyPipe = parsedPipe
-                             && AICodedbSupervisorProtocol.TryGetLegacySupervisorPipeName(
-                                 stateRoot,
-                                 stateRuntime,
-                                 out var legacyPipeName)
-                             && string.Equals(pipeName, legacyPipeName, StringComparison.OrdinalIgnoreCase);
             var dispositionIsCurrent = string.Equals(
                 generationDisposition,
                 "CURRENT",
@@ -1683,9 +1596,7 @@ namespace Rice.AI.Codedb.Editor
                 || evidenceSchema != 1
                 || ownerEvidenceSchema != 1
                 || stateProtocol != AICodedbSupervisorProtocol.Version
-                || (supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
-                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersion
-                    && supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersionV1)
+                || supervisorProtocol != AICodedbSupervisorProtocol.SupervisorVersion
                 || !string.Equals(stateManagedBy, "com.rice.ai-codedb", StringComparison.Ordinal)
                 || !string.Equals(stateRole, AICodedbSupervisorProtocol.SupervisorRole, StringComparison.Ordinal)
                 || !AICodedbSupervisorProtocol.PathsEqual(stateRoot, normalizedRoot)
@@ -1704,13 +1615,13 @@ namespace Rice.AI.Codedb.Editor
                     runtimeContract.ControlContract.Sha256,
                     StringComparison.OrdinalIgnoreCase)
                 || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, expectedRuntime)
+                || ownerIdentityVersion != runtimeContract.OwnerIdentityVersion
+                || !IsActivationEpoch(activationEpoch)
                 || !IsGenerationId(targetGenerationId)
                 || !IsGenerationId(selectedGenerationId)
                 || !string.Equals(stateGenerationId, selectedGenerationId, StringComparison.Ordinal)
-                || (supervisorProtocol != AICodedbSupervisorProtocol.LegacySupervisorVersionV1
-                    && !IsInstanceId(selectedInstanceId))
-                || (!string.IsNullOrWhiteSpace(selectedInstanceId)
-                    && !IsInstanceId(selectedInstanceId))
+                || !IsInstanceId(selectedInstanceId)
+                || !string.Equals(targetGenerationId, runtimeContract.Target.GenerationId, StringComparison.Ordinal)
                 || !IsSha256(runtimeContractSha256)
                 || !string.Equals(
                     runtimeContractSha256,
@@ -1720,7 +1631,7 @@ namespace Rice.AI.Codedb.Editor
                 || (dispositionIsCurrent
                     && !string.Equals(targetGenerationId, selectedGenerationId, StringComparison.Ordinal))
                 || !AICodedbSupervisorProtocol.PathsEqual(stateRuntime, expectedRuntime)
-                || (!canonicalPipe && !legacyPipe)
+                || !canonicalPipe
                 || string.IsNullOrWhiteSpace(authToken)
                 || supervisorProcessId <= 0
                 || evidencePid != supervisorProcessId
@@ -1749,6 +1660,8 @@ namespace Rice.AI.Codedb.Editor
                 runtimeContractSha256,
                 runtimeContract.ControlContract,
                 generationDisposition,
+                ownerIdentityVersion,
+                activationEpoch,
                 supervisorProtocol,
                 ownerEpoch,
                 supervisorProcessId,
@@ -1769,6 +1682,19 @@ namespace Rice.AI.Codedb.Editor
                     || character == '.' || character == '_' || character == '-')
                     continue;
                 return false;
+            }
+            return true;
+        }
+
+        private static bool IsActivationEpoch(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 32)
+                return false;
+            foreach (var character in value)
+            {
+                if ((character < '0' || character > '9')
+                    && (character < 'a' || character > 'f'))
+                    return false;
             }
             return true;
         }
@@ -1959,15 +1885,12 @@ namespace Rice.AI.Codedb.Editor
                 var observedIdentity = ReadSupervisorRuntimeIdentity(
                     normalizedRoot,
                     statePath,
+                    context.PackageRoot,
                     runtimeContract);
                 var identity = observedIdentity;
                 if (!string.Equals(command, "shutdown", StringComparison.Ordinal)
                     && !TryEnsureCurrentSupervisorProtocol(
-                        normalizedRoot,
-                        statePath,
                         observedIdentity,
-                        runtimeContract,
-                        cancellationToken,
                         out identity,
                         out var protocolError))
                 {
@@ -2033,6 +1956,8 @@ namespace Rice.AI.Codedb.Editor
                         identity.Runtime,
                         identity.ControlContract,
                         identity.SelectedInstanceId,
+                        identity.OwnerIdentityVersion,
+                        identity.ActivationEpoch,
                         identity.SupervisorProcessId);
                     eventName = AICodedbStrictJson.GetOptionalNullableString(status, "last_event", "CodeDB Supervisor command status") ?? string.Empty;
                     eventSequence = AICodedbStrictJson.GetOptionalNullableInt32(status, "event_sequence", "CodeDB Supervisor command status") ?? 0;
@@ -2252,6 +2177,8 @@ namespace Rice.AI.Codedb.Editor
                 identity.Runtime,
                 identity.ControlContract,
                 identity.SelectedInstanceId,
+                identity.OwnerIdentityVersion,
+                identity.ActivationEpoch,
                 identity.SupervisorProcessId);
             lock (_gate)
             {
@@ -2665,7 +2592,10 @@ namespace Rice.AI.Codedb.Editor
                 expectedRuntimeContractSha256,
                 expectedGenerationDisposition,
                 expectedRuntime,
-                AICodedbControlContract.CreateDefaultIdentity());
+                AICodedbControlContract.CreateDefaultIdentity(),
+                null,
+                AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion,
+                null);
         }
 
         internal static AICodedbSupervisorSnapshot ParseStatusResponse(
@@ -2678,6 +2608,8 @@ namespace Rice.AI.Codedb.Editor
             string expectedRuntime,
             AICodedbControlContractIdentity expectedControlContract,
             string expectedSelectedInstanceId = null,
+            int expectedOwnerIdentityVersion = AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion,
+            string expectedActivationEpoch = null,
             int expectedSupervisorProcessId = 0)
         {
             var response = AICodedbStrictJson.ParseObject(responseLine, "CodeDB Supervisor response");
@@ -2766,6 +2698,14 @@ namespace Rice.AI.Codedb.Editor
                 status,
                 "selected_instance_id",
                 "CodeDB Supervisor status");
+            var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
+                status,
+                "owner_identity_version",
+                "CodeDB Supervisor status");
+            var activationEpoch = AICodedbStrictJson.GetRequiredString(
+                status,
+                "activation_epoch",
+                "CodeDB Supervisor status");
             var supervisorProcessId = AICodedbStrictJson.GetRequiredInt32(
                 status,
                 "supervisor_pid",
@@ -2844,6 +2784,12 @@ namespace Rice.AI.Codedb.Editor
                     expectedControlContract.Sha256,
                     StringComparison.OrdinalIgnoreCase)
                 || !AICodedbSupervisorProtocol.PathsEqual(controlNamespace, expectedControlNamespace)
+                || ownerIdentityVersion != AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
+                || (expectedOwnerIdentityVersion > 0
+                    && ownerIdentityVersion != expectedOwnerIdentityVersion)
+                || !IsActivationEpoch(activationEpoch)
+                || (!string.IsNullOrWhiteSpace(expectedActivationEpoch)
+                    && !string.Equals(activationEpoch, expectedActivationEpoch, StringComparison.Ordinal))
                 || (!string.IsNullOrWhiteSpace(expectedSelectedInstanceId)
                     && !string.Equals(selectedInstanceId, expectedSelectedInstanceId, StringComparison.Ordinal))
                 || (expectedSupervisorProcessId > 0 && supervisorProcessId != expectedSupervisorProcessId))
@@ -3015,6 +2961,17 @@ namespace Rice.AI.Codedb.Editor
                         "CodeDB Supervisor operational readiness"),
                     runtimeContractSha256,
                     StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(
+                    operational,
+                    "owner_identity_version",
+                    "CodeDB Supervisor operational readiness") != ownerIdentityVersion
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(
+                        operational,
+                        "activation_epoch",
+                        "CodeDB Supervisor operational readiness"),
+                    activationEpoch,
+                    StringComparison.Ordinal)
                 || !string.Equals(
                     AICodedbStrictJson.GetRequiredString(
                         operational,
@@ -3106,6 +3063,8 @@ namespace Rice.AI.Codedb.Editor
                 observationRevision,
                 supervisorId,
                 ownerEpoch,
+                ownerIdentityVersion,
+                activationEpoch,
                 observedAtUtc);
         }
     }
