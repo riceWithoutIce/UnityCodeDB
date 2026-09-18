@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$PackageVersion = "0.3.0-preview.1",
+    [string]$PackageVersion = "0.3.0-preview.3",
     [string]$LocalAppDataRoot = "",
     [switch]$TestMode,
     [string]$TestArchivePath = "",
@@ -23,7 +23,7 @@ try {
     # Result codes remain ASCII even when the host does not allow an encoding change.
 }
 
-$script:ProviderPackageVersion = "0.3.0-preview.1"
+$script:ProviderPackageVersion = "0.3.0-preview.3"
 $script:DistributionManifestPath = Join-Path $PSScriptRoot "codedb-provider-distribution.json"
 $script:ProviderContractPath = Join-Path $PSScriptRoot "..\Payload~\AIWork\codedb\shared\codedb-machine-provider-contract.ps1"
 $script:ExpectedReleaseBaseUrl = "https://github.com/riceWithoutIce/UnityCodeDB/releases/download/codedb-provider-v0.5.0-28e3912-c2"

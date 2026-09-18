@@ -60,9 +60,9 @@ $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
-$expectedUpmPackageVersion = "0.3.0-preview.2"
-$expectedHostCompatibilityPackageVersion = "0.3.0-preview.2"
-$expectedGenerationId = "poc.36"
+$expectedUpmPackageVersion = "0.3.0-preview.3"
+$expectedHostCompatibilityPackageVersion = "0.3.0-preview.3"
+$expectedGenerationId = "poc.37"
 
 # v0.3 P1-B moves command ownership to the project-local Supervisor. Keep
 # these paths in the package boundary so a package cannot silently fall back to
@@ -343,13 +343,13 @@ Assert-Equal `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
 Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 36 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 37 -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
 Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
 $bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
-Assert-Equal -Actual $bootstrapTransitions.Count -Expected 5 -Label "Reviewed bootstrap transition count"
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 6 -Label "Reviewed bootstrap transition count"
 $v024Transition = $bootstrapTransitions[0]
 Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
 Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
@@ -409,6 +409,19 @@ Assert-Equal -Actual ([int]$poc35Transition.source_generation_lease_version) -Ex
 Assert-Equal -Actual ([int]$poc35Transition.source_flat_file_count) -Expected 22 -Label "Reviewed poc.35 bootstrap transition flat file count"
 Assert-Equal -Actual ([string]$poc35Transition.source_flat_closure_sha256) -Expected "132c09b1c2d63b1e8425479b8774addd41bbe363bf598294b923699778563ba4" -Label "Reviewed poc.35 bootstrap transition closure"
 Assert-Equal -Actual ([string]$poc35Transition.source_stable_wrapper_sha256) -Expected "01d9012c649df61056e469ad4382d004dccb89773997a9eb4ce8821ec01ae0ac" -Label "Reviewed poc.35 bootstrap transition stable wrapper"
+$poc36Transition = $bootstrapTransitions[5]
+Assert-Equal -Actual ([string]$poc36Transition.source_tag) -Expected "v0.3.0-preview.2" -Label "Reviewed poc.36 bootstrap transition tag"
+Assert-Equal -Actual ([string]$poc36Transition.source_package_version) -Expected "0.3.0-preview.2" -Label "Reviewed poc.36 bootstrap transition Package"
+Assert-Equal -Actual ([string]$poc36Transition.source_payload_version) -Expected "poc.36" -Label "Reviewed poc.36 bootstrap transition payload"
+Assert-Equal -Actual ([int]$poc36Transition.source_payload_sequence) -Expected 36 -Label "Reviewed poc.36 bootstrap transition sequence"
+Assert-Equal -Actual ([string]$poc36Transition.source_generation_id) -Expected "poc.36" -Label "Reviewed poc.36 bootstrap transition generation"
+Assert-Equal -Actual ([int]$poc36Transition.source_bootstrap_protocol) -Expected 1 -Label "Reviewed poc.36 bootstrap transition protocol"
+Assert-Equal -Actual ([int]$poc36Transition.source_marker_schema_version) -Expected 2 -Label "Reviewed poc.36 bootstrap transition marker schema"
+Assert-Equal -Actual ([int]$poc36Transition.source_host_use_gate_version) -Expected 1 -Label "Reviewed poc.36 bootstrap transition host-use gate"
+Assert-Equal -Actual ([int]$poc36Transition.source_generation_lease_version) -Expected 2 -Label "Reviewed poc.36 bootstrap transition generation lease"
+Assert-Equal -Actual ([int]$poc36Transition.source_flat_file_count) -Expected 22 -Label "Reviewed poc.36 bootstrap transition flat file count"
+Assert-Equal -Actual ([string]$poc36Transition.source_flat_closure_sha256) -Expected "d6c6c13e4a2e1393fa5c705e741d8b13b49b45f970c23936b663d34e2cc2f215" -Label "Reviewed poc.36 bootstrap transition closure"
+Assert-Equal -Actual ([string]$poc36Transition.source_stable_wrapper_sha256) -Expected "01d9012c649df61056e469ad4382d004dccb89773997a9eb4ce8821ec01ae0ac" -Label "Reviewed poc.36 bootstrap transition stable wrapper"
 
 $flatTargetPrefix = "AIWork/codedb/"
 $generationSourcePrefix = "Generations/$expectedGenerationId/"
@@ -485,6 +498,11 @@ $poc35RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc35Retire
     Get-RelativePath -Root $poc35RetiredGenerationSourceRoot -Path $_.FullName
 } | Sort-Object)
 Assert-Equal -Actual $poc35RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.35 retired generation closure"
+$poc36RetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.36"
+$poc36RetiredGenerationRelativePaths = @(Get-ChildItem -LiteralPath $poc36RetiredGenerationSourceRoot -Recurse -File | ForEach-Object {
+    Get-RelativePath -Root $poc36RetiredGenerationSourceRoot -Path $_.FullName
+} | Sort-Object)
+Assert-Equal -Actual $poc36RetiredGenerationRelativePaths.Count -Expected 23 -Label "poc.36 retired generation closure"
 $expectedRetiredTargets = @(
     foreach ($retiredGenerationId in @("poc.22", "poc.23", "poc.24", "poc.25", "poc.26", "poc.27", "poc.28", "poc.29", "poc.30")) {
         foreach ($generationSuffix in $legacyRetiredGenerationRelativePaths) {
@@ -503,6 +521,9 @@ $expectedRetiredTargets = @(
     foreach ($generationSuffix in $poc35RetiredGenerationRelativePaths) {
         "AIWork/.runtime/codedb/host/generations/poc.35/$generationSuffix"
     }
+    foreach ($generationSuffix in $poc36RetiredGenerationRelativePaths) {
+        "AIWork/.runtime/codedb/host/generations/poc.36/$generationSuffix"
+    }
 ) | Sort-Object
 $actualRetiredTargets = New-Object System.Collections.Generic.List[string]
 $seenRetiredTargets = @{}
@@ -514,7 +535,7 @@ foreach ($retiredTargetValue in @($payloadManifest.retired_targets)) {
     $actualRetiredTargets.Add($retiredTarget)
 }
 $actualRetiredTargets = @($actualRetiredTargets | Sort-Object)
-Assert-Equal -Actual $actualRetiredTargets.Count -Expected 281 -Label "Retired target count"
+Assert-Equal -Actual $actualRetiredTargets.Count -Expected 304 -Label "Retired target count"
 Assert-Equal `
     -Actual ($actualRetiredTargets -join "|") `
     -Expected ($expectedRetiredTargets -join "|") `
@@ -874,6 +895,12 @@ foreach ($requiredProviderInstallerBoundary in @(
         -Condition ($providerInstallerSource.IndexOf($requiredProviderInstallerBoundary, [StringComparison]::Ordinal) -ge 0) `
         -Message "Provider installer is missing boundary: $requiredProviderInstallerBoundary"
 }
+Assert-True `
+    -Condition ($providerInstallerSource.IndexOf('[string]$PackageVersion = "0.3.0-preview.3"', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Provider installer default Package version is not the successor candidate."
+Assert-True `
+    -Condition ($providerInstallerSource.IndexOf('$script:ProviderPackageVersion = "0.3.0-preview.3"', [StringComparison]::Ordinal) -ge 0) `
+    -Message "Provider installer contract Package version is not the successor candidate."
 $providerDistributionManifestSource = [System.IO.File]::ReadAllText($providerDistributionManifestPath)
 foreach ($requiredDistributionField in @(
     '"schema_version": 2',

@@ -142,7 +142,7 @@ function Invoke-Installer {
     )
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
-        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.3', '-TestMode',
         '-LocalAppDataRoot', $localAppDataRoot,
         '-TestArchivePath', $archivePath,
         '-TestSignaturePath', $signaturePath
@@ -167,7 +167,7 @@ function Invoke-Installer {
 function Invoke-ProductionTestModeAttempt {
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $originalInstallerPath,
-        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.3', '-TestMode',
         '-LocalAppDataRoot', $localAppDataRoot,
         '-TestArchivePath', $archivePath,
         '-TestSignaturePath', $signaturePath,
@@ -186,7 +186,7 @@ function Invoke-DevelopmentInstaller {
 
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
-        '-PackageVersion', '0.3.0-preview.1', '-TestMode',
+        '-PackageVersion', '0.3.0-preview.3', '-TestMode',
         '-LocalAppDataRoot', $LocalAppDataPath,
         '-TestArchivePath', $ArtifactPath,
         '-TestDistributionManifestPath', $DistributionPath
