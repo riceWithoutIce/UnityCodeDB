@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -377,6 +378,227 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void SupervisorProtocol_ConsumesNodeProducedOwnerIdentityV2Status()
+        {
+            var fixturePath = Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Tests",
+                "Editor",
+                "OwnerIdentityV2Status.json");
+            var templateResponse = File.ReadAllText(fixturePath);
+            var templateEnvelope = AICodedbStrictJson.ParseObject(
+                templateResponse,
+                "Node Owner Identity v2 fixture template");
+            var templateStatus = AICodedbStrictJson.RequireObject(
+                templateEnvelope["status"],
+                "Node Owner Identity v2 fixture template status");
+            var contract = ReadPackageRuntimeContract();
+            var expectedRoot = AICodedbEditorLifecycle.ValidateProjectRoot(_projectRoot);
+            var expectedProjectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(expectedRoot);
+            var expectedRuntime = AICodedbControlContract.GetSupervisorRuntimePath(
+                expectedRoot,
+                contract.ControlContract);
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
+                    expectedRoot,
+                    expectedRuntime,
+                    out var expectedPipeName),
+                Is.True);
+            var expectedPipe = @"\\.\pipe\" + expectedPipeName;
+            var response = BindOwnerIdentityV2FixtureToProjectRoot(
+                templateResponse,
+                templateStatus,
+                expectedRoot,
+                expectedProjectIdentity,
+                expectedRuntime,
+                expectedPipe);
+            var envelope = AICodedbStrictJson.ParseObject(response, "Node Owner Identity v2 fixture");
+            Assert.That(
+                AICodedbStrictJson.GetRequiredBoolean(
+                    envelope,
+                    "ok",
+                    "Node Owner Identity v2 fixture"),
+                Is.True);
+            var status = AICodedbStrictJson.RequireObject(
+                envelope["status"],
+                "Node Owner Identity v2 fixture status");
+            const string expectedSelectedInstanceId = "0123456789abcdef0123456789abcdef";
+            const string expectedActivationEpoch = "1234567890abcdef1234567890abcdef";
+            const int expectedOwnerIdentityVersion = 2;
+            const int expectedSupervisorProcessId = 424200001;
+            const string mismatchedActivationEpoch = "fedcba9876543210fedcba9876543210";
+            var actualRoot = AICodedbStrictJson.GetRequiredString(
+                status,
+                "root",
+                "Node Owner Identity v2 fixture status");
+            var actualRuntime = AICodedbStrictJson.GetRequiredString(
+                status,
+                "runtime",
+                "Node Owner Identity v2 fixture status");
+            var actualGenerationId = AICodedbStrictJson.GetRequiredString(
+                status,
+                "selected_generation_id",
+                "Node Owner Identity v2 fixture status");
+            var actualSelectedInstanceId = AICodedbStrictJson.GetRequiredString(
+                status,
+                "selected_instance_id",
+                "Node Owner Identity v2 fixture status");
+            var actualActivationEpoch = AICodedbStrictJson.GetRequiredString(
+                status,
+                "activation_epoch",
+                "Node Owner Identity v2 fixture status");
+            var actualSupervisorPid = AICodedbStrictJson.GetRequiredInt32(
+                status,
+                "supervisor_pid",
+                "Node Owner Identity v2 fixture status");
+            var actualRuntimeContractSha256 = AICodedbStrictJson.GetRequiredString(
+                status,
+                "runtime_contract_sha256",
+                "Node Owner Identity v2 fixture status");
+
+            Assert.That(actualRoot, Is.EqualTo(expectedRoot));
+            Assert.That(actualRuntime, Is.EqualTo(expectedRuntime));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    status,
+                    "project_identity",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo(expectedProjectIdentity));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    status,
+                    "control_namespace",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo(expectedRuntime));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    status,
+                    "pipe_name",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo(expectedPipe));
+            var operational = AICodedbStrictJson.RequireObject(
+                status["operational_readiness"],
+                "Node Owner Identity v2 fixture operational readiness");
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    operational,
+                    "project_root",
+                    "Node Owner Identity v2 fixture operational readiness"),
+                Is.EqualTo(expectedRoot));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    operational,
+                    "project_identity",
+                    "Node Owner Identity v2 fixture operational readiness"),
+                Is.EqualTo(expectedProjectIdentity));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    operational,
+                    "runtime",
+                    "Node Owner Identity v2 fixture operational readiness"),
+                Is.EqualTo(expectedRuntime));
+            Assert.That(actualGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    status,
+                    "target_generation_id",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(actualRuntimeContractSha256, Is.EqualTo(contract.Sha256));
+            Assert.That(actualSelectedInstanceId, Is.EqualTo(expectedSelectedInstanceId));
+            Assert.That(actualActivationEpoch, Is.EqualTo(expectedActivationEpoch));
+            Assert.That(actualSupervisorPid, Is.EqualTo(expectedSupervisorProcessId));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredInt32(
+                    status,
+                    "owner_identity_version",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo(expectedOwnerIdentityVersion));
+            Assert.That(
+                expectedOwnerIdentityVersion,
+                Is.EqualTo(AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion));
+            Assert.That(
+                AICodedbStrictJson.GetRequiredString(
+                    status,
+                    "last_event_detail",
+                    "Node Owner Identity v2 fixture status"),
+                Is.EqualTo("fixture diagnostic detail"));
+
+            var snapshot = AICodedbSupervisorBridge.ParseStatusResponse(
+                response,
+                expectedRoot,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                expectedRuntime,
+                contract.ControlContract,
+                expectedSelectedInstanceId,
+                expectedOwnerIdentityVersion,
+                expectedActivationEpoch,
+                expectedSupervisorProcessId);
+
+            Assert.That(snapshot.ConnectionState, Is.EqualTo(AICodedbSupervisorConnectionState.Connected));
+            Assert.That(snapshot.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.CoreReady));
+            Assert.That(snapshot.OwnerIdentityVersion, Is.EqualTo(expectedOwnerIdentityVersion));
+            Assert.That(snapshot.ActivationEpoch, Is.EqualTo(expectedActivationEpoch));
+            Assert.That(snapshot.SelectedInstanceId, Is.EqualTo(expectedSelectedInstanceId));
+            Assert.That(snapshot.SupervisorProcessId, Is.EqualTo(expectedSupervisorProcessId));
+            Assert.That(snapshot.TargetGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(snapshot.SelectedGenerationId, Is.EqualTo(contract.Target.GenerationId));
+            Assert.That(snapshot.RuntimeContractSha256, Is.EqualTo(contract.Sha256));
+            Assert.That(snapshot.GenerationDisposition, Is.EqualTo("CURRENT"));
+            Assert.That(snapshot.OperationalObservationSchemaVersion, Is.EqualTo(1));
+            Assert.That(snapshot.OperationalObservationRevision, Is.EqualTo(7000001));
+            Assert.That(snapshot.OperationalObservationId, Is.EqualTo("11111111111111111111111111111111"));
+            Assert.That(snapshot.ReadinessCode, Is.EqualTo("CORE_READY"));
+
+            var adjacentV1Response = response.Replace(
+                "\"owner_identity_version\": 2",
+                "\"owner_identity_version\": 1");
+            Assert.That(adjacentV1Response, Is.Not.EqualTo(response));
+            var adjacentV1 = AICodedbSupervisorBridge.ParseStatusResponse(
+                adjacentV1Response,
+                expectedRoot,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                expectedRuntime,
+                contract.ControlContract,
+                expectedSelectedInstanceId,
+                expectedOwnerIdentityVersion,
+                expectedActivationEpoch,
+                expectedSupervisorProcessId);
+            Assert.That(adjacentV1.ReadinessState, Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(adjacentV1.ReasonCode, Is.EqualTo("SUPERVISOR_IDENTITY_MISMATCH"));
+
+            var activationMismatchResponse = response.Replace(
+                "\"activation_epoch\": \"" + expectedActivationEpoch + "\"",
+                "\"activation_epoch\": \"" + mismatchedActivationEpoch + "\"");
+            Assert.That(activationMismatchResponse, Is.Not.EqualTo(response));
+            var activationMismatch = AICodedbSupervisorBridge.ParseStatusResponse(
+                activationMismatchResponse,
+                expectedRoot,
+                contract.Target.GenerationId,
+                contract.Target.GenerationId,
+                contract.Sha256,
+                "CURRENT",
+                expectedRuntime,
+                contract.ControlContract,
+                expectedSelectedInstanceId,
+                expectedOwnerIdentityVersion,
+                expectedActivationEpoch,
+                expectedSupervisorProcessId);
+            Assert.That(
+                activationMismatch.ReadinessState,
+                Is.EqualTo(AICodedbSupervisorReadinessState.Blocked));
+            Assert.That(
+                activationMismatch.ReasonCode,
+                Is.EqualTo("SUPERVISOR_IDENTITY_MISMATCH"));
+        }
+
+        [Test]
         public void SupervisorProtocol_OperationRequestUsesShortPollingEnvelope()
         {
             const string operationId = "0123456789abcdef0123456789abcdef";
@@ -558,7 +780,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void SupervisorProtocol_UsesCanonicalPipeIdentityAndRecognizesExactV1Handoff()
+        public void SupervisorProtocol_UsesCanonicalV2PipeIdentityAndRejectsV1Handoff()
         {
             var root = "G" + @":\RiceProgram\Test\Test";
             var contract = ReadPackageRuntimeContract();
@@ -572,7 +794,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     runtime,
                     out var canonical),
                 Is.True);
-            Assert.That(canonical, Is.EqualTo("codedb-supervisor-8ef262de0ef456d71b2b"));
+            Assert.That(canonical, Is.EqualTo("codedb-supervisor-4a8c46bec290917c83a6"));
             Assert.That(
                 AICodedbSupervisorProtocol.TryGetLegacySupervisorPipeName(
                     root,
@@ -595,7 +817,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     runtime,
                     root,
                     runtime),
-                Is.True);
+                Is.False);
             Assert.That(
                 AICodedbSupervisorProtocol.IsExpectedSupervisorPipeName(
                     "codedb-supervisor-00000000000000000000",
@@ -4872,6 +5094,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"control_contract_schema_version\":" + contract.ControlContract.SchemaVersion + ","
                    + "\"control_contract_sha256\":\"" + contract.ControlContract.Sha256 + "\","
                    + "\"control_namespace\":\"" + JsonPath(runtime) + "\","
+                   + "\"owner_identity_version\":" + AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion + ","
+                   + "\"activation_epoch\":\"0123456789abcdef0123456789abcdef\","
                    + "\"supervisor_pid\":1234,"
                    + "\"selected_instance_id\":\"" + selectedInstanceId + "\","
                    + "\"coordinator_pid\":1234,"
@@ -4903,6 +5127,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                    + "\"selected_generation_id\":\"" + target.GenerationId + "\","
                    + "\"target_generation_id\":\"" + target.GenerationId + "\","
                    + "\"runtime_contract_sha256\":\"" + contract.Sha256 + "\","
+                   + "\"owner_identity_version\":" + AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion + ","
+                   + "\"activation_epoch\":\"0123456789abcdef0123456789abcdef\","
                    + "\"generation_disposition\":\"CURRENT\","
                    + "\"lifecycle_id\":\"" + lifecycleId + "\","
                    + "\"supervisor_id\":\"" + supervisorId + "\","
@@ -5321,7 +5547,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             }
             CopyDirectory(sourcePayloadRoot, payloadRoot);
 
-            const string generationId = "poc.35";
+            const string generationId = "poc.36";
             var providerIdentityPaths = new[]
             {
                 Path.Combine(payloadRoot, "AIWork", "codedb", "shared", "codedb-machine-provider-contract.ps1"),
@@ -5373,17 +5599,17 @@ namespace Rice.AI.Codedb.Editor.Tests
             payloadManifest = RewriteManifestEntryHash(
                 payloadManifest,
                 "target",
-                "AIWork/.runtime/codedb/host/generations/poc.35/shared/codedb-machine-provider-contract.ps1",
+                "AIWork/.runtime/codedb/host/generations/poc.36/shared/codedb-machine-provider-contract.ps1",
                 GetSha256(providerIdentityPaths[1]));
             payloadManifest = RewriteManifestEntryHash(
                 payloadManifest,
                 "target",
-                "AIWork/.runtime/codedb/host/generations/poc.35/wrapper/codedb-project-instance-worker.mjs",
+                "AIWork/.runtime/codedb/host/generations/poc.36/wrapper/codedb-project-instance-worker.mjs",
                 GetSha256(providerIdentityPaths[2]));
             payloadManifest = RewriteManifestEntryHash(
                 payloadManifest,
                 "target",
-                "AIWork/.runtime/codedb/host/generations/poc.35/generation-manifest.json",
+                "AIWork/.runtime/codedb/host/generations/poc.36/generation-manifest.json",
                 GetSha256(generationManifestPath));
             payloadManifest = RewriteManifestEntryHash(
                 payloadManifest,
@@ -5445,6 +5671,111 @@ namespace Rice.AI.Codedb.Editor.Tests
             var mutated = expression.Replace(json, replacement, 1);
             Assert.That(mutated, Is.Not.EqualTo(json), "The JSON fixture mutation must change the document.");
             return mutated;
+        }
+
+        private static string BindOwnerIdentityV2FixtureToProjectRoot(
+            string response,
+            Dictionary<string, object> templateStatus,
+            string projectRoot,
+            string projectIdentity,
+            string runtime,
+            string pipeName)
+        {
+            var label = "Node Owner Identity v2 fixture template status";
+            var templateRoot = AICodedbStrictJson.GetRequiredString(templateStatus, "root", label);
+            var templateProjectIdentity = AICodedbStrictJson.GetRequiredString(
+                templateStatus,
+                "project_identity",
+                label);
+            var templateRuntime = AICodedbStrictJson.GetRequiredString(templateStatus, "runtime", label);
+            var templateControlNamespace = AICodedbStrictJson.GetRequiredString(
+                templateStatus,
+                "control_namespace",
+                label);
+            var templatePipeName = AICodedbStrictJson.GetRequiredString(
+                templateStatus,
+                "pipe_name",
+                label);
+            var templateOperational = AICodedbStrictJson.RequireObject(
+                templateStatus["operational_readiness"],
+                label + " operational readiness");
+            var templateObservedAtUtc = AICodedbStrictJson.GetRequiredString(
+                templateOperational,
+                "observed_at_utc",
+                label + " operational readiness");
+
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "root",
+                templateRoot,
+                projectRoot,
+                1);
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "project_identity",
+                templateProjectIdentity,
+                projectIdentity,
+                2);
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "runtime",
+                templateRuntime,
+                runtime,
+                2);
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "control_namespace",
+                templateControlNamespace,
+                runtime,
+                1);
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "pipe_name",
+                templatePipeName,
+                pipeName,
+                1);
+            response = ReplaceRequiredJsonStringValues(
+                response,
+                "project_root",
+                templateRoot,
+                projectRoot,
+                1);
+            return ReplaceRequiredJsonStringValues(
+                response,
+                "observed_at_utc",
+                templateObservedAtUtc,
+                DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                1);
+        }
+
+        private static string ReplaceRequiredJsonStringValues(
+            string json,
+            string propertyName,
+            string expectedValue,
+            string replacementValue,
+            int expectedCount)
+        {
+            var pattern = "(?<prefix>\""
+                          + Regex.Escape(propertyName)
+                          + "\"\\s*:\\s*\")"
+                          + Regex.Escape(EscapeJsonStringValue(expectedValue))
+                          + "(?<suffix>\")";
+            var expression = new Regex(pattern, RegexOptions.CultureInvariant);
+            var matches = expression.Matches(json);
+            Assert.That(
+                matches.Count,
+                Is.EqualTo(expectedCount),
+                "The fixture binding target must have the expected cardinality: " + propertyName);
+            var escapedReplacement = EscapeJsonStringValue(replacementValue);
+            return expression.Replace(
+                json,
+                match => match.Groups["prefix"].Value + escapedReplacement + match.Groups["suffix"].Value,
+                expectedCount);
+        }
+
+        private static string EscapeJsonStringValue(string value)
+        {
+            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
         private static void CopyDirectory(string sourceRoot, string targetRoot)

@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 if (process.platform !== "win32") {
   console.log("[DEFERRED] Supervisor named-pipe harness requires Windows.");
@@ -21,41 +22,50 @@ const supervisorScript = path.resolve(
   "..",
   "Tools~",
   "codedb-project-supervisor.mjs");
+const reviewedPackageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const reviewedPayloadRoot = path.join(reviewedPackageRoot, "Payload~");
+const reviewedManifestPath = path.join(reviewedPayloadRoot, "payload-manifest.json");
+const reviewedStableWrapperPath = path.join(
+  reviewedPayloadRoot,
+  "AIWork",
+  "codedb",
+  "wrapper",
+  "codedb-project-wrapper.mjs");
 const TARGET = Object.freeze({
-  packageVersion: "0.2.5-preview.5",
-  payloadVersion: "poc.34",
-  payloadSequence: 34,
-  generationId: "poc.34",
+  packageVersion: "0.3.0-preview.2",
+  payloadVersion: "poc.36",
+  payloadSequence: 36,
+  generationId: "poc.36",
   bootstrapProtocol: 1
 });
 const PREVIOUS = Object.freeze({
-  packageVersion: "0.2.5-preview.5",
-  payloadVersion: "poc.33",
-  payloadSequence: 33,
-  generationId: "poc.33",
-  bootstrapProtocol: 1
-});
-const SYNTHETIC_BUMP_TARGET = Object.freeze({
-  packageVersion: "0.2.5-preview.6",
+  packageVersion: "0.3.0-preview.1",
   payloadVersion: "poc.35",
   payloadSequence: 35,
   generationId: "poc.35",
   bootstrapProtocol: 1
 });
+const SYNTHETIC_BUMP_TARGET = Object.freeze({
+  packageVersion: "0.3.0-preview.3",
+  payloadVersion: "poc.37",
+  payloadSequence: 37,
+  generationId: "poc.37",
+  bootstrapProtocol: 1
+});
 const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
-const TARGET_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned current stable wrapper\n";
+const TARGET_STABLE_WRAPPER_CONTENT = fs.readFileSync(reviewedStableWrapperPath, "utf8");
 const PREVIOUS_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned previous stable wrapper\n";
 const TARGET_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(TARGET_STABLE_WRAPPER_CONTENT, "utf8"));
 const PREVIOUS_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(PREVIOUS_STABLE_WRAPPER_CONTENT, "utf8"));
 const CONTROL_CONTRACT = Object.freeze({
   id: "v0.3-control",
-  version: 1,
+  version: 2,
   schemaVersion: 1,
   sha256: hashBytes(Buffer.from([
     "com.rice.ai-codedb",
     "control-contract",
     "v0.3-control",
-    "1",
+    "2",
     "1"
   ].join("\n"), "utf8"))
 });
@@ -97,6 +107,7 @@ function createFixture(selected = TARGET) {
   const packageGenerationRoot = path.join(payloadRoot, "Generations", selected.generationId);
   const projectGenerationRoot = path.join(runtimeRoot, "host", "generations", selected.generationId);
   const instanceId = crypto.randomBytes(16).toString("hex");
+  const activationEpoch = crypto.randomBytes(16).toString("hex");
   const instanceRelativePath = `AIWork/.runtime/codedb/instances/${instanceId}`;
   const instanceRoot = path.join(runtimeRoot, "instances", instanceId);
   const coordinatorRuntime = path.join(instanceRoot, "watch", "coordinator");
@@ -160,42 +171,8 @@ function createFixture(selected = TARGET) {
   write(packageGenerationManifest, generationManifestText);
   write(projectGenerationManifest, generationManifestText);
 
-  const contract = {
-    schema_version: 1,
-    managed_by: "com.rice.ai-codedb",
-    control_contract: {
-      id: CONTROL_CONTRACT.id,
-      version: CONTROL_CONTRACT.version,
-      schema_version: CONTROL_CONTRACT.schemaVersion,
-      sha256: CONTROL_CONTRACT.sha256
-    },
-    package_version: TARGET.packageVersion,
-    payload_version: TARGET.payloadVersion,
-    payload_sequence: TARGET.payloadSequence,
-    generation_id: TARGET.generationId,
-    bootstrap_protocol: TARGET.bootstrapProtocol,
-    bootstrap_transitions: [{
-      source_tag: "v0.2.5-preview.5",
-      source_package_version: PREVIOUS.packageVersion,
-      source_payload_version: PREVIOUS.payloadVersion,
-      source_payload_sequence: PREVIOUS.payloadSequence,
-      source_generation_id: PREVIOUS.generationId,
-      source_bootstrap_protocol: PREVIOUS.bootstrapProtocol,
-      source_marker_schema_version: 2,
-      source_host_use_gate_version: 1,
-      source_generation_lease_version: 2,
-      source_flat_file_count: 22,
-      source_flat_closure_sha256: "a".repeat(64),
-      source_stable_wrapper_sha256: PREVIOUS_STABLE_WRAPPER_SHA256
-    }],
-    files: [{
-      source: STABLE_WRAPPER_RELATIVE_PATH,
-      target: STABLE_WRAPPER_RELATIVE_PATH,
-      sha256: TARGET_STABLE_WRAPPER_SHA256
-    }]
-  };
   const contractPath = path.join(payloadRoot, "payload-manifest.json");
-  json(contractPath, contract);
+  fs.copyFileSync(reviewedManifestPath, contractPath);
 
   const identity = projectIdentity(root);
   const instanceManifestPath = path.join(instanceRoot, "instance.json");
@@ -227,6 +204,8 @@ function createFixture(selected = TARGET) {
     instance_relative_path: instanceRelativePath,
     instance_manifest_sha256: hashFile(instanceManifestPath),
     generation_id: selected.generationId,
+    owner_identity_version: 2,
+    activation_epoch: activationEpoch,
     activated_at_utc: new Date().toISOString()
   });
 
@@ -258,6 +237,7 @@ function createFixture(selected = TARGET) {
     packageGenerationRoot,
     projectGenerationRoot,
     instanceId,
+    activationEpoch,
     instanceRoot,
     coordinatorRuntime,
     coordinatorScript,
@@ -316,6 +296,7 @@ function installAdditionalFixtureInstance(fixture, identity) {
   write(projectGenerationManifest, generationManifestText);
 
   const instanceId = crypto.randomBytes(16).toString("hex");
+  const activationEpoch = crypto.randomBytes(16).toString("hex");
   const instanceRelativePath = `AIWork/.runtime/codedb/instances/${instanceId}`;
   const instanceRoot = path.join(runtimeRoot, "instances", instanceId);
   for (const directory of ["config", "index", "adapter", "watch", "leases", "logs", "tmp"])
@@ -350,6 +331,8 @@ function installAdditionalFixtureInstance(fixture, identity) {
     instance_relative_path: instanceRelativePath,
     instance_manifest_sha256: hashFile(instanceManifestPath),
     generation_id: identity.generationId,
+    owner_identity_version: 2,
+    activation_epoch: activationEpoch,
     activated_at_utc: new Date().toISOString()
   };
   const stagedSelectionPath = path.join(runtimeRoot, "control", `staged-${instanceId}.json`);
@@ -383,7 +366,8 @@ function installAdditionalFixtureInstance(fixture, identity) {
     coordinatorStatePath,
     coordinatorScript: path.join(projectGenerationRoot, "coordinator", "codedb-watch-coordinator.mjs"),
     watchManager: path.join(projectGenerationRoot, "scripts", "manage-codedb-project-watch.ps1"),
-    stagedSelectionPath
+    stagedSelectionPath,
+    activationEpoch
   };
 }
 
@@ -666,7 +650,7 @@ async function verifyLegacyAndMismatchedRuntimeRejectedWithoutMutation() {
   }
 }
 
-function requestPipe(pipeName, authToken, request) {
+function requestPipe(pipeName, authToken, request, rawLineSink = null) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(pipeName);
     let buffer = "";
@@ -685,7 +669,12 @@ function requestPipe(pipeName, authToken, request) {
       buffer += chunk;
       const newline = buffer.indexOf("\n");
       if (newline >= 0) {
-        try { finish(resolve, JSON.parse(buffer.slice(0, newline))); }
+        try {
+          const rawLine = buffer.slice(0, newline);
+          const response = JSON.parse(rawLine);
+          if (rawLineSink) rawLineSink(rawLine);
+          finish(resolve, response);
+        }
         catch (error) { finish(reject, error); }
       }
     });
@@ -848,6 +837,8 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(supervisorState.control_contract_schema_version, CONTROL_CONTRACT.schemaVersion);
     assert.equal(supervisorState.control_contract_sha256, CONTROL_CONTRACT.sha256);
     assert.equal(supervisorState.control_namespace, fixture.runtime);
+    assert.equal(supervisorState.owner_identity_version, 2);
+    assert.equal(supervisorState.activation_epoch, fixture.activationEpoch);
     assert.equal(supervisorState.runtime, fixture.runtime);
     assert.equal(supervisorState.target_generation_id, TARGET.generationId);
     assert.equal(supervisorState.selected_generation_id, selected.generationId);
@@ -884,6 +875,10 @@ async function verifyHappyPath(selected, expectedDisposition) {
     assert.equal(status.status.operational_readiness.supervisor_pid, supervisorState.supervisor_pid);
     assert.equal(status.status.generation_disposition, expectedDisposition);
     assert.equal(status.status.control_namespace, fixture.runtime);
+    assert.equal(status.status.owner_identity_version, 2);
+    assert.equal(status.status.activation_epoch, fixture.activationEpoch);
+    assert.equal(status.status.operational_readiness.owner_identity_version, 2);
+    assert.equal(status.status.operational_readiness.activation_epoch, fixture.activationEpoch);
 
     const query = await requestPipe(
       supervisorState.pipe_name,
@@ -1149,6 +1144,71 @@ async function verifyQueryFirstBoundedMaintenanceQueue() {
   }
 }
 
+function loadSupervisorSnapshotPredicates() {
+  const lines = fs.readFileSync(supervisorScript, "utf8").split(/\r?\n/);
+  const functionSource = (name) => {
+    const start = lines.findIndex((line) => line.startsWith(`function ${name}(`));
+    assert.notEqual(start, -1, `Missing production predicate ${name}.`);
+    const next = lines.findIndex((line, index) => index > start
+      && /^(?:async )?function |^await main\(/.test(line));
+    assert.notEqual(next, -1, `Missing boundary after production predicate ${name}.`);
+    return lines.slice(start, next).join("\n");
+  };
+  const constantSource = (name) => {
+    const line = lines.find((value) => value.startsWith(`const ${name} = `));
+    assert.ok(line, `Missing production constant ${name}.`);
+    return line;
+  };
+  const fieldsStart = lines.findIndex((line) => line.startsWith("const OPERATIONAL_READINESS_FIELDS = "));
+  const fieldsEnd = lines.findIndex((line, index) => index > fieldsStart
+    && line.startsWith("const { command, options }"));
+  assert.ok(fieldsStart >= 0 && fieldsEnd > fieldsStart);
+  const categoriesStart = lines.findIndex((line) => line.startsWith("const COORDINATOR_FAILURE_CATEGORIES = "));
+  const categoriesEnd = lines.findIndex((line, index) => index > categoriesStart && line.startsWith("const "));
+  assert.ok(categoriesStart >= 0 && categoriesEnd > categoriesStart);
+  return vm.runInNewContext([
+    constantSource("SUPERVISOR_PROTOCOL_VERSION"),
+    constantSource("OPERATIONAL_READINESS_SCHEMA_VERSION"),
+    constantSource("OPERATIONAL_READINESS_MAX_AGE_MS"),
+    lines.slice(categoriesStart, categoriesEnd).join("\n"),
+    lines.slice(fieldsStart, fieldsEnd).join("\n"),
+    ...["requireObject", "validId", "pathsEqual", "stableSupervisorIdentityMatches",
+      "validateOperationalReadinessObservation", "authenticatedStatusMatches"].map(functionSource),
+    "({ identityMatches: stableSupervisorIdentityMatches, matches: authenticatedStatusMatches })"
+  ].join("\n"), { path, process: { platform: process.platform } }, { timeout: 1000 });
+}
+
+function verifySnapshotPredicateBoundaries(predicates, state, status) {
+  const previous = state.operational_readiness;
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const sameSnapshot = { ...status, operational_readiness: clone(previous) };
+  assert.equal(predicates.matches(state, sameSnapshot), true, "Identical snapshot must remain admissible.");
+  const rejected = (label, mutate) => {
+    const changed = clone(sameSnapshot);
+    mutate(changed);
+    assert.equal(predicates.matches(state, changed), false, `${label} unexpectedly passed.`);
+  };
+  rejected("owner mismatch", (value) => { value.owner_epoch = crypto.randomBytes(16).toString("hex"); });
+  rejected("selection mismatch", (value) => { value.selected_instance_id = crypto.randomBytes(16).toString("hex"); });
+  rejected("same-revision conflict", (value) => { value.operational_readiness.detail = "Conflicting snapshot."; });
+  rejected("revision regression", (value) => { value.operational_readiness.revision = previous.revision - 1; });
+  rejected("reused observation ID", (value) => { value.operational_readiness.revision += 1; });
+  rejected("timestamp regression", (value) => {
+    value.operational_readiness = clone(status.operational_readiness);
+    value.operational_readiness.observed_at_utc = new Date(Date.parse(previous.observed_at_utc) - 1).toISOString();
+  });
+  rejected("foreign readiness owner", (value) => {
+    value.operational_readiness = clone(status.operational_readiness);
+    value.operational_readiness.owner_epoch = crypto.randomBytes(16).toString("hex");
+  });
+  rejected("unknown readiness field", (value) => { value.operational_readiness.unknown = true; });
+  const staleState = clone(state);
+  staleState.operational_readiness.observed_at_utc = new Date(Date.now() - 31000).toISOString();
+  assert.equal(predicates.matches(staleState, {
+    ...status, operational_readiness: clone(staleState.operational_readiness)
+  }), false, "Stale authenticated snapshot unexpectedly passed.");
+}
+
 async function verifyOwnerEvidenceAndSingleStarter() {
   const fixture = createFixture(TARGET);
   try {
@@ -1177,6 +1237,29 @@ async function verifyOwnerEvidenceAndSingleStarter() {
       [first.stdout, second.stdout].filter((output) => output.includes("STARTED")).length,
       1,
       "Concurrent starters must converge on one daemon rather than publish two STARTED owners.");
+
+    const predicates = loadSupervisorSnapshotPredicates();
+    await requestPipe(state.pipe_name, state.auth_token, { command: "status" });
+    assert.equal(await waitForCondition(() => {
+      const current = JSON.parse(fs.readFileSync(path.join(fixture.runtime, "supervisor-state.json"), "utf8"));
+      return current.operational_readiness.revision > state.operational_readiness.revision;
+    }), true, "Normal refresh did not advance the readiness snapshot.");
+    const refreshed = await requestPipe(state.pipe_name, state.auth_token, { command: "status" });
+    assert.equal(refreshed.ok, true);
+    const stableOwnerMatches = predicates.identityMatches(state, refreshed.status);
+    const readinessSnapshotEqual = state.operational_readiness.observation_id
+        === refreshed.status.operational_readiness.observation_id
+      && state.operational_readiness.revision === refreshed.status.operational_readiness.revision;
+    assert.equal(stableOwnerMatches, true, "Normal refresh changed the stable owner.");
+    assert.equal(readinessSnapshotEqual, false, "Fixture did not exercise the original exact-snapshot rejection.");
+    assert.equal(predicates.matches(state, refreshed.status), true, "Same owner with advanced readiness was rejected.");
+    verifySnapshotPredicateBoundaries(predicates, state, refreshed.status);
+    const attached = await runSupervisor(fixture, "start");
+    assert.equal(attached.status, 0, "Same owner did not remain admissible after refresh.");
+    assert.match(attached.stdout, /ATTACHED/);
+    const finalState = JSON.parse(fs.readFileSync(path.join(fixture.runtime, "supervisor-state.json"), "utf8"));
+    assert.equal(predicates.identityMatches(state, finalState), true, "Refresh reconnect changed the stable owner.");
+    console.log(`[EVIDENCE] owner_refresh stable_owner_match=${stableOwnerMatches} readiness_snapshot_equal=${readinessSnapshotEqual} advanced_snapshot_admitted=true concurrent_started_count=1 negative_snapshot_boundaries=PASS`);
   } finally {
     await cleanupFixture(fixture);
   }
@@ -1198,6 +1281,11 @@ async function verifyProvenStaleOwnerTakeover() {
     const deadPid = 999999;
     state.supervisor_pid = deadPid;
     state.owner_evidence.pid = deadPid;
+    state.operational_readiness.supervisor_pid = deadPid;
+    assert.equal(
+      state.operational_readiness.supervisor_pid,
+      state.supervisor_pid,
+      "Stale-owner fixture readiness must remain bound to the synthetic dead Supervisor PID.");
     fs.writeFileSync(statePath, jsonText(state), "utf8");
     const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     lock.supervisor_pid = deadPid;
@@ -1852,12 +1940,283 @@ async function verifyRejected(label, selected, mutate, expectedError) {
   }
 }
 
+async function verifyOwnerIdentityV1ContractRejected() {
+  const fixture = createFixture(TARGET);
+  try {
+    const contract = JSON.parse(fs.readFileSync(fixture.contractPath, "utf8"));
+    contract.owner_identity_version = 1;
+    contract.control_contract.version = 1;
+    contract.control_contract.sha256 = hashBytes(Buffer.from([
+      "com.rice.ai-codedb",
+      "control-contract",
+      "v0.3-control",
+      "1",
+      "1"
+    ].join("\n"), "utf8"));
+    json(fixture.contractPath, contract);
+    const rejected = await runSupervisor(fixture, "status");
+    assert.notEqual(rejected.status, 0, "Owner Identity v1 unexpectedly entered the v2 runtime.");
+    assert.match(rejected.stderr, /Owner Identity|runtime contract|version|namespace/i);
+    assert.equal(fs.existsSync(fixture.runtime), false);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifyMismatchedAndMalformedV2OwnersRejected() {
+  const fixture = createFixture(TARGET);
+  try {
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const statePath = path.join(fixture.runtime, "supervisor-state.json");
+    const lockPath = path.join(fixture.runtime, "supervisor.lock");
+    const originalState = fs.readFileSync(statePath, "utf8");
+    const originalLock = fs.readFileSync(lockPath, "utf8");
+
+    const mismatchedLock = JSON.parse(originalLock);
+    mismatchedLock.activation_epoch = crypto.randomBytes(16).toString("hex");
+    json(lockPath, mismatchedLock);
+    const mismatched = await runSupervisor(fixture, "status");
+    assert.notEqual(mismatched.status, 0, "Mismatched v2 state/lock unexpectedly passed.");
+    assert.match(mismatched.stderr, /identity|owner|activation|invalid|ambiguous/i);
+
+    fs.writeFileSync(lockPath, originalLock, "utf8");
+    const malformedState = JSON.parse(originalState);
+    const malformedLock = JSON.parse(originalLock);
+    malformedState.activation_epoch = "not-an-attempt-id";
+    malformedLock.activation_epoch = "not-an-attempt-id";
+    json(statePath, malformedState);
+    json(lockPath, malformedLock);
+    const malformed = await runSupervisor(fixture, "status");
+    assert.notEqual(malformed.status, 0, "Malformed v2 owner unexpectedly passed.");
+    assert.match(malformed.stderr, /identity|owner|epoch|invalid|ambiguous/i);
+
+    fs.writeFileSync(statePath, originalState, "utf8");
+    fs.writeFileSync(lockPath, originalLock, "utf8");
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+const OWNER_IDENTITY_V2_CSHARP_NORMALIZATIONS = Object.freeze([
+  "status.activation_epoch",
+  "status.argv_sha256",
+  "status.control_namespace",
+  "status.coordinator_pid",
+  "status.coordinator_runtime",
+  "status.executable_path",
+  "status.lifecycle_id",
+  "status.last_event_detail",
+  "status.operational_readiness.activation_epoch",
+  "status.operational_readiness.lifecycle_id",
+  "status.operational_readiness.observation_id",
+  "status.operational_readiness.observed_at_utc",
+  "status.operational_readiness.owner_epoch",
+  "status.operational_readiness.project_identity",
+  "status.operational_readiness.project_root",
+  "status.operational_readiness.revision",
+  "status.operational_readiness.runtime",
+  "status.operational_readiness.selected_instance_id",
+  "status.operational_readiness.supervisor_pid",
+  "status.owner_epoch",
+  "status.pipe_name",
+  "status.process_start_identity",
+  "status.project_identity",
+  "status.provider_ready_at_utc",
+  "status.root",
+  "status.runtime",
+  "status.selected_instance_id",
+  "status.supervisor_pid",
+  "status.updated_at_utc"
+]);
+
+function collectChangedPaths(left, right, prefix = "") {
+  if (Object.is(left, right)) return [];
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return [prefix];
+  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
+  return keys.flatMap((key) => collectChangedPaths(
+    left[key],
+    right[key],
+    prefix ? `${prefix}.${key}` : key));
+}
+
+function collectDecodedStringLeaves(value, prefix = "") {
+  if (typeof value === "string") return [{ path: prefix, value }];
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) => collectDecodedStringLeaves(
+    child,
+    prefix ? `${prefix}.${key}` : key));
+}
+
+function assertDecodedFixtureLeavesAreSanitized(value, fixture, supervisorState) {
+  const pathValues = [fixture.root, process.execPath, os.homedir(), os.tmpdir()];
+  const identityValues = [
+    supervisorState.auth_token,
+    fixture.coordinatorToken,
+    fixture.lifecycleId,
+    fixture.instanceId,
+    fixture.activationEpoch
+  ];
+  const forbidden = [
+    ...pathValues.flatMap((candidate) => {
+      const normalized = candidate.replace(/\\/g, "/");
+      return [candidate, normalized, normalized.replace(/\//g, "\\")]
+        .filter((entry, index, entries) => entry && entries.indexOf(entry) === index)
+        .map((entry) => ({ value: entry.toLowerCase(), kind: "path" }));
+    }),
+    ...identityValues
+      .filter(Boolean)
+      .map((entry) => ({ value: entry.toLowerCase(), kind: "identity" }))
+  ];
+  const leaves = collectDecodedStringLeaves(value);
+  for (const leaf of leaves) {
+    const decoded = leaf.value.toLowerCase();
+    for (const candidate of forbidden) {
+      assert.equal(
+        decoded.includes(candidate.value),
+        false,
+        `Sanitized fixture leaf ${leaf.path} retained a ${candidate.kind} value.`);
+    }
+  }
+}
+
+function normalizeOwnerIdentityV2CsharpFixture(response) {
+  const normalized = JSON.parse(JSON.stringify(response));
+  const status = normalized.status;
+  const operational = status.operational_readiness;
+  const normalizedRoot = "C:/codedb-fixture/project";
+  const normalizedRuntime = `${normalizedRoot}/${CONTROL_NAMESPACE_RELATIVE_PATH}`;
+  const normalizedInstanceId = "0123456789abcdef0123456789abcdef";
+  const normalizedActivationEpoch = "1234567890abcdef1234567890abcdef";
+  const normalizedLifecycleId = "node-owner-v2-fixture";
+  const normalizedOwnerEpoch = "abcdefabcdefabcdefabcdefabcdefab";
+  const normalizedSupervisorPid = 424200001;
+  const normalizedCoordinatorPid = 424200002;
+  const normalizedTimestamp = "2000-01-01T00:00:00.000Z";
+
+  status.root = normalizedRoot;
+  status.project_identity = projectIdentity(normalizedRoot);
+  status.runtime = normalizedRuntime;
+  status.control_namespace = normalizedRuntime;
+  status.pipe_name = expectedSupervisorPipe(normalizedRoot, normalizedRuntime);
+  status.activation_epoch = normalizedActivationEpoch;
+  status.selected_instance_id = normalizedInstanceId;
+  status.supervisor_pid = normalizedSupervisorPid;
+  status.coordinator_pid = normalizedCoordinatorPid;
+  status.lifecycle_id = normalizedLifecycleId;
+  status.owner_epoch = normalizedOwnerEpoch;
+  status.process_start_identity = "123456789012345678";
+  status.executable_path = "C:/codedb-fixture/node.exe";
+  status.argv_sha256 = hashBytes(Buffer.from("owner-identity-v2-csharp-fixture", "utf8"));
+  status.provider_ready_at_utc = normalizedTimestamp;
+  status.coordinator_runtime = `${normalizedRoot}/AIWork/.runtime/codedb/instances/${normalizedInstanceId}/watch/coordinator`;
+  status.updated_at_utc = normalizedTimestamp;
+  status.last_event_detail = "fixture diagnostic detail";
+
+  operational.observation_id = "11111111111111111111111111111111";
+  operational.revision = 7000001;
+  operational.observed_at_utc = normalizedTimestamp;
+  operational.project_root = normalizedRoot;
+  operational.project_identity = status.project_identity;
+  operational.runtime = normalizedRuntime;
+  operational.selected_instance_id = normalizedInstanceId;
+  operational.activation_epoch = normalizedActivationEpoch;
+  operational.lifecycle_id = normalizedLifecycleId;
+  operational.owner_epoch = normalizedOwnerEpoch;
+  operational.supervisor_pid = normalizedSupervisorPid;
+  return normalized;
+}
+
+async function verifyOwnerIdentityV2CsharpFixture() {
+  const fixture = createFixture(TARGET);
+  try {
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const supervisorState = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    let rawStatusLine = "";
+    const response = await requestPipe(
+      supervisorState.pipe_name,
+      supervisorState.auth_token,
+      { command: "status" },
+      (line) => { rawStatusLine = line; });
+    assert.ok(rawStatusLine.length > 0, "The authenticated Supervisor status line was not captured.");
+    assert.deepEqual(JSON.parse(rawStatusLine), response);
+    assert.equal(response.ok, true);
+    assert.equal(response.status.owner_identity_version, 2);
+    assert.equal(response.status.operational_readiness.owner_identity_version, 2);
+    assert.equal(response.status.activation_epoch, fixture.activationEpoch);
+    assert.equal(response.status.operational_readiness.activation_epoch, fixture.activationEpoch);
+    assert.equal(response.status.selected_instance_id, fixture.instanceId);
+    assert.equal(response.status.operational_readiness.selected_instance_id, fixture.instanceId);
+    assert.equal(response.status.target_generation_id, TARGET.generationId);
+    assert.equal(response.status.selected_generation_id, TARGET.generationId);
+    assert.equal(response.status.operational_readiness.target_generation_id, TARGET.generationId);
+    assert.equal(response.status.operational_readiness.selected_generation_id, TARGET.generationId);
+    assert.equal(response.status.supervisor_pid, supervisorState.supervisor_pid);
+    assert.equal(response.status.operational_readiness.supervisor_pid, supervisorState.supervisor_pid);
+    assert.equal(response.status.operation, null);
+
+    const normalized = normalizeOwnerIdentityV2CsharpFixture(response);
+    const changedPaths = collectChangedPaths(response, normalized).sort();
+    assert.deepEqual(changedPaths, [...OWNER_IDENTITY_V2_CSHARP_NORMALIZATIONS].sort());
+    assert.equal(normalized.status.owner_identity_version, response.status.owner_identity_version);
+    assert.equal(
+      normalized.status.operational_readiness.owner_identity_version,
+      response.status.operational_readiness.owner_identity_version);
+    assert.equal(normalized.status.control_contract_id, response.status.control_contract_id);
+    assert.equal(normalized.status.control_contract_version, response.status.control_contract_version);
+    assert.equal(normalized.status.control_contract_sha256, response.status.control_contract_sha256);
+    assert.equal(normalized.status.runtime_contract_sha256, response.status.runtime_contract_sha256);
+    assert.equal(normalized.status.target_generation_id, response.status.target_generation_id);
+    assert.equal(normalized.status.selected_generation_id, response.status.selected_generation_id);
+    assert.equal(
+      normalized.status.operational_readiness.runtime_contract_sha256,
+      response.status.operational_readiness.runtime_contract_sha256);
+    assert.equal(normalized.status.activation_epoch, normalized.status.operational_readiness.activation_epoch);
+    assert.equal(normalized.status.owner_epoch, normalized.status.operational_readiness.owner_epoch);
+    assert.equal(normalized.status.supervisor_pid, normalized.status.operational_readiness.supervisor_pid);
+
+    assertDecodedFixtureLeavesAreSanitized(normalized, fixture, supervisorState);
+    const normalizedText = jsonText(normalized);
+    assert.equal(normalizedText.includes('"auth_token"'), false);
+
+    console.log(`[OWNER_IDENTITY_V2_CSHARP_FIXTURE] ${JSON.stringify({
+      raw_status_sha256: hashBytes(Buffer.from(rawStatusLine, "utf8")),
+      normalized_sample_sha256: hashBytes(Buffer.from(normalizedText, "utf8")),
+      normalizations: OWNER_IDENTITY_V2_CSHARP_NORMALIZATIONS,
+      sample_base64: Buffer.from(normalizedText, "utf8").toString("base64")
+    })}`);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
 async function main() {
   assert.equal(
     expectedSupervisorPipe(
       ["G:", "RiceProgram", "Test", "Test"].join("\\"),
       ["G:", "RiceProgram", "Test", "Test", ...CONTROL_NAMESPACE_RELATIVE_PATH.split("/")].join("\\")),
-    "\\\\.\\pipe\\codedb-supervisor-8ef262de0ef456d71b2b");
+    "\\\\.\\pipe\\codedb-supervisor-4a8c46bec290917c83a6");
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "owner-identity-v2-csharp-fixture") {
+    await verifyOwnerIdentityV2CsharpFixture();
+    console.log("[PASS] Actual Supervisor status was normalized into a provenance-backed Owner Identity v2 C# fixture.");
+    return;
+  }
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "owner-identity-v2") {
+    await verifyHappyPath(TARGET, "CURRENT");
+    await verifyOwnerEvidenceAndSingleStarter();
+    await verifyProvenStaleOwnerTakeover();
+    await verifyOwnerIdentityV1ContractRejected();
+    await verifyMismatchedAndMalformedV2OwnersRejected();
+    await verifyPidReuseIsAmbiguousAndNeverStopped();
+    console.log("[PASS] Owner Identity v2 publishes authenticated core_ready evidence and rejects stale, v1, mismatched, malformed, and unknown owners fail-closed.");
+    return;
+  }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "request-queue") {
     await verifyQueryFirstBoundedMaintenanceQueue();
     console.log("[PASS] Supervisor query-first bounded maintenance queue owns priority, coalescing, admission, and owner-epoch binding.");
