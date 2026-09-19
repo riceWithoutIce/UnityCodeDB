@@ -25,6 +25,7 @@ const supervisorScript = path.resolve(
 const reviewedPackageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reviewedPayloadRoot = path.join(reviewedPackageRoot, "Payload~");
 const reviewedManifestPath = path.join(reviewedPayloadRoot, "payload-manifest.json");
+const reviewedPayloadManifest = JSON.parse(fs.readFileSync(reviewedManifestPath, "utf8"));
 const reviewedStableWrapperPath = path.join(
   reviewedPayloadRoot,
   "AIWork",
@@ -32,25 +33,30 @@ const reviewedStableWrapperPath = path.join(
   "wrapper",
   "codedb-project-wrapper.mjs");
 const TARGET = Object.freeze({
-  packageVersion: "0.3.0-preview.2",
-  payloadVersion: "poc.36",
-  payloadSequence: 36,
-  generationId: "poc.36",
-  bootstrapProtocol: 1
+  packageVersion: reviewedPayloadManifest.package_version,
+  payloadVersion: reviewedPayloadManifest.payload_version,
+  payloadSequence: reviewedPayloadManifest.payload_sequence,
+  generationId: reviewedPayloadManifest.generation_id,
+  bootstrapProtocol: reviewedPayloadManifest.bootstrap_protocol
 });
+const previousTransition = reviewedPayloadManifest.bootstrap_transitions[
+  reviewedPayloadManifest.bootstrap_transitions.length - 1];
+assert.ok(previousTransition, "The reviewed Package manifest must retain a predecessor transition.");
 const PREVIOUS = Object.freeze({
-  packageVersion: "0.3.0-preview.1",
-  payloadVersion: "poc.35",
-  payloadSequence: 35,
-  generationId: "poc.35",
-  bootstrapProtocol: 1
+  packageVersion: previousTransition.source_package_version,
+  payloadVersion: previousTransition.source_payload_version,
+  payloadSequence: previousTransition.source_payload_sequence,
+  generationId: previousTransition.source_generation_id,
+  bootstrapProtocol: previousTransition.source_bootstrap_protocol
 });
+const previewVersionMatch = /^(.*-preview\.)(\d+)$/.exec(TARGET.packageVersion);
+assert.ok(previewVersionMatch, "The reviewed Package version must use the preview version contract.");
 const SYNTHETIC_BUMP_TARGET = Object.freeze({
-  packageVersion: "0.3.0-preview.3",
-  payloadVersion: "poc.37",
-  payloadSequence: 37,
-  generationId: "poc.37",
-  bootstrapProtocol: 1
+  packageVersion: `${previewVersionMatch[1]}${Number(previewVersionMatch[2]) + 1}`,
+  payloadVersion: `poc.${TARGET.payloadSequence + 1}`,
+  payloadSequence: TARGET.payloadSequence + 1,
+  generationId: `poc.${TARGET.payloadSequence + 1}`,
+  bootstrapProtocol: TARGET.bootstrapProtocol
 });
 const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
 const TARGET_STABLE_WRAPPER_CONTENT = fs.readFileSync(reviewedStableWrapperPath, "utf8");
@@ -58,16 +64,10 @@ const PREVIOUS_STABLE_WRAPPER_CONTENT = "// synthetic Package-owned previous sta
 const TARGET_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(TARGET_STABLE_WRAPPER_CONTENT, "utf8"));
 const PREVIOUS_STABLE_WRAPPER_SHA256 = hashBytes(Buffer.from(PREVIOUS_STABLE_WRAPPER_CONTENT, "utf8"));
 const CONTROL_CONTRACT = Object.freeze({
-  id: "v0.3-control",
-  version: 2,
-  schemaVersion: 1,
-  sha256: hashBytes(Buffer.from([
-    "com.rice.ai-codedb",
-    "control-contract",
-    "v0.3-control",
-    "2",
-    "1"
-  ].join("\n"), "utf8"))
+  id: reviewedPayloadManifest.control_contract.id,
+  version: reviewedPayloadManifest.control_contract.version,
+  schemaVersion: reviewedPayloadManifest.control_contract.schema_version,
+  sha256: reviewedPayloadManifest.control_contract.sha256
 });
 const CONTROL_NAMESPACE_RELATIVE_PATH = [
   "AIWork",
@@ -2086,7 +2086,7 @@ function normalizeOwnerIdentityV2CsharpFixture(response) {
   const normalized = JSON.parse(JSON.stringify(response));
   const status = normalized.status;
   const operational = status.operational_readiness;
-  const normalizedRoot = "C:/codedb-fixture/project";
+  const normalizedRoot = "fixture://project";
   const normalizedRuntime = `${normalizedRoot}/${CONTROL_NAMESPACE_RELATIVE_PATH}`;
   const normalizedInstanceId = "0123456789abcdef0123456789abcdef";
   const normalizedActivationEpoch = "1234567890abcdef1234567890abcdef";
@@ -2108,7 +2108,7 @@ function normalizeOwnerIdentityV2CsharpFixture(response) {
   status.lifecycle_id = normalizedLifecycleId;
   status.owner_epoch = normalizedOwnerEpoch;
   status.process_start_identity = "123456789012345678";
-  status.executable_path = "C:/codedb-fixture/node.exe";
+  status.executable_path = "fixture://node";
   status.argv_sha256 = hashBytes(Buffer.from("owner-identity-v2-csharp-fixture", "utf8"));
   status.provider_ready_at_utc = normalizedTimestamp;
   status.coordinator_runtime = `${normalizedRoot}/AIWork/.runtime/codedb/instances/${normalizedInstanceId}/watch/coordinator`;

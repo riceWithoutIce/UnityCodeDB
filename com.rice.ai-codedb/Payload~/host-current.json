@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "managed_by": "com.rice.ai-codedb",
-  "package_version": "0.3.0-preview.3",
-  "payload_version": "poc.37",
-  "payload_sequence": 37,
-  "generation_id": "poc.37",
-  "generation_relative_path": "AIWork/.runtime/codedb/host/generations/poc.37",
-  "generation_manifest_sha256": "cb0d06c32c6065a67ecb8a0d612e5fc148a80f516ac459ccdf1aa7176ada4fab",
+  "package_version": "0.3.0-preview.4",
+  "payload_version": "poc.38",
+  "payload_sequence": 38,
+  "generation_id": "poc.38",
+  "generation_relative_path": "AIWork/.runtime/codedb/host/generations/poc.38",
+  "generation_manifest_sha256": "b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638",
   "bootstrap_protocol": 1
 }
