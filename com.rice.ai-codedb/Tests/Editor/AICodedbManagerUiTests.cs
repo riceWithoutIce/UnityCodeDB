@@ -2134,6 +2134,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var status = new AICodedbUserActionStatus();
             status.Start("Configure CodeDB Dependencies", 10d);
+            status.SetProgress(6, 6, "Rechecking CodeDB readiness");
             status.Complete(
                 new AICodedbCommandResult(0, string.Empty, string.Empty, false, 1250),
                 AICodedbProductState.NeedsAttention,
@@ -2142,6 +2143,10 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             var presentation = status.BuildPresentation(11.25d);
 
+            Assert.That(presentation.IsVisible, Is.False,
+                "Completed actions stay in Last activity instead of occupying the live Header status row.");
+            Assert.That(presentation.HasProgress, Is.False,
+                "Terminal completion must not retain a completed progress bar.");
             Assert.That(presentation.IsRunning, Is.False);
             Assert.That(presentation.State, Is.EqualTo(AICodedbStatusState.Warning));
             Assert.That(presentation.StatusLabel, Is.EqualTo("Completed - needs attention"));
@@ -2160,6 +2165,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var status = new AICodedbUserActionStatus();
             status.Start("Install CodeDB", 4d);
+            status.SetProgress(6, 6, "Rechecking CodeDB readiness");
             status.Complete(
                 new AICodedbCommandResult(7, string.Empty, "provider unavailable", false),
                 AICodedbProductState.NeedsAttention,
@@ -2167,6 +2173,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 5d);
 
             var failed = status.BuildPresentation(5d);
+            Assert.That(failed.IsVisible, Is.False,
+                "Failed actions stay in Last activity instead of looking active in the Header.");
+            Assert.That(failed.HasProgress, Is.False,
+                "Terminal failures must not retain a completed progress bar.");
             Assert.That(failed.State, Is.EqualTo(AICodedbStatusState.Error));
             Assert.That(failed.StatusLabel, Is.EqualTo("Failed"));
             Assert.That(failed.Detail, Is.EqualTo("provider unavailable"));

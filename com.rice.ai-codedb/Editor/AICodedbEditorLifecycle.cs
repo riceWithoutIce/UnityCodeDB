@@ -950,6 +950,7 @@ namespace Rice.AI.Codedb.Editor
             var independentPrerequisiteRead = !HasPublishedEditorLease();
             var independentPrerequisiteCurrent = false;
             var coordinatorAdmissionAllowed = !independentPrerequisiteRead;
+            var bootstrapWithoutCoordinatorAllowed = false;
             var coordinatorAdmissionDisposition = independentPrerequisiteRead
                 ? AICodedbCoordinatorAdmissionDisposition.PrerequisiteEvidenceUntrustworthy
                 : AICodedbCoordinatorAdmissionDisposition.ExistingLease;
@@ -1001,6 +1002,11 @@ namespace Rice.AI.Codedb.Editor
                     true,
                     independentPrerequisiteCurrent,
                     HasPublishedEditorLease());
+                bootstrapWithoutCoordinatorAllowed = ShouldContinueInstanceBootstrapWithoutCoordinator(
+                    true,
+                    independentPrerequisiteCurrent,
+                    integrationStatus.State,
+                    coordinatorAdmissionDisposition);
                 if (coordinatorAdmissionAllowed)
                 {
                     Interlocked.Exchange(ref _leasePrerequisiteCurrent, 1);
@@ -1069,7 +1075,9 @@ namespace Rice.AI.Codedb.Editor
                 return LifecycleReconcileResult.WithState(migrationProductStatus.State);
             }
 
-            if (independentPrerequisiteRead && !coordinatorAdmissionAllowed)
+            if (independentPrerequisiteRead
+                && !coordinatorAdmissionAllowed
+                && !bootstrapWithoutCoordinatorAllowed)
             {
                 Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
                 if (independentPrerequisiteStatus.State == AICodedbProductState.MissingPrerequisite)
@@ -1258,11 +1266,43 @@ namespace Rice.AI.Codedb.Editor
                     workerResult.ProductState = productStatus.State;
                     if (!canContinue())
                         return workerResult;
-                    var verifiedInstanceResult = RunSupervisorCommand(
-                        context,
-                        "materialize",
-                        "Probe",
-                        cancellationToken);
+                    AICodedbCommandResult verifiedInstanceResult;
+                    var postUpgradeAdmissionDisposition = RunPostUpgradeBootstrapAdmission(
+                        bootstrapWithoutCoordinatorAllowed,
+                        instanceResult.Succeeded,
+                        () => TryRefreshEditorLeaseForAdmission(context),
+                        () => RunSupervisorCommand(
+                            context,
+                            "materialize",
+                            "Probe",
+                            cancellationToken),
+                        out verifiedInstanceResult);
+                    if (bootstrapWithoutCoordinatorAllowed
+                        && instanceResult.Succeeded
+                        && postUpgradeAdmissionDisposition !=
+                        AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished)
+                    {
+                        AICodedbLifecycleEvidence.RecordCoordinatorAdmissionDisposition(
+                            postUpgradeAdmissionDisposition);
+                        var detail =
+                            "CodeDB could not publish the first Editor lease after instance deployment: "
+                            + postUpgradeAdmissionDisposition
+                            + ".";
+                        var blockedStatus = new AICodedbProductStatus(
+                            AICodedbProductState.NeedsAttention,
+                            productStatus.Prerequisite,
+                            productStatus.Installed,
+                            productStatus.Configured,
+                            productStatus.McpAvailable,
+                            detail,
+                            productStatus.Command,
+                            AICodedbProductAttentionReason.None,
+                            string.Empty);
+                        RememberLifecycleProductStatus(blockedStatus, instanceResult);
+                        workerResult.ProductState = AICodedbProductState.NeedsAttention;
+                        workerResult.Warning = detail;
+                        return workerResult;
+                    }
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedInstanceResult);
                     productStatus = RememberLifecycleProductStatus(productStatus, verifiedInstanceResult);
                     workerResult.ProductState = productStatus.State;
@@ -3220,6 +3260,20 @@ namespace Rice.AI.Codedb.Editor
                    || (prerequisiteCurrent && editorLeasePublished);
         }
 
+        internal static bool ShouldContinueInstanceBootstrapWithoutCoordinator(
+            bool independentPrerequisiteRead,
+            bool prerequisiteCurrent,
+            AICodedbProjectIntegrationState integrationState,
+            AICodedbCoordinatorAdmissionDisposition admissionDisposition)
+        {
+            // A missing selection cannot publish a lease yet. Let only that
+            // exact cold-start state reach the Bridge's authenticated fallback.
+            return independentPrerequisiteRead
+                   && prerequisiteCurrent
+                   && integrationState == AICodedbProjectIntegrationState.Installed
+                   && admissionDisposition == AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing;
+        }
+
         internal static bool ApplyPrerequisiteGatedLeaseRefresh(
             AICodedbProjectIntegrationStatus integrationStatus,
             AICodedbProductStatus productStatus,
@@ -3397,6 +3451,33 @@ namespace Rice.AI.Codedb.Editor
         private static void RefreshEditorLeaseForIntegrationState(AICodedbEditorExecutionContext context)
         {
             _ = TryRefreshEditorLeaseForAdmission(context);
+        }
+
+        internal static AICodedbCoordinatorAdmissionDisposition RunPostUpgradeBootstrapAdmission(
+            bool bootstrapWithoutCoordinatorAllowed,
+            bool upgradeSucceeded,
+            Func<AICodedbCoordinatorAdmissionDisposition> publishLease,
+            Func<AICodedbCommandResult> verificationProbe,
+            out AICodedbCommandResult verificationResult)
+        {
+            if (publishLease == null)
+                throw new ArgumentNullException(nameof(publishLease));
+            if (verificationProbe == null)
+                throw new ArgumentNullException(nameof(verificationProbe));
+
+            verificationResult = null;
+            if (!bootstrapWithoutCoordinatorAllowed || !upgradeSucceeded)
+            {
+                verificationResult = verificationProbe();
+                return AICodedbCoordinatorAdmissionDisposition.Unknown;
+            }
+
+            var disposition = publishLease();
+            if (disposition != AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished)
+                return disposition;
+
+            verificationResult = verificationProbe();
+            return disposition;
         }
 
         private static AICodedbCoordinatorAdmissionDisposition TryRefreshEditorLeaseForAdmission(

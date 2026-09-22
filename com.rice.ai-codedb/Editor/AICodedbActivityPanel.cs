@@ -456,6 +456,7 @@ namespace Rice.AI.Codedb.Editor
             _completedProductState = productState;
             _statusRefreshSucceeded = statusRefreshSucceeded;
             _completedAt = Math.Max(_startedAt, SanitizeTime(now));
+            ClearProgress();
         }
 
         /// <summary>
@@ -569,7 +570,7 @@ namespace Rice.AI.Codedb.Editor
                         progressLabel);
                 case AICodedbUserActionPhase.Failed:
                     return new AICodedbUserActionPresentation(
-                        true,
+                        false,
                         false,
                         AICodedbStatusState.Error,
                         "Failed",
@@ -646,7 +647,7 @@ namespace Rice.AI.Codedb.Editor
             }
 
             return new AICodedbUserActionPresentation(
-                true,
+                false,
                 false,
                 state,
                 statusLabel,

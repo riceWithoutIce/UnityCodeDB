@@ -96,6 +96,127 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [TestCase(
+            true,
+            true,
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing,
+            ExpectedResult = true)]
+        [TestCase(
+            true,
+            false,
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing,
+            ExpectedResult = false)]
+        [TestCase(
+            true,
+            true,
+            AICodedbProjectIntegrationState.Uninstalled,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing,
+            ExpectedResult = false)]
+        [TestCase(
+            true,
+            true,
+            AICodedbProjectIntegrationState.Invalid,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing,
+            ExpectedResult = false)]
+        [TestCase(
+            true,
+            true,
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid,
+            ExpectedResult = false)]
+        [TestCase(
+            true,
+            true,
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed,
+            ExpectedResult = false)]
+        [TestCase(
+            false,
+            true,
+            AICodedbProjectIntegrationState.Installed,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing,
+            ExpectedResult = false)]
+        public bool InstanceBootstrapWithoutCoordinator_RequiresExactMissingInstanceAdmission(
+            bool independentPrerequisiteRead,
+            bool prerequisiteCurrent,
+            AICodedbProjectIntegrationState integrationState,
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition admissionDisposition)
+        {
+            return AICodedbEditorLifecycle.ShouldContinueInstanceBootstrapWithoutCoordinator(
+                independentPrerequisiteRead,
+                prerequisiteCurrent,
+                integrationState,
+                admissionDisposition);
+        }
+
+        [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed)]
+        [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid)]
+        [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceIneligible)]
+        public void InstanceBootstrap_LeaseAdmissionFailureSkipsCoordinatorProbe(
+            AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition leaseDisposition)
+        {
+            var leaseCount = 0;
+            var probeCount = 0;
+            AICodedbCommandResult verificationResult;
+
+            var actualDisposition = AICodedbEditorLifecycle.RunPostUpgradeBootstrapAdmission(
+                true,
+                true,
+                () =>
+                {
+                    leaseCount++;
+                    return leaseDisposition;
+                },
+                () =>
+                {
+                    probeCount++;
+                    return new AICodedbCommandResult(0, "probe", string.Empty, false);
+                },
+                out verificationResult);
+
+            Assert.That(actualDisposition, Is.EqualTo(leaseDisposition));
+            Assert.That(leaseCount, Is.EqualTo(1));
+            Assert.That(probeCount, Is.Zero);
+            Assert.That(verificationResult, Is.Null);
+        }
+
+        [Test]
+        public void InstanceBootstrap_PublishedLeaseRunsCoordinatorProbe()
+        {
+            var leaseCount = 0;
+            var probeCount = 0;
+            var expectedResult = new AICodedbCommandResult(
+                0,
+                "verified",
+                string.Empty,
+                false);
+            AICodedbCommandResult verificationResult;
+
+            var actualDisposition = AICodedbEditorLifecycle.RunPostUpgradeBootstrapAdmission(
+                true,
+                true,
+                () =>
+                {
+                    leaseCount++;
+                    return AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished;
+                },
+                () =>
+                {
+                    probeCount++;
+                    return expectedResult;
+                },
+                out verificationResult);
+
+            Assert.That(
+                actualDisposition,
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.EditorLeasePublished));
+            Assert.That(leaseCount, Is.EqualTo(1));
+            Assert.That(probeCount, Is.EqualTo(1));
+            Assert.That(verificationResult, Is.SameAs(expectedResult));
+        }
+
+        [TestCase(
             false,
             true,
             true,
