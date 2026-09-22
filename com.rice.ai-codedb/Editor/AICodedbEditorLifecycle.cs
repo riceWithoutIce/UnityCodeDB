@@ -28,6 +28,7 @@ namespace Rice.AI.Codedb.Editor
 
         private const double ReconcileRetrySeconds = 30d;
         private const double InitialReconcileDelaySeconds = 1.5d;
+        private const int ExplicitReconcileWaitMilliseconds = 60000;
         private const int MaximumInitializationRetries = 5;
         private const int InitializationRetryDeferralFrames = 30;
         private const string ManagedBy = "com.rice.ai-codedb";
@@ -54,6 +55,8 @@ namespace Rice.AI.Codedb.Editor
         private static double _nextHeartbeatAt;
         private static double _nextReconcileAt;
         private static int _reconcileInFlight;
+        private static readonly PostProviderReconcileGate PostProviderReconcile =
+            new PostProviderReconcileGate();
         private static int _leaseRefreshInFlight;
         private static int _prerequisiteRecheckInFlight;
         private static int _leasePrerequisiteCurrent;
@@ -381,6 +384,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbLifecycleCallbackKind.ScriptsReloaded);
             try
             {
+                PostProviderReconcile.Abort("Domain Reload deferred the post-Provider reconcile.");
                 AICodedbLifecycleEvidence.RecordDomainReload();
                 // A domain reload invalidates the managed IPC handle. Reconnect
                 // the Bridge to the selected instance, but never launch a
@@ -607,30 +611,39 @@ namespace Rice.AI.Codedb.Editor
         private static async void BeginReconcile(bool force)
         {
             if (_quitting)
+            {
+                PostProviderReconcile.Abort("Editor shutdown deferred the post-Provider reconcile.");
                 return;
+            }
             if (ShouldDeferReconcile(
                     EditorApplication.isCompiling,
                     EditorApplication.isUpdating,
                     IsPlayModeMaintenanceSuspended()))
             {
+                PostProviderReconcile.Abort("Editor maintenance is suspended; retry after Play or compilation.");
                 _nextReconcileAt = EditorApplication.timeSinceStartup + HeartbeatIntervalSeconds;
                 return;
             }
             if (Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
                 return;
 
+            var epoch = PostProviderReconcile.BeginEpoch(out var forcePostProvider);
+            var cacheRevisionAtStart = GetLifecycleCacheRevision();
+            force |= forcePostProvider;
             AICodedbLifecycleEvidence.RecordReconcileStarted();
             // Every reconcile epoch must re-establish the read-only control
             // contract admission before an automatic reconnect can start.
             Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
             _nextReconcileAt = EditorApplication.timeSinceStartup + ReconcileRetrySeconds;
+            LifecycleReconcileResult result = null;
+            var deferredDetail = "The reconcile did not publish a terminal status.";
             try
             {
                 var previousProductState = _lastProductState;
                 // This adapter only moves lifecycle intent off the callback and
                 // guards the local lifetime. The external Supervisor owns
                 // runtime ordering, coalescing, and maintenance admission.
-                var result = await SupervisorIntentAdapter.Dispatch(
+                result = await SupervisorIntentAdapter.Dispatch(
                     AICodedbSupervisorRequestKind.Reconcile,
                     cancellationToken => BackgroundScheduler.QueueMaintenance(
                         (canContinue, workerCancellationToken) => RunReconcileWorker(
@@ -685,17 +698,227 @@ namespace Rice.AI.Codedb.Editor
                 // Play, compilation, and Domain Reload deliberately cancel
                 // queued maintenance. The next lifecycle signal will enqueue
                 // a fresh epoch instead of reporting a spurious failure.
+                deferredDetail = "The reconcile was cancelled by an Editor lifecycle boundary.";
             }
             catch (Exception exception)
             {
+                deferredDetail = "The reconcile failed before a terminal status was published: " + exception.Message;
                 if (!_quitting)
                     Debug.LogWarning($"CodeDB Editor lifecycle reconcile failed: {exception.Message}");
             }
             finally
             {
+                var terminal = CreateReconcileTerminalOutcome(
+                    epoch,
+                    result,
+                    cacheRevisionAtStart,
+                    deferredDetail);
+                var followup = PostProviderReconcile.Complete(epoch, terminal);
                 Interlocked.Exchange(ref _reconcileInFlight, 0);
                 QueueSupervisorReconnect(false);
+                // A request can arrive after Complete but before the in-flight
+                // flag is released, when its own start attempt cannot proceed.
+                if (followup || PostProviderReconcile.HasPendingStart)
+                    BeginReconcile(true);
             }
+        }
+
+        internal enum AICodedbReconcileDisposition
+        {
+            Ready,
+            Uninstalled,
+            MissingPrerequisite,
+            NeedsAttention,
+            Deferred
+        }
+
+        internal sealed class AICodedbReconcileOutcome
+        {
+            internal long Epoch { get; }
+            internal AICodedbReconcileDisposition Disposition { get; }
+            internal AICodedbProductStatus ProductStatus { get; }
+            internal AICodedbCommandResult LastCommandResult { get; }
+            internal long CacheRevision { get; }
+            internal string Detail { get; }
+
+            internal AICodedbReconcileOutcome(
+                long epoch,
+                AICodedbReconcileDisposition disposition,
+                AICodedbProductStatus productStatus,
+                AICodedbCommandResult lastCommandResult,
+                long cacheRevision,
+                string detail)
+            {
+                Epoch = epoch;
+                Disposition = disposition;
+                ProductStatus = productStatus;
+                LastCommandResult = lastCommandResult;
+                CacheRevision = cacheRevision;
+                Detail = string.IsNullOrWhiteSpace(detail)
+                    ? disposition.ToString()
+                    : detail.Length <= 256 ? detail : detail.Substring(0, 256);
+            }
+        }
+
+        internal sealed class PostProviderReconcileGate
+        {
+            private readonly object _gate = new object();
+            private long _epoch;
+            private long _activeEpoch;
+            private long _targetEpoch;
+            private bool _followupPending;
+            private TaskCompletionSource<AICodedbReconcileOutcome> _waiter;
+
+            internal bool HasPendingStart
+            {
+                get
+                {
+                    lock (_gate)
+                        return _waiter != null && _followupPending && _activeEpoch == 0;
+                }
+            }
+
+            internal Task<AICodedbReconcileOutcome> Request(out bool startNow)
+            {
+                lock (_gate)
+                {
+                    if (_waiter != null)
+                    {
+                        startNow = false;
+                        return _waiter.Task;
+                    }
+                    _waiter = new TaskCompletionSource<AICodedbReconcileOutcome>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    _followupPending = true;
+                    _targetEpoch = 0;
+                    startNow = _activeEpoch == 0;
+                    return _waiter.Task;
+                }
+            }
+
+            internal long BeginEpoch(out bool forcePostProvider)
+            {
+                lock (_gate)
+                {
+                    _activeEpoch = ++_epoch;
+                    forcePostProvider = _followupPending;
+                    if (_followupPending)
+                    {
+                        _targetEpoch = _activeEpoch;
+                        _followupPending = false;
+                    }
+                    return _activeEpoch;
+                }
+            }
+
+            internal bool Complete(long epoch, AICodedbReconcileOutcome outcome)
+            {
+                TaskCompletionSource<AICodedbReconcileOutcome> completion = null;
+                bool followup;
+                lock (_gate)
+                {
+                    if (_activeEpoch != epoch)
+                        return false;
+                    _activeEpoch = 0;
+                    if (_waiter != null && _targetEpoch == epoch)
+                    {
+                        completion = _waiter;
+                        _waiter = null;
+                        _targetEpoch = 0;
+                    }
+                    followup = _followupPending;
+                }
+                completion?.TrySetResult(outcome);
+                return followup;
+            }
+
+            internal void Abort(string detail)
+            {
+                TaskCompletionSource<AICodedbReconcileOutcome> completion;
+                long epoch;
+                lock (_gate)
+                {
+                    completion = _waiter;
+                    _waiter = null;
+                    _followupPending = false;
+                    epoch = _targetEpoch != 0 ? _targetEpoch : _epoch + 1;
+                    _targetEpoch = 0;
+                }
+                completion?.TrySetResult(new AICodedbReconcileOutcome(
+                    epoch,
+                    AICodedbReconcileDisposition.Deferred,
+                    default(AICodedbProductStatus),
+                    null,
+                    0,
+                    detail));
+            }
+        }
+
+        private static long GetLifecycleCacheRevision()
+        {
+            lock (HostStatusCacheLock)
+                return _cachedHostStatusRevision;
+        }
+
+        private static AICodedbReconcileOutcome CreateReconcileTerminalOutcome(
+            long epoch,
+            LifecycleReconcileResult result,
+            long cacheRevisionAtStart,
+            string deferredDetail)
+        {
+            AICodedbCommandResult lastCommand;
+            AICodedbProductStatus status;
+            bool hasStatus;
+            long revision;
+            TryGetCachedLifecycleStatus(out lastCommand, out status, out hasStatus, out revision);
+            if (result == null || !result.HasProductState
+                || result.ProductState == AICodedbProductState.Starting
+                || !hasStatus || revision <= cacheRevisionAtStart)
+            {
+                return new AICodedbReconcileOutcome(
+                    epoch, AICodedbReconcileDisposition.Deferred,
+                    default(AICodedbProductStatus), null, revision, deferredDetail);
+            }
+
+            if (status.State != result.ProductState)
+            {
+                if (result.ProductState != AICodedbProductState.NeedsAttention)
+                {
+                    return new AICodedbReconcileOutcome(
+                        epoch, AICodedbReconcileDisposition.Deferred,
+                        default(AICodedbProductStatus), null, revision,
+                        "The published status did not match the reconcile terminal state.");
+                }
+                status = new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    status.Prerequisite, status.Installed, status.Configured,
+                    status.McpAvailable, result.Warning, status.Command,
+                    status.AttentionReason, status.DiagnosticDetail);
+                PublishLifecycleStatusCache(
+                    lastCommand, status, true, GetCachedLifecycleSupervisorSnapshot(),
+                    GetCachedTerminalConvergenceFailure());
+                revision = GetLifecycleCacheRevision();
+            }
+
+            AICodedbReconcileDisposition disposition;
+            switch (status.State)
+            {
+                case AICodedbProductState.Ready:
+                    disposition = AICodedbReconcileDisposition.Ready;
+                    break;
+                case AICodedbProductState.Uninstalled:
+                    disposition = AICodedbReconcileDisposition.Uninstalled;
+                    break;
+                case AICodedbProductState.MissingPrerequisite:
+                    disposition = AICodedbReconcileDisposition.MissingPrerequisite;
+                    break;
+                default:
+                    disposition = AICodedbReconcileDisposition.NeedsAttention;
+                    break;
+            }
+            return new AICodedbReconcileOutcome(
+                epoch, disposition, status, lastCommand, revision,
+                string.IsNullOrWhiteSpace(result.Warning) ? status.Detail : result.Warning);
         }
 
         private static LifecycleReconcileResult RunReconcileWorker(
@@ -895,6 +1118,8 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbPostAdmissionDisposition.IntegrationInvalid);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
+                RememberLifecycleProductStatus(
+                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
                 return LifecycleReconcileResult.WithWarning(
                     AICodedbProductState.NeedsAttention,
                     "CodeDB project integration desired state is invalid: " + integrationStatus.Detail);
@@ -984,6 +1209,12 @@ namespace Rice.AI.Codedb.Editor
                 Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
                 workerResult.ProductState = AICodedbProductState.NeedsAttention;
                 workerResult.Warning = "CodeDB current instance identity is invalid: " + currentInstance.Detail;
+                RememberLifecycleProductStatus(new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    productStatus.Prerequisite, productStatus.Installed,
+                    productStatus.Configured, productStatus.McpAvailable,
+                    workerResult.Warning, productStatus.Command,
+                    productStatus.AttentionReason, productStatus.DiagnosticDetail), hostResult);
                 return workerResult;
             }
             if (!currentInstance.Present || currentInstance.IsCurrent || currentInstance.IsTrustedPrevious)
@@ -1064,6 +1295,12 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbPostAdmissionDisposition.ConvergenceBlocked);
             workerResult.ProductState = AICodedbProductState.NeedsAttention;
             workerResult.Warning = "CodeDB selected-instance state is unsupported by the v0.3 Supervisor route.";
+            RememberLifecycleProductStatus(new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                productStatus.Prerequisite, productStatus.Installed,
+                productStatus.Configured, productStatus.McpAvailable,
+                workerResult.Warning, productStatus.Command,
+                productStatus.AttentionReason, productStatus.DiagnosticDetail), hostResult);
             return workerResult;
         }
 
@@ -1751,6 +1988,38 @@ namespace Rice.AI.Codedb.Editor
                 BeginReconcile(true);
         }
 
+        internal static async Task<AICodedbReconcileOutcome> RequestPostProviderReconcileAsync()
+        {
+            if (!_initialized || _quitting
+                || ShouldDeferReconcile(
+                    EditorApplication.isCompiling,
+                    EditorApplication.isUpdating,
+                    IsPlayModeMaintenanceSuspended()))
+            {
+                return new AICodedbReconcileOutcome(
+                    0, AICodedbReconcileDisposition.Deferred,
+                    default(AICodedbProductStatus), null,
+                    GetLifecycleCacheRevision(),
+                    "Editor maintenance is unavailable; retry after Play or compilation.");
+            }
+
+            bool startNow;
+            var pending = PostProviderReconcile.Request(out startNow);
+            if (startNow)
+                BeginReconcile(true);
+            using (var timeout = new CancellationTokenSource())
+            {
+                var completed = await Task.WhenAny(
+                    pending,
+                    Task.Delay(ExplicitReconcileWaitMilliseconds, timeout.Token));
+                if (completed != pending)
+                    PostProviderReconcile.Abort("The post-Provider reconcile exceeded its bounded wait.");
+                else
+                    timeout.Cancel();
+            }
+            return await pending;
+        }
+
         /// <summary>
         /// Requests a best-effort background observation without forcing the
         /// mutation/convergence branch. The Manager uses this as a lifecycle
@@ -1771,6 +2040,7 @@ namespace Rice.AI.Codedb.Editor
 
         private static void CancelBackgroundMaintenanceForBoundary()
         {
+            PostProviderReconcile.Abort("An Editor lifecycle boundary deferred the post-Provider reconcile.");
             BackgroundScheduler.SetMaintenanceSuspended(true);
             SupervisorIntentAdapter.SetMaintenanceSuspended(true);
         }

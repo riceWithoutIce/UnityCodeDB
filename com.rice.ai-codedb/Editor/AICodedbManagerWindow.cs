@@ -1387,7 +1387,9 @@ namespace Rice.AI.Codedb.Editor
                 ? (Action)(() => RunUserActionAsync(
                     "Configure CodeDB Dependencies",
                     progressLine => AICodedbActions.RunInstallProviderAsync(progressLine),
-                    RecheckHostPayloadAfterProviderAsync))
+                    RecheckHostPayloadAfterProviderAsync,
+                    requestReconcileAfterAction: false,
+                    refreshStatusAfterAction: false))
                 : null;
         }
 
@@ -1397,11 +1399,19 @@ namespace Rice.AI.Codedb.Editor
             if (providerResult == null || !providerResult.Succeeded)
                 return providerResult;
 
-            // The Actions layer consumes only the Bridge's explicit one-shot
-            // bootstrap authorization if the Supervisor has no current instance.
-            var admissionResult = await AICodedbActions.RunHostAdmissionAfterProviderAsync(providerResult);
-            AICodedbEditorLifecycle.RequestReconcile();
-            return admissionResult;
+            var outcome = await AICodedbActions.RunHostAdmissionAfterProviderAsync(providerResult);
+            TryApplyCachedLifecycleStatus();
+            if (outcome == null)
+                return new AICodedbCommandResult(4, string.Empty,
+                    "Lifecycle did not return a post-Provider reconcile outcome.", false);
+
+            var ready = outcome.Disposition ==
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready;
+            return new AICodedbCommandResult(
+                ready ? 0 : 4,
+                ready ? "CodeDB is ready." : string.Empty,
+                ready ? string.Empty : outcome.Detail,
+                false);
         }
 
         private string GetConfigureDependenciesLabel()
@@ -1933,7 +1943,9 @@ namespace Rice.AI.Codedb.Editor
                 RunUserActionAsync(
                     "Configure CodeDB Dependencies",
                     progressLine => AICodedbActions.RunInstallProviderAsync(progressLine),
-                    RecheckHostPayloadAfterProviderAsync);
+                    RecheckHostPayloadAfterProviderAsync,
+                    requestReconcileAfterAction: false,
+                    refreshStatusAfterAction: false);
                 return;
             }
 

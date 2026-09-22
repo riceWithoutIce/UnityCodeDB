@@ -236,137 +236,109 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(source, Does.Contain("RecheckHostPayloadAfterProviderAsync"));
             Assert.That(source, Does.Contain("RunHostAdmissionAfterProviderAsync(providerResult)"));
-            Assert.That(source, Does.Contain("AICodedbEditorLifecycle.RequestReconcile()"));
+            Assert.That(source, Does.Contain("TryApplyCachedLifecycleStatus()"));
             Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.RunDryRun()"));
-            Assert.That(actionsSource, Does.Contain("AICodedbEditorLifecycle.RunSupervisorCommandAsync(\"materialize\", \"Probe\", false)"));
-            Assert.That(actionsSource, Does.Contain("AICodedbEditorLifecycle.RunSupervisorCommandAsync(\"materialize\", \"Install\", true)"));
-            Assert.That(actionsSource, Does.Contain("AICodedbHostPayloadMaterializer.RunProbeAsync"));
-            Assert.That(actionsSource, Does.Contain("AICodedbHostPayloadMaterializer.RunInstallAsync"));
-            Assert.That(actionsSource, Does.Contain("IsSupervisorOneShotFallbackAllowed(supervisorResult)"));
-            Assert.That(actionsSource, Does.Contain("MCP availability requires the current Package-owned Host runtime."));
+            Assert.That(actionsSource, Does.Contain("RequestPostProviderReconcileAsync"));
+            var admissionStart = actionsSource.IndexOf(
+                "RunHostAdmissionAfterProviderAsync(", StringComparison.Ordinal);
+            var admissionEnd = actionsSource.IndexOf(
+                "private static AICodedbCommandResult RunProviderInstaller(",
+                admissionStart,
+                StringComparison.Ordinal);
+            Assert.That(admissionStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(admissionEnd, Is.GreaterThan(admissionStart));
+            var admissionBody = actionsSource.Substring(admissionStart, admissionEnd - admissionStart);
+            Assert.That(admissionBody, Does.Contain("RequestPostProviderReconcileAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("RunSupervisorCommandWithFallbackAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("RunProbeAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("RunInstallAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("MCP availability requires the current Package-owned Host runtime."));
         }
 
         [Test]
-        public void ConfigureDependenciesAdmission_UsesOnlyAuthorizedBootstrapFallback()
+        public void ConfigureDependenciesAdmission_ProviderFailureDoesNotRequestReconcile()
         {
-            var providerSuccess = Result("provider installed");
-            var supervisorCalls = 0;
-            var fallbackCalls = 0;
-            Func<AICodedbCommandResult, AICodedbCommandResult> run = supervisorResult =>
-                AICodedbActions.RunHostAdmissionAfterProviderAsync(
-                        providerSuccess,
-                        () =>
-                        {
-                            supervisorCalls++;
-                            return Task.FromResult(supervisorResult);
-                        },
-                        () =>
-                        {
-                            fallbackCalls++;
-                            return Task.FromResult(Result("bootstrap probe"));
-                        },
-                        () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install unavailable", false)),
-                        () => Task.FromResult(Result("must not install")))
-                    .GetAwaiter()
-                    .GetResult();
-
-            var authorized = run(new AICodedbCommandResult(4, string.Empty, "missing", false, 0, true));
-            Assert.That(authorized.Succeeded, Is.True);
-            Assert.That(supervisorCalls, Is.EqualTo(1));
-            Assert.That(fallbackCalls, Is.EqualTo(1));
-
-            var unauthorized = run(new AICodedbCommandResult(4, string.Empty, "unavailable", false));
-            Assert.That(unauthorized.Succeeded, Is.False);
-            Assert.That(supervisorCalls, Is.EqualTo(2));
-            Assert.That(fallbackCalls, Is.EqualTo(1));
-
-            var current = run(Result("current instance probe"));
-            Assert.That(current.Succeeded, Is.True);
-            Assert.That(supervisorCalls, Is.EqualTo(3));
-            Assert.That(fallbackCalls, Is.EqualTo(1));
-        }
-
-        [Test]
-        public void ConfigureDependenciesAdmission_ProviderFailureDoesNotProbe()
-        {
-            var supervisorCalls = 0;
-            var fallbackCalls = 0;
             var providerFailure = new AICodedbCommandResult(4, string.Empty, "provider failed", false);
-
+            var reconcileCalls = 0;
             var result = AICodedbActions.RunHostAdmissionAfterProviderAsync(
                     providerFailure,
                     () =>
                     {
-                        supervisorCalls++;
-                        return Task.FromResult(Result("must not run"));
-                    },
-                    () =>
-                    {
-                        fallbackCalls++;
-                        return Task.FromResult(Result("must not run"));
-                    },
-                    () => Task.FromResult(Result("must not install")),
-                    () => Task.FromResult(Result("must not install")))
+                        reconcileCalls++;
+                        return Task.FromResult(new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                            1,
+                            AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready,
+                            default(AICodedbProductStatus),
+                            null,
+                            1,
+                            "must not run"));
+                    })
                 .GetAwaiter()
                 .GetResult();
 
-            Assert.That(result, Is.SameAs(providerFailure));
-            Assert.That(supervisorCalls, Is.Zero);
-            Assert.That(fallbackCalls, Is.Zero);
+            Assert.That(result.Disposition, Is.EqualTo(AICodedbEditorLifecycle.AICodedbReconcileDisposition.Deferred));
+            Assert.That(reconcileCalls, Is.Zero);
         }
 
         [Test]
-        public void ConfigureDependenciesAdmission_BootstrapRuntimeRequirementUsesAuthorizedInstall()
+        public void ConfigureDependenciesAdmission_ProviderSuccessAwaitsLifecycleOutcome()
         {
             var providerSuccess = Result("provider installed");
-            var probeFallbackCalls = 0;
-            var installSupervisorCalls = 0;
-            var installFallbackCalls = 0;
-            var runtimeRequired = Result(
-                "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE - "
-                + "MCP availability requires the current Package-owned Host runtime.");
+            var reconcileCalls = 0;
+            var failedProbeShape = new AICodedbCommandResult(
+                4,
+                "[PRODUCT_LAYER PREREQUISITE] CURRENT",
+                "MCP availability requires the current Package-owned Host runtime.",
+                false);
+            var expected = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                7,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention,
+                default(AICodedbProductStatus),
+                failedProbeShape,
+                19,
+                "authoritative lifecycle result");
 
-            var result = AICodedbActions.RunHostAdmissionAfterProviderAsync(
+            var actual = AICodedbActions.RunHostAdmissionAfterProviderAsync(
                     providerSuccess,
-                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "bootstrap", false, 0, true)),
                     () =>
                     {
-                        probeFallbackCalls++;
-                        return Task.FromResult(runtimeRequired);
-                    },
-                    () =>
-                    {
-                        installSupervisorCalls++;
-                        return Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install bootstrap", false, 0, true));
-                    },
-                    () =>
-                    {
-                        installFallbackCalls++;
-                        return Task.FromResult(Result("installed"));
+                        reconcileCalls++;
+                        return Task.FromResult(expected);
                     })
                 .GetAwaiter()
                 .GetResult();
 
-            Assert.That(result.Succeeded, Is.True);
-            Assert.That(probeFallbackCalls, Is.EqualTo(1));
-            Assert.That(installSupervisorCalls, Is.EqualTo(1));
-            Assert.That(installFallbackCalls, Is.EqualTo(1));
+            Assert.That(actual, Is.SameAs(expected));
+            Assert.That(reconcileCalls, Is.EqualTo(1));
+            Assert.That(actual.Epoch, Is.EqualTo(7));
+            Assert.That(actual.CacheRevision, Is.EqualTo(19));
+            Assert.That(actual.Disposition, Is.EqualTo(AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention));
+            Assert.That(actual.LastCommandResult, Is.SameAs(failedProbeShape),
+                "A nonzero Host result with prerequisite stdout and runtime stderr does not select an Actions mutation.");
+        }
 
-            var unauthorizedInstall = AICodedbActions.RunHostAdmissionAfterProviderAsync(
-                    providerSuccess,
-                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "bootstrap", false, 0, true)),
-                    () => Task.FromResult(runtimeRequired),
-                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install denied", false)),
-                    () =>
-                    {
-                        installFallbackCalls++;
-                        return Task.FromResult(Result("must not install"));
-                    })
-                .GetAwaiter()
-                .GetResult();
+        [Test]
+        public void ActionsSource_DoesNotParseHostOutputOrSelectBootstrapMutation()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbActions.cs"));
 
-            Assert.That(unauthorizedInstall.Succeeded, Is.False);
-            Assert.That(installFallbackCalls, Is.EqualTo(1));
+            Assert.That(source, Does.Contain("RequestPostProviderReconcileAsync"));
+            var admissionStart = source.IndexOf(
+                "RunHostAdmissionAfterProviderAsync(", StringComparison.Ordinal);
+            var admissionEnd = source.IndexOf(
+                "private static AICodedbCommandResult RunProviderInstaller(",
+                admissionStart,
+                StringComparison.Ordinal);
+            Assert.That(admissionStart, Is.GreaterThanOrEqualTo(0));
+            Assert.That(admissionEnd, Is.GreaterThan(admissionStart));
+            var admissionBody = source.Substring(admissionStart, admissionEnd - admissionStart);
+            Assert.That(admissionBody, Does.Not.Contain("MCP availability requires the current Package-owned Host runtime."));
+            Assert.That(admissionBody, Does.Not.Contain("RunProbeAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("RunInstallAsync"));
+            Assert.That(admissionBody, Does.Not.Contain("RunSupervisorCommandWithFallbackAsync"));
         }
 
         [Test]

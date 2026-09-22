@@ -1929,6 +1929,111 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(actual, Is.EqualTo(expected));
         }
 
+        [Test]
+        public void PostProviderReconcileGate_WaitsForForcedFollowupAfterOlderEpoch()
+        {
+            var gate = new AICodedbEditorLifecycle.PostProviderReconcileGate();
+            bool forcePostProvider;
+            var firstEpoch = gate.BeginEpoch(out forcePostProvider);
+            Assert.That(forcePostProvider, Is.False);
+
+            bool startNow;
+            var waiter = gate.Request(out startNow);
+            Assert.That(startNow, Is.False,
+                "Provider completion during an older reconcile must not reuse that epoch.");
+            bool secondStart;
+            var sameWaiter = gate.Request(out secondStart);
+            Assert.That(sameWaiter, Is.SameAs(waiter));
+            Assert.That(secondStart, Is.False);
+
+            var firstOutcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                firstEpoch,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention,
+                default(AICodedbProductStatus),
+                null,
+                3,
+                "older epoch");
+            Assert.That(gate.Complete(firstEpoch, firstOutcome), Is.True);
+            Assert.That(waiter.IsCompleted, Is.False);
+
+            var secondEpoch = gate.BeginEpoch(out forcePostProvider);
+            Assert.That(forcePostProvider, Is.True);
+            var finalOutcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                secondEpoch,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready,
+                default(AICodedbProductStatus),
+                null,
+                4,
+                "forced follow-up");
+            Assert.That(gate.Complete(secondEpoch, finalOutcome), Is.False);
+            Assert.That(waiter.Result, Is.SameAs(finalOutcome));
+            Assert.That(waiter.Result.Epoch, Is.EqualTo(secondEpoch));
+        }
+
+        [Test]
+        public void PostProviderReconcileGate_AbortPublishesDeferredWithoutGuessingSuccess()
+        {
+            var gate = new AICodedbEditorLifecycle.PostProviderReconcileGate();
+            bool startNow;
+            var waiter = gate.Request(out startNow);
+            gate.Abort("compile boundary");
+
+            Assert.That(startNow, Is.True);
+            Assert.That(waiter.IsCompleted, Is.True);
+            Assert.That(waiter.Result.Disposition,
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbReconcileDisposition.Deferred));
+            Assert.That(waiter.Result.Detail, Is.EqualTo("compile boundary"));
+        }
+
+        [Test]
+        public void PostProviderReconcileGate_StartsForcedEpochWhenIdle()
+        {
+            var gate = new AICodedbEditorLifecycle.PostProviderReconcileGate();
+            bool startNow;
+            var waiter = gate.Request(out startNow);
+            bool forcePostProvider;
+            var epoch = gate.BeginEpoch(out forcePostProvider);
+
+            Assert.That(startNow, Is.True);
+            Assert.That(forcePostProvider, Is.True);
+            var terminal = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                epoch,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Uninstalled,
+                default(AICodedbProductStatus), null, 1, "Uninstalled remains explicit.");
+            Assert.That(gate.Complete(epoch, terminal), Is.False);
+            Assert.That(waiter.Result, Is.SameAs(terminal));
+        }
+
+        [Test]
+        public void PostProviderReconcileGate_RequestAfterCompletionRemainsPendingForWorkerRelease()
+        {
+            var gate = new AICodedbEditorLifecycle.PostProviderReconcileGate();
+            bool forcePostProvider;
+            var completedEpoch = gate.BeginEpoch(out forcePostProvider);
+            var completedOutcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                completedEpoch,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready,
+                default(AICodedbProductStatus), null, 1, "previous epoch");
+            Assert.That(gate.Complete(completedEpoch, completedOutcome), Is.False);
+
+            bool startNow;
+            var waiter = gate.Request(out startNow);
+            Assert.That(startNow, Is.True);
+            Assert.That(gate.HasPendingStart, Is.True,
+                "The worker release must retry a start lost to its in-flight flag.");
+            Assert.That(waiter.IsCompleted, Is.False);
+
+            var nextEpoch = gate.BeginEpoch(out forcePostProvider);
+            Assert.That(forcePostProvider, Is.True);
+            Assert.That(gate.HasPendingStart, Is.False);
+            var nextOutcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                nextEpoch,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready,
+                default(AICodedbProductStatus), null, 2, "post-Provider epoch");
+            Assert.That(gate.Complete(nextEpoch, nextOutcome), Is.False);
+            Assert.That(waiter.Result, Is.SameAs(nextOutcome));
+        }
+
         private static void AssertPostAdmissionEvidenceNotEvaluated(
             AICodedbLifecycleEvidenceDocument document)
         {

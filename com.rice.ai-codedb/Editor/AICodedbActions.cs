@@ -319,7 +319,8 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunInstallProvider()
         {
             var result = RunProviderInstaller(AICodedbPaths.CaptureExecutionContext(), true);
-            AICodedbEditorLifecycle.RequestReconcile();
+            if (result != null && result.Succeeded)
+                AICodedbEditorLifecycle.RequestReconcile();
             return result;
         }
 
@@ -331,70 +332,34 @@ namespace Rice.AI.Codedb.Editor
         internal static async Task<AICodedbCommandResult> RunInstallProviderAsync(Action<string> outputLine)
         {
             var context = AICodedbPaths.CaptureExecutionContext();
-            var result = await RunProviderInstallerAsync(context, outputLine);
-            AICodedbEditorLifecycle.RequestReconcile();
-            return result;
+            return await RunProviderInstallerAsync(context, outputLine);
         }
 
-        internal static Task<AICodedbCommandResult> RunHostAdmissionAfterProviderAsync(
+        internal static Task<AICodedbEditorLifecycle.AICodedbReconcileOutcome> RunHostAdmissionAfterProviderAsync(
             AICodedbCommandResult providerResult)
         {
             return RunHostAdmissionAfterProviderAsync(
                 providerResult,
-                () => AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Probe", false),
-                AICodedbHostPayloadMaterializer.RunProbeAsync,
-                () => AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Install", true),
-                AICodedbHostPayloadMaterializer.RunInstallAsync);
+                AICodedbEditorLifecycle.RequestPostProviderReconcileAsync);
         }
 
-        internal static Task<AICodedbCommandResult> RunHostAdmissionAfterProviderAsync(
+        internal static Task<AICodedbEditorLifecycle.AICodedbReconcileOutcome> RunHostAdmissionAfterProviderAsync(
             AICodedbCommandResult providerResult,
-            Func<Task<AICodedbCommandResult>> supervisorProbe,
-            Func<Task<AICodedbCommandResult>> bootstrapProbe,
-            Func<Task<AICodedbCommandResult>> supervisorInstall,
-            Func<Task<AICodedbCommandResult>> bootstrapInstall)
-        {
-            return RunHostAdmissionAfterProviderCoreAsync(
-                providerResult,
-                supervisorProbe,
-                bootstrapProbe,
-                supervisorInstall,
-                bootstrapInstall);
-        }
-
-        private static async Task<AICodedbCommandResult> RunHostAdmissionAfterProviderCoreAsync(
-            AICodedbCommandResult providerResult,
-            Func<Task<AICodedbCommandResult>> supervisorProbe,
-            Func<Task<AICodedbCommandResult>> bootstrapProbe,
-            Func<Task<AICodedbCommandResult>> supervisorInstall,
-            Func<Task<AICodedbCommandResult>> bootstrapInstall)
+            Func<Task<AICodedbEditorLifecycle.AICodedbReconcileOutcome>> reconcile)
         {
             if (providerResult == null || !providerResult.Succeeded)
-                return providerResult;
-
-            var supervisorResult = await supervisorProbe();
-            if (supervisorResult == null || supervisorResult.Succeeded)
-                return supervisorResult;
-            if (!AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(supervisorResult))
-                return supervisorResult;
-
-            var bootstrapProbeResult = await bootstrapProbe();
-            if (bootstrapProbeResult == null
-                || !bootstrapProbeResult.Succeeded
-                || !RequiresPackageOwnedHostRuntime(bootstrapProbeResult))
-                return bootstrapProbeResult;
-
-            return await RunSupervisorCommandWithFallbackAsync(
-                bootstrapInstall,
-                supervisorInstall);
-        }
-
-        private static bool RequiresPackageOwnedHostRuntime(AICodedbCommandResult result)
-        {
-            return result != null
-                   && (result.StandardOutput ?? string.Empty).IndexOf(
-                       "MCP availability requires the current Package-owned Host runtime.",
-                       StringComparison.Ordinal) >= 0;
+            {
+                return Task.FromResult(new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                    0,
+                    AICodedbEditorLifecycle.AICodedbReconcileDisposition.Deferred,
+                    default(AICodedbProductStatus),
+                    null,
+                    0,
+                    "Provider setup did not complete; Host admission was not requested."));
+            }
+            if (reconcile == null)
+                throw new ArgumentNullException(nameof(reconcile));
+            return reconcile();
         }
 
         private static AICodedbCommandResult RunProviderInstaller(
