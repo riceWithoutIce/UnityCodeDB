@@ -2239,72 +2239,130 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void SupervisorBridge_BootstrapFallbackRequiresReviewedMaterializerCommandAndEmptyRuntime()
+        public void SupervisorBridge_BootstrapFallbackRequiresReviewedCommandAndOwnedRuntimeEvidence()
         {
-            using (var bridge = new AICodedbSupervisorBridge())
-            {
-                var probe = bridge.SendCommand(
+            var runtime = AICodedbSupervisorLauncher.GetSupervisorRuntimePath(_projectRoot);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Probe", false), Is.True);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Install", false), Is.False);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Install", true), Is.True);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Reinstall", false), Is.False);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Reinstall", true), Is.True);
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "watcher", "Ensure", false), Is.False);
+
+            Directory.CreateDirectory(runtime);
+            Assert.That(
+                InvokeBootstrapFallbackProof(
+                    _projectRoot, runtime, "materialize", "Probe", false),
+                Is.False,
+                "An existing empty runtime has no authenticated owner and must remain fail-closed.");
+
+            WriteUtf8NoBom(Path.Combine(runtime, "operation.json"), "{}");
+            Assert.That(
+                InvokeBootstrapFallbackProof(
+                    _projectRoot, runtime, "materialize", "Probe", false),
+                Is.False,
+                "Operation evidence must close fallback until ownership is classified.");
+        }
+
+        [Test]
+        public void SupervisorBridge_BootstrapFallbackAuthenticatesPackageRuntimeWithoutSelection()
+        {
+            var runtimeContract = ReadPackageRuntimeContract();
+            var runtime = AICodedbSupervisorLauncher.GetSupervisorRuntimePath(
+                _projectRoot,
+                runtimeContract.ControlContract);
+            var statePath = Path.Combine(runtime, "supervisor-state.json");
+            var lockPath = Path.Combine(runtime, "supervisor.lock");
+            var pipeName = string.Empty;
+            Assert.That(
+                AICodedbSupervisorProtocol.TryGetExpectedSupervisorPipeName(
                     _projectRoot,
-                    "materialize",
-                    "Probe");
-                Assert.That(probe.OneShotFallbackAuthorized, Is.True);
+                    runtime,
+                    out pipeName),
+                Is.True);
 
-                var unconfirmedInstall = bridge.SendCommand(
-                    _projectRoot,
-                    "materialize",
-                    "Install");
-                Assert.That(unconfirmedInstall.OneShotFallbackAuthorized, Is.False);
+            const string activationEpoch = "0123456789abcdef0123456789abcdef";
+            const string ownerEpoch = "abcdefabcdefabcdefabcdefabcdefab";
+            const string hash = "0000000000000000000000000000000000000000000000000000000000000000";
+            var serializedPipe = JsonPath(@"\\.\pipe\" + pipeName);
+            Directory.CreateDirectory(runtime);
+            var stateJson =
+                "{\"schema_version\":" + AICodedbSupervisorProtocol.SupervisorStateSchemaVersion
+                + ",\"evidence_schema_version\":1"
+                + ",\"protocol_version\":" + AICodedbSupervisorProtocol.Version
+                + ",\"managed_by\":\"com.rice.ai-codedb\""
+                + ",\"role\":\"project-local-supervisor\""
+                + ",\"root\":\"" + JsonPath(_projectRoot) + "\""
+                + ",\"project_identity\":\"" + AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot) + "\""
+                + ",\"control_contract_id\":\"" + runtimeContract.ControlContract.Id + "\""
+                + ",\"control_contract_version\":" + runtimeContract.ControlContract.Version
+                + ",\"control_contract_schema_version\":" + runtimeContract.ControlContract.SchemaVersion
+                + ",\"control_contract_sha256\":\"" + runtimeContract.ControlContract.Sha256 + "\""
+                + ",\"control_namespace\":\"" + JsonPath(runtime) + "\""
+                + ",\"owner_identity_version\":" + runtimeContract.OwnerIdentityVersion
+                + ",\"activation_epoch\":\"" + activationEpoch + "\""
+                + ",\"generation_id\":\"" + runtimeContract.Target.GenerationId + "\""
+                + ",\"target_generation_id\":\"" + runtimeContract.Target.GenerationId + "\""
+                + ",\"selected_generation_id\":\"" + runtimeContract.Target.GenerationId + "\""
+                + ",\"selected_instance_id\":null"
+                + ",\"runtime_contract_sha256\":\"" + runtimeContract.Sha256 + "\""
+                + ",\"supervisor_protocol_version\":" + AICodedbSupervisorProtocol.SupervisorVersion
+                + ",\"generation_disposition\":\"CURRENT\""
+                + ",\"runtime\":\"" + JsonPath(runtime) + "\""
+                + ",\"auth_token\":\"fixture-auth-token\""
+                + ",\"pipe_name\":\"" + serializedPipe + "\""
+                + ",\"supervisor_pid\":1234"
+                + ",\"supervisor_id\":\"unity-bridge\""
+                + ",\"owner_epoch\":\"" + ownerEpoch + "\""
+                + ",\"publication_phase\":\"state_published\""
+                + ",\"owner_evidence\":{\"schema_version\":1,\"pid\":1234"
+                + ",\"process_start_identity\":\"1\",\"executable_path\":\"C:\\\\fixture-supervisor.exe\""
+                + ",\"argv_sha256\":\"" + hash + "\",\"command_line_sha256\":\"" + hash + "\"}}";
+            var lockJson =
+                "{\"managed_by\":\"com.rice.ai-codedb\",\"root\":\""
+                + JsonPath(_projectRoot) + "\",\"runtime\":\"" + JsonPath(runtime)
+                + "\",\"owner_epoch\":\"" + ownerEpoch + "\",\"supervisor_pid\":1234}";
+            WriteUtf8NoBom(statePath, stateJson);
+            WriteUtf8NoBom(lockPath, lockJson);
 
-                var confirmedInstall = bridge.SendCommand(
-                    _projectRoot,
-                    "materialize",
-                    "Install",
-                    null,
-                    true);
-                Assert.That(confirmedInstall.OneShotFallbackAuthorized, Is.True);
+            Assert.That(
+                InvokeBootstrapFallbackProof(
+                    _projectRoot, runtime, "materialize", "Probe", false),
+                Is.True,
+                "A current Package-owned runtime with a missing selection must retain the reviewed bootstrap proof.");
 
-                var unconfirmedReinstall = bridge.SendCommand(
-                    _projectRoot,
-                    "materialize",
-                    "Reinstall");
-                Assert.That(unconfirmedReinstall.OneShotFallbackAuthorized, Is.False);
+            WriteUtf8NoBom(statePath, stateJson.Replace(
+                "\"selected_instance_id\":null",
+                "\"selected_instance_id\":\"malformed\""));
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Probe", false), Is.False);
 
-                var confirmedReinstall = bridge.SendCommand(
-                    _projectRoot,
-                    "materialize",
-                    "Reinstall",
-                    null,
-                    true);
-                Assert.That(confirmedReinstall.OneShotFallbackAuthorized, Is.True);
+            WriteUtf8NoBom(statePath, stateJson);
+            WriteUtf8NoBom(lockPath, lockJson.Replace(
+                "\"managed_by\":\"com.rice.ai-codedb\"",
+                "\"managed_by\":\"unowned\""));
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Probe", false), Is.False);
 
-                var watcher = bridge.SendCommand(
-                    _projectRoot,
-                    "watcher",
-                    "Ensure");
-                Assert.That(watcher.OneShotFallbackAuthorized, Is.False);
+            WriteUtf8NoBom(lockPath, lockJson);
+            WriteUtf8NoBom(Path.Combine(runtime, "claim.json"), "{}");
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Probe", false), Is.False);
+            File.Delete(Path.Combine(runtime, "claim.json"));
 
-                var shutdown = bridge.RequestOwnedShutdownAsync(
-                        _projectRoot,
-                        "unity-bridge")
-                    .GetAwaiter()
-                    .GetResult();
-                Assert.That(shutdown.OneShotFallbackAuthorized, Is.False);
-
-                var runtime = AICodedbSupervisorLauncher.GetSupervisorRuntimePath(_projectRoot);
-                Directory.CreateDirectory(runtime);
-                Assert.That(
-                    bridge.SendCommand(_projectRoot, "materialize", "Probe")
-                        .OneShotFallbackAuthorized,
-                    Is.True,
-                    "An empty reviewed runtime remains a bootstrap case.");
-
-                WriteUtf8NoBom(Path.Combine(runtime, "operation.json"), "{}");
-                Assert.That(
-                    bridge.SendCommand(_projectRoot, "materialize", "Probe")
-                        .OneShotFallbackAuthorized,
-                    Is.False,
-                    "Any control evidence must close fallback until ownership is classified.");
-            }
+            var selectionPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceCurrentRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(selectionPath));
+            WriteUtf8NoBom(selectionPath, "{}");
+            Assert.That(InvokeBootstrapFallbackProof(
+                _projectRoot, runtime, "materialize", "Probe", false), Is.False);
         }
 
         [Test]
@@ -5198,6 +5256,30 @@ namespace Rice.AI.Codedb.Editor.Tests
         private static void WriteUtf8NoBom(string path, string content)
         {
             File.WriteAllText(path, content, new UTF8Encoding(false));
+        }
+
+        private static bool InvokeBootstrapFallbackProof(
+            string projectRoot,
+            string runtime,
+            string command,
+            string action,
+            bool confirmedProjectMutation)
+        {
+            var method = typeof(AICodedbSupervisorBridge).GetMethod(
+                "IsProvenBootstrapFallback",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.That(method, Is.Not.Null);
+            return (bool)method.Invoke(
+                null,
+                new object[]
+                {
+                    AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\'),
+                    runtime,
+                    command,
+                    action,
+                    confirmedProjectMutation,
+                    true
+                });
         }
 
         private string InstallCurrentGeneration()

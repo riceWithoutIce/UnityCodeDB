@@ -239,8 +239,11 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(source, Does.Contain("AICodedbEditorLifecycle.RequestReconcile()"));
             Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.RunDryRun()"));
             Assert.That(actionsSource, Does.Contain("AICodedbEditorLifecycle.RunSupervisorCommandAsync(\"materialize\", \"Probe\", false)"));
+            Assert.That(actionsSource, Does.Contain("AICodedbEditorLifecycle.RunSupervisorCommandAsync(\"materialize\", \"Install\", true)"));
             Assert.That(actionsSource, Does.Contain("AICodedbHostPayloadMaterializer.RunProbeAsync"));
+            Assert.That(actionsSource, Does.Contain("AICodedbHostPayloadMaterializer.RunInstallAsync"));
             Assert.That(actionsSource, Does.Contain("IsSupervisorOneShotFallbackAllowed(supervisorResult)"));
+            Assert.That(actionsSource, Does.Contain("MCP availability requires the current Package-owned Host runtime."));
         }
 
         [Test]
@@ -261,7 +264,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                         {
                             fallbackCalls++;
                             return Task.FromResult(Result("bootstrap probe"));
-                        })
+                        },
+                        () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install unavailable", false)),
+                        () => Task.FromResult(Result("must not install")))
                     .GetAwaiter()
                     .GetResult();
 
@@ -299,13 +304,69 @@ namespace Rice.AI.Codedb.Editor.Tests
                     {
                         fallbackCalls++;
                         return Task.FromResult(Result("must not run"));
-                    })
+                    },
+                    () => Task.FromResult(Result("must not install")),
+                    () => Task.FromResult(Result("must not install")))
                 .GetAwaiter()
                 .GetResult();
 
             Assert.That(result, Is.SameAs(providerFailure));
             Assert.That(supervisorCalls, Is.Zero);
             Assert.That(fallbackCalls, Is.Zero);
+        }
+
+        [Test]
+        public void ConfigureDependenciesAdmission_BootstrapRuntimeRequirementUsesAuthorizedInstall()
+        {
+            var providerSuccess = Result("provider installed");
+            var probeFallbackCalls = 0;
+            var installSupervisorCalls = 0;
+            var installFallbackCalls = 0;
+            var runtimeRequired = Result(
+                "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE - "
+                + "MCP availability requires the current Package-owned Host runtime.");
+
+            var result = AICodedbActions.RunHostAdmissionAfterProviderAsync(
+                    providerSuccess,
+                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "bootstrap", false, 0, true)),
+                    () =>
+                    {
+                        probeFallbackCalls++;
+                        return Task.FromResult(runtimeRequired);
+                    },
+                    () =>
+                    {
+                        installSupervisorCalls++;
+                        return Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install bootstrap", false, 0, true));
+                    },
+                    () =>
+                    {
+                        installFallbackCalls++;
+                        return Task.FromResult(Result("installed"));
+                    })
+                .GetAwaiter()
+                .GetResult();
+
+            Assert.That(result.Succeeded, Is.True);
+            Assert.That(probeFallbackCalls, Is.EqualTo(1));
+            Assert.That(installSupervisorCalls, Is.EqualTo(1));
+            Assert.That(installFallbackCalls, Is.EqualTo(1));
+
+            var unauthorizedInstall = AICodedbActions.RunHostAdmissionAfterProviderAsync(
+                    providerSuccess,
+                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "bootstrap", false, 0, true)),
+                    () => Task.FromResult(runtimeRequired),
+                    () => Task.FromResult(new AICodedbCommandResult(4, string.Empty, "install denied", false)),
+                    () =>
+                    {
+                        installFallbackCalls++;
+                        return Task.FromResult(Result("must not install"));
+                    })
+                .GetAwaiter()
+                .GetResult();
+
+            Assert.That(unauthorizedInstall.Succeeded, Is.False);
+            Assert.That(installFallbackCalls, Is.EqualTo(1));
         }
 
         [Test]

@@ -342,17 +342,59 @@ namespace Rice.AI.Codedb.Editor
             return RunHostAdmissionAfterProviderAsync(
                 providerResult,
                 () => AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Probe", false),
-                AICodedbHostPayloadMaterializer.RunProbeAsync);
+                AICodedbHostPayloadMaterializer.RunProbeAsync,
+                () => AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Install", true),
+                AICodedbHostPayloadMaterializer.RunInstallAsync);
         }
 
         internal static Task<AICodedbCommandResult> RunHostAdmissionAfterProviderAsync(
             AICodedbCommandResult providerResult,
             Func<Task<AICodedbCommandResult>> supervisorProbe,
-            Func<Task<AICodedbCommandResult>> bootstrapProbe)
+            Func<Task<AICodedbCommandResult>> bootstrapProbe,
+            Func<Task<AICodedbCommandResult>> supervisorInstall,
+            Func<Task<AICodedbCommandResult>> bootstrapInstall)
         {
-            return providerResult == null || !providerResult.Succeeded
-                ? Task.FromResult(providerResult)
-                : RunSupervisorCommandWithFallbackAsync(bootstrapProbe, supervisorProbe);
+            return RunHostAdmissionAfterProviderCoreAsync(
+                providerResult,
+                supervisorProbe,
+                bootstrapProbe,
+                supervisorInstall,
+                bootstrapInstall);
+        }
+
+        private static async Task<AICodedbCommandResult> RunHostAdmissionAfterProviderCoreAsync(
+            AICodedbCommandResult providerResult,
+            Func<Task<AICodedbCommandResult>> supervisorProbe,
+            Func<Task<AICodedbCommandResult>> bootstrapProbe,
+            Func<Task<AICodedbCommandResult>> supervisorInstall,
+            Func<Task<AICodedbCommandResult>> bootstrapInstall)
+        {
+            if (providerResult == null || !providerResult.Succeeded)
+                return providerResult;
+
+            var supervisorResult = await supervisorProbe();
+            if (supervisorResult == null || supervisorResult.Succeeded)
+                return supervisorResult;
+            if (!AICodedbEditorLifecycle.IsSupervisorOneShotFallbackAllowed(supervisorResult))
+                return supervisorResult;
+
+            var bootstrapProbeResult = await bootstrapProbe();
+            if (bootstrapProbeResult == null
+                || !bootstrapProbeResult.Succeeded
+                || !RequiresPackageOwnedHostRuntime(bootstrapProbeResult))
+                return bootstrapProbeResult;
+
+            return await RunSupervisorCommandWithFallbackAsync(
+                bootstrapInstall,
+                supervisorInstall);
+        }
+
+        private static bool RequiresPackageOwnedHostRuntime(AICodedbCommandResult result)
+        {
+            return result != null
+                   && (result.StandardOutput ?? string.Empty).IndexOf(
+                       "MCP availability requires the current Package-owned Host runtime.",
+                       StringComparison.Ordinal) >= 0;
         }
 
         private static AICodedbCommandResult RunProviderInstaller(

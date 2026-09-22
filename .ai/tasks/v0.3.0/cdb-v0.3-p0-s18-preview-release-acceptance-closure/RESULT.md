@@ -3787,3 +3787,1112 @@ publication, and release gates remain `NOT RUN / DEFERRED`.
 
 Current status: `ACCEPTED_FOCUSED_CONSUMER_SLICE / BROADER_GATES_DEFERRED`.
 No commit, push, publication, or promotion was performed.
+
+## Phase B Candidate Decision - 2026-09-18
+
+The human selected Package `0.3.0-preview.2` and immutable generation
+`poc.36` as the Phase B publication candidate. The `0.3.0-preview.1 / poc.35`
+references in the original card remain predecessor history only. Current
+Package/generation dirty files are not yet treated as a publishable artifact;
+they require one exact snapshot assembly and identity admission first.
+
+Current status: `PHASE_B_CANDIDATE_SELECTED / EXACT_SNAPSHOT_ASSEMBLY_PENDING`.
+No tag, push, publication, or release promotion was performed.
+
+## Planner/User Roadmap Decision - 2026-09-18
+
+The human accepted continuation of Delivery Sequence item 10. The current
+focused-consumer acceptance remains a checkpoint; S18 continues under the
+same Task ID through exact publication, third-party Package-only acceptance,
+real Codex acceptance, and final bounded release review. These are separate
+human-gated phases, not new micro-task directories.
+
+Current status: `FOCUSED_CONSUMER_ACCEPTED / ITEM_10_CONTINUATION_ALIGNED`.
+Next action: prepare a Phase B exact publication proposal. Publication and
+release promotion remain unauthorized.
+
+## Post-Publication FIX 01 - Provider Package Contract Successor - 2026-09-18
+
+Frozen pre-fix state:
+
+- Branch: `codex/v0.3.0-legacy-workflow`
+- HEAD: `983e091bbf5973fbb799a6e044dec028ef5b9720`
+- Published candidate preserved: `0.3.0-preview.2` / `poc.36`
+- External Provider identity preserved: `0.5.0-28e3912-c2`
+- Existing unrelated documentation/task and validation-project dirty paths were
+  preserved and were not included in the successor identity.
+
+Successor changes:
+
+- `com.rice.ai-codedb/Tools~/install-codedb-provider.ps1`: default and runtime
+  Package contract moved to `0.3.0-preview.3`; Provider artifact identity is
+  unchanged.
+- `com.rice.ai-codedb/Tests~/test-codedb-provider-installer.ps1`: three valid
+  fixture invocations now pass `0.3.0-preview.3`; the intentional negative
+  package-coupling fixture remains `0.3.0-preview.1`.
+- `com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1`: successor
+  Package/generation expectations and exact `poc.36` transition closure were
+  added; fixed Provider identity remains asserted.
+- `com.rice.ai-codedb/package.json`: version and release URLs moved to
+  `0.3.0-preview.3`.
+- `com.rice.ai-codedb/Payload~/payload-manifest.json` and
+  `com.rice.ai-codedb/Payload~/host-current.json`: successor is `poc.37`,
+  sequence `37`, with six transitions and 304 retired targets.
+- `com.rice.ai-codedb/Payload~/Generations/poc.37/`: 23-file successor copied
+  from `poc.36`; three content-derived file hashes were corrected in the
+  successor manifest, and the resulting generation-manifest SHA-256 is
+  `cb0d06c32c6065a67ecb8a0d612e5fc148a80f516ac459ccdf1aa7176ada4fab`.
+- `poc.36` was not modified. Its 23 tracked files match HEAD exactly.
+
+Evidence:
+
+- Final bounded static/source closure: `PASS`, exit `0`, wall `643 ms`.
+  Covered AST parse for the three changed PowerShell files, Provider identity,
+  Package `0.3.0-preview.3`, payload `poc.37/37`, generation directory count
+  23 with 22 manifest payload entries, 46 payload files, 304 retired targets,
+  six transitions, all successor hashes, pointer hash binding, predecessor
+  identity absence inside `poc.37`, and `poc.36` immutability.
+- The diagnostic closure pass exposed and repaired three stale successor
+  hashes and corrected only the inline checker assumptions for source spelling,
+  generation-manifest counting, and PowerShell `$LASTEXITCODE` handling. No
+  additional production or test behavior was changed beyond the authorized
+  successor closure.
+- Focused fixture command, run exactly once:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb\Tests~\test-codedb-provider-installer.ps1`
+  Exit `0`, tool-observed wall time approximately `10.5 s`. Output ended with
+  `[OK] Provider installer focused regression passed.` It covered expected
+  rejection, recovery, development-upstream, signed-release, and identity
+  mismatch fixture paths; no real Provider installation was used.
+- Scoped diff check, run exactly once, exit `0`, wall `241 ms`:
+  `git diff --check -- com.rice.ai-codedb/Tools~/install-codedb-provider.ps1 com.rice.ai-codedb/Tests~/test-codedb-provider-installer.ps1 com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1 com.rice.ai-codedb/package.json com.rice.ai-codedb/Payload~/payload-manifest.json com.rice.ai-codedb/Payload~/host-current.json com.rice.ai-codedb/Payload~/Generations/poc.37`
+  Git emitted only CRLF normalization warnings; no whitespace errors.
+- Successor identity, run exactly once, exit `0`, wall `1677 ms`: 29 ordered
+  authorized paths hashed as `path<TAB>blob` with terminal LF and UTF-8 without
+  BOM produced `4b57740477e611c2b37e048d74919e98cad3da27`.
+
+Budget and boundaries:
+
+- Provider-installer focused L0: `1/1`; corrected retry: `0`.
+- Scoped diff-check: `1/1`; successor identity calculation: `1/1`.
+- Unity, Unity MCP, real Provider installation, external process validation,
+  Node, C#, EditMode, package-boundary execution, Verifier, tag, push,
+  publication, and commit: `NOT RUN / DEFERRED`.
+- `poc.36`, Provider binaries, machine Provider state, and the closed external
+  Unity project remain outside the change scope.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `COMPLETE / POST_PUBLICATION_FIX_01_SUCCESSOR_READY`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reviews the stable `0.3.0-preview.3` / `poc.37` successor
+identity and decides whether to authorize any further external acceptance or
+publication step.
+Human decision or authorization required: Verifier routing, Unity/external
+Provider acceptance, tag, push, publication, and commit.
+
+## Post-Publication FIX 02 - Identity Reconciliation Only - 2026-09-18
+
+Planner authorized identity-only reconciliation after `VERIFICATION-02.md`
+reported a mismatch for the same uncommitted successor snapshot.
+
+Reconciliation evidence:
+
+- Frozen HEAD remains `983e091bbf5973fbb799a6e044dec028ef5b9720`.
+- The exact set was six explicit successor paths plus the 23 files beneath
+  `com.rice.ai-codedb/Payload~/Generations/poc.37/`; observed count was `29`
+  and unique path count was `29`.
+- Each path was read through its current Git blob (`git hash-object -- path`),
+  then serialized as `path<TAB>blob<LF>` with one terminal LF and UTF-8 without
+  BOM. No additional path, file, or repository-wide scan was used.
+- Correct ordinal path ordering with `StringComparer.Ordinal` and Git
+  `hash-object --stdin` produced the unique replacement identity:
+  `b4af83cc4df0b5297064e85bc91f6c37dc5283af`.
+- The previously recorded `4b57740477e611c2b37e048d74919e98cad3da27`
+  reproduces exactly when PowerShell's default string sorting is used. The
+  first ordering difference is `package.json` before the uppercase
+  `Payload~/Generations/poc.37/...` path; ordinal ordering places the uppercase
+  `Payload~` path first. This is a serialization/order recording error, not
+  byte drift or path-set ambiguity.
+- The verifier identity `b4af83cc4df0b5297064e85bc91f6c37dc5283af` therefore
+  replaces the prior recorded identity for the unchanged successor bytes.
+
+No source, test, Package, manifest, pointer, generation, `poc.36`, or task
+file was modified. No Provider installer/static/L0/diff-check, Unity, Unity
+MCP, external process, Verifier rerun, commit, tag, push, or publication was
+performed in this reconciliation.
+
+The first local reconciliation command stopped before hashing because the
+Windows PowerShell version does not support `Sort-Object -Comparer`; the
+corrected read-only reconciliation completed with exit `0` and tool-observed
+wall time approximately `1.67 s`. No retry or source repair followed it.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `COMPLETE / IDENTITY_RECONCILED`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner replaces the recorded successor identity with
+`b4af83cc4df0b5297064e85bc91f6c37dc5283af` and decides whether to reopen
+bounded Verifier admission.
+Human decision or authorization required: any semantic rerun, Verifier
+routing, Unity/external Provider acceptance, tag, push, publication, or commit.
+
+## Successor Disposition And Git Publication - 2026-09-18
+
+The human accepted the bounded FIX and authorized successor commit and Git
+publication after the reopened GUARDED Verifier PASS with no findings.
+Before staging, the exact 29-path ordinal identity matched
+`b4af83cc4df0b5297064e85bc91f6c37dc5283af`; only these 29 paths were committed.
+
+- Commit: `645f5effbe9f386600c216abaa3e7a9f3a0c233b`
+- Subject: `fix(v0.3): align preview.3 provider installer contract`
+- Candidate: `0.3.0-preview.3 / poc.37`
+- Branch and annotated tag `v0.3.0-preview.3` pushed atomically to `origin`.
+- Remote branch and peeled successor tag both match the commit above.
+- Remote `v0.3.0-preview.2` still resolves to
+  `983e091bbf5973fbb799a6e044dec028ef5b9720`.
+- Local Package-only ZIP from committed bytes: `1,944,232` bytes;
+  SHA-256 `26627026a1184e55fc8af6508f4d9aaa136306cc33c9207cb9bf39f6db3e467d`.
+- Archive is local evidence only, not an uploaded Release asset. Published
+  installation source is the repository Git tag with Package subdirectory.
+
+Unrelated dirty files and task records were not included in the candidate
+commit. No Unity, actual Provider install, registry mutation, GitHub Release
+creation, or stable-release promotion was performed. No tests were rerun.
+
+Current status: `BOUNDED_FIX_ACCEPTED / PREVIEW_3_GIT_PUBLISHED`.
+Next actor: human owner updates the external Unity Package source to
+`#v0.3.0-preview.3`, waits for compilation, and retries Configure Dependencies
+once. Report the visible terminal state before further acceptance stages.
+External Package-only and real Codex release acceptance remain pending.
+
+## External Package-Only Acceptance Blocked - 2026-09-18
+
+Human opened the repository-external `G:\work\mumodazhi\Unity` project with
+Package `0.3.0-preview.3`. `Configure CodeDB Dependencies` completed after the
+Provider installer contract fix, but the project did not become Ready.
+
+Visible Manager evidence:
+
+- Configure Dependencies: `Completed - needs attention`.
+- Host payload: `Needs Setup`; detail `Payload source hash mismatch:
+  host-current.json`.
+- Host generation, current instance, Provider executable, Project MCP config,
+  and MCP availability: `Not evaluated` / `Inactive` because the payload gate
+  remains blocked.
+- Configuration: `Current`.
+
+No `Upgrade` or `Host Payload Upgrade` action was exposed in the current
+Manager state. No manual runtime file edit, deletion, Redeploy, Reinstall,
+Unity MCP, process probe, or substitute action was performed. This is recorded
+as a new external Package-only acceptance blocker: Provider setup is repaired,
+but a legal mismatched `host-current.json` state has no visible controlled
+payload upgrade/recovery action and cannot reach Ready.
+
+Current status: `BLOCKED / EXTERNAL_HOST_PAYLOAD_UPGRADE_ACTION_UNAVAILABLE`.
+Next actor: Planner routes a bounded product investigation/fix for the
+successor payload mismatch state. No further external acceptance, commit, or
+publication action is implied by this evidence.
+
+## External Host Payload Blocker Investigation - 2026-09-18
+
+Status: `ROUTE_REASSESSMENT_REQUIRED`.
+
+The bounded read-only diagnosis followed the authorized Manager/status/action
+and materializer closure. The observed state is not a recoverable project
+payload drift that can be repaired by exposing a different Manager button:
+
+- `materialize-codedb-host-payload.ps1` validates every Package source against
+  `payload-manifest.json` before it can build a materialization plan. A source
+  hash mismatch throws exit `5` with `Payload source hash mismatch:
+  host-current.json` and remains fail-closed.
+- The C# host status builder only enables automatic Upgrade for an explicit
+  `[UPGRADE_READY]` result and Redeploy for `[REDEPLOY_READY]`. A failed
+  materializer result is surfaced as non-current/blocked diagnostic state.
+- `AICodedbManagerWindow.GetHostAction` additionally requires the selected host
+  generation to be `Current`; the invalid source closure cannot satisfy that
+  gate, so the existing Sync/Upgrade/Redeploy actions are intentionally not
+  executable from this state. `AICodedbActions` already has the corresponding
+  materializer commands; no missing action wrapper was found.
+- Exact Package closure evidence: the manifest entry for source
+  `host-current.json` declares `fab4a52f221788157e4d305b685125f9b033d2f183fda73aed636703732fe7e2`,
+  while the current worktree source SHA-256 is
+  `176c2d7b73f88f3d6732da849ade87bab0cd09f3e74fad47e6caa03cbc275bac` and the
+  HEAD blob content SHA-256 is
+  `850fe0323eb4e27fc1b723671dd8f5da5c342d0ab40a7f94f5cd295eb3c9bd49d`.
+  The published HEAD and Package source therefore do not provide a matching
+  manifest/source pair.
+
+Conclusion: changing Manager routing within the conditional allowlist would
+only expose an action that the Package materializer must reject again; it
+would weaken the fail-closed Package integrity boundary and would not repair
+the external `.3` artifact. Correct remediation requires a successor Package
+metadata/payload-manifest/current-pointer or published artifact correction,
+which is explicitly outside this investigation authorization. No source,
+Package, generation, Provider, external project, or runtime file was modified.
+
+Evidence boundaries:
+
+- Read-only diagnosis only; no focused test or static batch was run because the
+  required repair is outside the authorized safe scope.
+- Unity, Unity MCP, CUA, BatchMode, external project operation, runtime edit,
+  Provider install, package publication, Verifier, commit, tag, and push:
+  `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `ROUTE_REASSESSMENT_REQUIRED`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reassesses authorization for a successor Package/artifact
+closure repair before any further external acceptance.
+
+## Durable Successor Repair Attempt - preview.4 / poc.38 - 2026-09-19
+
+The authorized local-artifact-first successor attempt started from HEAD
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` on branch
+`codex/v0.3.0-legacy-workflow`. Published `0.3.0-preview.2 / poc.36` and
+`0.3.0-preview.3 / poc.37` were preserved; the static closure confirmed both
+predecessor generation directories had no worktree drift.
+
+Implemented successor files:
+
+- `com.rice.ai-codedb/package.json`: Package metadata advanced to
+  `0.3.0-preview.4` and matching release URLs.
+- `com.rice.ai-codedb/Tools~/install-codedb-provider.ps1` and
+  `com.rice.ai-codedb/Tests~/test-codedb-provider-installer.ps1`: directly
+  coupled Package-version contract/fixtures advanced to `.4`; Provider
+  identity remains `0.5.0-28e3912-c2`.
+- `com.rice.ai-codedb/Payload~/host-current.json`: pointer advanced to
+  `poc.38`, sequence `38`, with generation-manifest hash
+  `4b2cfced7397b9c1616274ca35ce170c8c497124c9206982f9d34acd16903c2a`.
+- `com.rice.ai-codedb/Payload~/Generations/poc.38/`: new 23-file successor
+  copied from `poc.37`, with successor identity fields and all 22 generation
+  hashes recomputed.
+- `com.rice.ai-codedb/Payload~/payload-manifest.json`: current identity moved
+  to `.4 / poc.38 / 38`; `host-current.json` source hash was bound to the
+  actual successor bytes; the prior `poc.37` transition was appended with
+  flat closure `cad3ae85a7dbcf89f4c8029625a5c14d31a95d3846d57e30d33eff0ea8d69e12`;
+  retired target count is `327` and transition count is `7`.
+- `com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1`: current
+  candidate version/generation/count expectations, `poc.37` transition and
+  retired-generation closure were added; the generation identity assertion is
+  bound to the candidate generation.
+
+Evidence:
+
+- Bounded static/source closure: `PASS`, exit `0`, wall `339 ms`. It covered
+  PowerShell AST parsing for the three affected test/installer scripts,
+  Package/payload/pointer/generation identity, all successor source hashes,
+  `23` generation files with `22` manifest entries, `46` payload entries,
+  `327` retired targets, `7` transitions, the `poc.37` closure value, and
+  unchanged `poc.36`/`poc.37` predecessor directories.
+- Focused Package-boundary L0, run exactly once:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1`
+  Exit `1`, tool-observed wall time approximately `1.636 s`. It stopped at
+  the existing package text scan with:
+  `Package contains a machine-local absolute path: Tests/Editor/OwnerIdentityV2Status.json`
+  at `test-codedb-package-boundary.ps1:210`.
+
+The Package-boundary failure is an independent pre-existing S18 fixture/harness
+condition, not a demonstrated successor manifest or generation failure. The
+authorized evidence envelope did not authorize modifying that fixture or
+retrying after an independent failure. Therefore no scoped diff-check or
+canonical successor identity was run after the stop condition.
+
+Budget and deferred boundaries:
+
+- Bounded static/source batch: `1/1`; corrected retry: `0`.
+- Package-boundary focused L0: `1/1`, failed at the first independent
+  fixture-scan condition; retry: `0`.
+- Scoped diff-check: `NOT RUN / DEFERRED` after the stop condition.
+- Canonical successor identity: `NOT RUN / UNAVAILABLE` because the focused
+  gate did not close.
+- Unity, Unity MCP, CUA, BatchMode, external project, real Provider install,
+  Node, C#, EditMode, Verifier, commit, tag, push, publication and release
+  promotion: `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `BLOCKED / PACKAGE_BOUNDARY_FIXTURE_ABSOLUTE_PATH`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner decides whether to authorize a separate bounded fixture
+sanitization/harness correction before any successor identity or publication
+review.
+Human decision or authorization required: fixture/harness scope expansion,
+fresh focused Package-boundary evidence, successor identity, Verifier routing,
+commit, tag, push, publication, or external acceptance.
+Human decision or authorization required: successor Package/payload repair,
+new identity/evidence, Verifier routing, publication, or external retry.
+
+## Owner Identity v2 Portable Fixture Correction - 2026-09-19
+
+The authorized bounded fixture correction preserved production code and the
+published `.2/poc.36` / `.3/poc.37` predecessors. The Node fixture harness now
+derives the current target and control contract from
+`Payload~/payload-manifest.json`, including the current `.4/poc.38` target,
+predecessor transition, synthetic successor target, and control-contract hash.
+The normalized C# sample uses `fixture://` placeholders for project root,
+Node executable, and coordinator runtime, so no machine-local absolute path is
+stored. `AICodedbEditorLifecycleTests.cs` and the fixture `.meta` remained
+unchanged; no production file changed.
+
+The single focused Node command was:
+
+```powershell
+$env:RICE_CODEDB_SUPERVISOR_TEST_FILTER='owner-identity-v2-csharp-fixture'; node com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs
+```
+
+It passed with exit `0` and wall time `5402 ms`. The normalized sample hash
+was `4089470651c35177b8d75f4a4816321297eedd6c3f2ab56a688929023db73628`.
+The current manifest hash was
+`053e93d3c1b53d16448722740226ecd7b114d6e6f00b7da3360c0052a4d87b23`; the
+stored fixture hash after synchronization was
+`e73a0d8102d879c80fb0cb4b14af2120942cd3a957e9a6741495af5755d9fae9`.
+
+The bounded source/fixture check passed with exit `0` and wall time `184 ms`:
+it confirmed current generation/contract identity, absence of drive-qualified
+or `C:/codedb-fixture` strings, absence of `auth_token`, and portable fixture
+placeholders. A first version of that check was stopped locally because its
+generic PowerShell object walker did not terminate; it was replaced by the
+equivalent direct-field/static check. This was a checker-construction issue,
+not a Node or product failure. No Node retry was performed.
+
+The newly authorized Package-boundary command was run exactly once:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1
+```
+
+It exited `1` after `4437 ms`. The first independent failure was:
+`Retired generation target closure mismatch`, in the existing successor
+retired-target expectation/closure (`poc.22` through `poc.37`). The original
+fixture absolute-path finding is no longer the reported failure. Per the
+bounded stop condition, no repair of the retired-generation closure was
+attempted; scoped `git diff --check` and successor identity calculation were
+not run.
+
+Budget and deferred boundaries:
+
+- Focused Node fixture generation: `1/1`, PASS; retry `0`.
+- Bounded source/fixture check: PASS after the local checker-construction
+  correction; no additional Node invocation.
+- Package-boundary L0: `1/1`, FAIL at the first independent retired-closure
+  mismatch; retry `0`.
+- Scoped diff-check and final successor identity: `NOT RUN / DEFERRED` after
+  the stop condition.
+- Unity, Unity MCP/CUA/BatchMode, C# compile/EditMode, other L0/L1, real
+  Provider/external process, Verifier, commit, tag, push, publication, and
+  release promotion: `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `BLOCKED / PACKAGE_BOUNDARY_RETIRED_GENERATION_CLOSURE`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner decides whether to authorize a separate bounded repair of
+the existing successor retired-generation closure before any diff-check,
+identity, Verifier routing, commit, tag, push, publication, or external
+acceptance.
+
+## FIX 01 Retired Generation Closure Repair - 2026-09-19
+
+Planner authorized one bounded continuation for the exact
+`PACKAGE_BOUNDARY_RETIRED_GENERATION_CLOSURE` finding. Frozen HEAD remained
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` on
+`codex/v0.3.0-legacy-workflow`. The published `.2/poc.36` and `.3/poc.37`
+predecessor generation bytes were preserved; no predecessor file was changed.
+
+### Exact change
+
+Only `com.rice.ai-codedb/Payload~/payload-manifest.json` was changed in this
+FIX. Its 23 `poc.37` retired targets were corrected from:
+
+`AIWork/.runtime/codedb/host/generations/poc.37/ayload~/Generations/poc.37/<suffix>`
+
+to the canonical:
+
+`AIWork/.runtime/codedb/host/generations/poc.37/<suffix>`
+
+No generation source file, Package-boundary assertion, production file, or
+Owner Identity fixture was changed. The existing Package-boundary assertion
+already constructs the canonical prefix, so no additional generator/assertion
+edit was required in this bounded attempt.
+
+### Evidence
+
+The corrected Package-boundary L0 was run exactly once:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1
+```
+
+It passed with exit `0` and wall time `4167 ms`:
+`[OK] Standalone CodeDB package boundary passed.` This closes the malformed
+retired-target finding and includes the existing predecessor/retired closure
+checks.
+
+The scoped `git diff --check` was run once over the exact 32-path successor/
+fixture allowlist: the seven Package/successor files
+(`package.json`, Provider installer and focused installer test,
+`host-current.json`, `payload-manifest.json`, Package-boundary test, and Node
+Supervisor harness), the 23 files under
+`Payload~/Generations/poc.38/`, and
+`Tests/Editor/OwnerIdentityV2Status.json` plus its `.meta`. It passed with
+exit `0` and wall time `124 ms`; Git emitted only existing CRLF normalization
+warnings for three JSON/package files.
+
+The final canonical successor identity used the same 32 paths, ordinal path
+ordering, `path<TAB>blob<LF>` serialization, terminal LF, and UTF-8 without
+BOM. It passed with exit `0` and is:
+
+`d028ea1551f3ff212a7098e7aa7c2432769a584c43b29f879b63a260ad9baadb`
+
+The changed manifest blob is `b9af2e75e91ca9bbf8b7a528a0dafa53345ecb51`.
+The portable Owner Identity fixture remains in the admitted successor scope;
+its blob is `c360af369eb238ebeffbfb26e6706d555628091e` and its `.meta` remains
+`c53ba5578d08ef1bce120eda7a5dba2b98a00e37`.
+
+### Budget and boundaries
+
+- Corrected Package-boundary L0: `1/1`, PASS; retry `0`.
+- Scoped 32-path `git diff --check`: `1/1`, PASS; retry `0`.
+- Canonical successor identity: `1/1`, PASS; retry `0`.
+- No Node, C#, EditMode, Unity, Unity MCP/CUA/BatchMode, external consumer,
+  real Provider installation, external process acceptance, Verifier, commit,
+  tag, push, publication, promotion, or release action was run.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `COMPLETE / PLANNER_REVIEW_REQUIRED`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reviews the stable 32-path successor snapshot and
+canonical identity. No Verifier or Git/publication action is implied.
+
+## FIX 02 Portable Fixture Runtime-Contract Binding - 2026-09-19
+
+This bounded FIX addressed only Verifier finding
+`P1-01 / PORTABLE_FIXTURE_RUNTIME_CONTRACT_STALE`. Frozen HEAD remained
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` on
+`codex/v0.3.0-legacy-workflow`.
+
+### Exact changed paths
+
+- `com.rice.ai-codedb/Tests/Editor/OwnerIdentityV2Status.json`
+- `com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1`
+- this append-only `RESULT.md`
+
+The existing focused Node generation path produced the complete portable JSON
+sample from the final `Payload~/payload-manifest.json`. The checked-in fixture
+was synchronized from that generated sample: both
+`status.runtime_contract_sha256` and
+`status.operational_readiness.runtime_contract_sha256` now equal final
+manifest SHA-256
+`46faed01a92cf0579bb08cccedf51a840f281a718232c15bbae49f7cc4f7d842`.
+All `fixture://` values, deterministic owner fields, and secret/path
+sanitization were preserved.
+
+The Package-boundary test now loads the stored Owner Identity v2 fixture,
+computes the actual SHA-256 of `payload-manifest.json`, and independently
+requires both fixture runtime-contract fields to equal that value. No
+production code, Node harness, generation, Package metadata, or predecessor
+file changed in this FIX.
+
+### Evidence
+
+Focused Node fixture generation, run exactly once:
+
+```powershell
+$env:RICE_CODEDB_SUPERVISOR_TEST_FILTER='owner-identity-v2-csharp-fixture'; node com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs
+```
+
+- Exit: `0`
+- Wall time: `3746 ms`
+- Raw status SHA-256:
+  `cbd59726e87a95de769a37448913a06911772c40dfa7caea4436e03893769572`
+- Complete normalized sample SHA-256:
+  `f879d8c47e8fb402d47fd9b9991ae492e1c4d1ea75672eb0cbe4b1abc6cc8c21`
+- Result: `PASS`; generated sample carried `poc.38`, portable `fixture://`
+  fields, and both final runtime-contract hashes.
+
+Package-boundary L0, run exactly once after synchronization/assertion update:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb\Tests~\test-codedb-package-boundary.ps1
+```
+
+- Exit: `0`
+- Wall time: `6541 ms`
+- Output: `[OK] Standalone CodeDB package boundary passed.`
+
+The exact 32-path successor/fixture `git diff --check` ran once and passed
+with exit `0` in `101 ms`. It emitted only the existing CRLF normalization
+warnings for `host-current.json`, `payload-manifest.json`, and `package.json`.
+
+The final canonical identity calculation ran once over the same 32 paths,
+using ordinal repository-relative path ordering,
+`path<TAB>blob<LF>` serialization with terminal LF, and UTF-8 without BOM:
+
+`29552e61ee7b234518dd58574bb78181b14bea38cf6346a17c01c8683222a21c`
+
+Relevant final blobs:
+
+- Portable fixture JSON:
+  `94e66191fe5f75de86ac7f762e9b6a229847cf63`
+- Package-boundary test:
+  `8f24f576fbda9d2d2a9d81993c80bc463c4584a0`
+- Final payload manifest:
+  `b9af2e75e91ca9bbf8b7a528a0dafa53345ecb51`
+- Node generator remained unchanged:
+  `e4977584be9fcaad338df0c22996935a2ef9b5b6`
+
+### Budget and boundaries
+
+- Focused Node generation: `1/1`, PASS; retry `0`.
+- Package-boundary L0: `1/1`, PASS; retry `0`.
+- Scoped 32-path diff-check: `1/1`, PASS; retry `0`.
+- Canonical successor identity: `1/1`, PASS; retry `0`.
+- Published `.2/poc.36` and `.3/poc.37` predecessor bytes remained
+  unmodified. The corrected `poc.37` retired-target closure and all
+  `.4/poc.38` Package closure remained intact and passed Package-boundary.
+- C# compile/EditMode, Unity, Unity MCP/CUA/BatchMode, external consumer,
+  real Provider install, runtime/process acceptance, unrelated tests,
+  Verifier contact, commit, artifact export, tag, push, publication,
+  promotion, and release acceptance: `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `COMPLETE / PLANNER_REVIEW_REQUIRED`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reviews only the stable 32-path snapshot and new
+canonical identity. No Verifier or Git/publication action is implied.
+
+## Release-byte Normalization Closure Attempt - 2026-09-19 (BLOCKED)
+
+The same-S18 bounded continuation started from frozen HEAD
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b`. The admitted predecessor
+32-path identity was
+`29552e61ee7b234518dd58574bb78181b14bea38cf6346a17c01c8683222a21c`;
+no new identity was calculated after the stop condition.
+
+### Preflight and byte changes
+
+The exact successor byte inventory found CRLF only in:
+
+- `com.rice.ai-codedb/package.json`
+- `com.rice.ai-codedb/Payload~/host-current.json`
+- `com.rice.ai-codedb/Payload~/payload-manifest.json`
+- `com.rice.ai-codedb/Payload~/Generations/poc.38/generation-manifest.json`
+
+All 22 payload files referenced by the `poc.38` generation manifest were
+already LF. A read-only recomputation proved `22/22` manifest entries matched
+their payload bytes. No generation payload or historical generation was
+modified. The four CRLF-bearing successor files were normalized to UTF-8
+without BOM and LF. Resulting immediate hashes included:
+
+- `package.json`:
+  `e7264016ce7e7f1c1d0777d2ebb48539ba52eaa87b8575491acef5343d00bdb7`
+- `poc.38/generation-manifest.json`:
+  `b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638`
+
+`host-current.json:generation_manifest_sha256` was updated to that final LF
+generation-manifest hash. The resulting final LF `host-current.json` SHA-256
+was `29bc2bb14e06885253146594472060cc3847e062978c1301f1505379b133cea3`,
+and the matching `host-current.json` entry in `payload-manifest.json` was
+updated. At that point the LF payload manifest SHA-256 was
+`f3d13f53efa8163f18d9b3134220816b0ff3987c521284ba8da37e1858f65cc8`.
+
+### Focused evidence and stop condition
+
+The focused Node fixture generation ran exactly once:
+
+```powershell
+$env:RICE_CODEDB_SUPERVISOR_TEST_FILTER='owner-identity-v2-csharp-fixture'; node com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs
+```
+
+- Exit: `0`
+- Wall time: `3328 ms`
+- Raw status SHA-256:
+  `8b794c089a772347501e088fcbf5d3a5691cb2ece27c8e6c999c8914d896ae19`
+- Generated normalized sample and synchronized fixture SHA-256:
+  `9cd15fe909754d216a8f169debbe3d852779e917c1e7855a72ad0953642a57ea`
+- Result: `PASS`; the complete generated portable fixture was synchronized,
+  rather than updating an independently guessed field.
+
+The Package-boundary L0 then ran exactly once:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1
+```
+
+- Exit: `1`
+- Wall time: `3458 ms`
+- First failure:
+  `Payload manifest: Generations/poc.38/generation-manifest.json expected 4b2cfced7397b9c1616274ca35ce170c8c497124c9206982f9d34acd16903c2a, got b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638`
+
+This exposed one omitted direct hash-chain reference: although the current
+pointer and its payload-manifest entry were rebuilt, the payload manifest's
+own entry for `Generations/poc.38/generation-manifest.json` still contains the
+pre-normalization hash. This is within the intended normalization chain, but
+the single Package-boundary attempt had already been consumed. Per the frozen
+zero-retry stop condition, no follow-up edit, rerun, diff-check, temporary-index
+closure, or prospective identity calculation was performed.
+
+Removal L0 was intentionally omitted before the failure because normalization
+changed no removal logic, retired-target set, or generation payload; it was
+not a directly coupled gate under the clarification.
+
+### Budget and deferred boundaries
+
+- Focused Node owner-identity fixture: `1/1`, PASS; retry `0`.
+- Package-boundary L0: `1/1`, FAIL; retry `0`.
+- Removal L0: `0`, intentionally omitted as not directly coupled.
+- Scoped successor/fixture `git diff --check`: `NOT RUN / DEFERRED`.
+- Isolated temporary-index prospective-byte closure: `NOT RUN / DEFERRED`.
+- Canonical prospective commit identity: `NOT RUN / UNAVAILABLE`.
+- Unity, Unity MCP/CUA/BatchMode, C# compile/EditMode, external consumer,
+  real Provider/runtime process, Verifier, real-index mutation, commit,
+  artifact export, tag, push, publication, promotion, and release acceptance:
+  `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `BLOCKED / PAYLOAD_MANIFEST_GENERATION_ENTRY_STALE`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reviews this stopped snapshot and decides whether to
+authorize one same-cause correction of the stale generation-manifest entry,
+fixture regeneration, and the dependent focused evidence sequence.
+Human decision or authorization required: corrected Package-boundary attempt,
+scoped diff-check, isolated temporary-index closure, prospective identity,
+Verifier routing, commit, export, tag, push, publication, or promotion.
+
+## Release-byte Normalization Same-cause Correction - 2026-09-19
+
+The authorized correction continued on frozen HEAD
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` without resetting or modifying
+the real Git index. Preflight confirmed the stale generation-manifest hash
+occurred exactly once in `Payload~/payload-manifest.json`, and `package.json`,
+`host-current.json`, `payload-manifest.json`, and the `poc.38` generation
+manifest remained pure LF.
+
+### Exact correction
+
+Only the omitted direct hash-chain entry was corrected before evidence:
+
+- `com.rice.ai-codedb/Payload~/payload-manifest.json`
+  - `Generations/poc.38/generation-manifest.json` SHA-256 changed from
+    `4b2cfced7397b9c1616274ca35ce170c8c497124c9206982f9d34acd16903c2a`
+    to the final LF hash
+    `b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638`.
+
+The resulting final LF payload-manifest SHA-256 is
+`ce84b9ac6e009024eb757ef815215c848042dbc3714883a2a3cd9fb7338e366a`.
+The existing complete Owner Identity generator then replaced
+`com.rice.ai-codedb/Tests/Editor/OwnerIdentityV2Status.json` with its complete
+portable output. The generated sample and written fixture SHA-256 both equal
+`06797eeb976db82005a575a1ad322463cc5a66d8822ec5715b2ec18e92113cf7`.
+No removal logic, retired set, runtime behavior, `poc.38` payload, published
+predecessor, or unrelated file was changed.
+
+### Focused evidence
+
+Corrected focused Node fixture generation:
+
+```powershell
+$env:RICE_CODEDB_SUPERVISOR_TEST_FILTER='owner-identity-v2-csharp-fixture'; node com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs
+```
+
+- Exit: `0`
+- Wall time: `3607 ms`
+- Raw status SHA-256:
+  `708e7f091a1c5826e06429d3d5893ae552d97361d6d25c445521faf6a23be6ff`
+- Result: `PASS`; full generated fixture synchronized and byte hash verified.
+
+Corrected Package-boundary L0:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1
+```
+
+- Exit: `0`
+- Wall time: `3170 ms`
+- Output: `[OK] Standalone CodeDB package boundary passed.`
+
+The exact successor/fixture scoped diff-check covered 32 paths: the nine
+admitted Package/Provider/test/fixture paths plus the exactly 23 files under
+`com.rice.ai-codedb/Payload~/Generations/poc.38/`.
+
+- Command: `git diff --check -- <exact admitted 32 paths>`
+- Exit: `0`
+- Wall time: `38 ms`
+- Output: none.
+
+Removal L0 remained omitted because no removal logic, retired target set, or
+generation payload changed.
+
+### Isolated prospective-byte closure
+
+An isolated `GIT_INDEX_FILE` was initialized from HEAD, and only the exact
+32 admitted paths were staged and exported. The real index was not selected
+by any Git command. Prospective exported bytes proved:
+
+- generation payload hashes: `22/22`;
+- generation-manifest SHA-256:
+  `b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638`;
+- `host-current.json:generation_manifest_sha256`: exact match;
+- host-current SHA-256:
+  `29bc2bb14e06885253146594472060cc3847e062978c1301f1505379b133cea3`;
+- payload-manifest generation-manifest entry: exact match;
+- payload-manifest host-current entry: exact match;
+- payload-manifest SHA-256:
+  `ce84b9ac6e009024eb757ef815215c848042dbc3714883a2a3cd9fb7338e366a`;
+- fixture runtime-contract hashes: `2/2` exact matches;
+- hash-authoritative worktree/prospective files: `26/26` byte matches;
+- Package metadata worktree/prospective bytes: `1/1` match;
+- published `poc.36` and `poc.37` drift: none.
+
+The completed closure exited `0` in `349 ms`. The real index SHA-256 was
+`051d186b053a4ed7c70d92601d5ed66c107e5301a65361e91bef77c12ec5fba4`
+both before and after the isolated operation.
+
+Two construction incidents preceded the valid closure and are retained for
+accuracy. The first command was rejected before process creation because its
+temporary cleanup used recursive `Remove-Item`; it created no index and
+consumed no evidence. The next isolated helper invocation created and safely
+removed a temporary index but stopped on PowerShell's reserved `$Host`
+variable before completing closure or starting identity calculation. Its real
+index guard also matched before/after. Renaming that helper variable produced
+the single complete closure above; no candidate/product assertion failed.
+
+### Prospective commit identity
+
+The same isolated final index contained exactly 32 admitted stage-0 entries.
+Using ordinal repository-relative path ordering,
+`path<TAB>blob<LF>` serialization, a terminal LF, and UTF-8 without BOM, the
+canonical prospective commit identity completed with exit `0` in `53 ms`:
+
+`c67d6ebe4721fa5eb6bfa70f8d153a139ec4827e56cff60ed458704281cce723`
+
+### Budget and boundaries
+
+- Focused Node same-cause correction: `1/1`, PASS; product retry `0`.
+- Package-boundary same-cause correction: `1/1`, PASS; product retry `0`.
+- Scoped 32-path diff-check: `1/1`, PASS.
+- Complete isolated prospective-byte closure: `1/1`, PASS, after the two
+  explicitly recorded command-construction incidents above.
+- Canonical prospective identity: `1/1`, PASS.
+- Removal L0: `0`, intentionally omitted as not directly coupled.
+- Unity, Unity MCP/CUA/BatchMode, C# compile/EditMode, external consumer,
+  Provider installation, external runtime/process, unrelated tests, broad
+  audit, Verifier contact, real-index mutation, commit, final artifact export,
+  tag, push, publication, promotion, and release action: `NOT RUN / DEFERRED`.
+
+Current task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+Current status: `COMPLETE / PLANNER_REVIEW_REQUIRED`
+Next notification: `UnityCodeDB v0.3 Planner`
+Next action: Planner reviews the stable prospective-byte closure and exact
+identity `c67d6ebe4721fa5eb6bfa70f8d153a139ec4827e56cff60ed458704281cce723`.
+Human decision or authorization required: Verifier routing, commit, artifact
+export, Unity/external acceptance, tag, push, publication, promotion, or any
+release action.
+
+## External Host Admission Bounded Fix - 2026-09-22
+
+External local-package evidence showed `Configure Dependencies` completed the
+Provider installer successfully while Host payload, Current instance, and
+Coordinator remained `Not evaluated`. Targeted source review confirmed the
+direct defect: both Configure entry points invoked only
+`AICodedbActions.RunInstallProviderAsync` and did not request the existing
+authenticated Supervisor Host admission observation.
+
+The bounded fix changed exactly these source/test paths:
+
+- `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+After a successful Provider install, the shared continuation now calls
+`AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Probe", false)`
+and requests the normal lifecycle reconcile before the Manager refreshes its
+cache. The Manager does not call the materializer directly. Overview and
+Setup Configure entry points use the same continuation. A direct source
+regression assertion covers the Supervisor Probe path and rejects direct
+materializer access.
+
+Bounded evidence:
+
+- Static/source check: PASS. Both Configure entry points are wired, the
+  Supervisor `materialize/Probe` call is present, and no direct materializer
+  call exists in the Manager continuation.
+- Focused source regression assertion: PASS (the new
+  `ConfigureDependenciesSource_RechecksHostAdmissionAfterProviderSuccess`
+  assertion is present).
+- Scoped `git diff --check` for the two changed paths: PASS, exit `0`.
+- HEAD remained `babec1fcf97e424fbf6c8c9ba28e5339407b13da`.
+- Worktree file SHA-256: Manager
+  `F8A0B91543A818336734B30B4ADC27A1D93398D212B1EAC7F3B89290F40004C4`;
+  Manager UI tests
+  `03FFEABC7EED0BDB3630F161A943BBD0FA588CC0D9254081A7B96F9F351DE5E3`.
+
+C# compile/EditMode, Unity, Unity MCP/CUA/BatchMode, external project,
+Provider rerun, runtime/process probes, broad tests, Verifier, commit, export,
+tag, push, publication, and promotion were not run. No published predecessor,
+Package metadata, Provider contract, or immutable generation was modified.
+
+Current status: `COMPLETE / PLANNER_REVIEW_REQUIRED`
+Next action: Planner reviews this stable uncommitted two-path fix and decides
+whether to request the separately authorized focused evidence/Verifier route.
+
+## External Host Admission FIX 01 - 2026-09-22
+
+Verifier P1-01 correctly identified that the first bounded fix did not consume
+the Bridge's explicit empty-runtime bootstrap authorization. A missing current
+instance could therefore return `CURRENT_INSTANCE_UNAVAILABLE` with
+`OneShotFallbackAuthorized`, but the Configure continuation returned that
+result without performing the permitted read-only Probe.
+
+The repair preserves the earlier Manager changes and expands the exact changed
+source/test set to:
+
+- `com.rice.ai-codedb/Editor/AICodedbActions.cs`
+- `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+`AICodedbActions.RunHostAdmissionAfterProviderAsync` now owns the narrow
+transition. A failed or null Provider result returns immediately. A successful
+Provider result first calls the project Supervisor with
+`materialize/Probe`. The existing `RunSupervisorCommandWithFallbackAsync`
+boundary performs exactly one Package materializer `RunProbeAsync` only when
+the failed Supervisor result carries the Bridge-owned
+`OneShotFallbackAuthorized` bit. An ordinary successful current-instance Probe
+returns directly, while failures without that bit remain fail-closed. The
+Manager uses this API and then requests its existing lifecycle reconcile/cache
+refresh sequence; it does not access the materializer directly.
+
+Adjacent tests now cover:
+
+- missing current instance plus authorized one-shot fallback;
+- missing authorization with no fallback;
+- an existing/current Supervisor Probe with no duplicate fallback; and
+- failed Provider installation with neither Supervisor nor fallback Probe.
+
+Bounded evidence:
+
+- Static/source contract batch: PASS. The Supervisor-first helper, explicit
+  authorization gate, read-only Probe fallback, Manager API routing, Provider
+  failure short-circuit, and adjacent test methods were all present.
+- Three-path scoped `git diff --check`: PASS, exit `0`.
+- Focused C# EditMode execution: `DEFERRED / NOT AUTHORIZED`; Unity was not
+  started or operated and no standalone non-Unity C# harness exists.
+- HEAD remained `babec1fcf97e424fbf6c8c9ba28e5339407b13da`.
+- Worktree SHA-256:
+  - Actions: `B850ED0D788CA0D9850BD9E9A419F2BBD38EED3C8962868103D608A8927912B6`;
+  - Manager: `62A19AF361188A4459165277EB916C0F1EF533CF5233410EF589F47E7C7DE0D7`;
+  - Manager UI tests: `57E5B173F2E32516ECD674AE008EACC0F5D764ADFFA436AD7CF9DFF31D624C92`.
+
+Unity, Unity MCP/CUA/BatchMode, external project, runtime/process probes,
+Provider rerun, broad tests, Verifier contact, commit, artifact export, tag,
+push, publication, and promotion were not run. Published predecessors,
+Package metadata, Provider contracts, and immutable generations remain
+unchanged.
+
+Current status: `COMPLETE / P1_01_FIX_PLANNER_REVIEW_REQUIRED`
+Next action: Planner reviews the stable three-path snapshot and decides whether
+to route the original P1-01 plus adjacent regression to Verifier.
+
+## External Host Runtime Bootstrap FIX 02 - 2026-09-22
+
+The next human external check reached Host admission but remained blocked with
+`MCP availability requires the current Package-owned Host runtime.` The
+bootstrap Probe is intentionally read-only and cannot create the first current
+instance. Existing Supervisor bridge rules already authorize a one-shot
+Package-owned `Install` fallback only for a proven empty bootstrap and an
+explicit `confirmed_project_mutation` request.
+
+This correction keeps the earlier Manager admission path and adds the narrow
+bootstrap Install transition in the existing Actions helper. The exact source
+and test paths changed in this attempt are:
+
+- `com.rice.ai-codedb/Editor/AICodedbActions.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+After Provider success, the helper first performs Supervisor `materialize/Probe`.
+It may read-only Probe fallback only when the failed Probe response carries
+`OneShotFallbackAuthorized`. If that authorized bootstrap Probe succeeds and
+explicitly reports the Package-owned Host runtime requirement, the helper then
+performs a second Supervisor-first `materialize/Install` request with confirmed
+project mutation. Its direct `RunInstallAsync` fallback is permitted only when
+that second Bridge response independently carries the same authorization bit.
+Current-instance Probe success returns without Install; unauthorized Probe or
+Install failures remain fail-closed; Provider failure never invokes either
+Probe or Install.
+
+Adjacent source tests cover:
+
+- authorized bootstrap Probe fallback;
+- unauthorized Probe with no fallback;
+- current-instance Probe with no duplicate fallback;
+- Provider failure with no Probe/Install; and
+- runtime-required bootstrap selecting authorized Install while an unauthorized
+  Install remains blocked.
+
+Bounded evidence:
+
+- Static/source contract batch: PASS. Supervisor-first Probe and Install,
+  explicit authorization gates, runtime-required marker, Provider short-circuit,
+  current-path no-duplicate behavior, and adjacent tests are present.
+- Scoped `git diff --check` for the two paths changed in this attempt: PASS,
+  exit `0`.
+- Focused C# EditMode execution: `DEFERRED / NOT AUTHORIZED`; Unity was not
+  started or operated and no standalone non-Unity C# harness exists.
+- Current HEAD after the previously authorized Manager admission commit:
+  `e4ac545e3d1261340c5b757cfa328a0c3296ac1e`.
+- Worktree SHA-256:
+  - Actions: `212DB33DACBAFBA873FA220606D47F2AAFA087D79E7A9924D2C2A4F5DE604489`;
+  - Manager UI tests: `DDBCE34F7A4CC341FB6443AC211EFC15E9FFB8C5B7F215E493D7B749ED98971D`.
+  The Manager source is clean at the preceding committed admission fix.
+
+Unity, Unity MCP/CUA/BatchMode, external project, runtime/process probes,
+Provider rerun, broad tests, Verifier contact, commit, artifact export, tag,
+push, publication, and promotion were not run. Published predecessors,
+Package metadata, Provider contracts, and immutable generations remain
+unchanged.
+
+Current status: `COMPLETE / HOST_RUNTIME_BOOTSTRAP_FIX_PLANNER_REVIEW_REQUIRED`
+Next action: Planner reviews this stable Actions/test snapshot and decides
+whether to route the new external P1 and its adjacent bootstrap regression to
+Verifier.
+
+## Planner/User Disposition - FIX 02 - 2026-09-22
+
+Disposition: `ACCEPT`.
+
+The user accepted the GUARDED Verifier result in
+`verifications/VERIFICATION-05.md`: `PASS /
+HOST_RUNTIME_REQUIRED_FOR_MCP_CLOSED`, with no in-scope findings. This
+acceptance covers only the two-file Host runtime bootstrap correction and its
+directly adjacent source/test regressions. Unity, EditMode, external Package
+rerun, publication, commit, push, and promotion remain deferred and require
+separate authorization.
+
+Current status: `ACCEPTED_HOST_RUNTIME_BOOTSTRAP_FIX / BROADER_GATES_DEFERRED`.
+
+## External Host Runtime Bootstrap FIX 03 - 2026-09-22
+
+FIX 03 keeps the accepted FIX 02 Actions/Manager snapshot and closes the
+adjacent Bridge proof gap for a bootstrap where the current-instance selection
+is absent but a project-local Supervisor runtime already exists. The changed
+paths are:
+
+- `com.rice.ai-codedb/Editor/AICodedbSupervisorBridge.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+
+The bootstrap-only identity reader now allows a missing selected instance only
+when the value is null or a valid instance id; a malformed non-empty id remains
+fail-closed. Existing proof continues to require the current Package contract,
+project/runtime paths, owner identity and epoch, canonical pipe, process
+evidence, and the exact `supervisor-state.json` plus `supervisor.lock` owner
+binding. The adjacent fixture writes a current Package-owned state/lock pair
+with missing selection and asserts that the reviewed Probe fallback remains
+authorized without starting a Supervisor.
+
+Bounded evidence:
+
+- One static/source assertion batch: PASS.
+- One two-path scoped `git diff --check`: PASS, exit `0`.
+- Focused C# EditMode, Unity, Unity MCP/CUA/BatchMode, external runtime,
+  Provider, broad tests and Verifier: `NOT RUN / DEFERRED`.
+- HEAD: `e4ac545e3d1261340c5b757cfa328a0c3296ac1e`.
+- Worktree SHA-256:
+  - Bridge: `bb135900d71adff24b76d5b285f79fe563140c72f936e884079ab43175c5187c`;
+  - Editor lifecycle tests: `0a2737be7292f04f165d239005091c40e3dbe67cffdbfe3685bcb5990c0dd08f`.
+
+No Provider, Package metadata, Payload, UnityValidationProject, commit, push,
+publication or external process was modified or started. The worktree retains
+the previously authorized FIX 02 changes and inherited protected records.
+
+Current status: `COMPLETE / FIX_03_PLANNER_REVIEW_REQUIRED`.
+Next action: Planner reviews this stable two-path Bridge/test snapshot and
+decides whether to route the original bootstrap finding plus its adjacent
+regression to Verifier.
+
+## External Host Runtime Bootstrap FIX 03 P1 Repair - 2026-09-22
+
+The bounded repair addressed the sole `VERIFICATION-06` finding without
+changing production code. Only
+`com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs` changed in
+the repair, in addition to this result record.
+
+The adjacent bootstrap tests now invoke the private bootstrap proof predicate
+directly rather than calling `SendCommand`; no test path can enter the
+Supervisor launcher. The contract explicitly asserts that a nonexistent
+runtime may use the reviewed bootstrap path, while an already-created empty
+runtime directory is unauthenticated and returns false. The Package-owned
+state/lock fixture retains the missing-selection positive case and adds
+fail-closed cases for a malformed selected instance, non-owned lock, extra
+claim artifact, and an existing current-instance selection.
+
+Evidence:
+
+- The single bounded static/source command was invalidated by a PowerShell
+  array-expression construction error. Its trailing PASS text is not accepted
+  as evidence, and the command was not rerun under the one-attempt budget.
+- The single test-path scoped `git diff --check`: PASS, exit `0`.
+- HEAD: `e4ac545e3d1261340c5b757cfa328a0c3296ac1e`.
+- Test SHA-256:
+  `bac51945ab50a150cf815412a9ae7ae0fc742a8a92c114384536666b77e317b7`.
+- Production Bridge SHA-256 remained
+  `bb135900d71adff24b76d5b285f79fe563140c72f936e884079ab43175c5187c`.
+
+Unity, EditMode, C# compile, Unity MCP/CUA/BatchMode, Supervisor/Provider or
+other external processes, broad tests, commit, export, tag, push, publication,
+promotion, and Verifier contact were `NOT RUN / DEFERRED`. No production,
+Package, Payload, Provider, or UnityValidationProject file was changed.
+
+Current status: `BLOCKED / STATIC_EVIDENCE_COMMAND_CONSTRUCTION_ERROR`.
+Next action: Planner decides whether to authorize one independent
+evidence-only static/source check on this unchanged test-only snapshot before
+Verifier routing.
+
+## External Host Runtime Bootstrap FIX 03 P1 Evidence-only Check - 2026-09-22
+
+The human authorized one independent evidence-only static/source check on the
+unchanged test-only repair snapshot. No production or test bytes were changed,
+and the earlier scoped diff-check was not repeated.
+
+The corrected PowerShell command used an ordered named assertion table and
+strict error handling. It extracted only the two adjacent bootstrap test
+methods and checked:
+
+- an existing empty runtime is asserted fail-closed;
+- both tests invoke the bootstrap proof predicate directly and contain no
+  `SendCommand` or launcher call;
+- the Package-owned state/lock plus missing-selection positive case remains;
+- malformed selection, non-owned lock, extra claim artifact, and existing
+  current selection negative cases remain; and
+- the fixture helper binds only the private static proof predicate.
+
+Result:
+
+- Exit: `0`.
+- Tool-observed wall time: approximately `1.3s`.
+- Output: `[PASS] S18 FIX03 evidence-only bootstrap source contract passed.`
+- Assertions: `14/14`.
+- HEAD: `e4ac545e3d1261340c5b757cfa328a0c3296ac1e`.
+- Bridge SHA-256:
+  `bb135900d71adff24b76d5b285f79fe563140c72f936e884079ab43175c5187c`.
+- Test SHA-256:
+  `bac51945ab50a150cf815412a9ae7ae0fc742a8a92c114384536666b77e317b7`.
+
+No diff-check, Unity, EditMode, C# compile, Unity MCP/CUA/BatchMode,
+Supervisor/Provider or other external process, broad test, commit, export,
+tag, push, publication, promotion, or Verifier contact was performed.
+
+Current status: `COMPLETE / FIX_03_P1_EVIDENCE_PASS`.
+Next action: Planner may route the unchanged frozen FIX 03 P1 repair identity
+to Verifier for targeted read-only re-review.
+
+## Planner/User Disposition - FIX 03 - 2026-09-22
+
+Disposition: `ACCEPT`.
+
+The user accepted the targeted Verifier re-review appended to
+`verifications/VERIFICATION-06.md`: `PASS / ORIGINAL_P1_CLOSED`, with no
+remaining in-scope findings. This acceptance covers the authenticated
+Package-owned Supervisor bootstrap proof, its fail-closed boundaries, the
+FIX 02 host-runtime admission continuation, and their directly adjacent test
+contracts.
+
+Unity, EditMode, C# compilation, external Package validation, artifact export,
+commit, tag, push, publication, and promotion remain `NOT RUN / DEFERRED` and
+require separate authorization.
+
+Current status: `ACCEPTED_FIX_03 / EXTERNAL_PACKAGE_REVALIDATION_PENDING`.

@@ -1493,7 +1493,8 @@ namespace Rice.AI.Codedb.Editor
             string normalizedRoot,
             string statePath,
             string packageRoot,
-            AICodedbPackageRuntimeContract runtimeContract)
+            AICodedbPackageRuntimeContract runtimeContract,
+            bool allowMissingSelectedInstance = false)
         {
             const string label = "CodeDB Supervisor state";
             if (runtimeContract == null || !runtimeContract.ControlContract.IsValid)
@@ -1620,7 +1621,10 @@ namespace Rice.AI.Codedb.Editor
                 || !IsGenerationId(targetGenerationId)
                 || !IsGenerationId(selectedGenerationId)
                 || !string.Equals(stateGenerationId, selectedGenerationId, StringComparison.Ordinal)
-                || !IsInstanceId(selectedInstanceId)
+                || (!allowMissingSelectedInstance && !IsInstanceId(selectedInstanceId))
+                || (allowMissingSelectedInstance
+                    && selectedInstanceId != null
+                    && !IsInstanceId(selectedInstanceId))
                 || !string.Equals(targetGenerationId, runtimeContract.Target.GenerationId, StringComparison.Ordinal)
                 || !IsSha256(runtimeContractSha256)
                 || !string.Equals(
@@ -1834,8 +1838,16 @@ namespace Rice.AI.Codedb.Editor
                 else if (startIfMissing)
                 {
                     var stateExistedBeforeLaunch = File.Exists(statePath);
-                    if (!stateExistedBeforeLaunch
-                        && IsCurrentInstanceSelectionMissing(normalizedRoot))
+                    if (IsCurrentInstanceSelectionMissing(normalizedRoot)
+                        && IsProvenBootstrapFallback(
+                            normalizedRoot,
+                            AICodedbSupervisorLauncher.GetSupervisorRuntimePath(
+                                normalizedRoot,
+                                runtimeContract.ControlContract),
+                            command,
+                            action,
+                            confirmedProjectMutation,
+                            startIfMissing))
                     {
                         const string detail = "No current CodeDB instance is selected.";
                         return new AICodedbSupervisorCommandResponse(
@@ -1848,15 +1860,7 @@ namespace Rice.AI.Codedb.Editor
                             AICodedbSupervisorSnapshot.Disconnected("CURRENT_INSTANCE_UNAVAILABLE", detail),
                             string.Empty,
                             0,
-                            IsProvenBootstrapFallback(
-                                normalizedRoot,
-                                AICodedbSupervisorLauncher.GetSupervisorRuntimePath(
-                                    normalizedRoot,
-                                    runtimeContract.ControlContract),
-                                command,
-                                action,
-                                confirmedProjectMutation,
-                                startIfMissing));
+                            true);
                     }
 
                     AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.Process);
@@ -2071,10 +2075,55 @@ namespace Rice.AI.Codedb.Editor
                 if (!Directory.Exists(runtime))
                     return true;
 
-                // Do not whitelist individual filenames. A new control artifact
-                // must close the bootstrap proof until its ownership semantics
-                // are reviewed.
-                return Directory.GetFileSystemEntries(runtime).Length == 0;
+                var statePath = Path.Combine(runtime, "supervisor-state.json");
+                var lockPath = Path.Combine(runtime, "supervisor.lock");
+                var allowedNames = new HashSet<string>(StringComparer.Ordinal)
+                {
+                    "supervisor-state.json",
+                    "supervisor.lock",
+                    "supervisor-events.jsonl",
+                    "supervisor-error.json"
+                };
+                foreach (var entry in Directory.GetFileSystemEntries(runtime))
+                {
+                    AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, entry);
+                    if (Directory.Exists(entry)
+                        || !allowedNames.Contains(Path.GetFileName(entry)))
+                        return false;
+                }
+                if (!File.Exists(statePath) || !File.Exists(lockPath))
+                    return false;
+
+                var packageRoot = AICodedbPaths.PackageRootPath;
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
+                var identity = ReadSupervisorRuntimeIdentity(
+                    normalizedRoot,
+                    statePath,
+                    packageRoot,
+                    runtimeContract,
+                    true);
+                var owner = AICodedbStrictJson.ReadObject(
+                    lockPath,
+                    SupervisorStateMaximumBytes,
+                    "CodeDB Supervisor lock");
+                return string.Equals(
+                           AICodedbStrictJson.GetRequiredString(owner, "managed_by", "CodeDB Supervisor lock"),
+                           "com.rice.ai-codedb",
+                           StringComparison.Ordinal)
+                       && AICodedbSupervisorProtocol.PathsEqual(
+                           AICodedbStrictJson.GetRequiredString(owner, "root", "CodeDB Supervisor lock"),
+                           normalizedRoot)
+                       && AICodedbSupervisorProtocol.PathsEqual(
+                           AICodedbStrictJson.GetRequiredString(owner, "runtime", "CodeDB Supervisor lock"),
+                           runtime)
+                       && string.Equals(
+                           AICodedbStrictJson.GetRequiredString(owner, "owner_epoch", "CodeDB Supervisor lock"),
+                           identity.OwnerEpoch,
+                           StringComparison.Ordinal)
+                       && AICodedbStrictJson.GetRequiredInt32(
+                           owner,
+                           "supervisor_pid",
+                           "CodeDB Supervisor lock") == identity.SupervisorProcessId;
             }
             catch
             {
