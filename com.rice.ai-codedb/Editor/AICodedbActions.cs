@@ -263,10 +263,17 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             Func<Task<AICodedbCommandResult>> fallback)
         {
-            var supervisorResult = await AICodedbEditorLifecycle.RunSupervisorCommandAsync(
-                "materialize",
-                action,
-                confirmedProjectMutation);
+            return await RunSupervisorCommandWithFallbackAsync(
+                fallback,
+                () => AICodedbEditorLifecycle.RunSupervisorCommandAsync(
+                    "materialize", action, confirmedProjectMutation));
+        }
+
+        private static async Task<AICodedbCommandResult> RunSupervisorCommandWithFallbackAsync(
+            Func<Task<AICodedbCommandResult>> fallback,
+            Func<Task<AICodedbCommandResult>> supervisorCommand)
+        {
+            var supervisorResult = await supervisorCommand();
             if (supervisorResult == null)
             {
                 return new AICodedbCommandResult(
@@ -327,6 +334,25 @@ namespace Rice.AI.Codedb.Editor
             var result = await RunProviderInstallerAsync(context, outputLine);
             AICodedbEditorLifecycle.RequestReconcile();
             return result;
+        }
+
+        internal static Task<AICodedbCommandResult> RunHostAdmissionAfterProviderAsync(
+            AICodedbCommandResult providerResult)
+        {
+            return RunHostAdmissionAfterProviderAsync(
+                providerResult,
+                () => AICodedbEditorLifecycle.RunSupervisorCommandAsync("materialize", "Probe", false),
+                AICodedbHostPayloadMaterializer.RunProbeAsync);
+        }
+
+        internal static Task<AICodedbCommandResult> RunHostAdmissionAfterProviderAsync(
+            AICodedbCommandResult providerResult,
+            Func<Task<AICodedbCommandResult>> supervisorProbe,
+            Func<Task<AICodedbCommandResult>> bootstrapProbe)
+        {
+            return providerResult == null || !providerResult.Succeeded
+                ? Task.FromResult(providerResult)
+                : RunSupervisorCommandWithFallbackAsync(bootstrapProbe, supervisorProbe);
         }
 
         private static AICodedbCommandResult RunProviderInstaller(

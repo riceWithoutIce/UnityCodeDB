@@ -1386,8 +1386,22 @@ namespace Rice.AI.Codedb.Editor
             return CanConfigureDependencies(_userActionInFlight)
                 ? (Action)(() => RunUserActionAsync(
                     "Configure CodeDB Dependencies",
-                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine)))
+                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine),
+                    RecheckHostPayloadAfterProviderAsync))
                 : null;
+        }
+
+        private async Task<AICodedbCommandResult> RecheckHostPayloadAfterProviderAsync(
+            AICodedbCommandResult providerResult)
+        {
+            if (providerResult == null || !providerResult.Succeeded)
+                return providerResult;
+
+            // The Actions layer consumes only the Bridge's explicit one-shot
+            // bootstrap authorization if the Supervisor has no current instance.
+            var admissionResult = await AICodedbActions.RunHostAdmissionAfterProviderAsync(providerResult);
+            AICodedbEditorLifecycle.RequestReconcile();
+            return admissionResult;
         }
 
         private string GetConfigureDependenciesLabel()
@@ -1918,7 +1932,8 @@ namespace Rice.AI.Codedb.Editor
             {
                 RunUserActionAsync(
                     "Configure CodeDB Dependencies",
-                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine));
+                    progressLine => AICodedbActions.RunInstallProviderAsync(progressLine),
+                    RecheckHostPayloadAfterProviderAsync);
                 return;
             }
 

@@ -223,6 +223,92 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ConfigureDependenciesSource_RechecksHostAdmissionAfterProviderSuccess()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbManagerWindow.cs"));
+            var actionsSource = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbActions.cs"));
+
+            Assert.That(source, Does.Contain("RecheckHostPayloadAfterProviderAsync"));
+            Assert.That(source, Does.Contain("RunHostAdmissionAfterProviderAsync(providerResult)"));
+            Assert.That(source, Does.Contain("AICodedbEditorLifecycle.RequestReconcile()"));
+            Assert.That(source, Does.Not.Contain("AICodedbHostPayloadMaterializer.RunDryRun()"));
+            Assert.That(actionsSource, Does.Contain("AICodedbEditorLifecycle.RunSupervisorCommandAsync(\"materialize\", \"Probe\", false)"));
+            Assert.That(actionsSource, Does.Contain("AICodedbHostPayloadMaterializer.RunProbeAsync"));
+            Assert.That(actionsSource, Does.Contain("IsSupervisorOneShotFallbackAllowed(supervisorResult)"));
+        }
+
+        [Test]
+        public void ConfigureDependenciesAdmission_UsesOnlyAuthorizedBootstrapFallback()
+        {
+            var providerSuccess = Result("provider installed");
+            var supervisorCalls = 0;
+            var fallbackCalls = 0;
+            Func<AICodedbCommandResult, AICodedbCommandResult> run = supervisorResult =>
+                AICodedbActions.RunHostAdmissionAfterProviderAsync(
+                        providerSuccess,
+                        () =>
+                        {
+                            supervisorCalls++;
+                            return Task.FromResult(supervisorResult);
+                        },
+                        () =>
+                        {
+                            fallbackCalls++;
+                            return Task.FromResult(Result("bootstrap probe"));
+                        })
+                    .GetAwaiter()
+                    .GetResult();
+
+            var authorized = run(new AICodedbCommandResult(4, string.Empty, "missing", false, 0, true));
+            Assert.That(authorized.Succeeded, Is.True);
+            Assert.That(supervisorCalls, Is.EqualTo(1));
+            Assert.That(fallbackCalls, Is.EqualTo(1));
+
+            var unauthorized = run(new AICodedbCommandResult(4, string.Empty, "unavailable", false));
+            Assert.That(unauthorized.Succeeded, Is.False);
+            Assert.That(supervisorCalls, Is.EqualTo(2));
+            Assert.That(fallbackCalls, Is.EqualTo(1));
+
+            var current = run(Result("current instance probe"));
+            Assert.That(current.Succeeded, Is.True);
+            Assert.That(supervisorCalls, Is.EqualTo(3));
+            Assert.That(fallbackCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ConfigureDependenciesAdmission_ProviderFailureDoesNotProbe()
+        {
+            var supervisorCalls = 0;
+            var fallbackCalls = 0;
+            var providerFailure = new AICodedbCommandResult(4, string.Empty, "provider failed", false);
+
+            var result = AICodedbActions.RunHostAdmissionAfterProviderAsync(
+                    providerFailure,
+                    () =>
+                    {
+                        supervisorCalls++;
+                        return Task.FromResult(Result("must not run"));
+                    },
+                    () =>
+                    {
+                        fallbackCalls++;
+                        return Task.FromResult(Result("must not run"));
+                    })
+                .GetAwaiter()
+                .GetResult();
+
+            Assert.That(result, Is.SameAs(providerFailure));
+            Assert.That(supervisorCalls, Is.Zero);
+            Assert.That(fallbackCalls, Is.Zero);
+        }
+
+        [Test]
         public void ActionsSource_RechecksCurrentRemoveIntegrationEvidenceOnAWorker()
         {
             var source = File.ReadAllText(Path.Combine(
