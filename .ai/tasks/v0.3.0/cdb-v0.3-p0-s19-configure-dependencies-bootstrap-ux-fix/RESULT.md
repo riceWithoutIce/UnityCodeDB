@@ -25,3 +25,22 @@ Changed source/test files:
 Static scoped diff check passed. Unity compilation, EditMode, Unity MCP,
 runtime integration, commit, package export, and Verifier review remain
 deferred pending the human-owned Unity gate.
+
+## Commit and Local Package Export - 2026-09-23
+
+The source fix was committed as `68fd597b267f91fd9287eb45a9f29b7099e2d318`
+(`fix(v0.3): unblock fresh dependency bootstrap`). The accepted source tree
+was exported from that commit only:
+
+- Package directory: `<local-artifact-root>/v0.3.0-preview.5-s19-68fd597-final/package/com.rice.ai-codedb`
+- ZIP artifact: `<local-artifact-root>/v0.3.0-preview.5-s19-68fd597-final/com.rice.ai-codedb-v0.3.0-preview.5-s19.zip`
+- `package.json` name/version: `com.rice.ai-codedb` / `0.3.0-preview.5`
+- extracted file count: `475`
+- extracted bytes: `9426259`
+- ZIP entry count: `561`
+- ZIP bytes: `2147645`
+- ZIP SHA-256: `e82b8fd07f517cd5a818a288f94abf026cefd764e7f124a8cd377826d2636251`
+
+The package structure is single-root `com.rice.ai-codedb`; no Unity project,
+Workflow, or unrelated dirty files were included. Unity/EditMode/runtime
+acceptance remains pending.
