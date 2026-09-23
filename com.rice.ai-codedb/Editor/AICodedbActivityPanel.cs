@@ -557,7 +557,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 case AICodedbUserActionPhase.Running:
                     return new AICodedbUserActionPresentation(
-                        true,
+                        false,
                         true,
                         AICodedbStatusState.Warning,
                         "In progress",

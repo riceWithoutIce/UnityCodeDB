@@ -150,6 +150,20 @@ namespace Rice.AI.Codedb.Editor.Tests
                 admissionDisposition);
         }
 
+        [TestCase(true, AICodedbCurrentInstanceState.Missing, ExpectedResult = true)]
+        [TestCase(true, AICodedbCurrentInstanceState.Current, ExpectedResult = false)]
+        [TestCase(true, AICodedbCurrentInstanceState.TrustedPrevious, ExpectedResult = false)]
+        [TestCase(true, AICodedbCurrentInstanceState.Invalid, ExpectedResult = false)]
+        [TestCase(false, AICodedbCurrentInstanceState.Missing, ExpectedResult = false)]
+        public bool InitialSupervisorProbe_IsSkippedOnlyForFreshBootstrap(
+            bool bootstrapWithoutCoordinatorAllowed,
+            AICodedbCurrentInstanceState currentInstanceState)
+        {
+            return AICodedbEditorLifecycle.ShouldSkipInitialSupervisorProbeForBootstrap(
+                bootstrapWithoutCoordinatorAllowed,
+                currentInstanceState);
+        }
+
         [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.LeasePublicationFailed)]
         [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid)]
         [TestCase(AICodedbEditorLifecycle.AICodedbCoordinatorAdmissionDisposition.CurrentInstanceIneligible)]

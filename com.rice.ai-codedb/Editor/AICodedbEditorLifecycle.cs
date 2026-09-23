@@ -1167,17 +1167,36 @@ namespace Rice.AI.Codedb.Editor
 
             if (!canContinue())
                 return null;
-            var hostResult = RunSupervisorCommand(
-                context,
-                "materialize",
-                "Probe",
-                cancellationToken);
-            var hostStatus = BuildHostPayloadStatus(hostResult, context);
-            var productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, hostResult);
+            // A fresh project has no selected instance yet. A Probe requires
+            // that Package-owned runtime to exist, so probing first creates a
+            // deterministic exit-4 dead end before the Deploy convergence
+            // branch can publish the initial instance. Reuse the already
+            // admitted prerequisite evidence for this one cold-start path.
+            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+            AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
+            var skipInitialSupervisorProbe = ShouldSkipInitialSupervisorProbeForBootstrap(
+                bootstrapWithoutCoordinatorAllowed,
+                currentInstance.State);
+            AICodedbCommandResult hostResult;
+            AICodedbProductStatus productStatus;
+            if (skipInitialSupervisorProbe)
+            {
+                hostResult = independentPrerequisiteResult;
+                productStatus = independentPrerequisiteStatus;
+            }
+            else
+            {
+                hostResult = RunSupervisorCommand(
+                    context,
+                    "materialize",
+                    "Probe",
+                    cancellationToken);
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, hostResult);
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.InitialSupervisorProbeEvaluated);
+            }
             productStatus = RememberLifecycleProductStatus(productStatus, hostResult);
             AICodedbLifecycleEvidence.RecordPostAdmissionProductLayers(productStatus);
-            AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
-                AICodedbPostAdmissionDisposition.InitialSupervisorProbeEvaluated);
             var workerResult = LifecycleReconcileResult.WithState(productStatus.State);
             if (productStatus.State == AICodedbProductState.MissingPrerequisite)
             {
@@ -1208,8 +1227,6 @@ namespace Rice.AI.Codedb.Editor
             // Automatic lifecycle convergence is instance-first. The legacy
             // flat/generation path remains available to diagnostics, but it
             // must not be selected after a Package reload.
-            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
-            AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
             if (currentInstance.State == AICodedbCurrentInstanceState.Invalid)
             {
                 AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
@@ -3272,6 +3289,14 @@ namespace Rice.AI.Codedb.Editor
                    && prerequisiteCurrent
                    && integrationState == AICodedbProjectIntegrationState.Installed
                    && admissionDisposition == AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing;
+        }
+
+        internal static bool ShouldSkipInitialSupervisorProbeForBootstrap(
+            bool bootstrapWithoutCoordinatorAllowed,
+            AICodedbCurrentInstanceState currentInstanceState)
+        {
+            return bootstrapWithoutCoordinatorAllowed
+                   && currentInstanceState == AICodedbCurrentInstanceState.Missing;
         }
 
         internal static bool ApplyPrerequisiteGatedLeaseRefresh(

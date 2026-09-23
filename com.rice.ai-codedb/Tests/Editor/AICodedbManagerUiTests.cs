@@ -2082,14 +2082,15 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void UserActionStatus_ShowsRunningActionAndElapsedTime()
+        public void UserActionStatus_KeepsRunningActionInActivityPanelAndOutOfHeader()
         {
             var status = new AICodedbUserActionStatus();
             status.Start("Configure CodeDB Dependencies", 10d);
 
             var presentation = status.BuildPresentation(13.25d);
 
-            Assert.That(presentation.IsVisible, Is.True);
+            Assert.That(presentation.IsVisible, Is.False,
+                "Running progress belongs in the Last activity panel, not the full-width Manager header.");
             Assert.That(presentation.IsRunning, Is.True);
             Assert.That(presentation.StatusLabel, Is.EqualTo("In progress"));
             Assert.That(presentation.Detail, Does.Contain("Configure CodeDB Dependencies is running"));
