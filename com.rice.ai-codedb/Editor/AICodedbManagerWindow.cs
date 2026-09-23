@@ -1401,17 +1401,38 @@ namespace Rice.AI.Codedb.Editor
 
             var outcome = await AICodedbActions.RunHostAdmissionAfterProviderAsync(providerResult);
             TryApplyCachedLifecycleStatus();
+            return ResolvePostProviderReconcileResult(outcome);
+        }
+
+        internal static AICodedbCommandResult ResolvePostProviderReconcileResult(
+            AICodedbEditorLifecycle.AICodedbReconcileOutcome outcome)
+        {
             if (outcome == null)
                 return new AICodedbCommandResult(4, string.Empty,
                     "Lifecycle did not return a post-Provider reconcile outcome.", false);
 
-            var ready = outcome.Disposition ==
-                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready;
+            if (outcome.Disposition == AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready)
+                return new AICodedbCommandResult(0, "CodeDB is ready.", string.Empty, false);
+
+            var authoritative = outcome.LastCommandResult;
+            if (authoritative == null)
+                return new AICodedbCommandResult(4, string.Empty, outcome.Detail, false);
+            if (!authoritative.Succeeded)
+                return authoritative;
+
+            var terminalDetail = string.IsNullOrWhiteSpace(outcome.Detail)
+                ? "Post-Provider reconcile did not reach Ready."
+                : outcome.Detail.Trim();
+            var standardError = string.IsNullOrWhiteSpace(authoritative.StandardError)
+                ? terminalDetail
+                : authoritative.StandardError.TrimEnd() + Environment.NewLine + terminalDetail;
             return new AICodedbCommandResult(
-                ready ? 0 : 4,
-                ready ? "CodeDB is ready." : string.Empty,
-                ready ? string.Empty : outcome.Detail,
-                false);
+                4,
+                authoritative.StandardOutput,
+                standardError,
+                authoritative.TimedOut,
+                authoritative.ElapsedMilliseconds,
+                authoritative.OneShotFallbackAuthorized);
         }
 
         private string GetConfigureDependenciesLabel()

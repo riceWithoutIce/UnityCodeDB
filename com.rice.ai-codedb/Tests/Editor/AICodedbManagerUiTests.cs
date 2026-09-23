@@ -318,6 +318,106 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void PostProviderResult_FailingAuthoritativeResultIsPreservedExactly()
+        {
+            var authoritative = new AICodedbCommandResult(
+                17,
+                "authoritative stdout",
+                "authoritative stderr",
+                false,
+                4321,
+                true);
+            var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                8,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention,
+                default(AICodedbProductStatus),
+                authoritative,
+                20,
+                "truncated terminal detail");
+
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+
+            Assert.That(actual, Is.SameAs(authoritative));
+            Assert.That(actual.ExitCode, Is.EqualTo(17));
+            Assert.That(actual.StandardOutput, Is.EqualTo("authoritative stdout"));
+            Assert.That(actual.StandardError, Is.EqualTo("authoritative stderr"));
+            Assert.That(actual.TimedOut, Is.False);
+            Assert.That(actual.ElapsedMilliseconds, Is.EqualTo(4321));
+            Assert.That(actual.OneShotFallbackAuthorized, Is.True);
+        }
+
+        [Test]
+        public void PostProviderResult_SuccessfulCommandWithNonReadyOutcomeRetainsEvidenceAndFails()
+        {
+            var authoritative = new AICodedbCommandResult(
+                0,
+                "successful command stdout",
+                "successful command warning",
+                false,
+                876,
+                true);
+            var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                9,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Deferred,
+                default(AICodedbProductStatus),
+                authoritative,
+                21,
+                "Lifecycle remained deferred.");
+
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+
+            Assert.That(actual.Succeeded, Is.False);
+            Assert.That(actual.ExitCode, Is.EqualTo(4));
+            Assert.That(actual.StandardOutput, Is.EqualTo(authoritative.StandardOutput));
+            Assert.That(actual.StandardError, Does.StartWith(authoritative.StandardError));
+            Assert.That(actual.StandardError, Does.Contain("Lifecycle remained deferred."));
+            Assert.That(actual.TimedOut, Is.EqualTo(authoritative.TimedOut));
+            Assert.That(actual.ElapsedMilliseconds, Is.EqualTo(authoritative.ElapsedMilliseconds));
+            Assert.That(actual.OneShotFallbackAuthorized, Is.EqualTo(authoritative.OneShotFallbackAuthorized));
+        }
+
+        [Test]
+        public void PostProviderResult_ReadyOutcomeReturnsBoundedSuccess()
+        {
+            var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                10,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready,
+                default(AICodedbProductStatus),
+                new AICodedbCommandResult(12, "ignored", "ignored", false, 123, true),
+                22,
+                "ready");
+
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+
+            Assert.That(actual.Succeeded, Is.True);
+            Assert.That(actual.StandardOutput, Is.EqualTo("CodeDB is ready."));
+            Assert.That(actual.StandardError, Is.Empty);
+        }
+
+        [Test]
+        public void PostProviderResult_MissingAuthoritativeResultReturnsBoundedFailure()
+        {
+            var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                11,
+                AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention,
+                default(AICodedbProductStatus),
+                null,
+                23,
+                "No authoritative command was published.");
+
+            var missingCommand = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+            var missingOutcome = AICodedbManagerWindow.ResolvePostProviderReconcileResult(null);
+
+            Assert.That(missingCommand.Succeeded, Is.False);
+            Assert.That(missingCommand.ExitCode, Is.EqualTo(4));
+            Assert.That(missingCommand.StandardError, Is.EqualTo("No authoritative command was published."));
+            Assert.That(missingOutcome.Succeeded, Is.False);
+            Assert.That(missingOutcome.ExitCode, Is.EqualTo(4));
+            Assert.That(missingOutcome.StandardError,
+                Is.EqualTo("Lifecycle did not return a post-Provider reconcile outcome."));
+        }
+
+        [Test]
         public void ActionsSource_DoesNotParseHostOutputOrSelectBootstrapMutation()
         {
             var source = File.ReadAllText(Path.Combine(
