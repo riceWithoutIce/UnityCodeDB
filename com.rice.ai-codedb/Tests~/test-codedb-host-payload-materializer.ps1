@@ -77,7 +77,11 @@ if ([string]::IsNullOrWhiteSpace($nodePath) -or -not [System.IO.File]::Exists($n
 }
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $markerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
-$generationId = "poc.36"
+$packagePayloadContract = Get-Content -LiteralPath (Join-Path $packagePayloadRoot "payload-manifest.json") -Raw | ConvertFrom-Json -ErrorAction Stop
+$generationId = [string]$packagePayloadContract.generation_id
+if ($generationId -notmatch '^poc\.[0-9]+$') {
+    throw "Package payload generation identity is invalid."
+}
 $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
 $currentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
 $lastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
@@ -6366,6 +6370,7 @@ function New-SyntheticPayload {
         payload_sequence = $resolvedPayloadSequence
         generation_id = $generationId
         bootstrap_protocol = 1
+        owner_identity_version = [int]$canonicalPayloadManifest.owner_identity_version
         bootstrap_transitions = @()
         current_pointer_target = $currentPointerRelativePath
         retired_targets = @()
@@ -9106,9 +9111,9 @@ try {
     Set-TestCanonicalPayloadRoot -Root $fixtureCanonicalPayloadRoot
     Assert-True -Condition (Test-Path -LiteralPath $materializerPath -PathType Leaf) -Message "Materializer script is missing."
     Assert-True -Condition (Test-Path -LiteralPath $canonicalPayloadRoot -PathType Container) -Message "Canonical payload root is missing."
-    Assert-Equal -Actual $canonicalPayloadManifest.package_version -Expected "0.3.0-preview.2" -Message "Canonical package version mismatch."
+    Assert-Equal -Actual ([string]$canonicalPayloadManifest.package_version) -Expected ([string]$packagePayloadContract.package_version) -Message "Canonical package version mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.payload_version -Expected $generationId -Message "Canonical payload version mismatch."
-    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected 36 -Message "Canonical payload sequence mismatch."
+    Assert-Equal -Actual $canonicalPayloadManifest.payload_sequence -Expected ([int]$packagePayloadContract.payload_sequence) -Message "Canonical payload sequence mismatch."
     Assert-Equal -Actual $canonicalPayloadManifest.generation_id -Expected $generationId -Message "Canonical generation id mismatch."
     Assert-Equal -Actual $legacyManagedTargets.Count -Expected 22 -Message "Flat target count mismatch."
     Assert-Equal -Actual $generationManagedTargets.Count -Expected 23 -Message "Generation target count mismatch."

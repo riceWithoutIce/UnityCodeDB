@@ -2,7 +2,9 @@
 
 [CmdletBinding()]
 param(
-    [string]$PackageVersion = "0.3.0-preview.4",
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^0\.[0-9]+\.[0-9]+-preview\.[0-9]+$')]
+    [string]$PackageVersion,
     [string]$LocalAppDataRoot = "",
     [switch]$TestMode,
     [string]$TestArchivePath = "",
@@ -23,7 +25,6 @@ try {
     # Result codes remain ASCII even when the host does not allow an encoding change.
 }
 
-$script:ProviderPackageVersion = "0.3.0-preview.4"
 $script:DistributionManifestPath = Join-Path $PSScriptRoot "codedb-provider-distribution.json"
 $script:ProviderContractPath = Join-Path $PSScriptRoot "..\Payload~\AIWork\codedb\shared\codedb-machine-provider-contract.ps1"
 $script:ExpectedReleaseBaseUrl = "https://github.com/riceWithoutIce/UnityCodeDB/releases/download/codedb-provider-v0.5.0-28e3912-c2"
@@ -224,7 +225,7 @@ function Get-ValidatedDistributionMode {
     }
 
     if ([string]::Equals($state, "DEVELOPMENT_UPSTREAM", [StringComparison]::Ordinal)) {
-        if ($script:ProviderPackageVersion -cnotmatch '-preview\.[0-9]+$') {
+        if ($PackageVersion -cnotmatch '-preview\.[0-9]+$') {
             throw "Development Provider distribution is available only to preview Package versions."
         }
         $archiveSha256 = Get-CodedbProviderManifestString -Properties $Manifest -Name "archive_sha256"
@@ -311,7 +312,7 @@ function Copy-ProviderArtifact {
     try {
         $request = [System.Net.HttpWebRequest]::Create($Source)
         $request.Method = "GET"
-        $request.UserAgent = "Rice-AI-CodeDB/$script:ProviderPackageVersion"
+        $request.UserAgent = "Rice-AI-CodeDB/$PackageVersion"
         $request.AllowAutoRedirect = $true
         $request.Timeout = $script:ProviderDownloadTimeoutMilliseconds
         $request.ReadWriteTimeout = $script:ProviderDownloadTimeoutMilliseconds
@@ -698,9 +699,6 @@ function Assert-TestModeIsolation {
 }
 
 function Invoke-CodedbProviderInstall {
-    if (-not [string]::Equals($PackageVersion, $script:ProviderPackageVersion, [StringComparison]::Ordinal)) {
-        throw "Provider installer Package version does not match its reviewed distribution contract."
-    }
     Assert-TestModeIsolation
     $distribution = Read-ProviderDistributionManifest
     $distributionMode = Get-ValidatedDistributionMode -Manifest $distribution

@@ -2548,7 +2548,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 + ",\"owner_epoch\":\"" + ownerEpoch + "\""
                 + ",\"publication_phase\":\"state_published\""
                 + ",\"owner_evidence\":{\"schema_version\":1,\"pid\":1234"
-                + ",\"process_start_identity\":\"1\",\"executable_path\":\"C:\\\\fixture-supervisor.exe\""
+                + ",\"process_start_identity\":\"1\",\"executable_path\":\"fixture-supervisor.exe\""
                 + ",\"argv_sha256\":\"" + hash + "\",\"command_line_sha256\":\"" + hash + "\"}}";
             var lockJson =
                 "{\"managed_by\":\"com.rice.ai-codedb\",\"root\":\""
