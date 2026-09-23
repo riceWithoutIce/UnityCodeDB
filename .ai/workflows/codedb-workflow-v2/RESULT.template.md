@@ -4,7 +4,9 @@
 
 - Status: COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Workflow: codedb-workflow-v2
-- Actual profile/model/reasoning:
+- Workflow revision: 2.3
+- Actual execution mode/profile/model/reasoning:
+- Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
 - Frozen identity:
 - Changed files:
 - Outcome summary:
@@ -16,6 +18,9 @@
 - Correction summary: none | <one consolidated summary>
 - Budget use:
 - Identity/diff check:
+- Package closure evidence: source count, mismatches, extracted file/byte counts,
+  artifact hash, and frozen commit source:
+- Unity/external gate status:
 
 ## Risks And Limits
 
@@ -23,6 +28,7 @@
 - Deferred/NOT RUN evidence:
 - Protected state and side effects:
 - Scope or authority expansion required: no | <exact request>
+- Mode promotion: NOT_REQUIRED | MODE_PROMOTION_REQUIRED: <reason>
 
 ## Handoff
 

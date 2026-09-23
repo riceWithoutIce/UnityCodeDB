@@ -4,8 +4,10 @@
 
 - Verdict: PASS | FAIL | BLOCKED | DEFERRED
 - Workflow: codedb-workflow-v2
+- Workflow revision: 2.3
 - Review mode: GUARDED | RELEASE | <explicit request>
-- Actual profile/model/reasoning:
+- Actual execution mode/profile/model/reasoning:
+- Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
 - Frozen identity admission:
 - Reviewed claims:
 
@@ -15,13 +17,17 @@
 - Targeted read-only checks:
 - Tests rerun: none | <explicitly authorized run>
 - Identity stability:
+- Release closure identity: exact artifact, frozen commit, extracted root, and
+  cross-hash checks:
 
 ## Findings And Limits
 
 - One-time findings: none | BLOCKER/P1/P2/FOLLOW-UP
 - Original finding and adjacent regression status, when applicable:
 - NOT RUN/DEFERRED boundaries:
+- Package source enumeration and artifact extraction reused:
 - Out-of-scope observations:
+- Mode promotion: NOT_REQUIRED | MODE_PROMOTION_REQUIRED: <reason>
 
 ## Handoff
 
