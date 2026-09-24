@@ -5,7 +5,6 @@ using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using UnityEditor;
 
 namespace Rice.AI.Codedb.Editor
 {
@@ -32,7 +31,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult ReadStatus()
         {
-            return Run(AICodedbHostPayloadAction.DryRun, false, false);
+            return Run(AICodedbHostPayloadAction.DryRun, false);
         }
 
         internal static Task<AICodedbCommandResult> ReadStatusAsync()
@@ -62,7 +61,6 @@ namespace Rice.AI.Codedb.Editor
                 context,
                 AICodedbHostPayloadAction.DryRun,
                 false,
-                false,
                 cancellationToken);
         }
 
@@ -84,23 +82,22 @@ namespace Rice.AI.Codedb.Editor
                 context,
                 AICodedbHostPayloadAction.Probe,
                 false,
-                false,
                 cancellationToken);
         }
 
         internal static AICodedbCommandResult RunDryRun()
         {
-            return Run(AICodedbHostPayloadAction.DryRun, false, true);
+            return Run(AICodedbHostPayloadAction.DryRun, false);
         }
 
         internal static AICodedbCommandResult RunVerify()
         {
-            return Run(AICodedbHostPayloadAction.Verify, false, true);
+            return Run(AICodedbHostPayloadAction.Verify, false);
         }
 
         internal static AICodedbCommandResult RunUpgrade()
         {
-            return Run(AICodedbHostPayloadAction.Upgrade, false, true);
+            return Run(AICodedbHostPayloadAction.Upgrade, false);
         }
 
         internal static Task<AICodedbCommandResult> RunUpgradeAsync()
@@ -125,18 +122,17 @@ namespace Rice.AI.Codedb.Editor
                 context,
                 AICodedbHostPayloadAction.Upgrade,
                 false,
-                false,
                 cancellationToken);
         }
 
         internal static AICodedbCommandResult RunRedeploy(bool confirmedProjectMutation)
         {
-            return Run(AICodedbHostPayloadAction.Redeploy, confirmedProjectMutation, true);
+            return Run(AICodedbHostPayloadAction.Redeploy, confirmedProjectMutation);
         }
 
         internal static AICodedbCommandResult RunRepair()
         {
-            return Run(AICodedbHostPayloadAction.Repair, true, true);
+            return Run(AICodedbHostPayloadAction.Repair, true);
         }
 
         internal static Task<AICodedbCommandResult> RunRepairAsync()
@@ -146,12 +142,12 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult RunSync()
         {
-            return Run(AICodedbHostPayloadAction.Sync, true, true);
+            return Run(AICodedbHostPayloadAction.Sync, true);
         }
 
         internal static AICodedbCommandResult RunRemove()
         {
-            return Run(AICodedbHostPayloadAction.Remove, true, true);
+            return Run(AICodedbHostPayloadAction.Remove, true);
         }
 
         internal static Task<AICodedbCommandResult> RunRemoveIntegrationAsync()
@@ -164,7 +160,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult RunUninstall()
         {
-            return Run(AICodedbHostPayloadAction.Uninstall, true, true);
+            return Run(AICodedbHostPayloadAction.Uninstall, true);
         }
 
         internal static Task<AICodedbCommandResult> RunUninstallAsync()
@@ -174,7 +170,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult RunInstall()
         {
-            return Run(AICodedbHostPayloadAction.Install, true, true);
+            return Run(AICodedbHostPayloadAction.Install, true);
         }
 
         internal static Task<AICodedbCommandResult> RunInstallAsync()
@@ -184,7 +180,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbCommandResult RunReinstall(bool confirmedProjectMutation)
         {
-            return Run(AICodedbHostPayloadAction.Reinstall, confirmedProjectMutation, true);
+            return Run(AICodedbHostPayloadAction.Reinstall, confirmedProjectMutation);
         }
 
         internal static Task<AICodedbCommandResult> RunReinstallAsync(bool confirmedProjectMutation)
@@ -287,27 +283,23 @@ namespace Rice.AI.Codedb.Editor
 
         private static AICodedbCommandResult Run(
             AICodedbHostPayloadAction action,
-            bool confirmedProjectMutation,
-            bool showProgress)
+            bool confirmedProjectMutation)
         {
             return Run(
                 AICodedbPaths.CaptureExecutionContext(),
                 action,
-                confirmedProjectMutation,
-                showProgress);
+                confirmedProjectMutation);
         }
 
         private static AICodedbCommandResult Run(
             AICodedbEditorExecutionContext context,
             AICodedbHostPayloadAction action,
-            bool confirmedProjectMutation,
-            bool showProgress = false)
+            bool confirmedProjectMutation)
         {
             return Run(
                 context,
                 action,
                 confirmedProjectMutation,
-                showProgress,
                 CancellationToken.None);
         }
 
@@ -315,7 +307,6 @@ namespace Rice.AI.Codedb.Editor
             AICodedbEditorExecutionContext context,
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation,
-            bool showProgress,
             CancellationToken cancellationToken)
         {
             string[] arguments;
@@ -328,36 +319,20 @@ namespace Rice.AI.Codedb.Editor
                 return new AICodedbCommandResult(-1, string.Empty, exception.Message, false);
             }
 
-            if (showProgress)
+            var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
+            if (cancellationToken != CancellationToken.None)
             {
-                EditorUtility.DisplayProgressBar(
-                    AICodedbProjectSettings.DisplayName,
-                    $"Running {Path.GetFileName(AICodedbPaths.HostPayloadMaterializerScriptPath)} ({action})",
-                    0.5f);
-            }
-
-            try
-            {
-                var timeout = IsMutation(action) ? MutationTimeoutMilliseconds : ReadTimeoutMilliseconds;
-                if (cancellationToken != CancellationToken.None)
-                {
-                    return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
-                        context,
-                        timeout,
-                        cancellationToken,
-                        arguments);
-                }
-
                 return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
                     context,
                     timeout,
+                    cancellationToken,
                     arguments);
             }
-            finally
-            {
-                if (showProgress)
-                    EditorUtility.ClearProgressBar();
-            }
+
+            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
+                context,
+                timeout,
+                arguments);
         }
 
         private static Task<AICodedbCommandResult> RunAsync(

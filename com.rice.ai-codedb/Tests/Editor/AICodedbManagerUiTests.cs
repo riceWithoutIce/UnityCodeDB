@@ -223,6 +223,29 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ManagerHostActions_KeepUnityProgressUiOutOfWorkerCommands()
+        {
+            var editorRoot = Path.Combine(AICodedbPaths.PackageRootPath, "Editor");
+            var manager = File.ReadAllText(Path.Combine(editorRoot, "AICodedbManagerWindow.cs"));
+            var actions = File.ReadAllText(Path.Combine(editorRoot, "AICodedbActions.cs"));
+            var materializer = File.ReadAllText(Path.Combine(editorRoot, "AICodedbHostPayloadMaterializer.cs"));
+
+            Assert.That(manager, Does.Contain("_ => Task.Run(action)"));
+            Assert.That(manager, Does.Contain("GetActivityPanel().ResetForRunningAction()"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadDryRun"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadVerify"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadSync"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadRemove"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadUpgrade"));
+            Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadRedeploy(true)"));
+
+            Assert.That(actions, Does.Not.Contain("EditorUtility.DisplayProgressBar"));
+            Assert.That(actions, Does.Not.Contain("EditorUtility.ClearProgressBar"));
+            Assert.That(materializer, Does.Not.Contain("EditorUtility.DisplayProgressBar"));
+            Assert.That(materializer, Does.Not.Contain("EditorUtility.ClearProgressBar"));
+        }
+
+        [Test]
         public void ConfigureDependenciesSource_RechecksHostAdmissionAfterProviderSuccess()
         {
             var source = File.ReadAllText(Path.Combine(

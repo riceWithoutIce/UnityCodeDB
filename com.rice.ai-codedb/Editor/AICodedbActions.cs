@@ -338,7 +338,7 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal static AICodedbCommandResult RunInstallProvider()
         {
-            var result = RunProviderInstaller(AICodedbPaths.CaptureExecutionContext(), true);
+            var result = RunProviderInstaller(AICodedbPaths.CaptureExecutionContext());
             if (result != null && result.Succeeded)
                 AICodedbEditorLifecycle.RequestReconcile();
             return result;
@@ -383,8 +383,7 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static AICodedbCommandResult RunProviderInstaller(
-            AICodedbEditorExecutionContext context,
-            bool showProgress)
+            AICodedbEditorExecutionContext context)
         {
             if (context.Platform != RuntimePlatform.WindowsEditor)
             {
@@ -395,22 +394,12 @@ namespace Rice.AI.Codedb.Editor
                     false);
             }
 
-            if (showProgress)
-                EditorUtility.DisplayProgressBar(AICodedbProjectSettings.DisplayName, "Configuring CodeDB dependencies", 0.5f);
-            try
-            {
-                return AICodedbProcessRunner.RunResolvedPackageProviderInstallerPowerShellScript(
-                    context,
-                    ProviderInstallTimeoutMilliseconds,
-                    "-PackageVersion",
-                    AICodedbPackageRuntimeContractStore.Read(context.PackageRoot)
-                        .Target.PackageVersion);
-            }
-            finally
-            {
-                if (showProgress)
-                    EditorUtility.ClearProgressBar();
-            }
+            return AICodedbProcessRunner.RunResolvedPackageProviderInstallerPowerShellScript(
+                context,
+                ProviderInstallTimeoutMilliseconds,
+                "-PackageVersion",
+                AICodedbPackageRuntimeContractStore.Read(context.PackageRoot)
+                    .Target.PackageVersion);
         }
 
         private static Task<AICodedbCommandResult> RunProviderInstallerAsync(
@@ -715,39 +704,6 @@ namespace Rice.AI.Codedb.Editor
                 BuildWatcherScriptArguments(action));
         }
 
-        private static AICodedbCommandResult RunWatcherAction(
-            string title,
-            string action,
-            int timeoutMilliseconds)
-        {
-            var context = AICodedbPaths.CaptureExecutionContext();
-            if (WatcherActionRequiresEditorLease(action))
-            {
-                string leaseDetail;
-                if (!AICodedbEditorLifecycle.TryPrepareCurrentEditorLease(context, out leaseDetail))
-                {
-                    return new AICodedbCommandResult(
-                        4,
-                        string.Empty,
-                        leaseDetail,
-                        false);
-                }
-            }
-
-            EditorUtility.DisplayProgressBar(
-                AICodedbProjectSettings.DisplayName,
-                $"Running {title}",
-                0.5f);
-            try
-            {
-                return RunWatcherScript(context, action, timeoutMilliseconds);
-            }
-            finally
-            {
-                EditorUtility.ClearProgressBar();
-            }
-        }
-
         internal static bool WatcherActionRequiresEditorLease(string action)
         {
             return string.Equals(action, "Enable", StringComparison.Ordinal)
@@ -871,9 +827,8 @@ namespace Rice.AI.Codedb.Editor
         }
 
         /// <summary>
-        /// Runs a codedb script with a progress bar and returns the captured output.
+        /// Runs a codedb script and returns the captured output.
         /// </summary>
-        /// <param name="title">Progress title.</param>
         /// <param name="scriptPath">Absolute path to the script.</param>
         private static AICodedbCommandResult RunScript(string title, string scriptPath)
         {
@@ -883,7 +838,6 @@ namespace Rice.AI.Codedb.Editor
         /// <summary>
         /// Runs a codedb script with a timeout and returns the captured output.
         /// </summary>
-        /// <param name="title">Progress title.</param>
         /// <param name="scriptPath">Absolute path to the script.</param>
         /// <param name="timeoutMilliseconds">Maximum runtime in milliseconds, or zero for the default timeout.</param>
         /// <param name="scriptArguments">Optional arguments passed to the script.</param>
@@ -896,16 +850,10 @@ namespace Rice.AI.Codedb.Editor
             if (readinessFailure != null)
                 return readinessFailure;
 
-            EditorUtility.DisplayProgressBar(AICodedbProjectSettings.DisplayName, $"Running {Path.GetFileName(scriptPath)}", 0.5f);
-
-            try
-            {
-                return AICodedbProcessRunner.RunPowerShellScript(scriptPath, timeoutMilliseconds, scriptArguments);
-            }
-            finally
-            {
-                EditorUtility.ClearProgressBar();
-            }
+            return AICodedbProcessRunner.RunPowerShellScript(
+                scriptPath,
+                timeoutMilliseconds,
+                scriptArguments);
         }
 
         internal static AICodedbCommandResult GetHostCommandReadinessFailure(
