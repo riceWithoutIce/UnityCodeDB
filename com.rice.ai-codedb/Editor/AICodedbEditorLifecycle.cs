@@ -1745,6 +1745,7 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             CancellationToken cancellationToken = default(CancellationToken))
         {
+            var managerActionId = AICodedbPaths.CurrentActionId;
             var projectRoot = _projectRoot;
             if (string.IsNullOrWhiteSpace(projectRoot))
                 projectRoot = AICodedbPaths.ProjectRoot;
@@ -1754,7 +1755,8 @@ namespace Rice.AI.Codedb.Editor
                 action,
                 null,
                 confirmedProjectMutation,
-                cancellationToken);
+                cancellationToken,
+                managerActionId);
             if (string.Equals(command, "materialize", StringComparison.Ordinal))
                 AICodedbLifecycleEvidence.RecordMaterializerCommand(false);
             if (response != null && response.Snapshot != null)
@@ -1771,6 +1773,7 @@ namespace Rice.AI.Codedb.Editor
         internal static async Task<AICodedbCommandResult> RunSupervisorMaintenanceCommandAsync(
             string action)
         {
+            var managerActionId = AICodedbPaths.CurrentActionId;
             var projectRoot = _projectRoot;
             if (string.IsNullOrWhiteSpace(projectRoot))
                 projectRoot = AICodedbPaths.ProjectRoot;
@@ -1783,7 +1786,8 @@ namespace Rice.AI.Codedb.Editor
                     action,
                     null,
                     false,
-                    cancellationToken),
+                    cancellationToken,
+                    managerActionId),
                 true);
             if (response != null && response.Snapshot != null)
             {
@@ -1794,6 +1798,32 @@ namespace Rice.AI.Codedb.Editor
             return response == null
                 ? new AICodedbCommandResult(4, string.Empty, "The project Supervisor returned no maintenance response.", false)
                 : response.ToCommandResult();
+        }
+
+        internal static async Task<AICodedbManagerActionRecoveryOutcome> RecoverManagerActionAsync(
+            AICodedbEditorExecutionContext context,
+            string actionId,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                return AICodedbManagerActionRecoveryOutcome.Conflict("The persisted Manager action id is invalid.");
+            var response = await SupervisorBridge.RecoverManagerActionAsync(
+                context.ProjectRoot,
+                actionId,
+                cancellationToken);
+            if (response == null)
+                return AICodedbManagerActionRecoveryOutcome.Pending(
+                    "The project Supervisor returned no action correlation response.");
+            if (string.Equals(response.ErrorCode, "ACTION_OPERATION_NOT_FOUND", StringComparison.Ordinal))
+                return AICodedbManagerActionRecoveryOutcome.NotFound(
+                    "No durable Supervisor operation is bound to this Manager action.");
+            if (!response.HasOperationEvidence)
+                return AICodedbManagerActionRecoveryOutcome.Pending(response.Error);
+            var result = response.ToCommandResult();
+            return AICodedbManagerActionRecoveryOutcome.Terminal(
+                new AICodedbCommandResult(result.ExitCode, result.StandardOutput,
+                    result.StandardError, result.TimedOut, result.ElapsedMilliseconds,
+                    result.OneShotFallbackAuthorized, true, actionId));
         }
 
         private static void RememberSupervisorSnapshot(AICodedbSupervisorSnapshot snapshot)

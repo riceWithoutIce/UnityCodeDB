@@ -1,5 +1,8 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
 using UnityEditor.PackageManager;
 using UnityEngine;
 
@@ -53,10 +56,106 @@ namespace Rice.AI.Codedb.Editor
     internal static class AICodedbPaths
     {
         private static readonly object PackageRootLock = new object();
+        private static readonly AsyncLocal<AICodedbEditorExecutionContext?> ActionContext =
+            new AsyncLocal<AICodedbEditorExecutionContext?>();
+        private static readonly AsyncLocal<string> ActionId = new AsyncLocal<string>();
+        private static readonly AsyncLocal<string> ActionEffect = new AsyncLocal<string>();
+        private static readonly AsyncLocal<string> ActionAuthority = new AsyncLocal<string>();
+        private static readonly AsyncLocal<string> ActionStage = new AsyncLocal<string>();
+        private static readonly AsyncLocal<bool?> ActionStageTerminal = new AsyncLocal<bool?>();
         private static string _cachedPackageRootPath = string.Empty;
 
-        internal static string ProjectRoot => NormalizePath(Path.Combine(Application.dataPath, ".."));
-        internal static string PackageRootPath => ResolvePackageRootPath();
+        internal static string ProjectRoot => ActionContext.Value?.ProjectRoot
+            ?? NormalizePath(Path.Combine(Application.dataPath, ".."));
+        internal static string PackageRootPath => ActionContext.Value?.PackageRoot
+            ?? ResolvePackageRootPath();
+
+        internal static string CurrentActionId => ActionId.Value ?? string.Empty;
+        internal static string CurrentActionEffect => ActionEffect.Value ?? string.Empty;
+        internal static string CurrentActionAuthority => ActionAuthority.Value ?? string.Empty;
+        internal static string CurrentActionStage => ActionStage.Value ?? string.Empty;
+        internal static bool CurrentActionStageIsTerminal => ActionStageTerminal.Value ?? true;
+
+        internal static IDisposable UseActionContext(
+            AICodedbEditorExecutionContext context,
+            string actionId = null,
+            string effectClass = null,
+            string authorizationSource = null)
+        {
+            if (string.IsNullOrWhiteSpace(context.ProjectRoot)
+                || string.IsNullOrWhiteSpace(context.PackageRoot))
+                throw new ArgumentException("An action requires a captured project and Package context.", nameof(context));
+            var previous = ActionContext.Value;
+            var previousActionId = ActionId.Value;
+            var previousEffect = ActionEffect.Value;
+            var previousAuthority = ActionAuthority.Value;
+            ActionContext.Value = context;
+            ActionId.Value = actionId ?? string.Empty;
+            ActionEffect.Value = effectClass ?? string.Empty;
+            ActionAuthority.Value = authorizationSource ?? string.Empty;
+            return new ActionContextScope(
+                previous,
+                previousActionId,
+                previousEffect,
+                previousAuthority);
+        }
+
+        internal static IDisposable UseActionStage(string stage, bool terminalForAction)
+        {
+            if (string.IsNullOrWhiteSpace(CurrentActionId))
+                return new ActionStageScope(ActionStage.Value, ActionStageTerminal.Value);
+            var previousStage = ActionStage.Value;
+            var previousTerminal = ActionStageTerminal.Value;
+            ActionStage.Value = stage ?? string.Empty;
+            ActionStageTerminal.Value = terminalForAction;
+            return new ActionStageScope(previousStage, previousTerminal);
+        }
+
+        private sealed class ActionContextScope : IDisposable
+        {
+            private readonly AICodedbEditorExecutionContext? _previous;
+            private readonly string _previousActionId;
+            private readonly string _previousEffect;
+            private readonly string _previousAuthority;
+
+            internal ActionContextScope(
+                AICodedbEditorExecutionContext? previous,
+                string previousActionId,
+                string previousEffect,
+                string previousAuthority)
+            {
+                _previous = previous;
+                _previousActionId = previousActionId;
+                _previousEffect = previousEffect;
+                _previousAuthority = previousAuthority;
+            }
+
+            public void Dispose()
+            {
+                ActionContext.Value = _previous;
+                ActionId.Value = _previousActionId;
+                ActionEffect.Value = _previousEffect;
+                ActionAuthority.Value = _previousAuthority;
+            }
+        }
+
+        private sealed class ActionStageScope : IDisposable
+        {
+            private readonly string _previousStage;
+            private readonly bool? _previousTerminal;
+
+            internal ActionStageScope(string previousStage, bool? previousTerminal)
+            {
+                _previousStage = previousStage;
+                _previousTerminal = previousTerminal;
+            }
+
+            public void Dispose()
+            {
+                ActionStage.Value = _previousStage;
+                ActionStageTerminal.Value = _previousTerminal;
+            }
+        }
         internal static string HostPayloadMarkerPath => GetProjectPath(AICodedbProjectSettings.HostPayloadMarkerRelativePath);
         internal static string HostCurrentPointerPath => GetProjectPath(AICodedbProjectSettings.HostCurrentPointerRelativePath);
         internal static string HostLastKnownGoodPointerPath => GetProjectPath(AICodedbProjectSettings.HostLastKnownGoodPointerRelativePath);
@@ -70,10 +169,15 @@ namespace Rice.AI.Codedb.Editor
         internal static string HostPayloadMaterializerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath));
         internal static string ProviderInstallerScriptPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.ProviderInstallerScriptPackageRelativePath));
         internal static string ProviderDistributionManifestPath => NormalizePath(Path.Combine(PackageRootPath, AICodedbProjectSettings.ProviderDistributionManifestPackageRelativePath));
-        internal static string RuntimePath => GetProjectPath(AICodedbProjectSettings.RuntimeRelativePath);
+        internal static string ManagerActionWriterScriptPath => NormalizePath(Path.Combine(PackageRootPath, "Tools~/invoke-codedb-manager-action.ps1"));
+        internal static string RuntimePath => GetProjectPath(ActionContext.Value?.RuntimeRelativePath
+            ?? AICodedbProjectSettings.RuntimeRelativePath);
         internal static string ProviderExecutablePath => GetMachineProviderExecutablePath();
-        internal static string ProviderConfigPath => GetProjectPath(AICodedbProjectSettings.ProviderConfigRelativePath);
-        internal static string WatchConfigPath => GetProjectPath(AICodedbProjectSettings.WatchConfigRelativePath);
+        internal static string ProviderConfigPath => GetProjectPath(ActionContext.Value?.ProviderConfigRelativePath
+            ?? AICodedbProjectSettings.ProviderConfigRelativePath);
+        internal static string WatchConfigPath => GetProjectPath(ActionContext.Value.HasValue
+            ? ActionContext.Value.Value.RuntimeRelativePath + "/config/codedb-mcp.watch.toml"
+            : AICodedbProjectSettings.WatchConfigRelativePath);
         internal static string WatchCoordinatorRuntimePath => GetProjectPath(AICodedbProjectSettings.WatchCoordinatorRuntimeRelativePath);
         internal static string WatchCoordinatorStatePath => Path.Combine(WatchCoordinatorRuntimePath, "coordinator-state.json");
         internal static string WatchLifecyclePath => GetProjectPath(AICodedbProjectSettings.WatchLifecycleRelativePath);
@@ -82,10 +186,14 @@ namespace Rice.AI.Codedb.Editor
         internal static string WatchEditorLeasesPath => GetProjectPath(AICodedbProjectSettings.WatchEditorLeasesRelativePath);
         internal static string WatchEnabledMarkerPath => GetProjectPath(AICodedbProjectSettings.WatchEnabledMarkerRelativePath);
         internal static string WatchPausedMarkerPath => GetProjectPath(AICodedbProjectSettings.WatchPausedMarkerRelativePath);
-        internal static string IndexPath => GetProjectPath(AICodedbProjectSettings.IndexRelativePath);
-        internal static string IndexManifestPath => GetProjectPath(AICodedbProjectSettings.IndexManifestRelativePath);
-        internal static string TextAdapterPath => GetProjectPath(AICodedbProjectSettings.TextAdapterRelativePath);
-        internal static string TextAdapterManifestPath => GetProjectPath(AICodedbProjectSettings.TextAdapterManifestRelativePath);
+        internal static string IndexPath => GetProjectPath(ActionContext.Value?.IndexRelativePath
+            ?? AICodedbProjectSettings.IndexRelativePath);
+        internal static string IndexManifestPath => GetProjectPath(ActionContext.Value?.IndexManifestRelativePath
+            ?? AICodedbProjectSettings.IndexManifestRelativePath);
+        internal static string TextAdapterPath => GetProjectPath(ActionContext.Value?.TextAdapterRelativePath
+            ?? AICodedbProjectSettings.TextAdapterRelativePath);
+        internal static string TextAdapterManifestPath => GetProjectPath(ActionContext.Value?.TextAdapterManifestRelativePath
+            ?? AICodedbProjectSettings.TextAdapterManifestRelativePath);
         internal static string ProjectMcpConfigPath => GetProjectPath(AICodedbProjectSettings.ProjectMcpConfigRelativePath);
         internal static string RuntimeConfigTemplatePath => GetHostPath("codedb-mcp.runtime.example.toml", AICodedbProjectSettings.RuntimeConfigTemplateRelativePath);
         internal static string RefreshScriptPath => GetHostPath("scripts/refresh-codedb-project.ps1", AICodedbProjectSettings.RefreshScriptRelativePath);
@@ -106,6 +214,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbEditorExecutionContext CaptureExecutionContext()
         {
+            if (ActionContext.Value.HasValue)
+                return ActionContext.Value.Value;
             var projectRoot = ProjectRoot;
             // Path.GetFileName is intentionally used here instead of
             // DirectoryInfo. Context capture is also used by Manager startup;
@@ -147,6 +257,58 @@ namespace Rice.AI.Codedb.Editor
                 "providers",
                 AICodedbProjectSettings.MachineProviderVersion,
                 "codebase-mcp.exe"));
+        }
+
+        internal static string GetManagerActionReceiptRoot(
+            AICodedbEditorExecutionContext context,
+            string actionId)
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                throw new ArgumentException("The Manager action id is invalid.", nameof(actionId));
+            return NormalizePath(Path.Combine(
+                GetManagerActionsRoot(),
+                GetManagerActionProjectKey(context),
+                GetManagerActionPackageKey(context),
+                actionId));
+        }
+
+        internal static string GetManagerActionsRoot()
+        {
+            var localAppData = Environment.GetEnvironmentVariable(
+                "LOCALAPPDATA",
+                EnvironmentVariableTarget.Process);
+            if (string.IsNullOrWhiteSpace(localAppData))
+                localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
+                throw new InvalidOperationException("Local application data is unavailable for Manager action receipts.");
+            return NormalizePath(Path.Combine(
+                localAppData,
+                "Rice",
+                "CodeDB",
+                "manager-actions"));
+        }
+
+        internal static string GetManagerActionProjectKey(AICodedbEditorExecutionContext context)
+        {
+            return ComputeIdentityKey(context.ProjectRoot);
+        }
+
+        internal static string GetManagerActionPackageKey(AICodedbEditorExecutionContext context)
+        {
+            return ComputeIdentityKey(context.PackageRoot);
+        }
+
+        internal static string ComputeIdentityKey(string value)
+        {
+            var normalized = NormalizePath(value).TrimEnd('/', '\\').ToLowerInvariant();
+            using (var algorithm = SHA256.Create())
+            {
+                var bytes = algorithm.ComputeHash(Encoding.UTF8.GetBytes(normalized));
+                var builder = new StringBuilder(bytes.Length * 2);
+                foreach (var item in bytes)
+                    builder.Append(item.ToString("x2"));
+                return builder.ToString();
+            }
         }
 
         private static string GetHostPath(string generationRelativePath, string legacyRelativePath)

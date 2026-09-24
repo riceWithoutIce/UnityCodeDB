@@ -41,6 +41,8 @@ const MAX_PENDING_QUERY_REQUESTS = 16;
 const LOCK_NAME = "supervisor.lock";
 const STATE_NAME = "supervisor-state.json";
 const OPERATION_NAME = "operation.json";
+const OPERATION_HISTORY_NAME = "operation-history";
+const ACTION_OPERATION_NAME = "manager-actions";
 const TAKEOVER_CLAIM_NAME = "supervisor-takeover.claim";
 const EVENT_NAME = "supervisor-events.jsonl";
 const ERROR_NAME = "supervisor-error.json";
@@ -269,6 +271,8 @@ function buildContext(raw) {
     statePath: path.join(runtime, STATE_NAME),
     lockPath: path.join(runtime, LOCK_NAME),
     operationPath: path.join(runtime, OPERATION_NAME),
+    operationHistoryPath: path.join(runtime, OPERATION_HISTORY_NAME),
+    actionOperationPath: path.join(runtime, ACTION_OPERATION_NAME),
     takeoverClaimPath: path.join(runtime, TAKEOVER_CLAIM_NAME),
     eventPath: path.join(runtime, EVENT_NAME),
     errorPath: path.join(runtime, ERROR_NAME),
@@ -1097,6 +1101,7 @@ async function runDaemon(raw) {
     value.error_code = errorCode;
     value.error = detail;
     operations.set(value.operation_id, value);
+    persistOperation(context, value);
   };
   const invalidatePendingRequests = (errorCode, detail) => {
     while (pendingQueries.length > 0) {
@@ -1397,11 +1402,51 @@ async function runDaemon(raw) {
         status: publicStatus(state, coordinatorStatus)
       };
     }
+    const requestedManagerActionId = request.manager_action_id === undefined
+      || request.manager_action_id === null
+      || request.manager_action_id === ""
+      ? ""
+      : validId(request.manager_action_id);
+    if (requestedManagerActionId === null) {
+      return {
+        ok: false,
+        error_code: "INVALID_MANAGER_ACTION_ID",
+        error: "The Manager action correlation id is invalid.",
+        status: publicStatus(state, coordinatorStatus)
+      };
+    }
     const key = maintenanceOperationKey(name, request);
-    if (activeOperation?.state === "running" && activeOperation.key === key)
+    if (activeOperation?.state === "running" && activeOperation.key === key) {
+      if (requestedManagerActionId
+          && activeOperation.manager_action_id !== requestedManagerActionId) {
+        return {
+          ok: false,
+          accepted: false,
+          error_code: "OPERATION_OWNED_BY_ANOTHER_ACTION",
+          error: "An equivalent operation is already owned by another Manager action.",
+          pending: true,
+          operation_id: activeOperation.operation_id,
+          status: publicStatus(state, coordinatorStatus)
+        };
+      }
       return operationResponse(activeOperation, true);
+    }
     const queued = queuedMaintenanceByKey.get(key);
-    if (queued) return operationResponse(queued.value, true);
+    if (queued) {
+      if (requestedManagerActionId
+          && queued.value.manager_action_id !== requestedManagerActionId) {
+        return {
+          ok: false,
+          accepted: false,
+          error_code: "OPERATION_OWNED_BY_ANOTHER_ACTION",
+          error: "An equivalent queued operation is already owned by another Manager action.",
+          pending: true,
+          operation_id: queued.value.operation_id,
+          status: publicStatus(state, coordinatorStatus)
+        };
+      }
+      return operationResponse(queued.value, true);
+    }
     if (pendingMaintenance.length >= MAX_PENDING_MAINTENANCE_REQUESTS) {
       const blockingOperation = activeOperation?.state === "running"
         ? activeOperation
@@ -1424,6 +1469,7 @@ async function runDaemon(raw) {
       operation_id: crypto.randomUUID().replaceAll("-", ""),
       key,
       request_id: typeof request.request_id === "string" ? request.request_id : "",
+      manager_action_id: requestedManagerActionId,
       name,
       lane: "maintenance",
       state: "queued",
@@ -1443,9 +1489,21 @@ async function runDaemon(raw) {
       value,
       run: fn
     };
-    operations.set(value.operation_id, value);
     pendingMaintenance.push(entry);
     queuedMaintenanceByKey.set(key, entry);
+    try {
+      rememberOperation(value);
+    } catch (error) {
+      pendingMaintenance.pop();
+      queuedMaintenanceByKey.delete(key);
+      return {
+        ok: false,
+        accepted: false,
+        error_code: "SUPERVISOR_STATE_PUBLISH_FAILED",
+        error: error instanceof Error ? error.message : String(error),
+        status: publicStatus(state, coordinatorStatus)
+      };
+    }
     scheduleRequestQueue();
     return operationResponse(value);
   };
@@ -1464,7 +1522,8 @@ async function runDaemon(raw) {
     if (name === "operation") {
       return queueQuery(() => {
         const operationId = String(request.operation_id || "");
-        const selected = operations.get(operationId);
+        const selected = operations.get(operationId)
+          || readPersistedOperationById(context, operationId);
         if (!selected) {
           return {
             ok: false,
@@ -1476,6 +1535,26 @@ async function runDaemon(raw) {
           };
         }
         const response = operationResponse(selected);
+        if (!response.pending && response.handoff_queued && !shuttingDown)
+          queueRetirement("selected_instance_changed_observed");
+        return response;
+      }, queryRequestKey(name, request));
+    }
+    if (name === "manager_action_operation") {
+      return queueQuery(() => {
+        const actionId = String(request.action || "");
+        const selected = readPersistedManagerActionOperation(context, actionId);
+        if (!selected) {
+          return {
+            ok: false,
+            error_code: "ACTION_OPERATION_NOT_FOUND",
+            error: "No durable Supervisor operation is bound to the requested Manager action.",
+            pending: false,
+            operation_id: "",
+            status: publicStatus(state, coordinatorStatus)
+          };
+        }
+        const response = operationResponse(selected, true);
         if (!response.pending && response.handoff_queued && !shuttingDown)
           queueRetirement("selected_instance_changed_observed");
         return response;
@@ -1564,6 +1643,20 @@ async function runDaemon(raw) {
   };
 
   try {
+    if (latestOperation?.state === "queued") {
+      latestOperation.completed_at_utc = new Date().toISOString();
+      latestOperation.result = {
+        exit_code: 4,
+        stdout: "",
+        stderr: "The Supervisor restarted before the queued operation was admitted; no effect was replayed.",
+        timed_out: false
+      };
+      latestOperation.state = "failed";
+      latestOperation.phase = "interrupted_before_admission";
+      latestOperation.error_code = "OPERATION_NOT_ADMITTED";
+      latestOperation.error = latestOperation.result.stderr;
+      rememberOperation(latestOperation);
+    }
     state.auth_token = crypto.randomBytes(32).toString("hex");
     writeJson(context.statePath, state);
     server = net.createServer((socket) => handleClient(socket, state.auth_token, dispatch));
@@ -1968,6 +2061,7 @@ function publicOperation(value) {
     schema_version: value.schema_version ?? EVIDENCE_SCHEMA_VERSION,
     operation_id: value.operation_id,
     request_id: value.request_id || null,
+    manager_action_id: value.manager_action_id || null,
     name: value.name,
     lane: value.lane,
     state: value.state,
@@ -2025,6 +2119,115 @@ function readPersistedOperation(context) {
 
 function persistOperation(context, operation) {
   writeJson(context.operationPath, operation);
+  ensureOperationEvidenceDirectory(
+    context,
+    context.operationHistoryPath,
+    "Supervisor operation history");
+  writeJson(operationHistoryFile(context, operation.operation_id), operation);
+  if (operation.manager_action_id)
+    persistManagerActionOperation(context, operation);
+}
+
+function operationHistoryFile(context, operationId) {
+  if (!validId(operationId)) throw new Error("Supervisor operation id is invalid.");
+  return path.join(context.operationHistoryPath, `${operationId}.json`);
+}
+
+function managerActionOperationFile(context, actionId) {
+  if (!validId(actionId)) throw new Error("Manager action id is invalid.");
+  return path.join(context.actionOperationPath, `${actionId}.json`);
+}
+
+function ensureOperationEvidenceDirectory(context, directoryPath, label) {
+  assertInside(directoryPath, context.runtime, label);
+  assertNoRedirectedAncestors(context.runtime, directoryPath, label);
+  fs.mkdirSync(directoryPath, { recursive: true });
+  assertReviewedPath(context.runtime, directoryPath, label, "directory");
+}
+
+function readPersistedOperationById(context, operationId) {
+  if (!validId(operationId)) return null;
+  const operationPath = operationHistoryFile(context, operationId);
+  if (!fs.existsSync(operationPath)) return null;
+  assertReviewedPath(context.runtime, operationPath, "Supervisor operation history entry", "file");
+  const operation = readRequiredJson(
+    operationPath,
+    MAX_STATE_BYTES,
+    "Supervisor operation history entry").value;
+  validatePersistedOperation(context, operation);
+  if (operation.operation_id !== operationId)
+    throw new Error("Supervisor operation history identity is invalid.");
+  return operation;
+}
+
+function persistManagerActionOperation(context, operation) {
+  const actionId = operation.manager_action_id;
+  if (!validId(actionId))
+    throw new Error("Supervisor operation Manager action identity is invalid.");
+  ensureOperationEvidenceDirectory(
+    context,
+    context.actionOperationPath,
+    "Supervisor Manager action evidence");
+  const recordPath = managerActionOperationFile(context, actionId);
+  let operationIds = [];
+  if (fs.existsSync(recordPath)) {
+    assertReviewedPath(context.runtime, recordPath, "Supervisor Manager action record", "file");
+    const existing = readRequiredJson(
+      recordPath,
+      MAX_STATE_BYTES,
+      "Supervisor Manager action record").value;
+    validateManagerActionOperationRecord(context, existing, actionId);
+    operationIds = [...existing.operation_ids];
+  }
+  if (!operationIds.includes(operation.operation_id))
+    operationIds.push(operation.operation_id);
+  if (operationIds.length > OPERATION_RETENTION_LIMIT)
+    throw new Error("Supervisor Manager action operation history exceeded its bound.");
+  writeJson(recordPath, {
+    schema_version: EVIDENCE_SCHEMA_VERSION,
+    managed_by: "com.rice.ai-codedb",
+    manager_action_id: actionId,
+    project_identity: context.projectIdentity,
+    root: context.root,
+    runtime: context.runtime,
+    operation_ids: operationIds,
+    latest_operation_id: operation.operation_id,
+    updated_at_utc: new Date().toISOString()
+  });
+}
+
+function validateManagerActionOperationRecord(context, record, expectedActionId) {
+  requireObject(record, "Supervisor Manager action record");
+  if (record.schema_version !== EVIDENCE_SCHEMA_VERSION
+      || record.managed_by !== "com.rice.ai-codedb"
+      || record.manager_action_id !== expectedActionId
+      || record.project_identity !== context.projectIdentity
+      || !pathsEqual(record.root, context.root)
+      || !pathsEqual(record.runtime, context.runtime)
+      || !Array.isArray(record.operation_ids)
+      || record.operation_ids.length < 1
+      || record.operation_ids.length > OPERATION_RETENTION_LIMIT
+      || record.operation_ids.some((value) => !validId(value))
+      || !validId(record.latest_operation_id)
+      || record.operation_ids[record.operation_ids.length - 1] !== record.latest_operation_id) {
+    throw new Error("Supervisor Manager action record is invalid.");
+  }
+}
+
+function readPersistedManagerActionOperation(context, actionId) {
+  if (!validId(actionId)) return null;
+  const recordPath = managerActionOperationFile(context, actionId);
+  if (!fs.existsSync(recordPath)) return null;
+  assertReviewedPath(context.runtime, recordPath, "Supervisor Manager action record", "file");
+  const record = readRequiredJson(
+    recordPath,
+    MAX_STATE_BYTES,
+    "Supervisor Manager action record").value;
+  validateManagerActionOperationRecord(context, record, actionId);
+  const operation = readPersistedOperationById(context, record.latest_operation_id);
+  if (!operation || operation.manager_action_id !== actionId)
+    throw new Error("Supervisor Manager action operation binding is invalid.");
+  return operation;
 }
 
 function validatePersistedOperation(context, operation) {
@@ -2033,10 +2236,13 @@ function validatePersistedOperation(context, operation) {
       || operation.managed_by !== "com.rice.ai-codedb"
       || !validId(operation.operation_id)
       || !validId(operation.owner_epoch)
+      || (operation.manager_action_id !== undefined
+          && operation.manager_action_id !== ""
+          && !validId(operation.manager_action_id))
       || operation.project_identity !== context.projectIdentity
       || !pathsEqual(operation.root, context.root)
       || !pathsEqual(operation.runtime, context.runtime)
-      || !["running", "completed", "failed"].includes(operation.state)
+      || !["queued", "running", "completed", "failed"].includes(operation.state)
       || typeof operation.name !== "string"
       || operation.name.length === 0
       || typeof operation.key !== "string") {

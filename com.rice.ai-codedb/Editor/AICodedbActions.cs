@@ -62,7 +62,7 @@ namespace Rice.AI.Codedb.Editor
                 ? currentInstance.InstanceRoot
                 : AICodedbPaths.NormalizePath(Path.Combine(
                     projectRoot,
-                    AICodedbProjectSettings.RuntimeRelativePath));
+                    AICodedbPaths.CaptureExecutionContext().RuntimeRelativePath));
         }
 
         /// <summary>
@@ -109,7 +109,9 @@ namespace Rice.AI.Codedb.Editor
             if (!confirmedProjectMutation)
                 return AICodedbHostPayloadMaterializer.RunRedeploy(false);
 
-            var preflightResult = AICodedbHostPayloadMaterializer.RunDryRun();
+            AICodedbCommandResult preflightResult;
+            using (AICodedbPaths.UseActionStage("redeploy-worker-preflight", false))
+                preflightResult = AICodedbHostPayloadMaterializer.RunDryRun();
             if (!preflightResult.Succeeded)
                 return preflightResult;
 
@@ -141,11 +143,15 @@ namespace Rice.AI.Codedb.Editor
                     preflightResult.ElapsedMilliseconds);
             }
 
-            var redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy(true);
+            AICodedbCommandResult redeployResult;
+            using (AICodedbPaths.UseActionStage("redeploy-mutation", false))
+                redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy(true);
             if (!redeployResult.Succeeded)
                 return redeployResult;
 
-            var configResult = RunRegenerateRuntimeConfig();
+            AICodedbCommandResult configResult;
+            using (AICodedbPaths.UseActionStage("redeploy-runtime-config", true))
+                configResult = RunRegenerateRuntimeConfig();
             return CombineResults(redeployResult, configResult);
         }
 
@@ -814,7 +820,12 @@ namespace Rice.AI.Codedb.Editor
                 JoinOutput(first.StandardOutput, second.StandardOutput),
                 JoinOutput(first.StandardError, second.StandardError),
                 first.TimedOut || second.TimedOut,
-                first.ElapsedMilliseconds + second.ElapsedMilliseconds);
+                first.ElapsedMilliseconds + second.ElapsedMilliseconds,
+                false,
+                first.HasAuthoritativeTerminalEvidence
+                && second.HasAuthoritativeTerminalEvidence,
+                null,
+                second.TerminalForManagerAction);
         }
 
         private static string JoinOutput(string first, string second)

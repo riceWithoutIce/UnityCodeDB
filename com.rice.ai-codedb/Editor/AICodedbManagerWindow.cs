@@ -110,6 +110,8 @@ namespace Rice.AI.Codedb.Editor
         private long _cachedLifecycleStatusRevision = -1;
         private bool _watcherStatusRefreshInFlight;
         private bool _userActionInFlight;
+        private bool _actionRecoveryInspectionInFlight;
+        private double _nextActionRecoveryInspectionAt;
         private double _nextUserActionRepaintAt;
         private AICodedbUserActionStatus _userActionStatus;
         private double _nextHostStatusRefreshAt;
@@ -164,6 +166,7 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbManagerLayout.ActivityDefaultWidth);
                 _activityPanel = new AICodedbActivityPanel();
                 _userActionStatus = new AICodedbUserActionStatus();
+                AttachCurrentActionSession();
                 _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
                 _watcherStatusLoaded = false;
                 EditorApplication.update -= ObserveTransientHostStatus;
@@ -347,27 +350,21 @@ namespace Rice.AI.Codedb.Editor
             ApplyDisclosurePolicy(true);
         }
 
-        private void RefreshStatus(AICodedbCommandResult hostPayloadResult)
-        {
-            if (IsPlayModeDisplaySuspended())
-            {
-                RestoreReadySnapshotForPlayMode();
-                _transientStatusRefreshPending = true;
-                return;
-            }
-            var initializeDisclosures = _statusSnapshot == null;
-            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.FileSystem);
-            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.Hash);
-            AICodedbLifecycleEvidence.RecordMainThreadWork(AICodedbLifecycleWorkKind.FullStatus);
-            _statusSnapshot = AICodedbStatusSnapshot.Refresh(
-                hostPayloadResult,
-                GetCachedCoordinatorFailureCategory());
-            ApplyStatusSnapshot(_statusSnapshot, true, initializeDisclosures);
-        }
-
         private void ObserveTransientHostStatus()
         {
-            if (_userActionInFlight)
+            AttachCurrentActionSession();
+            var recoveringAction = AICodedbManagerActionSession.CurrentFor(_executionContext);
+            if (recoveringAction != null && recoveringAction.IsRecovering
+                && !_actionRecoveryInspectionInFlight
+                && EditorApplication.timeSinceStartup >= _nextActionRecoveryInspectionAt
+                && !EditorApplication.isCompiling && !EditorApplication.isUpdating)
+            {
+                _nextActionRecoveryInspectionAt = EditorApplication.timeSinceStartup + 2d;
+                InspectActionRecoveryAsync(recoveringAction);
+            }
+            if (_userActionInFlight
+                && _userActionStatus != null
+                && _userActionStatus.Phase == AICodedbUserActionPhase.Running)
             {
                 if (EditorApplication.timeSinceStartup >= _nextUserActionRepaintAt)
                 {
@@ -424,6 +421,60 @@ namespace Rice.AI.Codedb.Editor
             _nextHostStatusRefreshAt = EditorApplication.timeSinceStartup + TransientStatusRefreshSeconds;
         }
 
+        private void AttachCurrentActionSession()
+        {
+            var session = AICodedbManagerActionSession.CurrentFor(_executionContext);
+            if (session == null)
+                return;
+
+            _userActionStatus = session.Status;
+            _userActionInFlight = session.IsRunning || session.IsRecovering;
+            if (!session.IsRunning && !ReferenceEquals(_lastResult, session.Result))
+            {
+                _lastResult = session.Result;
+                _lastResultTitle = session.Title;
+                GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
+            }
+        }
+
+        private async void InspectActionRecoveryAsync(AICodedbManagerActionSession session)
+        {
+            _actionRecoveryInspectionInFlight = true;
+            try
+            {
+                var direct = await Task.Run(() =>
+                    AICodedbProcessRunner.RecoverManagerAction(session.Context, session.ActionId));
+                var outcome = direct.State == AICodedbManagerActionRecoveryState.NotFound
+                    ? await AICodedbEditorLifecycle.RecoverManagerActionAsync(
+                        session.Context, session.ActionId)
+                    : direct;
+                if (this == null || !ReferenceEquals(
+                        AICodedbManagerActionSession.CurrentFor(_executionContext), session))
+                    return;
+                if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                    && session.TryCompleteRecovery(outcome.Result,
+                        EditorApplication.timeSinceStartup))
+                {
+                    AttachCurrentActionSession();
+                    BeginStatusRefresh(true);
+                }
+                else
+                {
+                    session.SetRecoveryDetail(outcome.Detail);
+                }
+                Repaint();
+            }
+            catch (Exception exception)
+            {
+                session.SetRecoveryDetail("The previous action's command evidence is unavailable: "
+                    + exception.Message);
+            }
+            finally
+            {
+                _actionRecoveryInspectionInFlight = false;
+            }
+        }
+
         private void ApplyStatusSnapshot(AICodedbStatusSnapshot snapshot)
         {
             ApplyStatusSnapshot(snapshot, true, _statusSnapshot == null);
@@ -445,13 +496,13 @@ namespace Rice.AI.Codedb.Editor
             ApplyDisclosurePolicy(initializeDisclosures);
         }
 
-        private async Task RefreshStatusAsync(AICodedbCommandResult hostPayloadResult)
+        private async Task<bool> RefreshStatusAsync(AICodedbCommandResult hostPayloadResult)
         {
             if (!TryCaptureWindowStatusLifetime(
                     out var windowStatusGeneration,
                     out var cancellationToken))
             {
-                return;
+                return false;
             }
 
             AICodedbLifecycleEvidence.RecordManagerStatusRefreshStarted();
@@ -468,7 +519,7 @@ namespace Rice.AI.Codedb.Editor
                     || cancellationToken.IsCancellationRequested)
                 {
                     disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
-                    return;
+                    return false;
                 }
                 if (!ShouldApplyStatusRefreshResult(
                         windowStatusGeneration,
@@ -486,7 +537,7 @@ namespace Rice.AI.Codedb.Editor
                         _nextTransientStatusRefreshAt = EditorApplication.timeSinceStartup;
                     }
                     disposition = AICodedbManagerStatusRefreshDisposition.Cancelled;
-                    return;
+                    return false;
                 }
 
                 ApplyStatusSnapshot(snapshot, true, false);
@@ -505,6 +556,7 @@ namespace Rice.AI.Codedb.Editor
                 }
                 AICodedbLifecycleEvidence.RecordManagerStatusRefreshFinished(disposition);
             }
+            return disposition == AICodedbManagerStatusRefreshDisposition.Completed;
         }
 
         private void BeginStatusRefresh(bool force = false)
@@ -1032,7 +1084,7 @@ namespace Rice.AI.Codedb.Editor
                 DrawHeaderBrandIcon();
                 GUILayout.Label(
                     "\u25cf",
-                    AICodedbManagerStyles.GetStateDotStyle(_statusSnapshot.OverallState),
+                    AICodedbManagerStyles.GetStateDotStyle(GetDisplayedProductState()),
                     GUILayout.Width(AICodedbManagerStyles.StatusDotWidth),
                     GUILayout.Height(HeaderContentHeight));
 
@@ -1272,7 +1324,7 @@ namespace Rice.AI.Codedb.Editor
             AICodedbSectionView.DrawBanner(
                 GetOverviewStatusTitle(),
                 GetOverviewStatusDescription(),
-                _statusSnapshot.OverallState,
+                GetDisplayedProductState(),
                 GetPrimaryActionLabel(),
                 primaryAction);
 
@@ -1400,39 +1452,23 @@ namespace Rice.AI.Codedb.Editor
                 return providerResult;
 
             var outcome = await AICodedbActions.RunHostAdmissionAfterProviderAsync(providerResult);
+            AICodedbManagerActionSession.CurrentFor(_executionContext)?.RecordPostOutcome(outcome);
             TryApplyCachedLifecycleStatus();
-            return ResolvePostProviderReconcileResult(outcome);
+            return ResolvePostProviderReconcileResult(providerResult, outcome);
         }
 
         internal static AICodedbCommandResult ResolvePostProviderReconcileResult(
+            AICodedbCommandResult providerResult,
             AICodedbEditorLifecycle.AICodedbReconcileOutcome outcome)
         {
+            if (providerResult == null || !providerResult.Succeeded)
+                return providerResult ?? new AICodedbCommandResult(4, string.Empty,
+                    "Provider installation did not return a command result.", false);
             if (outcome == null)
                 return new AICodedbCommandResult(4, string.Empty,
                     "Lifecycle did not return a post-Provider reconcile outcome.", false);
 
-            if (outcome.Disposition == AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready)
-                return new AICodedbCommandResult(0, "CodeDB is ready.", string.Empty, false);
-
-            var authoritative = outcome.LastCommandResult;
-            if (authoritative == null)
-                return new AICodedbCommandResult(4, string.Empty, outcome.Detail, false);
-            if (!authoritative.Succeeded)
-                return authoritative;
-
-            var terminalDetail = string.IsNullOrWhiteSpace(outcome.Detail)
-                ? "Post-Provider reconcile did not reach Ready."
-                : outcome.Detail.Trim();
-            var standardError = string.IsNullOrWhiteSpace(authoritative.StandardError)
-                ? terminalDetail
-                : authoritative.StandardError.TrimEnd() + Environment.NewLine + terminalDetail;
-            return new AICodedbCommandResult(
-                4,
-                authoritative.StandardOutput,
-                standardError,
-                authoritative.TimedOut,
-                authoritative.ElapsedMilliseconds,
-                authoritative.OneShotFallbackAuthorized);
+            return outcome.LastCommandResult ?? providerResult;
         }
 
         private string GetConfigureDependenciesLabel()
@@ -1928,7 +1964,10 @@ namespace Rice.AI.Codedb.Editor
                         GUILayout.Width(AICodedbActionGridView.ButtonWidth),
                         GUILayout.Height(AICodedbActionGridView.ButtonHeight)))
                 {
-                    RunAction("Language Custom Probe", RunLanguageCustomProbe);
+                    var query = (_customProbeQuery ?? string.Empty).Trim();
+                    var language = CustomProbeLanguageValues[Mathf.Clamp(
+                        _customProbeLanguageIndex, 0, CustomProbeLanguageValues.Length - 1)];
+                    RunAction("Language Custom Probe", () => RunLanguageCustomProbe(query, language));
                 }
             }
         }
@@ -2178,7 +2217,11 @@ namespace Rice.AI.Codedb.Editor
         {
             await RunUserActionAsync(
                 "Host Payload Redeploy",
-                _ => Task.Run(() => AICodedbActions.RunHostPayloadDryRun()),
+                _ => Task.Run(() =>
+                {
+                    using (AICodedbPaths.UseActionStage("redeploy-ui-preflight", false))
+                        return AICodedbActions.RunHostPayloadDryRun();
+                }),
                 ContinueHostPayloadRedeployAfterPreflightAsync);
         }
 
@@ -2272,16 +2315,11 @@ namespace Rice.AI.Codedb.Editor
             RunAction("Host Payload Remove", AICodedbActions.RunHostPayloadRemove);
         }
 
-        private AICodedbCommandResult RunLanguageCustomProbe()
+        private static AICodedbCommandResult RunLanguageCustomProbe(string query, string language)
         {
-            var query = (_customProbeQuery ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(query))
                 return new AICodedbCommandResult(-1, string.Empty, "Language Custom Probe text is empty.", false);
 
-            var language = CustomProbeLanguageValues[Mathf.Clamp(
-                _customProbeLanguageIndex,
-                0,
-                CustomProbeLanguageValues.Length - 1)];
             if (string.Equals(language, "ShaderHlsl", StringComparison.Ordinal))
                 return AICodedbActions.RunShaderAdapterSearch(query);
             return AICodedbActions.RunProviderCustomProbe(language, query);
@@ -2345,7 +2383,12 @@ namespace Rice.AI.Codedb.Editor
             bool requestReconcileAfterAction = true,
             bool refreshStatusAfterAction = true)
         {
-            if (_userActionInFlight || action == null)
+            if (action == null
+                || !AICodedbManagerActionSession.TryStart(
+                    title,
+                    _executionContext,
+                    EditorApplication.timeSinceStartup,
+                    out var session))
                 return;
 
             InvalidateReadySnapshot(_executionContext.ProjectRoot);
@@ -2353,33 +2396,43 @@ namespace Rice.AI.Codedb.Editor
             _transientStatusRefreshPending = false;
             _userActionInFlight = true;
             _nextUserActionRepaintAt = EditorApplication.timeSinceStartup;
-            var actionStatus = GetUserActionStatus();
-            actionStatus.Start(title, EditorApplication.timeSinceStartup);
+            var actionStatus = session.Status;
+            _userActionStatus = actionStatus;
             _lastResultTitle = title;
             GetActivityPanel().ResetForRunningAction();
             ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
-            RefreshStatus();
             Repaint();
             AICodedbCommandResult result;
-            try
+            using (AICodedbPaths.UseActionContext(
+                       _executionContext, session.ActionId,
+                       session.EffectClass, session.AuthorizationSource))
             {
-                result = await action(line => { actionStatus.UpdateProgressLine(line); });
-                if (continueOnMainThread != null && this != null)
-                    result = await continueOnMainThread(result);
-            }
-            catch (Exception exception)
-            {
-                result = new AICodedbCommandResult(
-                    -1,
-                    string.Empty,
-                    exception.Message,
-                    false);
+                try
+                {
+                    result = await action(line => { actionStatus.UpdateProgressLine(line); });
+                    session.RecordInitialCommandResult(result);
+                    if (continueOnMainThread != null && this != null)
+                        result = await continueOnMainThread(result);
+                }
+                catch (Exception exception)
+                {
+                    result = new AICodedbCommandResult(
+                        -1,
+                        string.Empty,
+                        exception.Message,
+                        false);
+                }
             }
             if (this == null)
+            {
+                session.FinishAfterWindowClose(result, EditorApplication.timeSinceStartup);
+                if (requestReconcileAfterAction)
+                    AICodedbEditorLifecycle.RequestReconcile();
                 return;
+            }
             _lastResult = result;
             GetActivityPanel().ResetForNewResult(_lastResult, _lastResultTitle);
-            var statusRefreshSucceeded = true;
+            var statusRefreshSucceeded = session.PostActionProductState.HasValue;
             if (title.IndexOf("Dependencies", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 actionStatus.SetProgress(6, 6, "Rechecking CodeDB readiness");
@@ -2388,7 +2441,7 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 if (refreshStatusAfterAction)
-                    await RefreshStatusAsync(_lastResult);
+                    statusRefreshSucceeded = await RefreshStatusAsync(_lastResult);
             }
             catch (Exception exception)
             {
@@ -2396,11 +2449,17 @@ namespace Rice.AI.Codedb.Editor
                 Debug.LogWarning("CodeDB Manager status refresh after action failed: " + exception.Message);
             }
 
-            actionStatus.Complete(
-                _lastResult,
-                _statusSnapshot == null ? AICodedbProductState.Starting : _statusSnapshot.ProductStatus.State,
-                statusRefreshSucceeded,
-                EditorApplication.timeSinceStartup);
+            if (this == null)
+            {
+                session.FinishAfterWindowClose(result, EditorApplication.timeSinceStartup);
+                if (requestReconcileAfterAction)
+                    AICodedbEditorLifecycle.RequestReconcile();
+                return;
+            }
+
+            session.Complete(_lastResult, _statusSnapshot == null
+                ? AICodedbProductState.Starting : _statusSnapshot.ProductStatus.State,
+                statusRefreshSucceeded, EditorApplication.timeSinceStartup);
             _userActionInFlight = false;
             ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
             if (requestReconcileAfterAction)
@@ -2416,9 +2475,12 @@ namespace Rice.AI.Codedb.Editor
                     GetUserActionPresentation(),
                     layout))
             {
-                _lastResult = null;
-                _lastResultTitle = string.Empty;
-                GetUserActionStatus().Clear();
+                if (AICodedbManagerActionSession.ClearCompleted())
+                {
+                    _lastResult = null;
+                    _lastResultTitle = string.Empty;
+                    GetUserActionStatus().Clear();
+                }
             }
         }
 
@@ -2705,16 +2767,22 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetHeaderTitle()
         {
+            if (TryGetActionStatusOverride(out var presentation))
+                return GetActionStatusTitle(presentation);
             return _statusSnapshot.OverallTitle;
         }
 
         private string GetHeaderDescription()
         {
+            if (TryGetActionStatusOverride(out var presentation))
+                return GetActionStatusDescription(presentation);
             return _statusSnapshot.OverallDescription;
         }
 
         private string GetOverviewStatusTitle()
         {
+            if (TryGetActionStatusOverride(out var presentation))
+                return GetActionStatusTitle(presentation);
             switch (_statusSnapshot.ProductStatus.State)
             {
                 case AICodedbProductState.Ready:
@@ -2732,7 +2800,48 @@ namespace Rice.AI.Codedb.Editor
 
         private string GetOverviewStatusDescription()
         {
+            if (TryGetActionStatusOverride(out var presentation))
+                return GetActionStatusDescription(presentation);
             return _statusSnapshot.OverallDescription;
+        }
+
+        private AICodedbStatusState GetDisplayedProductState()
+        {
+            return TryGetActionStatusOverride(out _)
+                ? AICodedbStatusState.Warning
+                : _statusSnapshot.OverallState;
+        }
+
+        private bool TryGetActionStatusOverride(out AICodedbUserActionPresentation presentation)
+        {
+            presentation = default(AICodedbUserActionPresentation);
+            if (_userActionStatus == null)
+                return false;
+            presentation = GetUserActionPresentation();
+            return presentation.IsRunning
+                   || _userActionStatus.Phase == AICodedbUserActionPhase.Recovery
+                   || (_userActionStatus.Phase == AICodedbUserActionPhase.Completed
+                       && presentation.State == AICodedbStatusState.Warning)
+                   || (_userActionStatus.Phase == AICodedbUserActionPhase.Failed
+                       && !_userActionStatus.HasFreshProductState);
+        }
+
+        private string GetActionStatusDescription(AICodedbUserActionPresentation presentation)
+        {
+            return _userActionStatus.Phase == AICodedbUserActionPhase.Failed
+                   && !_userActionStatus.HasFreshProductState
+                ? "The command failed and current CodeDB status is unavailable."
+                : presentation.Detail;
+        }
+
+        private static string GetActionStatusTitle(AICodedbUserActionPresentation presentation)
+        {
+            if (presentation.IsRunning)
+                return "CodeDB action in progress";
+            if (string.Equals(presentation.StatusLabel, "Completed - needs attention",
+                    StringComparison.Ordinal))
+                return "CodeDB needs attention";
+            return "CodeDB status unconfirmed";
         }
 
         private string GetHostPayloadLabel()
@@ -2784,6 +2893,283 @@ namespace Rice.AI.Codedb.Editor
                     return "Error";
                 default:
                     return "Unknown";
+            }
+        }
+    }
+
+    internal sealed class AICodedbManagerActionSession
+    {
+        private const string PendingKeyPrefix = "Rice.AI.Codedb.Manager.PendingAction.";
+        private static readonly object Gate = new object();
+        private static AICodedbManagerActionSession _current;
+
+        internal string ActionId { get; }
+        internal string Title { get; }
+        internal string EffectClass { get; }
+        internal string AuthorizationSource { get; }
+        internal AICodedbEditorExecutionContext Context { get; }
+        internal AICodedbUserActionStatus Status { get; }
+        internal AICodedbCommandResult Result { get; private set; }
+        internal AICodedbCommandResult InitialCommandResult { get; private set; }
+        internal string PostActionDetail { get; private set; } = string.Empty;
+        internal AICodedbProductState? PostActionProductState { get; private set; }
+        internal bool IsRunning { get; private set; }
+        internal bool IsRecovering { get; private set; }
+
+        private AICodedbManagerActionSession(
+            string title,
+            AICodedbEditorExecutionContext context,
+            double now,
+            string actionId,
+            bool recovering)
+        {
+            ActionId = actionId;
+            Title = title;
+            Context = context;
+            EffectClass = ClassifyEffect(title);
+            AuthorizationSource = ClassifyAuthority(title);
+            Status = new AICodedbUserActionStatus();
+            if (recovering)
+                Status.Recover(title, now);
+            else
+                Status.Start(title, now);
+            IsRunning = !recovering;
+            IsRecovering = recovering;
+        }
+
+        internal static bool TryStart(
+            string title,
+            AICodedbEditorExecutionContext context,
+            double now,
+            out AICodedbManagerActionSession session)
+        {
+            lock (Gate)
+            {
+                RestorePending(context, now);
+                if (_current != null && (_current.IsRunning || _current.IsRecovering))
+                {
+                    session = null;
+                    return false;
+                }
+
+                var candidate = new AICodedbManagerActionSession(
+                    title, context, now, Guid.NewGuid().ToString("N"), false);
+                SessionState.SetString(PendingKey(context),
+                    candidate.ActionId + "|" + title + "|" + context.PackageRoot);
+                session = candidate;
+                _current = candidate;
+                return true;
+            }
+        }
+
+        internal static AICodedbManagerActionSession CurrentFor(AICodedbEditorExecutionContext context)
+        {
+            lock (Gate)
+            {
+                RestorePending(context, EditorApplication.timeSinceStartup);
+                return _current != null
+                       && string.Equals(_current.Context.ProjectRoot, context.ProjectRoot,
+                           StringComparison.OrdinalIgnoreCase)
+                       && string.Equals(_current.Context.PackageRoot, context.PackageRoot,
+                           StringComparison.OrdinalIgnoreCase)
+                    ? _current : null;
+            }
+        }
+
+        internal void Complete(
+            AICodedbCommandResult result,
+            AICodedbProductState productState,
+            bool statusRefreshSucceeded,
+            double now)
+        {
+            lock (Gate)
+            {
+                if (!ReferenceEquals(_current, this) || !IsRunning)
+                    return;
+                if (result == null || !result.HasAuthoritativeTerminalEvidence)
+                {
+                    Status.Recover(Title, now);
+                    if (result != null)
+                        Status.SetRecoveryDetail(result.StandardError);
+                    IsRunning = false;
+                    IsRecovering = true;
+                    return;
+                }
+                Result = result;
+                Status.Complete(result, PostActionProductState ?? productState,
+                    statusRefreshSucceeded, now, PostActionDetail);
+                IsRunning = false;
+                if (SessionState.GetString(PendingKey(Context), string.Empty)
+                    .StartsWith(ActionId + "|", StringComparison.Ordinal))
+                    SessionState.SetString(PendingKey(Context), string.Empty);
+            }
+        }
+
+        internal void RecordInitialCommandResult(AICodedbCommandResult result)
+        {
+            InitialCommandResult = result;
+        }
+
+        internal void RecoverAfterWindowClose(AICodedbCommandResult result, double now)
+        {
+            lock (Gate)
+            {
+                if (!ReferenceEquals(_current, this) || !IsRunning)
+                    return;
+                Result = result;
+                Status.Recover(Title, now);
+                if (result != null)
+                    Status.SetRecoveryDetail(result.StandardError);
+                IsRunning = false;
+                IsRecovering = true;
+            }
+        }
+
+        internal void FinishAfterWindowClose(AICodedbCommandResult result, double now)
+        {
+            if (result == null || !result.HasAuthoritativeTerminalEvidence)
+                RecoverAfterWindowClose(result, now);
+            else
+                Complete(result, AICodedbProductState.Starting, false, now);
+        }
+
+        internal bool TryCompleteRecovery(AICodedbCommandResult result, double now)
+        {
+            lock (Gate)
+            {
+                if (!ReferenceEquals(_current, this) || !IsRecovering
+                    || result == null || !result.HasAuthoritativeTerminalEvidence
+                    || !string.Equals(result.ActionId, ActionId, StringComparison.Ordinal))
+                    return false;
+                Result = result;
+                Status.Complete(result, AICodedbProductState.Starting, false, now);
+                IsRecovering = false;
+                if (SessionState.GetString(PendingKey(Context), string.Empty)
+                    .StartsWith(ActionId + "|", StringComparison.Ordinal))
+                    SessionState.SetString(PendingKey(Context), string.Empty);
+                return true;
+            }
+        }
+
+        internal void SetRecoveryDetail(string detail)
+        {
+            if (IsRecovering)
+                Status.SetRecoveryDetail(detail);
+        }
+
+        internal void RecordPostOutcome(AICodedbEditorLifecycle.AICodedbReconcileOutcome outcome)
+        {
+            if (outcome == null)
+                return;
+            PostActionDetail = outcome.Detail;
+            switch (outcome.Disposition)
+            {
+                case AICodedbEditorLifecycle.AICodedbReconcileDisposition.Ready:
+                    PostActionProductState = AICodedbProductState.Ready;
+                    break;
+                case AICodedbEditorLifecycle.AICodedbReconcileDisposition.Uninstalled:
+                    PostActionProductState = AICodedbProductState.Uninstalled;
+                    break;
+                case AICodedbEditorLifecycle.AICodedbReconcileDisposition.MissingPrerequisite:
+                    PostActionProductState = AICodedbProductState.MissingPrerequisite;
+                    break;
+                case AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention:
+                    PostActionProductState = AICodedbProductState.NeedsAttention;
+                    break;
+                default:
+                    PostActionProductState = AICodedbProductState.Starting;
+                    break;
+            }
+        }
+
+        internal static bool ClearCompleted()
+        {
+            lock (Gate)
+            {
+                if (_current == null)
+                    return true;
+                if (_current.IsRecovering)
+                {
+                    // Keep the durable pending marker so the next admission
+                    // restores Recovery instead of creating a second owner.
+                    _current = null;
+                    return false;
+                }
+                if (_current.IsRunning)
+                    return false;
+                _current = null;
+                return true;
+            }
+        }
+
+        private static void RestorePending(AICodedbEditorExecutionContext context, double now)
+        {
+            if (_current != null && (_current.IsRunning || _current.IsRecovering))
+                return;
+            var pending = SessionState.GetString(PendingKey(context), string.Empty);
+            if (string.IsNullOrEmpty(pending))
+                return;
+            var parts = pending.Split(new[] { '|' }, 3);
+            if (parts.Length != 3 || !Guid.TryParseExact(parts[0], "N", out _)
+                || !string.Equals(parts[2], context.PackageRoot,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                _current = new AICodedbManagerActionSession(
+                    "Previous CodeDB action", context, now, Guid.NewGuid().ToString("N"), true);
+                return;
+            }
+            _current = new AICodedbManagerActionSession(
+                parts[1], context, now, parts[0], true);
+        }
+
+        private static string PendingKey(AICodedbEditorExecutionContext context)
+        {
+            return PendingKeyPrefix + context.ProjectRoot;
+        }
+
+        internal static string ClassifyEffect(string title)
+        {
+            switch (title)
+            {
+                case "Host Payload DryRun":
+                case "Host Payload Verify":
+                    return "Observation";
+                case "Host Payload Upgrade":
+                    return "LifecycleMutation";
+                case "Configure CodeDB Dependencies":
+                    return "ProviderInstallation";
+                case "Host Payload Redeploy":
+                case "Host Payload Sync":
+                case "Host Payload Remove":
+                case "Install CodeDB":
+                case "Uninstall CodeDB from Project":
+                case "Remove CodeDB Integration":
+                    return "ConfirmedProjectMutation";
+                default:
+                    return "ExistingBackendEffect";
+            }
+        }
+
+        internal static string ClassifyAuthority(string title)
+        {
+            switch (title)
+            {
+                case "Host Payload DryRun":
+                case "Host Payload Verify":
+                    return "PackageMaterializer";
+                case "Host Payload Upgrade":
+                    return "MaterializerAndInstanceAuthority";
+                case "Configure CodeDB Dependencies":
+                    return "ProviderInstallerAndLifecycle";
+                case "Host Payload Redeploy":
+                case "Host Payload Sync":
+                case "Host Payload Remove":
+                case "Install CodeDB":
+                case "Uninstall CodeDB from Project":
+                case "Remove CodeDB Integration":
+                    return "UserConfirmationAndBackendAdmission";
+                default:
+                    return "ExistingActionSpecificBackend";
             }
         }
     }

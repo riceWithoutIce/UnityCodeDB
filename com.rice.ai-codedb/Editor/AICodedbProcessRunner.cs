@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Collections.Generic;
 using System.IO;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,9 @@ namespace Rice.AI.Codedb.Editor
         internal string StandardError { get; }
         internal bool TimedOut { get; }
         internal long ElapsedMilliseconds { get; }
+        internal string ActionId { get; }
+        internal bool HasAuthoritativeTerminalEvidence { get; }
+        internal bool TerminalForManagerAction { get; }
         // Only the Supervisor Bridge may set this bit. It records a
         // read-only proof that the command is in the empty-runtime bootstrap
         // case; callers must never infer fallback permission from text output.
@@ -38,14 +42,20 @@ namespace Rice.AI.Codedb.Editor
             string standardError,
             bool timedOut,
             long elapsedMilliseconds = 0,
-            bool oneShotFallbackAuthorized = false)
+            bool oneShotFallbackAuthorized = false,
+            bool authoritativeTerminalEvidence = true,
+            string actionId = null,
+            bool terminalForManagerAction = true)
         {
             ExitCode = exitCode;
             StandardOutput = standardOutput ?? string.Empty;
             StandardError = standardError ?? string.Empty;
             TimedOut = timedOut;
             ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
+            ActionId = actionId ?? AICodedbPaths.CurrentActionId;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
+            HasAuthoritativeTerminalEvidence = authoritativeTerminalEvidence;
+            TerminalForManagerAction = terminalForManagerAction;
         }
 
         /// <summary>
@@ -76,6 +86,8 @@ namespace Rice.AI.Codedb.Editor
             builder.AppendLine($"Exit Code: {ExitCode}");
             if (ElapsedMilliseconds > 0)
                 builder.AppendLine($"Elapsed: {GetElapsedText()}");
+            if (!string.IsNullOrWhiteSpace(ActionId))
+                builder.AppendLine("Action ID: " + ActionId);
 
             if (TimedOut)
                 builder.AppendLine("Timed Out: True");
@@ -150,10 +162,50 @@ namespace Rice.AI.Codedb.Editor
         }
     }
 
+    internal enum AICodedbManagerActionRecoveryState
+    {
+        NotFound,
+        Pending,
+        Terminal,
+        Conflict
+    }
+
+    internal sealed class AICodedbManagerActionRecoveryOutcome
+    {
+        internal AICodedbManagerActionRecoveryState State { get; }
+        internal AICodedbCommandResult Result { get; }
+        internal string Detail { get; }
+
+        private AICodedbManagerActionRecoveryOutcome(
+            AICodedbManagerActionRecoveryState state,
+            AICodedbCommandResult result,
+            string detail)
+        {
+            State = state;
+            Result = result;
+            Detail = detail ?? string.Empty;
+        }
+
+        internal static AICodedbManagerActionRecoveryOutcome NotFound(string detail) =>
+            new AICodedbManagerActionRecoveryOutcome(
+                AICodedbManagerActionRecoveryState.NotFound, null, detail);
+        internal static AICodedbManagerActionRecoveryOutcome Pending(string detail) =>
+            new AICodedbManagerActionRecoveryOutcome(
+                AICodedbManagerActionRecoveryState.Pending, null, detail);
+        internal static AICodedbManagerActionRecoveryOutcome Terminal(AICodedbCommandResult result) =>
+            new AICodedbManagerActionRecoveryOutcome(
+                AICodedbManagerActionRecoveryState.Terminal, result, string.Empty);
+        internal static AICodedbManagerActionRecoveryOutcome Conflict(string detail) =>
+            new AICodedbManagerActionRecoveryOutcome(
+                AICodedbManagerActionRecoveryState.Conflict, null, detail);
+    }
+
     internal static class AICodedbProcessRunner
     {
         private const int DefaultTimeoutMilliseconds = 120000;
         private const int OutputDrainTimeoutMilliseconds = 1000;
+        private const int ManagerActionReceiptMaximumBytes = 4 * 1024 * 1024;
+        private const int ManagerActionWriterGraceMilliseconds = 30000;
         private static readonly object ActiveProcessLock = new object();
         private static readonly List<Process> ActiveBackgroundProcesses = new List<Process>();
 
@@ -467,6 +519,15 @@ namespace Rice.AI.Codedb.Editor
                 return new AICodedbCommandResult(-1, string.Empty, authorizationError, false);
             }
 
+            if (AICodedbSupervisorProtocol.IsManagerActionId(AICodedbPaths.CurrentActionId))
+            {
+                return RunDurableManagerAction(
+                    context,
+                    normalizedScriptPath,
+                    timeoutMilliseconds,
+                    scriptArguments);
+            }
+
             return RunProcess(
                 BuildPowerShellStartInfo(context, normalizedScriptPath, instanceRoot, scriptArguments),
                 timeoutMilliseconds,
@@ -531,6 +592,510 @@ namespace Rice.AI.Codedb.Editor
 
             foreach (var process in processes)
                 TryKillProcess(process);
+        }
+
+        private static AICodedbCommandResult RunDurableManagerAction(
+            AICodedbEditorExecutionContext context,
+            string normalizedScriptPath,
+            int timeoutMilliseconds,
+            string[] scriptArguments)
+        {
+            var actionId = AICodedbPaths.CurrentActionId;
+            var writerPath = AICodedbPaths.NormalizePath(Path.Combine(
+                context.PackageRoot,
+                "Tools~/invoke-codedb-manager-action.ps1"));
+            if (!TryValidateResolvedPackageOwnedScriptPath(
+                    context.PackageRoot,
+                    writerPath,
+                    "Tools~/invoke-codedb-manager-action.ps1",
+                    "CodeDB Package Manager action writer",
+                    out var normalizedWriterPath,
+                    out var writerError))
+            {
+                return UnconfirmedManagerActionResult(actionId, writerError);
+            }
+
+            try
+            {
+                var arguments = scriptArguments ?? new string[0];
+                var scriptSha256 = GetFileSha256(normalizedScriptPath);
+                var argumentSha256 = ComputeSha256(string.Join("\n", arguments));
+                var commandIdentity = ComputeSha256(
+                    scriptSha256 + "\n" + argumentSha256 + "\n"
+                    + timeoutMilliseconds.ToString(CultureInfo.InvariantCulture));
+                var stageName = string.IsNullOrWhiteSpace(AICodedbPaths.CurrentActionStage)
+                    ? Path.GetFileName(normalizedScriptPath) + ":" + argumentSha256.Substring(0, 16)
+                    : AICodedbPaths.CurrentActionStage;
+                var stageId = ComputeSha256(actionId + "\n" + stageName + "\n" + commandIdentity);
+                var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
+                var stageRoot = AICodedbPaths.NormalizePath(Path.Combine(actionRoot, stageId));
+                EnsureReceiptDirectory(context, actionRoot, stageRoot);
+                var admittedPath = Path.Combine(stageRoot, "admitted.json");
+                if (File.Exists(admittedPath)
+                    || File.Exists(Path.Combine(stageRoot, "claim.json"))
+                    || File.Exists(Path.Combine(stageRoot, "terminal.json")))
+                {
+                    return UnconfirmedManagerActionResult(
+                        actionId,
+                        "The Manager action stage already has durable evidence; automatic replay was blocked.");
+                }
+
+                var admitted = BuildManagerActionAdmissionJson(
+                    context,
+                    actionId,
+                    stageId,
+                    normalizedWriterPath,
+                    normalizedScriptPath,
+                    scriptSha256,
+                    argumentSha256,
+                    commandIdentity,
+                    timeoutMilliseconds,
+                    arguments);
+                WriteNewUtf8FileAtomic(admittedPath, admitted);
+
+                var writerResult = RunProcess(
+                    BuildPowerShellStartInfo(
+                        context,
+                        normalizedWriterPath,
+                        null,
+                        new[] { "-ReceiptPath", stageRoot }),
+                    checked(timeoutMilliseconds + ManagerActionWriterGraceMilliseconds));
+                var terminalPath = Path.Combine(stageRoot, "terminal.json");
+                if (!File.Exists(terminalPath))
+                {
+                    var detail = writerResult.TimedOut
+                        ? "The one-shot Manager action writer exceeded its bounded handoff window."
+                        : "The one-shot Manager action writer exited without a terminal receipt.";
+                    if (!string.IsNullOrWhiteSpace(writerResult.StandardError))
+                        detail += " " + writerResult.StandardError.Trim();
+                    return UnconfirmedManagerActionResult(actionId, detail);
+                }
+
+                var outcome = ReadTerminalReceipt(context, actionId, terminalPath);
+                return outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                    ? outcome.Result
+                    : UnconfirmedManagerActionResult(actionId, outcome.Detail);
+            }
+            catch (Exception exception)
+            {
+                return UnconfirmedManagerActionResult(actionId, exception.Message);
+            }
+        }
+
+        internal static AICodedbManagerActionRecoveryOutcome RecoverManagerAction(
+            AICodedbEditorExecutionContext context,
+            string actionId)
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                return AICodedbManagerActionRecoveryOutcome.Conflict("The persisted Manager action id is invalid.");
+            try
+            {
+                var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
+                if (!Directory.Exists(actionRoot))
+                    return AICodedbManagerActionRecoveryOutcome.NotFound(
+                        "No Package-owned direct-command receipt exists for this action.");
+                AssertReceiptPath(context, actionRoot);
+                var stageDirectories = Directory.GetDirectories(actionRoot);
+                if (stageDirectories.Length > 32)
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "The Manager action receipt contains too many stage entries.");
+
+                AICodedbCommandResult terminalResult = null;
+                var evidenceObserved = false;
+                foreach (var stageDirectory in stageDirectories)
+                {
+                    AssertReceiptPath(context, stageDirectory);
+                    evidenceObserved = true;
+                    var terminalPath = Path.Combine(stageDirectory, "terminal.json");
+                    if (!File.Exists(terminalPath))
+                        continue;
+                    var outcome = ReadTerminalReceipt(context, actionId, terminalPath);
+                    if (outcome.State == AICodedbManagerActionRecoveryState.Conflict)
+                        return outcome;
+                    if (outcome.State != AICodedbManagerActionRecoveryState.Terminal)
+                        continue;
+                    if (!outcome.Result.TerminalForManagerAction)
+                        continue;
+                    if (terminalResult != null)
+                        return AICodedbManagerActionRecoveryOutcome.Conflict(
+                            "Multiple terminal stages claim the same Manager action.");
+                    terminalResult = outcome.Result;
+                }
+
+                if (terminalResult != null)
+                    return AICodedbManagerActionRecoveryOutcome.Terminal(terminalResult);
+                return evidenceObserved
+                    ? AICodedbManagerActionRecoveryOutcome.Pending(
+                        "The direct command has admitted or claimed evidence but no matching terminal receipt; no replay was attempted.")
+                    : AICodedbManagerActionRecoveryOutcome.NotFound(
+                        "No Package-owned direct-command stage exists for this action.");
+            }
+            catch (Exception exception)
+            {
+                return AICodedbManagerActionRecoveryOutcome.Conflict(
+                    "Manager action receipt validation failed: " + exception.Message);
+            }
+        }
+
+        private static AICodedbManagerActionRecoveryOutcome ReadTerminalReceipt(
+            AICodedbEditorExecutionContext context,
+            string actionId,
+            string terminalPath)
+        {
+            AssertReceiptPath(context, terminalPath);
+            var stageRoot = Path.GetDirectoryName(terminalPath);
+            var stageId = Path.GetFileName(stageRoot);
+            var admitted = AICodedbStrictJson.ReadObject(
+                Path.Combine(stageRoot, "admitted.json"),
+                ManagerActionReceiptMaximumBytes,
+                "CodeDB Manager action admission");
+            var claim = AICodedbStrictJson.ReadObject(
+                Path.Combine(stageRoot, "claim.json"),
+                ManagerActionReceiptMaximumBytes,
+                "CodeDB Manager action writer claim");
+            var receipt = AICodedbStrictJson.ReadObject(
+                terminalPath,
+                ManagerActionReceiptMaximumBytes,
+                "CodeDB Manager action terminal receipt");
+            if (!HasValidManagerActionReceiptEnvelope(admitted, claim, receipt)
+                || stageId.Length != 64 || !IsLowerHex(stageId)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "action_id", "CodeDB Manager action admission"),
+                    actionId, StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "stage_id", "CodeDB Manager action admission"),
+                    stageId, StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(claim, "action_id", "CodeDB Manager action writer claim"),
+                    actionId, StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(claim, "stage_id", "CodeDB Manager action writer claim"),
+                    stageId, StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "project_key", "CodeDB Manager action admission"),
+                    AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "package_key", "CodeDB Manager action admission"),
+                    AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(claim, "project_key", "CodeDB Manager action writer claim"),
+                    AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(claim, "package_key", "CodeDB Manager action writer claim"),
+                    AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "stage_id", "CodeDB Manager action terminal receipt"),
+                    stageId, StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "project_root", "CodeDB Manager action admission"),
+                    context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "package_root", "CodeDB Manager action admission"),
+                    context.PackageRoot, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "command_identity_sha256", "CodeDB Manager action admission"),
+                    AICodedbStrictJson.GetRequiredString(receipt, "command_identity_sha256", "CodeDB Manager action terminal receipt"),
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "effect_class", "CodeDB Manager action admission"),
+                    AICodedbStrictJson.GetRequiredString(receipt, "effect_class", "CodeDB Manager action terminal receipt"),
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "authorization_source", "CodeDB Manager action admission"),
+                    AICodedbStrictJson.GetRequiredString(receipt, "authorization_source", "CodeDB Manager action terminal receipt"),
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "project_identity", "CodeDB Manager action admission"),
+                    AICodedbStrictJson.GetRequiredString(receipt, "project_identity", "CodeDB Manager action terminal receipt"),
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(admitted, "package_identity", "CodeDB Manager action admission"),
+                    AICodedbStrictJson.GetRequiredString(receipt, "package_identity", "CodeDB Manager action terminal receipt"),
+                    StringComparison.Ordinal)
+                || AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", "CodeDB Manager action writer claim")
+                   != AICodedbStrictJson.GetRequiredInt32(receipt, "writer_pid", "CodeDB Manager action terminal receipt")
+                || AICodedbStrictJson.GetRequiredBoolean(admitted, "terminal_for_action", "CodeDB Manager action admission")
+                   != AICodedbStrictJson.GetRequiredBoolean(receipt, "terminal_for_action", "CodeDB Manager action terminal receipt")
+                || AICodedbStrictJson.GetRequiredInt32(
+                    receipt,
+                    "schema_version",
+                    "CodeDB Manager action terminal receipt") != 1
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "managed_by", "CodeDB Manager action terminal receipt"),
+                    "com.rice.ai-codedb",
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "state", "CodeDB Manager action terminal receipt"),
+                    "terminal",
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "action_id", "CodeDB Manager action terminal receipt"),
+                    actionId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "project_key", "CodeDB Manager action terminal receipt"),
+                    AICodedbPaths.GetManagerActionProjectKey(context),
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    AICodedbStrictJson.GetRequiredString(receipt, "package_key", "CodeDB Manager action terminal receipt"),
+                    AICodedbPaths.GetManagerActionPackageKey(context),
+                    StringComparison.Ordinal))
+            {
+                return AICodedbManagerActionRecoveryOutcome.Conflict(
+                    "The Manager action terminal receipt identity does not match the current project and Package.");
+            }
+            var result = new AICodedbCommandResult(
+                AICodedbStrictJson.GetRequiredInt32(receipt, "exit_code", "CodeDB Manager action terminal receipt"),
+                AICodedbStrictJson.GetRequiredString(receipt, "stdout", "CodeDB Manager action terminal receipt"),
+                AICodedbStrictJson.GetRequiredString(receipt, "stderr", "CodeDB Manager action terminal receipt"),
+                AICodedbStrictJson.GetRequiredBoolean(receipt, "timed_out", "CodeDB Manager action terminal receipt"),
+                AICodedbStrictJson.GetRequiredInt32(receipt, "elapsed_milliseconds", "CodeDB Manager action terminal receipt"),
+                false,
+                true,
+                actionId,
+                AICodedbStrictJson.GetRequiredBoolean(
+                    receipt, "terminal_for_action", "CodeDB Manager action terminal receipt"));
+            return AICodedbManagerActionRecoveryOutcome.Terminal(result);
+        }
+
+        internal static bool HasValidManagerActionReceiptEnvelope(
+            Dictionary<string, object> admitted,
+            Dictionary<string, object> claim,
+            Dictionary<string, object> terminal)
+        {
+            if (admitted == null || claim == null || terminal == null)
+                return false;
+
+            const string admissionLabel = "CodeDB Manager action admission";
+            const string claimLabel = "CodeDB Manager action writer claim";
+            const string terminalLabel = "CodeDB Manager action terminal receipt";
+            try
+            {
+                if (AICodedbStrictJson.GetRequiredInt32(admitted, "schema_version", admissionLabel) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "managed_by", admissionLabel),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "state", admissionLabel),
+                        "admitted", StringComparison.Ordinal)
+                    || AICodedbStrictJson.GetRequiredInt32(claim, "schema_version", claimLabel) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "managed_by", claimLabel),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "state", claimLabel),
+                        "claimed", StringComparison.Ordinal)
+                    || AICodedbStrictJson.GetRequiredInt32(terminal, "schema_version", terminalLabel) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(terminal, "managed_by", terminalLabel),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(terminal, "state", terminalLabel),
+                        "terminal", StringComparison.Ordinal))
+                    return false;
+
+                var writerPid = AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", claimLabel);
+                var terminalWriterPid = AICodedbStrictJson.GetRequiredInt32(terminal, "writer_pid", terminalLabel);
+                var childPid = AICodedbStrictJson.GetRequiredInt32(terminal, "child_pid", terminalLabel);
+                var ticksText = AICodedbStrictJson.GetRequiredString(claim, "writer_start_utc_ticks", claimLabel);
+                if (!long.TryParse(ticksText, NumberStyles.None, CultureInfo.InvariantCulture,
+                        out var writerStartTicks)
+                    || writerStartTicks <= DateTime.MinValue.Ticks
+                    || writerStartTicks > DateTime.MaxValue.Ticks
+                    || writerPid <= 0 || terminalWriterPid != writerPid
+                    || childPid <= 0 || childPid == writerPid)
+                    return false;
+
+                var completedText = AICodedbStrictJson.GetRequiredString(
+                    terminal, "completed_at_utc", terminalLabel);
+                if (!completedText.EndsWith("Z", StringComparison.Ordinal)
+                    || !DateTime.TryParseExact(completedText, "O", CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var completedAt)
+                    || completedAt.Kind != DateTimeKind.Utc
+                    || completedAt.Ticks < writerStartTicks)
+                    return false;
+
+                var overflow = AICodedbStrictJson.GetRequiredBoolean(
+                    terminal, "output_overflow", terminalLabel);
+                var timedOut = AICodedbStrictJson.GetRequiredBoolean(
+                    terminal, "timed_out", terminalLabel);
+                var exitCode = AICodedbStrictJson.GetRequiredInt32(
+                    terminal, "exit_code", terminalLabel);
+                var elapsed = AICodedbStrictJson.GetRequiredInt32(
+                    terminal, "elapsed_milliseconds", terminalLabel);
+                if (!admitted.TryGetValue("command", out var commandValue))
+                    return false;
+                var command = AICodedbStrictJson.RequireObject(commandValue, admissionLabel + " command");
+                var timeout = AICodedbStrictJson.GetRequiredInt32(command, "timeout_ms", admissionLabel + " command");
+                return timeout >= 1 && timeout <= 1800000
+                    && elapsed >= 0 && (!timedOut || elapsed >= timeout)
+                    && ((!overflow && !timedOut) || exitCode == 4);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static AICodedbCommandResult UnconfirmedManagerActionResult(
+            string actionId,
+            string detail)
+        {
+            return new AICodedbCommandResult(
+                4,
+                string.Empty,
+                string.IsNullOrWhiteSpace(detail)
+                    ? "The Manager action has no authoritative terminal receipt."
+                    : detail,
+                false,
+                0,
+                false,
+                false,
+                actionId);
+        }
+
+        private static string BuildManagerActionAdmissionJson(
+            AICodedbEditorExecutionContext context,
+            string actionId,
+            string stageId,
+            string writerPath,
+            string scriptPath,
+            string scriptSha256,
+            string argumentSha256,
+            string commandIdentity,
+            int timeoutMilliseconds,
+            string[] arguments)
+        {
+            var projectKey = AICodedbPaths.GetManagerActionProjectKey(context);
+            var packageKey = AICodedbPaths.GetManagerActionPackageKey(context);
+            var builder = new StringBuilder();
+            builder.Append("{\n  \"schema_version\": 1,\n  \"managed_by\": \"com.rice.ai-codedb\",\n  \"state\": \"admitted\",")
+                .Append("\n  \"action_id\": \"").Append(EscapeJson(actionId)).Append("\",")
+                .Append("\n  \"stage_id\": \"").Append(EscapeJson(stageId)).Append("\",")
+                .Append("\n  \"terminal_for_action\": ").Append(AICodedbPaths.CurrentActionStageIsTerminal ? "true" : "false").Append(',')
+                .Append("\n  \"project_key\": \"").Append(projectKey).Append("\",")
+                .Append("\n  \"package_key\": \"").Append(packageKey).Append("\",")
+                .Append("\n  \"project_identity\": \"sha256:").Append(projectKey).Append("\",")
+                .Append("\n  \"package_identity\": \"sha256:").Append(packageKey).Append("\",")
+                .Append("\n  \"effect_class\": \"").Append(EscapeJson(AICodedbPaths.CurrentActionEffect)).Append("\",")
+                .Append("\n  \"authorization_source\": \"").Append(EscapeJson(AICodedbPaths.CurrentActionAuthority)).Append("\",")
+                .Append("\n  \"command_identity_sha256\": \"").Append(commandIdentity).Append("\",")
+                .Append("\n  \"writer_sha256\": \"").Append(GetFileSha256(writerPath)).Append("\",")
+                .Append("\n  \"project_root\": \"").Append(EscapeJson(context.ProjectRoot)).Append("\",")
+                .Append("\n  \"package_root\": \"").Append(EscapeJson(context.PackageRoot)).Append("\",")
+                .Append("\n  \"command\": {\n    \"script_path\": \"").Append(EscapeJson(scriptPath)).Append("\",")
+                .Append("\n    \"script_sha256\": \"").Append(scriptSha256).Append("\",")
+                .Append("\n    \"arguments_sha256\": \"").Append(argumentSha256).Append("\",")
+                .Append("\n    \"timeout_ms\": ").Append(timeoutMilliseconds.ToString(CultureInfo.InvariantCulture)).Append(',')
+                .Append("\n    \"arguments\": [");
+            for (var index = 0; index < arguments.Length; index++)
+            {
+                if (index > 0)
+                    builder.Append(',');
+                builder.Append("\n      \"").Append(EscapeJson(arguments[index])).Append('"');
+            }
+            if (arguments.Length > 0)
+                builder.Append('\n').Append("    ");
+            builder.Append("]\n  }\n}\n");
+            return builder.ToString();
+        }
+
+        private static void EnsureReceiptDirectory(
+            AICodedbEditorExecutionContext context,
+            string actionRoot,
+            string stageRoot)
+        {
+            Directory.CreateDirectory(stageRoot);
+            AssertReceiptPath(context, actionRoot);
+            AssertReceiptPath(context, stageRoot);
+        }
+
+        private static void AssertReceiptPath(
+            AICodedbEditorExecutionContext context,
+            string path)
+        {
+            var root = AICodedbPaths.GetManagerActionsRoot().TrimEnd('/');
+            var normalized = AICodedbPaths.NormalizePath(path);
+            if (!normalized.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Manager action receipt path escapes its scoped root.");
+            var current = root;
+            var relative = normalized.Substring(root.Length).TrimStart('/');
+            foreach (var segment in relative.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, segment);
+                if (!Directory.Exists(current) && !File.Exists(current))
+                    break;
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Manager action receipt path traverses a reparse point.");
+            }
+        }
+
+        private static bool IsLowerHex(string value)
+        {
+            foreach (var character in value)
+            {
+                if (!((character >= '0' && character <= '9')
+                      || (character >= 'a' && character <= 'f')))
+                    return false;
+            }
+            return true;
+        }
+
+        private static void WriteNewUtf8FileAtomic(string path, string value)
+        {
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temp, value, new UTF8Encoding(false));
+                if (File.Exists(path))
+                    throw new InvalidOperationException("Manager action admission evidence already exists.");
+                File.Move(temp, path);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
+            }
+        }
+
+        private static string GetFileSha256(string path)
+        {
+            using (var stream = File.OpenRead(path))
+            using (var algorithm = SHA256.Create())
+                return ToHex(algorithm.ComputeHash(stream));
+        }
+
+        private static string ComputeSha256(string value)
+        {
+            using (var algorithm = SHA256.Create())
+                return ToHex(algorithm.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty)));
+        }
+
+        private static string ToHex(byte[] value)
+        {
+            var builder = new StringBuilder(value.Length * 2);
+            foreach (var item in value)
+                builder.Append(item.ToString("x2", CultureInfo.InvariantCulture));
+            return builder.ToString();
+        }
+
+        private static string EscapeJson(string value)
+        {
+            if (value == null)
+                return string.Empty;
+            var builder = new StringBuilder(value.Length + 16);
+            foreach (var character in value)
+            {
+                switch (character)
+                {
+                    case '\\': builder.Append("\\\\"); break;
+                    case '"': builder.Append("\\\""); break;
+                    case '\r': builder.Append("\\r"); break;
+                    case '\n': builder.Append("\\n"); break;
+                    case '\t': builder.Append("\\t"); break;
+                    default:
+                        if (character < 0x20)
+                            builder.Append("\\u").Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
+                        else
+                            builder.Append(character);
+                        break;
+                }
+            }
+            return builder.ToString();
         }
 
         private static AICodedbCommandResult UnsupportedPlatformResult()

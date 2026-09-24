@@ -696,6 +696,19 @@ async function waitForOperation(pipeName, authToken, operationId, timeoutMillise
   throw new Error(`Supervisor operation ${operationId} did not reach a terminal state.`);
 }
 
+async function waitForManagerAction(pipeName, authToken, actionId, timeoutMilliseconds = 15000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    const response = await requestPipe(
+      pipeName,
+      authToken,
+      { command: "manager_action_operation", action: actionId });
+    if (response.pending !== true) return response;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Manager action ${actionId} did not reach a terminal state.`);
+}
+
 async function startCoordinator(fixture) {
   fixture.coordinatorServer = net.createServer((socket) => {
     socket.setEncoding("utf8");
@@ -1022,6 +1035,85 @@ async function verifyAsynchronousMaterializerOperation() {
     assert.equal(failed.error_code, "SUPERVISOR_COMMAND_FAILED");
     assert.equal(failed.result.exit_code, 4);
     assert.match(failed.error, /synthetic terminal failure/);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
+async function verifyManagerActionOperationCorrelation() {
+  const fixture = createFixture(TARGET);
+  const counterPath = path.join(fixture.root, "manager-action-probe-count.txt");
+  const actionId = crypto.randomBytes(16).toString("hex");
+  const conflictingActionId = crypto.randomBytes(16).toString("hex");
+  const unrelatedActionId = crypto.randomBytes(16).toString("hex");
+  try {
+    writeSlowProbeMaterializer(fixture, counterPath);
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    let state = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+
+    // Treat the acceptance response as lost: recovery uses only the durable
+    // action correlation, never the operation id from this response.
+    await requestPipe(state.pipe_name, state.auth_token, {
+      command: "materialize",
+      action: "Probe",
+      request_id: crypto.randomBytes(16).toString("hex"),
+      manager_action_id: actionId
+    });
+    const observed = await requestPipe(state.pipe_name, state.auth_token, {
+      command: "manager_action_operation",
+      action: actionId
+    });
+    assert.equal(observed.accepted, true);
+    assert.equal(observed.operation.manager_action_id, actionId);
+
+    const conflicting = await requestPipe(state.pipe_name, state.auth_token, {
+      command: "materialize",
+      action: "Probe",
+      request_id: crypto.randomBytes(16).toString("hex"),
+      manager_action_id: conflictingActionId
+    });
+    assert.equal(conflicting.ok, false);
+    assert.equal(conflicting.error_code, "OPERATION_OWNED_BY_ANOTHER_ACTION");
+
+    const terminal = await waitForManagerAction(state.pipe_name, state.auth_token, actionId);
+    assert.equal(terminal.ok, true, terminal.error || "Manager action operation failed.");
+    assert.equal(terminal.operation.manager_action_id, actionId);
+    assert.equal(fs.readFileSync(counterPath, "utf8"), "1");
+
+    const unrelated = await requestPipe(state.pipe_name, state.auth_token, {
+      command: "materialize",
+      action: "Verify",
+      request_id: crypto.randomBytes(16).toString("hex"),
+      manager_action_id: unrelatedActionId
+    });
+    assert.equal(unrelated.accepted, true);
+    await waitForOperation(state.pipe_name, state.auth_token, unrelated.operation_id);
+    const afterUnrelated = await requestPipe(state.pipe_name, state.auth_token, {
+      command: "manager_action_operation",
+      action: actionId
+    });
+    assert.equal(afterUnrelated.operation_id, terminal.operation_id);
+    assert.equal(afterUnrelated.pending, false);
+
+    const stopped = await runSupervisor(fixture, "stop");
+    assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
+    assert.equal(await waitForSupervisorExit(fixture), true);
+    const restarted = await runSupervisor(fixture, "start");
+    assert.equal(restarted.status, 0, `${restarted.stdout}\n${restarted.stderr}`);
+    state = JSON.parse(fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-state.json"),
+      "utf8"));
+    const afterRestart = await requestPipe(state.pipe_name, state.auth_token, {
+      command: "manager_action_operation",
+      action: actionId
+    });
+    assert.equal(afterRestart.operation_id, terminal.operation_id);
+    assert.equal(afterRestart.pending, false);
+    assert.equal(afterRestart.result.exit_code, 0);
   } finally {
     await cleanupFixture(fixture);
   }
@@ -2220,6 +2312,11 @@ async function main() {
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "request-queue") {
     await verifyQueryFirstBoundedMaintenanceQueue();
     console.log("[PASS] Supervisor query-first bounded maintenance queue owns priority, coalescing, admission, and owner-epoch binding.");
+    return;
+  }
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "manager-action-correlation") {
+    await verifyManagerActionOperationCorrelation();
+    console.log("[PASS] Supervisor Manager action correlation survives lost acceptance, unrelated operations, and restart.");
     return;
   }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "coordinator-readmission") {

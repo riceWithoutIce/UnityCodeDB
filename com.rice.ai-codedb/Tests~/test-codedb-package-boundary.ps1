@@ -1,7 +1,7 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param()
+param([switch]$ManagerActionWriterOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -27,6 +27,147 @@ function Assert-Equal {
     if (-not [string]::Equals([string]$Actual, [string]$Expected, [StringComparison]::Ordinal)) {
         throw "$Label mismatch. Expected '$Expected', got '$Actual'."
     }
+}
+
+function Get-FixtureSha256 {
+    param([string]$Text)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+
+function Invoke-ManagerActionWriterScenarios {
+    $sourceWriter = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Tools~\invoke-codedb-manager-action.ps1'))
+    $fixtureTag = [Guid]::NewGuid().ToString('N')
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('codedb-manager-action-' + $fixtureTag)
+    $projectRoot = Join-Path $fixtureRoot 'project'
+    $packageRoot = Join-Path $fixtureRoot 'package'
+    $writerPath = Join-Path $packageRoot 'Tools~\invoke-codedb-manager-action.ps1'
+    $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', [EnvironmentVariableTarget]::Process)
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    }
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($localAppData)) -Message 'Fixture LocalApplicationData is unavailable.'
+    $receiptRoot = Join-Path $localAppData 'Rice\CodeDB\manager-actions'
+    $actionRoots = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        [void](New-Item -ItemType Directory -Path $projectRoot, (Split-Path $writerPath -Parent) -Force)
+        Copy-Item -LiteralPath $sourceWriter -Destination $writerPath
+        $projectKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($projectRoot).Replace('\', '/').ToLowerInvariant())
+        $packageKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($packageRoot).Replace('\', '/').ToLowerInvariant())
+        $writerHash = (Get-FileHash -LiteralPath $writerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+        foreach ($scenario in @('success', 'timeout', 'identity-rejected')) {
+            $actionId = [Guid]::NewGuid().ToString('N')
+            $actionRoot = Join-Path (Join-Path (Join-Path $receiptRoot $projectKey) $packageKey) $actionId
+            $actionRoots.Add($actionRoot)
+            $commandPath = Join-Path $projectRoot ($scenario + '.ps1')
+            $commandText = if ($scenario -eq 'timeout') {
+                'Start-Sleep -Seconds 2'
+            } else {
+                'Write-Output "fixture-ok"'
+            }
+            [IO.File]::WriteAllText($commandPath, $commandText, (New-Object Text.UTF8Encoding($false)))
+            $commandHash = (Get-FileHash -LiteralPath $commandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $argumentHash = Get-FixtureSha256 ''
+            $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 10000 }
+            $commandIdentity = Get-FixtureSha256 ("$commandHash`n$argumentHash`n$timeoutMs")
+            $stageId = Get-FixtureSha256 ("$actionId`n$scenario`n$commandIdentity")
+            $stageRoot = Join-Path $actionRoot $stageId
+            [void](New-Item -ItemType Directory -Path $stageRoot -Force)
+            $admitted = [ordered]@{
+                schema_version = 1
+                managed_by = 'com.rice.ai-codedb'
+                state = 'admitted'
+                action_id = $actionId
+                stage_id = $stageId
+                terminal_for_action = $true
+                project_key = $projectKey
+                package_key = $packageKey
+                project_identity = 'sha256:' + $projectKey
+                package_identity = 'sha256:' + $packageKey
+                effect_class = 'Observation'
+                authorization_source = 'PackageMaterializer'
+                command_identity_sha256 = $commandIdentity
+                writer_sha256 = $writerHash
+                project_root = [IO.Path]::GetFullPath($projectRoot).Replace('\', '/')
+                package_root = [IO.Path]::GetFullPath($packageRoot).Replace('\', '/')
+                command = [ordered]@{
+                    script_path = [IO.Path]::GetFullPath($commandPath).Replace('\', '/')
+                    script_sha256 = $commandHash
+                    arguments_sha256 = $argumentHash
+                    timeout_ms = $timeoutMs
+                    arguments = @()
+                }
+            }
+            if ($scenario -eq 'identity-rejected') {
+                $admitted.project_identity = 'sha256:' + ('0' * 64)
+            }
+            $admittedPath = Join-Path $stageRoot 'admitted.json'
+            [IO.File]::WriteAllText($admittedPath,
+                ($admitted | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
+            $ErrorActionPreference = 'Continue'
+            $writerOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $writerPath -ReceiptPath $stageRoot 2>&1
+            $writerExit = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            $claimPath = Join-Path $stageRoot 'claim.json'
+            $terminalPath = Join-Path $stageRoot 'terminal.json'
+            if ($scenario -eq 'identity-rejected') {
+                Assert-True -Condition ($writerExit -ne 0) -Message 'Mismatched identity was accepted.'
+                Assert-True -Condition (-not (Test-Path -LiteralPath $claimPath)) -Message 'Rejected identity acquired a claim.'
+                Assert-True -Condition (-not (Test-Path -LiteralPath $terminalPath)) -Message 'Rejected identity acquired a terminal receipt.'
+                continue
+            }
+            if ($writerExit -ne 0) {
+                $writerText = [string]($writerOutput | Out-String)
+                $writerText = $writerText.Replace($fixtureRoot, '<fixture>')
+                $writerText = $writerText.Replace($receiptRoot, '<receipt-root>')
+                $writerText = $writerText.Replace($localAppData, '<local-app-data>')
+                if ($writerText.Length -gt 4096) {
+                    $writerText = $writerText.Substring(0, 4096) + ' [truncated]'
+                }
+                throw "$scenario writer exit=$writerExit; admitted=$(Test-Path -LiteralPath $admittedPath); claim=$(Test-Path -LiteralPath $claimPath); terminal=$(Test-Path -LiteralPath $terminalPath); combined stdout/stderr: $writerText"
+            }
+            Assert-Equal -Actual $writerExit -Expected 0 -Label "$scenario writer exit"
+            Assert-True -Condition (Test-Path -LiteralPath $claimPath) -Message "$scenario writer claim missing. $writerOutput"
+            Assert-True -Condition (Test-Path -LiteralPath $terminalPath) -Message "$scenario terminal receipt missing. $writerOutput"
+            $terminal = [IO.File]::ReadAllText($terminalPath) | ConvertFrom-Json
+            Assert-Equal -Actual $terminal.action_id -Expected $actionId -Label "$scenario action id"
+            Assert-Equal -Actual $terminal.stage_id -Expected $stageId -Label "$scenario stage id"
+            Assert-True -Condition ($terminal.writer_pid -gt 0 -and $terminal.child_pid -gt 0) -Message "$scenario process identity missing."
+            if ($scenario -eq 'success') {
+                Assert-Equal -Actual $terminal.exit_code -Expected 0 -Label 'Success exit'
+                Assert-True -Condition ($terminal.stdout -match 'fixture-ok') -Message 'Success output missing.'
+            } else {
+                Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Timeout exit'
+                Assert-True -Condition $terminal.timed_out -Message 'Timeout bit missing.'
+            }
+        }
+        Write-Host '[OK] Focused Manager action writer receipt scenarios passed.'
+    }
+    finally {
+        foreach ($actionRoot in $actionRoots) {
+            $resolved = [IO.Path]::GetFullPath($actionRoot)
+            $expected = [IO.Path]::GetFullPath($receiptRoot).TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+            if ($resolved.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase) -and
+                (Split-Path $resolved -Leaf) -match '^[0-9a-f]{32}$' -and
+                (Test-Path -LiteralPath $resolved)) {
+                Remove-Item -LiteralPath $resolved -Recurse -Force
+            }
+        }
+        if ((Test-Path -LiteralPath $fixtureRoot) -and
+            (Split-Path $fixtureRoot -Leaf) -eq ('codedb-manager-action-' + $fixtureTag)) {
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+        }
+    }
+}
+
+if ($ManagerActionWriterOnly) {
+    Invoke-ManagerActionWriterScenarios
+    return
 }
 
 function Get-RelativePath {
@@ -68,8 +209,10 @@ $expectedGenerationId = "poc.39"
 # these paths in the package boundary so a package cannot silently fall back to
 # an unreviewed machine-global daemon or a missing bridge launcher.
 $supervisorScriptPath = Join-Path $packageRoot "Tools~\codedb-project-supervisor.mjs"
+$managerActionWriterPath = Join-Path $packageRoot "Tools~\invoke-codedb-manager-action.ps1"
 $supervisorLauncherPath = Join-Path $packageRoot "Editor\AICodedbSupervisorLauncher.cs"
 Assert-True -Condition (Test-Path -LiteralPath $supervisorScriptPath -PathType Leaf) -Message "Project Supervisor script is missing."
+Assert-True -Condition (Test-Path -LiteralPath $managerActionWriterPath -PathType Leaf) -Message "Manager action writer is missing from the Package."
 Assert-True -Condition (Test-Path -LiteralPath $supervisorLauncherPath -PathType Leaf) -Message "Project Supervisor launcher is missing."
 $supervisorLauncherSource = [System.IO.File]::ReadAllText($supervisorLauncherPath)
 Assert-True `
@@ -1422,7 +1565,7 @@ foreach ($forbiddenManagerStatusPath in @(
 }
 $managerTransientObservationFunction = [regex]::Match(
     $managerSource,
-    '(?s)private\s+void\s+ObserveTransientHostStatus\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+ApplyStatusSnapshot\s*\(\s*AICodedbStatusSnapshot\s+snapshot\s*\)')
+    '(?s)private\s+void\s+ObserveTransientHostStatus\s*\(\s*\)\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\r?\n\s*private\s+void\s+AttachCurrentActionSession\s*\(')
 Assert-True -Condition $managerTransientObservationFunction.Success -Message "Package boundary could not isolate Manager transient status observation."
 Assert-True `
     -Condition ($managerTransientObservationFunction.Groups["body"].Value.IndexOf("TryApplyCachedLifecycleStatus()", [StringComparison]::Ordinal) -ge 0) `

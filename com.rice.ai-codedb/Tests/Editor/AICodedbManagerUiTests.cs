@@ -7,12 +7,453 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEditor.PackageManager;
+using UnityEngine;
 
 namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        [TestCase("Host Payload DryRun", "Observation", "PackageMaterializer")]
+        [TestCase("Host Payload Verify", "Observation", "PackageMaterializer")]
+        [TestCase("Host Payload Upgrade", "LifecycleMutation", "MaterializerAndInstanceAuthority")]
+        [TestCase("Host Payload Redeploy", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Host Payload Sync", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Host Payload Remove", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Install CodeDB", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Uninstall CodeDB from Project", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Remove CodeDB Integration", "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission")]
+        [TestCase("Configure CodeDB Dependencies", "ProviderInstallation", "ProviderInstallerAndLifecycle")]
+        public void ManagerActionInventory_HasExplicitEffectAndAuthority(
+            string title, string effect, string authority)
+        {
+            Assert.That(AICodedbManagerActionSession.ClassifyEffect(title), Is.EqualTo(effect));
+            Assert.That(AICodedbManagerActionSession.ClassifyAuthority(title), Is.EqualTo(authority));
+        }
+
+        [Test]
+        public void ActionContext_FlowsCapturedProjectAndPackageToWorker()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-action-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-action-package"),
+                "codedb-action-project");
+
+            using (AICodedbPaths.UseActionContext(
+                       context, "test-action-id", "Observation", "PackageMaterializer"))
+            {
+                Assert.That(AICodedbPaths.CurrentActionEffect, Is.EqualTo("Observation"));
+                Assert.That(AICodedbPaths.CurrentActionAuthority, Is.EqualTo("PackageMaterializer"));
+                using (AICodedbPaths.UseActionStage("preflight", false))
+                {
+                    Assert.That(Task.Run(() => AICodedbPaths.CurrentActionStage)
+                        .GetAwaiter().GetResult(), Is.EqualTo("preflight"));
+                    Assert.That(Task.Run(() => AICodedbPaths.CurrentActionStageIsTerminal)
+                        .GetAwaiter().GetResult(), Is.False);
+                }
+                Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.True);
+                var workerContext = Task.Run(() => AICodedbPaths.CaptureExecutionContext())
+                    .GetAwaiter().GetResult();
+                Assert.That(workerContext.ProjectRoot, Is.EqualTo(context.ProjectRoot));
+                Assert.That(workerContext.PackageRoot, Is.EqualTo(context.PackageRoot));
+                Assert.That(Task.Run(() => AICodedbPaths.ProjectRoot).GetAwaiter().GetResult(),
+                    Is.EqualTo(context.ProjectRoot));
+                Assert.That(Task.Run(() => AICodedbPaths.PackageRootPath).GetAwaiter().GetResult(),
+                    Is.EqualTo(context.PackageRoot));
+                Assert.That(Task.Run(() => AICodedbPaths.RuntimePath).GetAwaiter().GetResult(),
+                    Is.EqualTo(context.GetProjectPath(context.RuntimeRelativePath)));
+                Assert.That(Task.Run(() => AICodedbPaths.ProviderConfigPath).GetAwaiter().GetResult(),
+                    Is.EqualTo(context.GetProjectPath(context.ProviderConfigRelativePath)));
+                var result = Task.Run(() => new AICodedbCommandResult(
+                    0, "worker output", string.Empty, false)).GetAwaiter().GetResult();
+                Assert.That(result.ActionId, Is.EqualTo("test-action-id"));
+                Assert.That(result.GetDisplayText(), Does.Contain("Action ID: test-action-id"));
+            }
+            Assert.That(AICodedbPaths.CurrentActionId, Is.Empty);
+        }
+
+        [Test]
+        public void ManagerActionSession_RejectsOverlapAndRetainsResultAcrossWindowInstances()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-session-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-session-package"),
+                "codedb-session-project");
+            AICodedbManagerActionSession.ClearCompleted();
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Upgrade", context, 10d, out var action), Is.True);
+                Assert.That(action.ActionId, Has.Length.EqualTo(32));
+                Assert.That(action.EffectClass, Is.EqualTo("LifecycleMutation"));
+                Assert.That(action.AuthorizationSource, Is.EqualTo("MaterializerAndInstanceAuthority"));
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Sync", context, 11d, out _), Is.False);
+                Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.SameAs(action));
+
+                var result = new AICodedbCommandResult(4, "original output", "backend refusal", false, 123);
+                action.Complete(result, AICodedbProductState.NeedsAttention, true, 12d);
+                Assert.That(action.IsRunning, Is.False);
+                Assert.That(AICodedbManagerActionSession.CurrentFor(context).Result, Is.SameAs(result));
+                Assert.That(action.Status.BuildPresentation(12d).StatusLabel, Is.EqualTo("Failed"));
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_ReloadRestoresUnconfirmedOutcomeWithoutRetry()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-reload-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-reload-package"),
+                "codedb-reload-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            SessionState.SetString(key,
+                Guid.NewGuid().ToString("N") + "|Host Payload Sync|" + context.PackageRoot);
+            try
+            {
+                var recovered = AICodedbManagerActionSession.CurrentFor(context);
+                Assert.That(recovered.IsRecovering, Is.True);
+                Assert.That(recovered.IsRunning, Is.False);
+                Assert.That(recovered.Result, Is.Null);
+                Assert.That(recovered.Status.BuildPresentation(0d).StatusLabel,
+                    Is.EqualTo("Outcome unconfirmed"));
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Sync", context, 1d, out _), Is.False);
+                Assert.That(AICodedbManagerActionSession.ClearCompleted(), Is.False);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Sync", context, 2d, out _), Is.False);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_OnlyMatchingAuthoritativeRecoveryReleasesAdmission()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-recovery-terminal-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-recovery-terminal-package"),
+                "codedb-recovery-terminal-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            var actionId = Guid.NewGuid().ToString("N");
+            SessionState.SetString(key,
+                actionId + "|Host Payload Sync|" + context.PackageRoot);
+            try
+            {
+                var recovered = AICodedbManagerActionSession.CurrentFor(context);
+                var wrongAction = new AICodedbCommandResult(
+                    0, "done", string.Empty, false, 1, false, true,
+                    Guid.NewGuid().ToString("N"));
+                var unconfirmed = new AICodedbCommandResult(
+                    4, string.Empty, "response lost", false, 1, false, false,
+                    actionId);
+                Assert.That(recovered.TryCompleteRecovery(wrongAction, 1d), Is.False);
+                Assert.That(recovered.TryCompleteRecovery(unconfirmed, 1d), Is.False);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 2d, out _), Is.False);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+
+                var terminal = new AICodedbCommandResult(
+                    0, "done", string.Empty, false, 1, false, true, actionId);
+                Assert.That(recovered.TryCompleteRecovery(terminal, 3d), Is.True);
+                Assert.That(recovered.IsRecovering, Is.False);
+                Assert.That(recovered.Result, Is.SameAs(terminal));
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 4d, out var next), Is.True);
+                next.Complete(new AICodedbCommandResult(0, string.Empty,
+                    string.Empty, false), AICodedbProductState.Starting, false, 5d);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionReceipt_CompleteEnvelopeIsValid()
+        {
+            var records = CreateManagerActionReceiptEnvelope();
+            Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                records[0], records[1], records[2]), Is.True);
+        }
+
+        [TestCase(0, "schema_version")]
+        [TestCase(0, "managed_by")]
+        [TestCase(0, "state")]
+        [TestCase(0, "command")]
+        [TestCase(1, "schema_version")]
+        [TestCase(1, "managed_by")]
+        [TestCase(1, "state")]
+        [TestCase(1, "writer_start_utc_ticks")]
+        [TestCase(1, "writer_pid")]
+        [TestCase(2, "schema_version")]
+        [TestCase(2, "managed_by")]
+        [TestCase(2, "state")]
+        [TestCase(2, "writer_pid")]
+        [TestCase(2, "child_pid")]
+        [TestCase(2, "completed_at_utc")]
+        [TestCase(2, "output_overflow")]
+        public void ManagerActionReceipt_MissingEnvelopeFieldCannotBeTerminal(
+            int recordIndex, string field)
+        {
+            var records = CreateManagerActionReceiptEnvelope();
+            records[recordIndex].Remove(field);
+            Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                records[0], records[1], records[2]), Is.False,
+                recordIndex + ":" + field);
+        }
+
+        [Test]
+        public void ManagerActionReceipt_AlteredWriterChildAndOutputEvidenceIsRejected()
+        {
+            var changes = new[]
+            {
+                new { Index = 0, Field = "state", Value = (object)"terminal" },
+                new { Index = 0, Field = "schema_version", Value = (object)"1" },
+                new { Index = 1, Field = "managed_by", Value = (object)"other" },
+                new { Index = 1, Field = "writer_start_utc_ticks", Value = (object)"invalid" },
+                new { Index = 1, Field = "writer_start_utc_ticks", Value = (object)"0" },
+                new { Index = 1, Field = "writer_pid", Value = (object)33L },
+                new { Index = 2, Field = "writer_pid", Value = (object)33L },
+                new { Index = 2, Field = "child_pid", Value = (object)0L },
+                new { Index = 2, Field = "child_pid", Value = (object)11L },
+                new { Index = 2, Field = "completed_at_utc", Value = (object)"invalid" },
+                new { Index = 2, Field = "output_overflow", Value = (object)"false" },
+                new { Index = 2, Field = "output_overflow", Value = (object)true }
+            };
+            foreach (var change in changes)
+            {
+                var records = CreateManagerActionReceiptEnvelope();
+                records[change.Index][change.Field] = change.Value;
+                Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                    records[0], records[1], records[2]), Is.False,
+                    change.Index + ":" + change.Field + "=" + change.Value);
+            }
+        }
+
+        [Test]
+        public void ManagerActionReceipt_TimeoutCannotPrecedeAdmittedDeadline()
+        {
+            var records = CreateManagerActionReceiptEnvelope();
+            records[2]["timed_out"] = true;
+            records[2]["exit_code"] = 4L;
+            Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                records[0], records[1], records[2]), Is.False);
+
+            records[2]["elapsed_milliseconds"] = 120000L;
+            Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                records[0], records[1], records[2]), Is.True);
+
+            var command = AICodedbStrictJson.RequireObject(records[0]["command"], "admission fixture command");
+            command.Remove("timeout_ms");
+            Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
+                records[0], records[1], records[2]), Is.False);
+        }
+
+        private static Dictionary<string, object>[] CreateManagerActionReceiptEnvelope()
+        {
+            return new[]
+            {
+                AICodedbStrictJson.ParseObject(
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"state\":\"admitted\",\"command\":{\"timeout_ms\":120000}}",
+                    "admission fixture"),
+                AICodedbStrictJson.ParseObject(
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"state\":\"claimed\",\"writer_pid\":11,\"writer_start_utc_ticks\":\"1\"}",
+                    "claim fixture"),
+                AICodedbStrictJson.ParseObject(
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"state\":\"terminal\",\"writer_pid\":11,\"child_pid\":22,\"completed_at_utc\":\"2026-09-24T00:00:00.0000000Z\",\"output_overflow\":false,\"timed_out\":false,\"exit_code\":0,\"elapsed_milliseconds\":1}",
+                    "terminal fixture")
+            };
+        }
+
+        [Test]
+        public void ManagerActionSession_ProviderSuccessKeepsCommandAndNeedsAttentionSeparate()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-provider-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-provider-package"),
+                "codedb-provider-project");
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Configure CodeDB Dependencies", context, 1d, out var action), Is.True);
+                var providerResult = new AICodedbCommandResult(
+                    0, "provider installed", string.Empty, false, 234);
+                action.RecordInitialCommandResult(providerResult);
+                action.RecordPostOutcome(new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
+                    1,
+                    AICodedbEditorLifecycle.AICodedbReconcileDisposition.NeedsAttention,
+                    default(AICodedbProductStatus),
+                    null,
+                    1,
+                    "Host admission still needs attention."));
+                action.Complete(providerResult, AICodedbProductState.Starting, true, 2d);
+
+                Assert.That(action.Result, Is.SameAs(providerResult));
+                Assert.That(action.InitialCommandResult, Is.SameAs(providerResult));
+                Assert.That(action.Status.BuildPresentation(2d).StatusLabel,
+                    Is.EqualTo("Completed - needs attention"));
+                Assert.That(action.Status.BuildPresentation(2d).Detail,
+                    Is.EqualTo("Host admission still needs attention."));
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_WindowCloseWithCommandRetainsResultWithoutClaimingReady()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-close-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-close-package"),
+                "codedb-close-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Redeploy", context, 1d, out var action), Is.True);
+                var preflight = new AICodedbCommandResult(0, "preflight", string.Empty, false);
+                action.FinishAfterWindowClose(preflight, 2d);
+
+                Assert.That(action.Result, Is.SameAs(preflight));
+                Assert.That(action.IsRecovering, Is.False);
+                Assert.That(action.Status.BuildPresentation(2d).StatusLabel,
+                    Is.EqualTo("Completed - status unavailable"));
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 3d, out var next), Is.True);
+                next.Complete(new AICodedbCommandResult(0, string.Empty, string.Empty, false),
+                    AICodedbProductState.Starting, false, 4d);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_WindowCloseWithoutCommandKeepsRecoveryAdmissionBlocked()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-close-unknown-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-close-unknown-package"),
+                "codedb-close-unknown-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Redeploy", context, 1d, out var action), Is.True);
+                action.FinishAfterWindowClose(null, 2d);
+
+                Assert.That(action.IsRecovering, Is.True);
+                Assert.That(AICodedbManagerActionSession.ClearCompleted(), Is.False);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Redeploy", context, 3d, out _), Is.False);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_MissingCommandResultCannotReleaseAdmission()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-missing-result-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-missing-result-package"),
+                "codedb-missing-result-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 1d, out var action), Is.True);
+                action.Complete(null, AICodedbProductState.NeedsAttention, false, 2d);
+
+                Assert.That(action.IsRecovering, Is.True);
+                Assert.That(action.Status.BuildPresentation(2d).StatusLabel,
+                    Is.EqualTo("Outcome unconfirmed"));
+                Assert.That(AICodedbManagerActionSession.ClearCompleted(), Is.False);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 3d, out _), Is.False);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionSession_UnconfirmedTransportFailureKeepsRecovery()
+        {
+            var context = new AICodedbEditorExecutionContext(
+                RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-unconfirmed-project"),
+                Path.Combine(Path.GetTempPath(), "codedb-unconfirmed-package"),
+                "codedb-unconfirmed-project");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            try
+            {
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Sync", context, 1d, out var action), Is.True);
+                var lostResponse = new AICodedbCommandResult(
+                    4, string.Empty, "response lost", false, 1, false, false,
+                    action.ActionId);
+                action.Complete(lostResponse, AICodedbProductState.Ready, true, 2d);
+                Assert.That(action.IsRecovering, Is.True);
+                Assert.That(action.Status.BuildPresentation(2d).Detail,
+                    Does.Contain("response lost"));
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", context, 3d, out _), Is.False);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerOpenAndRefresh_DoNotCallSynchronousFullStatus()
+        {
+            var managerSource = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath, "Editor", "AICodedbManagerWindow.cs"));
+            var activitySource = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath, "Editor", "AICodedbActivityPanel.cs"));
+
+            Assert.That(managerSource, Does.Not.Contain("AICodedbStatusSnapshot.Refresh("));
+            Assert.That(managerSource, Does.Not.Contain("RecordMainThreadWork("));
+            Assert.That(managerSource, Does.Contain("AICodedbStatusSnapshot.RefreshAsync("));
+            Assert.That(activitySource, Does.Not.Contain("GUILayout.Button(\"Acknowledge\""));
+        }
+
         /// <summary>
         /// Verifies that package-core actions use fixed project-neutral script entry points.
         /// </summary>
@@ -238,6 +679,8 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadRemove"));
             Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadUpgrade"));
             Assert.That(manager, Does.Contain("AICodedbActions.RunHostPayloadRedeploy(true)"));
+            Assert.That(manager, Does.Contain("GetDisplayedProductState()"));
+            Assert.That(manager, Does.Contain("TryGetActionStatusOverride(out var presentation)"));
 
             Assert.That(actions, Does.Not.Contain("EditorUtility.DisplayProgressBar"));
             Assert.That(actions, Does.Not.Contain("EditorUtility.ClearProgressBar"));
@@ -358,7 +801,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 20,
                 "truncated terminal detail");
 
-            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(
+                new AICodedbCommandResult(0, "provider installed", string.Empty, false), outcome);
 
             Assert.That(actual, Is.SameAs(authoritative));
             Assert.That(actual.ExitCode, Is.EqualTo(17));
@@ -370,7 +814,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void PostProviderResult_SuccessfulCommandWithNonReadyOutcomeRetainsEvidenceAndFails()
+        public void PostProviderResult_SuccessfulCommandWithNonReadyOutcomeRetainsExitCode()
         {
             var authoritative = new AICodedbCommandResult(
                 0,
@@ -387,20 +831,16 @@ namespace Rice.AI.Codedb.Editor.Tests
                 21,
                 "Lifecycle remained deferred.");
 
-            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(
+                new AICodedbCommandResult(0, "provider installed", string.Empty, false), outcome);
 
-            Assert.That(actual.Succeeded, Is.False);
-            Assert.That(actual.ExitCode, Is.EqualTo(4));
-            Assert.That(actual.StandardOutput, Is.EqualTo(authoritative.StandardOutput));
-            Assert.That(actual.StandardError, Does.StartWith(authoritative.StandardError));
-            Assert.That(actual.StandardError, Does.Contain("Lifecycle remained deferred."));
-            Assert.That(actual.TimedOut, Is.EqualTo(authoritative.TimedOut));
-            Assert.That(actual.ElapsedMilliseconds, Is.EqualTo(authoritative.ElapsedMilliseconds));
-            Assert.That(actual.OneShotFallbackAuthorized, Is.EqualTo(authoritative.OneShotFallbackAuthorized));
+            Assert.That(actual, Is.SameAs(authoritative));
+            Assert.That(actual.ExitCode, Is.Zero);
+            Assert.That(actual.StandardError, Is.EqualTo("successful command warning"));
         }
 
         [Test]
-        public void PostProviderResult_ReadyOutcomeReturnsBoundedSuccess()
+        public void PostProviderResult_ReadyOutcomeDoesNotReplaceFailedCommand()
         {
             var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
                 10,
@@ -410,15 +850,16 @@ namespace Rice.AI.Codedb.Editor.Tests
                 22,
                 "ready");
 
-            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
+            var actual = AICodedbManagerWindow.ResolvePostProviderReconcileResult(
+                new AICodedbCommandResult(0, "provider installed", string.Empty, false), outcome);
 
-            Assert.That(actual.Succeeded, Is.True);
-            Assert.That(actual.StandardOutput, Is.EqualTo("CodeDB is ready."));
-            Assert.That(actual.StandardError, Is.Empty);
+            Assert.That(actual.Succeeded, Is.False);
+            Assert.That(actual.ExitCode, Is.EqualTo(12));
+            Assert.That(actual.StandardOutput, Is.EqualTo("ignored"));
         }
 
         [Test]
-        public void PostProviderResult_MissingAuthoritativeResultReturnsBoundedFailure()
+        public void PostProviderResult_MissingHostCommandKeepsProviderEvidence()
         {
             var outcome = new AICodedbEditorLifecycle.AICodedbReconcileOutcome(
                 11,
@@ -428,12 +869,14 @@ namespace Rice.AI.Codedb.Editor.Tests
                 23,
                 "No authoritative command was published.");
 
-            var missingCommand = AICodedbManagerWindow.ResolvePostProviderReconcileResult(outcome);
-            var missingOutcome = AICodedbManagerWindow.ResolvePostProviderReconcileResult(null);
+            var providerResult = new AICodedbCommandResult(
+                0, "provider installed", string.Empty, false, 100);
+            var missingCommand = AICodedbManagerWindow.ResolvePostProviderReconcileResult(
+                providerResult, outcome);
+            var missingOutcome = AICodedbManagerWindow.ResolvePostProviderReconcileResult(
+                providerResult, null);
 
-            Assert.That(missingCommand.Succeeded, Is.False);
-            Assert.That(missingCommand.ExitCode, Is.EqualTo(4));
-            Assert.That(missingCommand.StandardError, Is.EqualTo("No authoritative command was published."));
+            Assert.That(missingCommand, Is.SameAs(providerResult));
             Assert.That(missingOutcome.Succeeded, Is.False);
             Assert.That(missingOutcome.ExitCode, Is.EqualTo(4));
             Assert.That(missingOutcome.StandardError,
@@ -2286,6 +2729,21 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void UserActionStatus_LaterAuthoritativeObservationClearsStatusUnavailable()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Refresh Index", 1d);
+            status.Complete(new AICodedbCommandResult(0, "done", string.Empty, false),
+                AICodedbProductState.Starting, false, 2d);
+            Assert.That(status.BuildPresentation(2d).StatusLabel,
+                Is.EqualTo("Completed - status unavailable"));
+
+            status.UpdateProductState(AICodedbProductState.Ready);
+            Assert.That(status.BuildPresentation(3d).StatusLabel, Is.EqualTo("Completed"));
+            Assert.That(status.BuildPresentation(3d).Detail, Does.Contain("CodeDB is ready"));
+        }
+
+        [Test]
         public void UserActionStatus_FailedActionRetainsFailureAndClearHidesIt()
         {
             var status = new AICodedbUserActionStatus();
@@ -2309,6 +2767,21 @@ namespace Rice.AI.Codedb.Editor.Tests
             status.Clear();
             var cleared = status.BuildPresentation(6d);
             Assert.That(cleared.IsVisible, Is.False);
+        }
+
+        [Test]
+        public void UserActionStatus_MissingCommandResultIsVisibleAsFailure()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Host Payload Verify", 1d);
+            status.Complete(null, AICodedbProductState.NeedsAttention, false, 2d);
+
+            var presentation = status.BuildPresentation(2d);
+            Assert.That(presentation.State, Is.EqualTo(AICodedbStatusState.Error));
+            Assert.That(presentation.Detail, Is.EqualTo("The command did not return a result."));
+            var panelSource = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath, "Editor", "AICodedbActivityPanel.cs"));
+            Assert.That(panelSource, Does.Contain("else if (userAction.State == AICodedbStatusState.Error)"));
         }
 
         [Test]

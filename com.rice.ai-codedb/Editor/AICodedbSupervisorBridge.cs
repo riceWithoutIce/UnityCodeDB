@@ -381,6 +381,7 @@ namespace Rice.AI.Codedb.Editor
         internal string EventName { get; }
         internal long EventSequence { get; }
         internal bool OneShotFallbackAuthorized { get; }
+        internal bool HasOperationEvidence { get; }
 
         internal AICodedbSupervisorCommandResponse(
             bool succeeded,
@@ -392,7 +393,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbSupervisorSnapshot snapshot,
             string eventName,
             long eventSequence,
-            bool oneShotFallbackAuthorized = false)
+            bool oneShotFallbackAuthorized = false,
+            bool hasOperationEvidence = false)
         {
             Succeeded = succeeded;
             ExitCode = exitCode;
@@ -404,6 +406,7 @@ namespace Rice.AI.Codedb.Editor
             EventName = eventName ?? string.Empty;
             EventSequence = eventSequence;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
+            HasOperationEvidence = hasOperationEvidence;
         }
 
         internal AICodedbCommandResult ToCommandResult()
@@ -417,7 +420,9 @@ namespace Rice.AI.Codedb.Editor
                 error,
                 false,
                 0,
-                OneShotFallbackAuthorized);
+                OneShotFallbackAuthorized,
+                !string.Equals(ErrorCode, "SUPERVISOR_OUTCOME_UNCONFIRMED",
+                    StringComparison.Ordinal));
         }
     }
 
@@ -754,7 +759,8 @@ namespace Rice.AI.Codedb.Editor
             string command,
             string action,
             string expectedLifecycleId,
-            bool confirmedProjectMutation)
+            bool confirmedProjectMutation,
+            string managerActionId = null)
         {
             if (string.IsNullOrWhiteSpace(authToken))
                 throw new ArgumentException("An IPC auth token is required.", nameof(authToken));
@@ -781,11 +787,32 @@ namespace Rice.AI.Codedb.Editor
                 builder.Append(",\"expected_lifecycle_id\":\"").Append(EscapeJson(expectedLifecycleId)).Append("\"");
             if (confirmedProjectMutation)
                 builder.Append(",\"confirmed_project_mutation\":true");
+            if (!string.IsNullOrWhiteSpace(managerActionId))
+            {
+                if (!IsManagerActionId(managerActionId))
+                    throw new ArgumentException("The Manager action id is invalid.", nameof(managerActionId));
+                builder.Append(",\"manager_action_id\":\"")
+                    .Append(EscapeJson(managerActionId))
+                    .Append("\"");
+            }
             builder.Append('}');
             var request = builder.ToString();
             if (Encoding.UTF8.GetByteCount(request) > MaximumMessageBytes)
                 throw new ArgumentException("The Supervisor request exceeds the IPC message limit.", nameof(command));
             return request;
+        }
+
+        internal static bool IsManagerActionId(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length != 32)
+                return false;
+            foreach (var character in value)
+            {
+                if (!((character >= '0' && character <= '9')
+                      || (character >= 'a' && character <= 'f')))
+                    return false;
+            }
+            return true;
         }
 
         internal static string BuildOperationRequest(
@@ -1142,7 +1169,8 @@ namespace Rice.AI.Codedb.Editor
             string action = null,
             string expectedLifecycleId = null,
             bool confirmedProjectMutation = false,
-            CancellationToken cancellationToken = default(CancellationToken))
+            CancellationToken cancellationToken = default(CancellationToken),
+            string managerActionId = null)
         {
             if (cancellationToken.IsCancellationRequested)
                 return Task.FromCanceled<AICodedbSupervisorCommandResponse>(cancellationToken);
@@ -1167,7 +1195,29 @@ namespace Rice.AI.Codedb.Editor
                     action,
                     expectedLifecycleId,
                     confirmedProjectMutation,
-                    cancellationToken),
+                    cancellationToken,
+                    true,
+                    managerActionId),
+                cancellationToken);
+        }
+
+        internal Task<AICodedbSupervisorCommandResponse> RecoverManagerActionAsync(
+            string projectRoot,
+            string managerActionId,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(managerActionId))
+                throw new ArgumentException("The Manager action id is invalid.", nameof(managerActionId));
+            return Task.Run(
+                () => SendCommandWorker(
+                    projectRoot,
+                    "manager_action_operation",
+                    managerActionId,
+                    null,
+                    false,
+                    cancellationToken,
+                    false,
+                    null),
                 cancellationToken);
         }
 
@@ -1768,8 +1818,10 @@ namespace Rice.AI.Codedb.Editor
             string expectedLifecycleId,
             bool confirmedProjectMutation,
             CancellationToken cancellationToken,
-            bool startIfMissing = true)
+            bool startIfMissing = true,
+            string managerActionId = null)
         {
+            var requestDispatched = false;
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
@@ -1783,7 +1835,8 @@ namespace Rice.AI.Codedb.Editor
                     runtimeContract.ControlContract);
                 if (!startIfMissing)
                 {
-                    if (!string.Equals(command, "shutdown", StringComparison.Ordinal))
+                    if (!string.Equals(command, "shutdown", StringComparison.Ordinal)
+                        && !string.Equals(command, "manager_action_operation", StringComparison.Ordinal))
                     {
                         return new AICodedbSupervisorCommandResponse(
                             false,
@@ -1918,7 +1971,9 @@ namespace Rice.AI.Codedb.Editor
                     command,
                     action,
                     expectedLifecycleId,
-                    confirmedProjectMutation);
+                    confirmedProjectMutation,
+                    managerActionId);
+                requestDispatched = true;
                 var responseLine = SendPipeRequest(identity.PipeName, request, cancellationToken);
                 if (string.IsNullOrWhiteSpace(responseLine))
                     throw new InvalidOperationException("The project Supervisor closed the command without a response.");
@@ -1932,6 +1987,8 @@ namespace Rice.AI.Codedb.Editor
                 var succeeded = AICodedbStrictJson.GetRequiredBoolean(response, "ok", "CodeDB Supervisor command response");
                 var errorCode = AICodedbStrictJson.GetOptionalNullableString(response, "error_code", "CodeDB Supervisor command response") ?? string.Empty;
                 var error = AICodedbStrictJson.GetOptionalNullableString(response, "error", "CodeDB Supervisor command response") ?? string.Empty;
+                var operationId = AICodedbStrictJson.GetOptionalNullableString(
+                    response, "operation_id", "CodeDB Supervisor command response");
                 var result = response.ContainsKey("result") && response["result"] != null
                     ? AICodedbStrictJson.RequireObject(response["result"], "CodeDB Supervisor command result")
                     : null;
@@ -2013,7 +2070,9 @@ namespace Rice.AI.Codedb.Editor
                     standardError,
                     snapshot,
                     eventName,
-                    eventSequence);
+                    eventSequence,
+                    false,
+                    !string.IsNullOrWhiteSpace(operationId));
             }
             catch (OperationCanceledException)
             {
@@ -2021,10 +2080,12 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (InvalidOperationException exception)
             {
+                var uncertain = requestDispatched
+                    && AICodedbSupervisorProtocol.IsManagerActionId(managerActionId);
                 return new AICodedbSupervisorCommandResponse(
                     false,
                     4,
-                    "INVALID_SUPERVISOR_EVIDENCE",
+                    uncertain ? "SUPERVISOR_OUTCOME_UNCONFIRMED" : "INVALID_SUPERVISOR_EVIDENCE",
                     exception.Message,
                     string.Empty,
                     exception.Message,
@@ -2034,10 +2095,12 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (Exception exception)
             {
+                var uncertain = requestDispatched
+                    && AICodedbSupervisorProtocol.IsManagerActionId(managerActionId);
                 return new AICodedbSupervisorCommandResponse(
                     false,
                     4,
-                    "SUPERVISOR_COMMAND_FAILED",
+                    uncertain ? "SUPERVISOR_OUTCOME_UNCONFIRMED" : "SUPERVISOR_COMMAND_FAILED",
                     exception.Message,
                     string.Empty,
                     exception.Message,

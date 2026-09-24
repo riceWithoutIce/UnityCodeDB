@@ -70,16 +70,30 @@ namespace Rice.AI.Codedb.Editor
 
                 if (result == null)
                 {
-                    EditorGUILayout.LabelField("No recent command.", EditorStyles.wordWrappedMiniLabel);
+                    if (string.Equals(userAction.StatusLabel, "Outcome unconfirmed", StringComparison.Ordinal))
+                    {
+                        EditorGUILayout.LabelField(userAction.StatusLabel, EditorStyles.boldLabel);
+                        EditorGUILayout.LabelField(userAction.Detail, EditorStyles.wordWrappedMiniLabel);
+                    }
+                    else if (userAction.State == AICodedbStatusState.Error)
+                    {
+                        EditorGUILayout.LabelField(userAction.StatusLabel, EditorStyles.boldLabel);
+                        EditorGUILayout.LabelField(userAction.Detail, EditorStyles.wordWrappedMiniLabel);
+                        if (GUILayout.Button("Clear", GUILayout.Height(24f)))
+                            return true;
+                    }
+                    else
+                        EditorGUILayout.LabelField("No recent command.", EditorStyles.wordWrappedMiniLabel);
                     GUILayout.FlexibleSpace();
                     return false;
                 }
 
-                DrawSummary(result, summary);
+                DrawSummary(result, summary, userAction);
                 DrawOutputDisclosure(result, summary, layout.ActivityHeight);
                 if (!_showOutput)
                     GUILayout.FlexibleSpace();
-                return DrawFooter(result);
+                return DrawFooter(result, !string.Equals(userAction.StatusLabel,
+                    "Outcome unconfirmed", StringComparison.Ordinal));
             }
         }
 
@@ -153,22 +167,33 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
-        private static void DrawSummary(AICodedbCommandResult result, AICodedbActivitySummary summary)
+        private static void DrawSummary(
+            AICodedbCommandResult result,
+            AICodedbActivitySummary summary,
+            AICodedbUserActionPresentation userAction)
         {
+            var showProductOutcome = string.Equals(userAction.StatusLabel,
+                    "Outcome unconfirmed", StringComparison.Ordinal)
+                || (result.Succeeded
+                    && userAction.State == AICodedbStatusState.Warning
+                    && !string.IsNullOrWhiteSpace(userAction.StatusLabel));
+            var state = showProductOutcome ? userAction.State : summary.State;
+            var statusLabel = showProductOutcome ? userAction.StatusLabel : summary.StatusLabel;
+            var detail = showProductOutcome ? userAction.Detail : summary.Detail;
             using (new EditorGUILayout.VerticalScope(GUILayout.MinHeight(72f)))
             {
                 using (new EditorGUILayout.HorizontalScope(GUILayout.Height(20f)))
                 {
                     GUILayout.Label(
                         "\u25cf",
-                        AICodedbManagerStyles.GetStateDotStyle(summary.State),
+                        AICodedbManagerStyles.GetStateDotStyle(state),
                         GUILayout.Width(AICodedbManagerStyles.StatusDotWidth),
                         GUILayout.Height(20f));
-                    EditorGUILayout.LabelField(summary.StatusLabel, EditorStyles.boldLabel);
+                    EditorGUILayout.LabelField(statusLabel, EditorStyles.boldLabel);
                 }
 
-                if (!string.IsNullOrWhiteSpace(summary.Detail))
-                    EditorGUILayout.LabelField(summary.Detail, EditorStyles.wordWrappedMiniLabel);
+                if (!string.IsNullOrWhiteSpace(detail))
+                    EditorGUILayout.LabelField(detail, EditorStyles.wordWrappedMiniLabel);
 
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -203,14 +228,14 @@ namespace Rice.AI.Codedb.Editor
                 true);
         }
 
-        private bool DrawFooter(AICodedbCommandResult result)
+        private bool DrawFooter(AICodedbCommandResult result, bool allowClear)
         {
             using (new EditorGUILayout.HorizontalScope(GUILayout.Height(26f)))
             {
                 if (GUILayout.Button("Copy output", GUILayout.Height(24f)))
                     EditorGUIUtility.systemCopyBuffer = result.GetDisplayText();
 
-                if (GUILayout.Button("Clear", GUILayout.Width(ClearButtonWidth), GUILayout.Height(24f)))
+                if (allowClear && GUILayout.Button("Clear", GUILayout.Width(ClearButtonWidth), GUILayout.Height(24f)))
                 {
                     _resultScrollPosition = Vector2.zero;
                     _itemsPage = 0;
@@ -370,7 +395,8 @@ namespace Rice.AI.Codedb.Editor
         None,
         Running,
         Completed,
-        Failed
+        Failed,
+        Recovery
     }
 
     internal readonly struct AICodedbUserActionPresentation
@@ -421,6 +447,7 @@ namespace Rice.AI.Codedb.Editor
         private double _completedAt;
         private bool _statusRefreshSucceeded;
         private AICodedbProductState _completedProductState;
+        private string _terminalDetail = string.Empty;
         private readonly object _progressLock = new object();
         private bool _hasProgress;
         private int _progressStage;
@@ -429,6 +456,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal AICodedbUserActionPhase Phase { get; private set; }
         internal string Title { get; private set; } = string.Empty;
+        internal bool HasFreshProductState => _statusRefreshSucceeded;
         private AICodedbCommandResult Result { get; set; }
 
         internal void Start(string title, double now)
@@ -440,6 +468,7 @@ namespace Rice.AI.Codedb.Editor
             _completedAt = _startedAt;
             _statusRefreshSucceeded = false;
             _completedProductState = AICodedbProductState.Starting;
+            _terminalDetail = string.Empty;
             ClearProgress();
         }
 
@@ -447,7 +476,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbCommandResult result,
             AICodedbProductState productState,
             bool statusRefreshSucceeded,
-            double now)
+            double now,
+            string terminalDetail = null)
         {
             Result = result;
             Phase = result != null && result.Succeeded
@@ -455,8 +485,23 @@ namespace Rice.AI.Codedb.Editor
                 : AICodedbUserActionPhase.Failed;
             _completedProductState = productState;
             _statusRefreshSucceeded = statusRefreshSucceeded;
+            _terminalDetail = terminalDetail ?? string.Empty;
             _completedAt = Math.Max(_startedAt, SanitizeTime(now));
             ClearProgress();
+        }
+
+        internal void Recover(string title, double now)
+        {
+            Start(title, now);
+            Phase = AICodedbUserActionPhase.Recovery;
+            ClearProgress();
+        }
+
+        internal void SetRecoveryDetail(string detail)
+        {
+            if (Phase == AICodedbUserActionPhase.Recovery)
+                _terminalDetail = string.IsNullOrWhiteSpace(detail)
+                    ? string.Empty : detail.Trim();
         }
 
         /// <summary>
@@ -531,8 +576,11 @@ namespace Rice.AI.Codedb.Editor
 
         internal void UpdateProductState(AICodedbProductState productState)
         {
-            if (Phase == AICodedbUserActionPhase.Completed && _statusRefreshSucceeded)
+            if (Phase == AICodedbUserActionPhase.Completed)
+            {
                 _completedProductState = productState;
+                _statusRefreshSucceeded = true;
+            }
         }
 
         internal void Clear()
@@ -544,6 +592,7 @@ namespace Rice.AI.Codedb.Editor
             _completedAt = 0d;
             _statusRefreshSucceeded = false;
             _completedProductState = AICodedbProductState.Starting;
+            _terminalDetail = string.Empty;
             ClearProgress();
         }
 
@@ -583,6 +632,18 @@ namespace Rice.AI.Codedb.Editor
                         progressLabel);
                 case AICodedbUserActionPhase.Completed:
                     return BuildCompletedPresentation(hasProgress, progressValue, progressLabel);
+                case AICodedbUserActionPhase.Recovery:
+                    return new AICodedbUserActionPresentation(
+                        false,
+                        false,
+                        AICodedbStatusState.Warning,
+                        "Outcome unconfirmed",
+                        string.IsNullOrWhiteSpace(_terminalDetail)
+                            ? "The previous action has no verified outcome. Further Manager actions stay blocked until its authoritative outcome is known; no action was retried."
+                            : _terminalDetail,
+                        string.Empty,
+                        string.Empty,
+                        Title + " outcome is unconfirmed after a Manager or Editor boundary.");
                 default:
                     return new AICodedbUserActionPresentation(
                         false,
@@ -628,19 +689,25 @@ namespace Rice.AI.Codedb.Editor
                     case AICodedbProductState.NeedsAttention:
                         state = AICodedbStatusState.Warning;
                         statusLabel = "Completed - needs attention";
-                        detail = "The command completed, but CodeDB still needs attention.";
+                        detail = string.IsNullOrWhiteSpace(_terminalDetail)
+                            ? "The command completed, but CodeDB still needs attention."
+                            : _terminalDetail;
                         notification = Title + " completed, but CodeDB still needs attention.";
                         break;
                     case AICodedbProductState.MissingPrerequisite:
                         state = AICodedbStatusState.Warning;
                         statusLabel = "Completed - prerequisite missing";
-                        detail = "The command completed, but a required dependency is still missing or invalid.";
+                        detail = string.IsNullOrWhiteSpace(_terminalDetail)
+                            ? "The command completed, but a required dependency is still missing or invalid."
+                            : _terminalDetail;
                         notification = Title + " completed, but a required dependency is still missing or invalid.";
                         break;
                     default:
                         state = AICodedbStatusState.Warning;
                         statusLabel = "Completed - checking status";
-                        detail = "The command completed. CodeDB status is still being checked.";
+                        detail = string.IsNullOrWhiteSpace(_terminalDetail)
+                            ? "The command completed. CodeDB status is still being checked."
+                            : _terminalDetail;
                         notification = Title + " completed. CodeDB status is still being checked.";
                         break;
                 }
