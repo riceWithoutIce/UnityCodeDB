@@ -28,6 +28,8 @@ param(
 
     [switch]$OwnerIdentityRemovalOnly,
 
+    [switch]$PartialV1RemovalOnly,
+
     [switch]$PortabilityOnly,
 
     [switch]$TransactionOnly
@@ -36,8 +38,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
-    throw "RepairOnly, McpAvailabilityOnly, UninstallOnly, McpConfigOnly, PrerequisiteOnly, UpgradeOnly, PayloadContractOnly, ActivationContractOnly, ActivationTransactionOnly, ActivationRetirementOnly, OperationalReadinessOnly, ControlContractReinstallOnly, OwnerIdentityRemovalOnly, PortabilityOnly, and TransactionOnly are mutually exclusive."
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+    throw "Focused materializer switches are mutually exclusive."
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -7777,6 +7779,169 @@ function Invoke-OwnerIdentityRemovalScenarios {
     Write-Host "[OK] Owner Identity removal blocks live, unverifiable, mismatched, partial, and conflicting authority; admits only an exact orphaned v1 selection or authenticated Supervisor authority; preserves immutable instances, indexes, leases, retirement sentinels, user data, unrelated TOML, and processes; and recovers idempotently after interruption."
 }
 
+function Invoke-PartialV1RemovalScenarios {
+    $parseTokens = $null
+    $parseErrors = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath, [ref]$parseTokens, [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message "Materializer source did not parse for partial v1 fixture loading."
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    . (Join-Path $packageRoot "Tools~\codedb-instance-engine.ps1")
+    $script:ManagedBy = "com.rice.ai-codedb"
+    $script:RequestedExitCode = 0
+    $script:CurrentPointerRelativePath = "AIWork/.runtime/codedb/host/current.json"
+    $script:LastKnownGoodPointerRelativePath = "AIWork/.runtime/codedb/host/last-known-good.json"
+    $script:MarkerRelativePath = $markerRelativePath
+    $script:IntegrationStateRelativePath = "AIWork/.runtime/codedb/payload-materializer/integration-state.json"
+    $script:McpConfigRelativePath = ".codex/config.toml"
+    $script:McpAvailabilityRelativePath = "AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"
+    $script:TargetPrefix = "AIWork/codedb/"
+    $script:AllowedTargetPaths = @{}
+    $prior = Install-TrustedPreviousInstanceFixture
+    Remove-Item -LiteralPath $prior.StableWrapperPath -Force
+    $selection = Get-Content -LiteralPath $prior.SelectionPath -Raw | ConvertFrom-Json
+    $instance = Get-Content -LiteralPath $prior.InstanceManifestPath -Raw | ConvertFrom-Json
+    $contract = [pscustomobject]@{
+        Id = "v0.3-control"
+        Version = 1
+        SchemaVersion = 1
+        Sha256 = Get-RemoveIntegrationControlContractSha256 -Version 1
+    }
+    $runtimeHash = "a" * 64
+    $manifest = [pscustomobject]@{
+        ControlContract = $contract
+        RuntimeContractSha256 = $runtimeHash
+        TargetGenerationId = $prior.GenerationId
+        TargetGenerationManifestSha256 = [string]$instance.generation_manifest_sha256
+    }
+    $attempt = [pscustomobject]@{
+        ActivationEpoch = [guid]::NewGuid().ToString("N")
+        OperationId = [guid]::NewGuid().ToString("N")
+    }
+    $context = New-InstanceActivationContractContext -Manifest $manifest -ProjectRoot $hostRoot -OperationId $attempt.OperationId
+    $candidate = New-InstanceActivationEvidence `
+        -InstanceId $prior.InstanceId `
+        -GenerationId $prior.GenerationId `
+        -InstanceManifestSha256 ([string]$selection.instance_manifest_sha256) `
+        -GenerationManifestSha256 ([string]$instance.generation_manifest_sha256) `
+        -GenerationDisposition CURRENT
+    $mutation = New-InstanceActivationMutationEvidence `
+        -Index 0 `
+        -Target $script:InstanceCurrentRelativePath `
+        -Mutation Write `
+        -DesiredSha256 (Get-FileHash -LiteralPath $prior.SelectionPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -ExistedBefore $false `
+        -PreImageSha256 $null
+    $timestamp = [DateTime]::UtcNow.ToString("o")
+    $activation = New-InstanceActivationRecordDocument `
+        -Context $context -Attempt $attempt -Candidate $candidate -Current $candidate `
+        -LastKnownGood $null -PublicationPhase COMMITTED -TimestampUtc $timestamp
+    $operation = New-InstanceActivationOperationDocument `
+        -Context $context -Attempt $attempt -Action UPGRADE -Candidate $candidate `
+        -PreviousActivationRecordSha256 $null -Phase COMMITTED -Mutations @($mutation) -TimestampUtc $timestamp
+    $operation.PSObject.Properties.Remove("retirement_intent_path")
+    $operation.PSObject.Properties.Remove("retirement_intent_sha256")
+    Write-Utf8File -Path $context.Paths.ActivationPath -Content (ConvertTo-InstanceJsonText -Value $activation)
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+
+    $supervisorRoot = $context.Paths.SupervisorRoot
+    $failedName = "materialize:DryRun"
+    $failed = [ordered]@{
+        schema_version = 1
+        managed_by = "com.rice.ai-codedb"
+        operation_id = [guid]::NewGuid().ToString("N")
+        key = ""
+        request_id = ""
+        name = $failedName
+        lane = "maintenance"
+        state = "failed"
+        phase = "failed"
+        owner_epoch = [guid]::NewGuid().ToString("N")
+        project_identity = Get-TestProjectIdentity -Root $hostRoot
+        root = [IO.Path]::GetFullPath($hostRoot).TrimEnd('\', '/')
+        runtime = $supervisorRoot
+        selected_instance_id = $prior.InstanceId
+        selected_generation_id = $prior.GenerationId
+        runtime_contract_sha256 = $runtimeHash
+        child = $null
+        started_at_utc = $timestamp
+        completed_at_utc = $timestamp
+        result = [ordered]@{ exit_code = 4; stdout = ""; stderr = "fixture failure"; timed_out = $false }
+        error = "fixture failure"
+    }
+    $supervisorOperationPath = Join-Path $supervisorRoot "operation.json"
+    Write-Utf8File -Path $supervisorOperationPath -Content (($failed | ConvertTo-Json -Depth 8) + "`n")
+    $event = [ordered]@{
+        schema_version = 1
+        sequence = 1
+        at_utc = $timestamp
+        event = "operation_failed"
+        detail = $failedName
+    }
+    $eventsPath = Join-Path $supervisorRoot "supervisor-events.jsonl"
+    Write-Utf8File -Path $eventsPath -Content (($event | ConvertTo-Json -Compress) + "`n")
+    Assert-ThrowsMessage `
+        -Action { Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $hostRoot } `
+        -ExpectedMessage "exact field set" `
+        -Label "Ordinary activation reading rejects historical v1 operation shape"
+
+    $liveBefore = Get-FileSnapshot -Root $hostRoot
+    $live = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $live -ExitCode 4 -Label "Partial v1 live-holder rejection"
+    Assert-True -Condition ($live.Text.Contains("holder is live or ambiguous")) -Message "Partial v1 live holder was not rejected.`n$($live.Text)"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $liveBefore -Message "Partial v1 live-holder rejection changed project state."
+    Remove-Item -LiteralPath $prior.InstanceLeasePath -Force
+
+    $failed.selected_generation_id = "unknown"
+    Write-Utf8File -Path $supervisorOperationPath -Content (($failed | ConvertTo-Json -Depth 8) + "`n")
+    $mismatchBefore = Get-FileSnapshot -Root $hostRoot
+    $mismatch = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $mismatch -ExitCode 4 -Label "Partial v1 identity mismatch rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $mismatchBefore -Message "Partial v1 mismatch changed project state."
+    $failed.selected_generation_id = $prior.GenerationId
+    Write-Utf8File -Path $supervisorOperationPath -Content (($failed | ConvertTo-Json -Depth 8) + "`n")
+
+    $unknownPath = Join-Path $supervisorRoot "unknown.json"
+    Write-Utf8File -Path $unknownPath -Content "{}`n"
+    $unknownBefore = Get-FileSnapshot -Root $hostRoot
+    $unknown = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $unknown -ExitCode 4 -Label "Partial v1 unknown-evidence rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $unknownBefore -Message "Partial v1 unknown evidence changed project state."
+    Remove-Item -LiteralPath $unknownPath -Force
+
+    $activationText = [IO.File]::ReadAllText($context.Paths.ActivationPath)
+    Remove-Item -LiteralPath $context.Paths.ActivationPath -Force
+    $missingBefore = Get-FileSnapshot -Root $hostRoot
+    $missing = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $missing -ExitCode 4 -Label "Partial v1 missing activation rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $missingBefore -Message "Partial v1 missing activation changed project state."
+    Write-Utf8File -Path $context.Paths.ActivationPath -Content $activationText
+
+    $statePath = Join-Path $supervisorRoot "supervisor-state.json"
+    Write-Utf8File -Path $statePath -Content "{}`n"
+    $stateOnlyBefore = Get-FileSnapshot -Root $hostRoot
+    $stateOnly = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $stateOnly -ExitCode 4 -Label "Partial v1 state-only rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $stateOnlyBefore -Message "Partial v1 state-only evidence changed project state."
+    Remove-Item -LiteralPath $statePath -Force
+
+    $instanceBefore = Get-FileSnapshot -Root $prior.InstanceRoot
+    $generationBefore = Get-FileSnapshot -Root $prior.GenerationRoot
+    $removed = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $removed -ExitCode 0 -Label "Partial v1 explicit removal"
+    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.SelectionPath)) -Message "Partial v1 removal retained current selection."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $supervisorOperationPath)) -Message "Partial v1 removal retained failed Supervisor operation."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $context.Paths.ActivationPath)) -Message "Partial v1 removal retained activation evidence."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.InstanceRoot) -Expected $instanceBefore -Message "Partial v1 removal changed preserved instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $generationBefore -Message "Partial v1 removal changed immutable generation."
+    Assert-True -Condition (Test-Path -LiteralPath $prior.GenerationLeasePath) -Message "Partial v1 removal deleted an external generation lease."
+    Write-Host "[OK] Partial Owner Identity v1 removal rejects live, mismatched, and unknown evidence; deletes only certified control targets and preserves instance and generation bytes."
+}
+
 function Invoke-ControlContractReinstallFixtureRequest {
     param(
         [Parameter(Mandatory = $true)]
@@ -9262,6 +9427,14 @@ try {
         Invoke-OwnerIdentityRemovalScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused Owner Identity v2 removal acceptance modified package source files."
         Write-Host "[OK] Focused Owner Identity v2 removal scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($PartialV1RemovalOnly) {
+        Invoke-PartialV1RemovalScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused partial v1 removal acceptance modified package source files."
+        Write-Host "[OK] Focused partial Owner Identity v1 removal scenarios passed."
         $fixturePassed = $true
         return
     }

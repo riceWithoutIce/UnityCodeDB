@@ -352,6 +352,7 @@ namespace Rice.AI.Codedb.Editor
 
                 var versionedV1 = InspectVersionedV1Namespace(
                     projectRoot,
+                    packageRoot,
                     versionedV1Path,
                     versionedV1Contract);
                 if (versionedV1.Kind == NamespaceEvidenceKind.Invalid)
@@ -511,6 +512,7 @@ namespace Rice.AI.Codedb.Editor
 
         private static NamespaceEvidence InspectVersionedV1Namespace(
             string projectRoot,
+            string packageRoot,
             string namespacePath,
             AICodedbControlContractIdentity contract)
         {
@@ -519,7 +521,19 @@ namespace Rice.AI.Codedb.Editor
             var stateExists = File.Exists(statePath) || Directory.Exists(statePath);
             var lockExists = File.Exists(lockPath) || Directory.Exists(lockPath);
             if (!stateExists && !lockExists)
-                return new NamespaceEvidence(NamespaceEvidenceKind.Missing, false, string.Empty);
+            {
+                if (!Directory.Exists(namespacePath))
+                    return new NamespaceEvidence(NamespaceEvidenceKind.Missing, false, string.Empty);
+                try
+                {
+                    return InspectPartialVersionedV1Namespace(
+                        projectRoot, packageRoot, namespacePath, contract);
+                }
+                catch (Exception exception)
+                {
+                    return new NamespaceEvidence(NamespaceEvidenceKind.Invalid, false, exception.Message);
+                }
+            }
             if (!stateExists || !lockExists)
             {
                 return new NamespaceEvidence(
@@ -549,6 +563,217 @@ namespace Rice.AI.Codedb.Editor
                     false,
                     exception.Message);
             }
+        }
+
+        private static NamespaceEvidence InspectPartialVersionedV1Namespace(
+            string projectRoot,
+            string packageRoot,
+            string namespacePath,
+            AICodedbControlContractIdentity contract)
+        {
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, namespacePath);
+            var entries = Directory.GetFileSystemEntries(namespacePath);
+            if (entries.Length == 0)
+                return new NamespaceEvidence(NamespaceEvidenceKind.Missing, false, string.Empty);
+            var operationPath = Path.Combine(namespacePath, "operation.json");
+            var eventsPath = Path.Combine(namespacePath, "supervisor-events.jsonl");
+            if (entries.Length != 2 || !File.Exists(operationPath) || !File.Exists(eventsPath))
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor evidence is incomplete or contains unknown entries.");
+            foreach (var entry in entries)
+            {
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, entry);
+                if (!AICodedbSupervisorProtocol.PathsEqual(entry, operationPath)
+                    && !AICodedbSupervisorProtocol.PathsEqual(entry, eventsPath))
+                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor evidence contains an unknown entry.");
+            }
+
+            var selection = AICodedbCurrentInstanceStore.Read(projectRoot, packageRoot);
+            if (selection.State != AICodedbCurrentInstanceState.ObsoleteReinstallRequired)
+                throw new InvalidOperationException("Partial Owner Identity v1 control has no authenticated obsolete selection.");
+            if (File.Exists(Path.Combine(projectRoot, "AIWork", ".runtime", "codedb", "control",
+                    "last-known-good-instance.json")))
+                throw new InvalidOperationException("Partial Owner Identity v1 control has a second instance selection.");
+            var selectedIdentity = new AICodedbRuntimeIdentity(
+                selection.PackageVersion, selection.PayloadVersion, selection.PayloadSequence,
+                selection.GenerationId, selection.BootstrapProtocol);
+            if (AICodedbPackageRuntimeContractStore.Read(packageRoot).Classify(selectedIdentity)
+                != AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+                throw new InvalidOperationException("Partial Owner Identity v1 control is not a Package-declared predecessor.");
+            var selectionPath = Path.Combine(projectRoot, "AIWork", ".runtime", "codedb", "control", "current-instance.json");
+            var pointer = ReadEvidence(selectionPath, "Owner Identity v1 selection");
+            var instance = ReadEvidence(Path.Combine(selection.InstanceRoot, "instance.json"), "Owner Identity v1 instance");
+            var instanceHash = AICodedbStrictJson.GetRequiredString(pointer, "instance_manifest_sha256", "Owner Identity v1 selection");
+            var generationHash = AICodedbStrictJson.GetRequiredString(instance, "generation_manifest_sha256", "Owner Identity v1 instance");
+            var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(projectRoot);
+
+            var failed = ReadEvidence(operationPath, "partial Owner Identity v1 Supervisor operation");
+            RequireExactFields(failed,
+                new[] { "schema_version", "managed_by", "operation_id", "key", "request_id", "name", "lane", "state", "phase", "owner_epoch", "project_identity", "root", "runtime", "selected_instance_id", "selected_generation_id", "runtime_contract_sha256", "child", "started_at_utc", "completed_at_utc", "result" },
+                new[] { "error", "error_code", "handoff_queued", "handoff_reason" },
+                "partial Owner Identity v1 Supervisor operation");
+            var runtimeHash = AICodedbStrictJson.GetRequiredString(failed, "runtime_contract_sha256", "partial Owner Identity v1 Supervisor operation");
+            var failedName = AICodedbStrictJson.GetRequiredString(failed, "name", "partial Owner Identity v1 Supervisor operation");
+            if (AICodedbStrictJson.GetRequiredInt32(failed, "schema_version", "partial Owner Identity v1 Supervisor operation") != 1
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "managed_by", "partial Owner Identity v1 Supervisor operation"), ManagedBy, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "state", "partial Owner Identity v1 Supervisor operation"), "failed", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "phase", "partial Owner Identity v1 Supervisor operation"), "failed", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "lane", "partial Owner Identity v1 Supervisor operation"), "maintenance", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "project_identity", "partial Owner Identity v1 Supervisor operation"), projectIdentity, StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.PathsEqual(AICodedbStrictJson.GetRequiredString(failed, "root", "partial Owner Identity v1 Supervisor operation"), projectRoot)
+                || !AICodedbSupervisorProtocol.PathsEqual(AICodedbStrictJson.GetRequiredString(failed, "runtime", "partial Owner Identity v1 Supervisor operation"), namespacePath)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "selected_instance_id", "partial Owner Identity v1 Supervisor operation"), selection.InstanceId, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(failed, "selected_generation_id", "partial Owner Identity v1 Supervisor operation"), selection.GenerationId, StringComparison.Ordinal)
+                || !AICodedbControlContract.IsSha256(runtimeHash)
+                || !IsLowercaseId(AICodedbStrictJson.GetRequiredString(failed, "operation_id", "partial Owner Identity v1 Supervisor operation"))
+                || !IsLowercaseId(AICodedbStrictJson.GetRequiredString(failed, "owner_epoch", "partial Owner Identity v1 Supervisor operation"))
+                || string.IsNullOrWhiteSpace(failedName))
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor operation does not bind the selected project instance.");
+            object resultValue;
+            if (!failed.TryGetValue("result", out resultValue))
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor result is missing.");
+            var result = AICodedbStrictJson.RequireObject(resultValue, "partial Owner Identity v1 Supervisor result");
+            if (result.ContainsKey("exit_code")
+                ? AICodedbStrictJson.GetRequiredInt32(result, "exit_code", "partial Owner Identity v1 Supervisor result") == 0
+                : AICodedbStrictJson.GetRequiredInt32(result, "code", "partial Owner Identity v1 Supervisor result") == 0)
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor operation is not failed.");
+
+            var eventsInfo = new FileInfo(eventsPath);
+            if (eventsInfo.Length <= 0 || eventsInfo.Length > 4 * 1024 * 1024)
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor events have an invalid size.");
+            var sequence = 0;
+            var foundFailure = false;
+            foreach (var line in File.ReadAllLines(eventsPath))
+            {
+                var observed = AICodedbStrictJson.ParseObject(line, "partial Owner Identity v1 Supervisor event");
+                RequireExactFields(observed,
+                    new[] { "schema_version", "sequence", "at_utc", "event", "detail" },
+                    Array.Empty<string>(),
+                    "partial Owner Identity v1 Supervisor event");
+                if (AICodedbStrictJson.GetRequiredInt32(observed, "schema_version", "partial Owner Identity v1 Supervisor event") != 1
+                    || AICodedbStrictJson.GetRequiredInt32(observed, "sequence", "partial Owner Identity v1 Supervisor event") != ++sequence)
+                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor events are not contiguous.");
+                foundFailure |= string.Equals(AICodedbStrictJson.GetRequiredString(observed, "event", "partial Owner Identity v1 Supervisor event"), "operation_failed", StringComparison.Ordinal)
+                    && string.Equals(AICodedbStrictJson.GetRequiredString(observed, "detail", "partial Owner Identity v1 Supervisor event"), failedName, StringComparison.Ordinal);
+            }
+            if (!foundFailure)
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor failure has no matching event.");
+
+            var versionRoot = Directory.GetParent(namespacePath).FullName;
+            var activation = ReadEvidence(Path.Combine(versionRoot, "activation.json"), "Owner Identity v1 activation");
+            var journal = ReadEvidence(Path.Combine(versionRoot, "operation.json"), "Owner Identity v1 activation operation");
+            RequireExactFields(activation,
+                new[] { "schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "candidate", "current", "last_known_good", "publication_phase", "updated_at_utc" },
+                Array.Empty<string>(), "Owner Identity v1 activation");
+            if (journal.ContainsKey("retirement_intent_path") != journal.ContainsKey("retirement_intent_sha256"))
+                throw new InvalidOperationException("Owner Identity v1 activation retirement reference is incomplete.");
+            var journalFields = new List<string>
+            {
+                "schema_version", "managed_by", "control_contract", "runtime_contract_sha256",
+                "project_root", "project_identity", "activation_epoch", "operation_id",
+                "action", "candidate", "previous_activation_record_sha256", "phase",
+                "updated_at_utc", "mutations"
+            };
+            if (journal.ContainsKey("retirement_intent_path"))
+            {
+                journalFields.Add("retirement_intent_path");
+                journalFields.Add("retirement_intent_sha256");
+            }
+            RequireExactFields(journal, journalFields.ToArray(), Array.Empty<string>(),
+                "Owner Identity v1 activation operation");
+            AICodedbStrictJson.GetRequiredArray(journal, "mutations", "Owner Identity v1 activation operation");
+            var operationId = AICodedbStrictJson.GetRequiredString(journal, "operation_id", "Owner Identity v1 activation operation");
+            var epoch = AICodedbStrictJson.GetRequiredString(journal, "activation_epoch", "Owner Identity v1 activation operation");
+            if (!IsLowercaseId(operationId) || !IsLowercaseId(epoch)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(activation, "operation_id", "Owner Identity v1 activation"), operationId, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(activation, "activation_epoch", "Owner Identity v1 activation"), epoch, StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(activation, "publication_phase", "Owner Identity v1 activation"), "COMMITTED", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(journal, "phase", "Owner Identity v1 activation operation"), "COMMITTED", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(journal, "action", "Owner Identity v1 activation operation"), "UPGRADE", StringComparison.Ordinal)
+                || !MatchesPartialV1ActivationContext(activation, projectRoot, projectIdentity, contract, runtimeHash)
+                || !MatchesPartialV1ActivationContext(journal, projectRoot, projectIdentity, contract, runtimeHash)
+                || !MatchesPartialV1Candidate(activation, "candidate", selection, instanceHash, generationHash)
+                || !MatchesPartialV1Candidate(activation, "current", selection, instanceHash, generationHash)
+                || !MatchesPartialV1Candidate(journal, "candidate", selection, instanceHash, generationHash))
+                throw new InvalidOperationException("Partial Owner Identity v1 activation evidence does not bind the selection.");
+            var operationDirectoryRoot = Path.Combine(versionRoot, "operations");
+            if (Directory.Exists(operationDirectoryRoot))
+            {
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, operationDirectoryRoot);
+                var directories = Directory.GetFileSystemEntries(operationDirectoryRoot);
+                if (directories.Length == 1)
+                    AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, directories[0]);
+                if (directories.Length > 1 || (directories.Length == 1
+                    && (!Directory.Exists(directories[0])
+                        || !string.Equals(Path.GetFileName(directories[0]), operationId, StringComparison.Ordinal)
+                        || Directory.GetFileSystemEntries(directories[0]).Length != 0)))
+                    throw new InvalidOperationException("Partial Owner Identity v1 activation operation directory is ambiguous.");
+            }
+            var retirementsRoot = Path.Combine(versionRoot, "retirements");
+            if (Directory.Exists(retirementsRoot))
+            {
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, retirementsRoot);
+                if (Directory.GetFileSystemEntries(retirementsRoot).Length != 0)
+                    throw new InvalidOperationException("Partial Owner Identity v1 retirement evidence is not in the reviewed closure.");
+            }
+            return new NamespaceEvidence(NamespaceEvidenceKind.Obsolete, false,
+                "An authenticated partial Owner Identity v1 control state requires explicit integration removal.");
+        }
+
+        private static bool MatchesPartialV1ActivationContext(
+            Dictionary<string, object> value, string projectRoot, string projectIdentity,
+            AICodedbControlContractIdentity contract, string runtimeHash)
+        {
+            object contractValue;
+            if (!value.TryGetValue("control_contract", out contractValue)) return false;
+            var declared = AICodedbStrictJson.RequireObject(contractValue, "Owner Identity v1 control contract");
+            RequireExactFields(declared, new[] { "id", "version", "schema_version", "sha256" },
+                Array.Empty<string>(), "Owner Identity v1 control contract");
+            return AICodedbStrictJson.GetRequiredInt32(value, "schema_version", "Owner Identity v1 activation") == 1
+                && string.Equals(AICodedbStrictJson.GetRequiredString(value, "managed_by", "Owner Identity v1 activation"), ManagedBy, StringComparison.Ordinal)
+                && AICodedbSupervisorProtocol.PathsEqual(AICodedbStrictJson.GetRequiredString(value, "project_root", "Owner Identity v1 activation"), projectRoot)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(value, "project_identity", "Owner Identity v1 activation"), projectIdentity, StringComparison.Ordinal)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(value, "runtime_contract_sha256", "Owner Identity v1 activation"), runtimeHash, StringComparison.Ordinal)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(declared, "id", "Owner Identity v1 control contract"), contract.Id, StringComparison.Ordinal)
+                && AICodedbStrictJson.GetRequiredInt32(declared, "version", "Owner Identity v1 control contract") == contract.Version
+                && AICodedbStrictJson.GetRequiredInt32(declared, "schema_version", "Owner Identity v1 control contract") == contract.SchemaVersion
+                && string.Equals(AICodedbStrictJson.GetRequiredString(declared, "sha256", "Owner Identity v1 control contract"), contract.Sha256, StringComparison.Ordinal);
+        }
+
+        private static bool MatchesPartialV1Candidate(
+            Dictionary<string, object> value, string name, AICodedbCurrentInstanceStatus selection,
+            string instanceHash, string generationHash)
+        {
+            object candidateValue;
+            if (!value.TryGetValue(name, out candidateValue)) return false;
+            var candidate = AICodedbStrictJson.RequireObject(candidateValue, "Owner Identity v1 activation " + name);
+            RequireExactFields(candidate,
+                new[] { "instance_id", "generation_id", "instance_manifest_sha256", "generation_manifest_sha256", "generation_disposition" },
+                Array.Empty<string>(), "Owner Identity v1 activation " + name);
+            return string.Equals(AICodedbStrictJson.GetRequiredString(candidate, "instance_id", name), selection.InstanceId, StringComparison.Ordinal)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(candidate, "generation_id", name), selection.GenerationId, StringComparison.Ordinal)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(candidate, "instance_manifest_sha256", name), instanceHash, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(candidate, "generation_manifest_sha256", name), generationHash, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(AICodedbStrictJson.GetRequiredString(candidate, "generation_disposition", name), "CURRENT", StringComparison.Ordinal);
+        }
+
+        private static bool IsLowercaseId(string value)
+        {
+            if (value == null || value.Length != 32) return false;
+            foreach (var character in value)
+                if (!((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')))
+                    return false;
+            return true;
+        }
+
+        private static void RequireExactFields(
+            Dictionary<string, object> value, string[] required, string[] optional, string label)
+        {
+            var allowed = new HashSet<string>(required, StringComparer.Ordinal);
+            foreach (var name in optional) allowed.Add(name);
+            foreach (var name in required)
+                if (!value.ContainsKey(name)) throw new InvalidOperationException(label + " is missing " + name + ".");
+            foreach (var name in value.Keys)
+                if (!allowed.Contains(name)) throw new InvalidOperationException(label + " contains unknown evidence.");
         }
 
         private static NamespaceEvidence InspectLegacyNamespace(

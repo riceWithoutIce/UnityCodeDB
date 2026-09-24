@@ -3443,6 +3443,142 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CurrentInstanceStore_MissingStableWrapperOnlyPermitsObsoleteV1Classification()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33", true);
+            var wrapperPath = Path.Combine(_projectRoot, "AIWork", "codedb", "wrapper",
+                "codedb-project-wrapper.mjs");
+            File.Delete(wrapperPath);
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(_projectRoot, AICodedbPaths.PackageRootPath);
+            var ordinaryHostPointer = AICodedbHostGenerationStore.ResolvePointer(
+                _projectRoot,
+                Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath),
+                AICodedbPaths.PackageRootPath);
+
+            Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.ObsoleteReinstallRequired));
+            Assert.That(status.CanPublishEditorLease, Is.False);
+            Assert.That(ordinaryHostPointer.State, Is.EqualTo(AICodedbHostGenerationState.Invalid));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
+
+            WriteUtf8NoBom(wrapperPath, "drifted wrapper");
+            var drifted = AICodedbCurrentInstanceStore.Read(_projectRoot, AICodedbPaths.PackageRootPath);
+            Assert.That(drifted.State, Is.EqualTo(AICodedbCurrentInstanceState.Invalid));
+        }
+
+        [Test]
+        public void ControlContractMigration_PartialV1RequiresBoundCommittedEvidence()
+        {
+            var instanceRoot = InstallPackageDeclaredPreviousInstance("poc.33", true);
+            var wrapperPath = Path.Combine(_projectRoot, "AIWork", "codedb", "wrapper",
+                "codedb-project-wrapper.mjs");
+            File.Delete(wrapperPath);
+            var pointer = AICodedbStrictJson.ReadObject(
+                Path.Combine(_projectRoot, AICodedbProjectSettings.InstanceCurrentRelativePath),
+                64 * 1024, "partial v1 selection fixture");
+            var instance = AICodedbStrictJson.ReadObject(
+                Path.Combine(instanceRoot, "instance.json"), 128 * 1024,
+                "partial v1 instance fixture");
+            var instanceId = AICodedbStrictJson.GetRequiredString(pointer, "instance_id", "partial v1 selection fixture");
+            var instanceHash = AICodedbStrictJson.GetRequiredString(pointer, "instance_manifest_sha256", "partial v1 selection fixture");
+            var generationHash = AICodedbStrictJson.GetRequiredString(instance, "generation_manifest_sha256", "partial v1 instance fixture");
+            var contract = new AICodedbControlContractIdentity(
+                "v0.3-control", 1, 1,
+                AICodedbControlContract.ComputeSha256(
+                    AICodedbControlContract.BuildCanonicalIdentity("v0.3-control", 1, 1)));
+            var supervisorRoot = AICodedbControlContract.GetSupervisorRuntimePath(_projectRoot, contract);
+            var versionRoot = Directory.GetParent(supervisorRoot).FullName;
+            Directory.CreateDirectory(supervisorRoot);
+            const string runtimeHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            const string activationEpoch = "11111111111111111111111111111111";
+            const string activationOperationId = "22222222222222222222222222222222";
+            const string timestamp = "2026-08-26T00:00:03.0000000Z";
+            var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
+            var contractDocument = new Dictionary<string, object>
+            {
+                { "id", contract.Id }, { "version", contract.Version },
+                { "schema_version", contract.SchemaVersion }, { "sha256", contract.Sha256 }
+            };
+            var candidate = new Dictionary<string, object>
+            {
+                { "instance_id", instanceId }, { "generation_id", "poc.33" },
+                { "instance_manifest_sha256", instanceHash },
+                { "generation_manifest_sha256", generationHash },
+                { "generation_disposition", "CURRENT" }
+            };
+            var activation = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "managed_by", "com.rice.ai-codedb" },
+                { "control_contract", contractDocument }, { "runtime_contract_sha256", runtimeHash },
+                { "project_root", _projectRoot }, { "project_identity", projectIdentity },
+                { "activation_epoch", activationEpoch }, { "operation_id", activationOperationId },
+                { "candidate", candidate }, { "current", candidate }, { "last_known_good", null },
+                { "publication_phase", "COMMITTED" }, { "updated_at_utc", timestamp }
+            };
+            var journal = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "managed_by", "com.rice.ai-codedb" },
+                { "control_contract", contractDocument }, { "runtime_contract_sha256", runtimeHash },
+                { "project_root", _projectRoot }, { "project_identity", projectIdentity },
+                { "activation_epoch", activationEpoch }, { "operation_id", activationOperationId },
+                { "action", "UPGRADE" }, { "candidate", candidate },
+                { "previous_activation_record_sha256", null },
+                { "phase", "COMMITTED" }, { "updated_at_utc", timestamp },
+                { "mutations", new List<object>() }
+            };
+            var failed = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "managed_by", "com.rice.ai-codedb" },
+                { "operation_id", "33333333333333333333333333333333" },
+                { "key", string.Empty }, { "request_id", string.Empty },
+                { "name", "materialize:DryRun" }, { "lane", "maintenance" },
+                { "state", "failed" }, { "phase", "failed" },
+                { "owner_epoch", "44444444444444444444444444444444" },
+                { "project_identity", projectIdentity }, { "root", _projectRoot },
+                { "runtime", supervisorRoot }, { "selected_instance_id", instanceId },
+                { "selected_generation_id", "poc.33" }, { "runtime_contract_sha256", runtimeHash },
+                { "child", null }, { "started_at_utc", timestamp }, { "completed_at_utc", timestamp },
+                { "result", new Dictionary<string, object> { { "exit_code", 4 } } }
+            };
+            var observed = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "sequence", 1 }, { "at_utc", timestamp },
+                { "event", "operation_failed" }, { "detail", "materialize:DryRun" }
+            };
+            var failedPath = Path.Combine(supervisorRoot, "operation.json");
+            var activationPath = Path.Combine(versionRoot, "activation.json");
+            var journalPath = Path.Combine(versionRoot, "operation.json");
+            WriteUtf8NoBom(activationPath, AICodedbSupervisorBridge.SerializeJsonObject(activation));
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));
+            WriteUtf8NoBom(Path.Combine(supervisorRoot, "supervisor-events.jsonl"),
+                AICodedbSupervisorBridge.SerializeJsonObject(observed) + "\n");
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var accepted = AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath);
+            Assert.That(accepted.State, Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired));
+            Assert.That(accepted.BlocksAutomaticStart, Is.True);
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
+
+            failed["selected_generation_id"] = "unknown";
+            WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            failed["selected_generation_id"] = "poc.33";
+            WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));
+            journal["mutations"] = "invalid";
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            journal["mutations"] = new List<object>();
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            WriteUtf8NoBom(Path.Combine(supervisorRoot, "unknown.json"), "{}");
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+        }
+
+        [Test]
         public void CurrentInstanceStore_OwnerIdentityV1WithUnknownFieldRemainsInvalid()
         {
             InstallPackageDeclaredPreviousInstance("poc.33", true);

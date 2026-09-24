@@ -214,7 +214,8 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbHostGenerationSelection ResolvePointer(
             string projectRoot,
             string pointerPath,
-            string packageRoot)
+            string packageRoot,
+            bool allowMissingStableWrapperForObsoleteV1 = false)
         {
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
             var normalizedPointerPath = AICodedbPaths.NormalizePath(pointerPath);
@@ -233,13 +234,15 @@ namespace Rice.AI.Codedb.Editor
             return ResolveCurrent(
                 normalizedRoot,
                 AICodedbPaths.NormalizePath(packageRoot).TrimEnd('/'),
-                normalizedPointerPath);
+                normalizedPointerPath,
+                allowMissingStableWrapperForObsoleteV1);
         }
 
         private static AICodedbHostGenerationSelection ResolveCurrent(
             string projectRoot,
             string packageRoot,
-            string currentPath)
+            string currentPath,
+            bool allowMissingStableWrapperForObsoleteV1 = false)
         {
             var hasValidatedPointer = false;
             var validatedPointer = default(CurrentPointerDocument);
@@ -275,8 +278,14 @@ namespace Rice.AI.Codedb.Editor
                 validatedGenerationRoot = generationRoot;
                 hasValidatedPointer = true;
                 var state = ClassifyValidatedPointer(pointer, runtimeContract);
-                if (state == AICodedbHostGenerationState.Current
-                    || state == AICodedbHostGenerationState.Previous)
+                var stableWrapperPath = AICodedbPaths.NormalizePath(Path.Combine(
+                    projectRoot,
+                    AICodedbPackageRuntimeContractStore.StableWrapperRelativePath.Replace('/', Path.DirectorySeparatorChar)));
+                if ((state == AICodedbHostGenerationState.Current
+                     || state == AICodedbHostGenerationState.Previous)
+                    && (!allowMissingStableWrapperForObsoleteV1
+                        || File.Exists(stableWrapperPath)
+                        || Directory.Exists(stableWrapperPath)))
                 {
                     AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
                         projectRoot,

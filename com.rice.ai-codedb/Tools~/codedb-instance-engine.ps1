@@ -677,13 +677,25 @@ function Assert-InstanceActivationRecordDocument {
 function Assert-InstanceActivationOperationDocument {
     param(
         [Parameter(Mandatory = $true)]$Document,
-        [Parameter(Mandatory = $true)]$Context
+        [Parameter(Mandatory = $true)]$Context,
+        [switch]$AllowLegacyV1CommittedOperation
     )
 
     $label = "activation operation journal"
+    $hasIntentPath = $null -ne $Document.PSObject.Properties["retirement_intent_path"]
+    $hasIntentSha = $null -ne $Document.PSObject.Properties["retirement_intent_sha256"]
+    if ($hasIntentPath -ne $hasIntentSha) {
+        throw "Activation operation retirement intent fields are incomplete."
+    }
+    $legacyV1Committed = $AllowLegacyV1CommittedOperation -and
+        [int]$Context.ControlContract.Version -eq 1 -and
+        -not $hasIntentPath -and
+        [string]::Equals([string]$Document.phase, "COMMITTED", [StringComparison]::Ordinal)
+    $fields = @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "action", "candidate", "previous_activation_record_sha256", "phase", "updated_at_utc", "mutations")
+    if (-not $legacyV1Committed) { $fields += @("retirement_intent_path", "retirement_intent_sha256") }
     Assert-InstanceJsonFieldAllowlist `
         -Object $Document `
-        -Fields @("schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "action", "candidate", "previous_activation_record_sha256", "retirement_intent_path", "retirement_intent_sha256", "phase", "updated_at_utc", "mutations") `
+        -Fields $fields `
         -Label $label
     if ((Get-RequiredJsonInt32 -Object $Document -Name "schema_version" -Label $label) -ne $script:InstanceActivationOperationSchemaVersion -or
         -not [string]::Equals((Get-RequiredJsonString -Object $Document -Name "managed_by" -Label $label), $script:ManagedBy, [StringComparison]::Ordinal)) {
@@ -701,8 +713,8 @@ function Assert-InstanceActivationOperationDocument {
     Assert-InstanceActivationRoleSemantics -Context $Context -Candidate $candidate -Current $null -LastKnownGood $null
     $previousHash = Get-RequiredJsonNullableString -Object $Document -Name "previous_activation_record_sha256" -Label $label
     $null = Assert-InstanceLowercaseSha256 -Value $previousHash -Label "previous activation record hash" -AllowNull
-    $retirementIntentRelativePath = Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_path" -Label $label
-    $retirementIntentSha256 = Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_sha256" -Label $label
+    $retirementIntentRelativePath = if ($legacyV1Committed) { $null } else { Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_path" -Label $label }
+    $retirementIntentSha256 = if ($legacyV1Committed) { $null } else { Get-RequiredJsonNullableString -Object $Document -Name "retirement_intent_sha256" -Label $label }
     if (($null -eq $retirementIntentRelativePath) -ne ($null -eq $retirementIntentSha256)) {
         throw "Activation operation retirement intent reference is incomplete."
     }
@@ -755,13 +767,16 @@ function Read-InstanceActivationRecord {
 }
 
 function Read-InstanceActivationOperation {
-    param([Parameter(Mandatory = $true)]$Context)
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [switch]$AllowLegacyV1CommittedOperation
+    )
 
     $path = [string]$Context.Paths.OperationPath
     Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "activation operation journal"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Activation operation journal is missing or not a regular file." }
     $json = Read-BoundedJsonDocument -Path $path -Label "activation operation journal" -MaximumBytes $script:InstanceActivationOperationMaximumBytes
-    $validated = Assert-InstanceActivationOperationDocument -Document $json.Document -Context $Context
+    $validated = Assert-InstanceActivationOperationDocument -Document $json.Document -Context $Context -AllowLegacyV1CommittedOperation:$AllowLegacyV1CommittedOperation
     $validated | Add-Member -NotePropertyName Path -NotePropertyValue $path
     $validated | Add-Member -NotePropertyName Sha256 -NotePropertyValue $json.Sha256
     $validated | Add-Member -NotePropertyName Text -NotePropertyValue $json.Text
@@ -1021,7 +1036,8 @@ function Assert-InstanceActivationContractNamespace {
 function Get-InstanceActivationContractState {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$AllowLegacyV1CommittedOperation
     )
 
     $contractRoot = Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot
@@ -1060,7 +1076,7 @@ function Get-InstanceActivationContractState {
         -ProjectRoot $ProjectRoot `
         -OperationId $operationId
     $activation = Read-InstanceActivationRecord -Context $context
-    $operation = Read-InstanceActivationOperation -Context $context
+    $operation = Read-InstanceActivationOperation -Context $context -AllowLegacyV1CommittedOperation:$AllowLegacyV1CommittedOperation
     Assert-InstanceActivationDocumentsMatch -Activation $activation -Operation $operation
     $hasMatchingOperationDirectory = $operationDirectories.Count -eq 1 -and
         [string]::Equals($operationDirectories[0].Name, $operationId, [StringComparison]::Ordinal)
@@ -2313,7 +2329,8 @@ function Assert-InstanceTransactionTarget {
             "$($script:InstanceControlRelativePath)/supervisor/supervisor-error.json")) {
         return $normalized
     }
-    if ($normalized -cmatch '^AIWork/\.runtime/codedb/control/contracts/v0\.3-control/v[12]/(?:activation\.json|operation\.json|supervisor/(?:supervisor-state\.json|supervisor\.lock|supervisor-events\.jsonl|supervisor-error\.json))$') {
+    if ($normalized -cmatch '^AIWork/\.runtime/codedb/control/contracts/v0\.3-control/v[12]/(?:activation\.json|operation\.json|supervisor/(?:supervisor-state\.json|supervisor\.lock|supervisor-events\.jsonl|supervisor-error\.json))$' -or
+        $normalized -ceq "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/supervisor/operation.json") {
         return $normalized
     }
     if ($normalized -cmatch '^AIWork/\.runtime/codedb/instances/[0-9a-f]{32}/logs/mcp-availability\.json$') {

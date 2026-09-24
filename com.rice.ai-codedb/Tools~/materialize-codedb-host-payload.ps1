@@ -10229,6 +10229,126 @@ function Get-RemoveIntegrationNamespaceInventory {
     return $files.ToArray()
 }
 
+function Get-PartialV1RemoveIntegrationAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Authority
+    )
+
+    $selection = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 1
+    $instance = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $selection.InstanceRoot
+    if ($instance.Generation.Disposition -cne "TRUSTED_PREVIOUS") {
+        throw "Partial Owner Identity v1 recovery requires a Package-declared predecessor generation."
+    }
+    $lastKnownGood = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 1 -LastKnownGood -AllowMissing
+    if ($null -ne $lastKnownGood) {
+        throw "Partial Owner Identity v1 recovery does not admit a second instance selection."
+    }
+    $namespace = $Authority.Path
+    Assert-NoReparsePoint -Path $namespace -Root $ProjectRoot -Label "partial Owner Identity v1 Supervisor namespace"
+    $expected = @{
+        "operation.json" = 256 * 1024
+        "supervisor-events.jsonl" = 4 * 1024 * 1024
+    }
+    $inventory = @(
+        foreach ($item in @(Get-ChildItem -LiteralPath $namespace -Force -ErrorAction Stop)) {
+            Assert-NoReparsePoint -Path $item.FullName -Root $namespace -Label "partial Owner Identity v1 Supervisor entry"
+            if ($item.PSIsContainer -or -not $expected.ContainsKey($item.Name) -or
+                $item.Length -le 0 -or $item.Length -gt $expected[$item.Name]) {
+                throw "Partial Owner Identity v1 Supervisor namespace contains unexpected evidence."
+            }
+            [pscustomobject]@{ Name = $item.Name; Path = $item.FullName; Sha256 = Get-FileSha256 -Path $item.FullName }
+        }
+    )
+    if ($inventory.Count -ne 2) {
+        throw "Partial Owner Identity v1 Supervisor recovery requires one failed operation and its events."
+    }
+    $operation = (Read-BoundedJsonDocument -Path (Join-Path $namespace "operation.json") -Label "partial Owner Identity v1 Supervisor operation" -MaximumBytes (256 * 1024)).Document
+    Assert-RemoveIntegrationJsonFields -Object $operation -Label "partial Owner Identity v1 Supervisor operation" `
+        -Required @("schema_version", "managed_by", "operation_id", "key", "request_id", "name", "lane", "state", "phase", "owner_epoch", "project_identity", "root", "runtime", "selected_instance_id", "selected_generation_id", "runtime_contract_sha256", "child", "started_at_utc", "completed_at_utc", "result") `
+        -Optional @("error", "error_code", "handoff_queued", "handoff_reason")
+    $runtimeHash = Get-RequiredJsonString -Object $operation -Name "runtime_contract_sha256" -Label "partial Owner Identity v1 Supervisor operation"
+    if ((Get-RequiredJsonInt32 -Object $operation -Name "schema_version" -Label "partial Owner Identity v1 Supervisor operation") -ne 1 -or
+        (Get-RequiredJsonString -Object $operation -Name "managed_by" -Label "partial Owner Identity v1 Supervisor operation") -cne $script:ManagedBy -or
+        (Get-RequiredJsonString -Object $operation -Name "operation_id" -Label "partial Owner Identity v1 Supervisor operation") -cnotmatch '^[0-9a-f]{32}$' -or
+        (Get-RequiredJsonString -Object $operation -Name "owner_epoch" -Label "partial Owner Identity v1 Supervisor operation") -cnotmatch '^[0-9a-f]{32}$' -or
+        $runtimeHash -cnotmatch '^[0-9a-f]{64}$' -or
+        (Get-RequiredJsonString -Object $operation -Name "state" -Label "partial Owner Identity v1 Supervisor operation") -cne "failed" -or
+        (Get-RequiredJsonString -Object $operation -Name "phase" -Label "partial Owner Identity v1 Supervisor operation") -cne "failed" -or
+        (Get-RequiredJsonString -Object $operation -Name "lane" -Label "partial Owner Identity v1 Supervisor operation") -cne "maintenance" -or
+        (Get-RequiredJsonString -Object $operation -Name "project_identity" -Label "partial Owner Identity v1 Supervisor operation") -cne (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot) -or
+        -not [string]::Equals([IO.Path]::GetFullPath((Get-RequiredJsonString -Object $operation -Name "root" -Label "partial Owner Identity v1 Supervisor operation")), [IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([IO.Path]::GetFullPath((Get-RequiredJsonString -Object $operation -Name "runtime" -Label "partial Owner Identity v1 Supervisor operation")), [IO.Path]::GetFullPath($namespace), [StringComparison]::OrdinalIgnoreCase) -or
+        (Get-RequiredJsonString -Object $operation -Name "selected_instance_id" -Label "partial Owner Identity v1 Supervisor operation") -cne $selection.InstanceId -or
+        (Get-RequiredJsonString -Object $operation -Name "selected_generation_id" -Label "partial Owner Identity v1 Supervisor operation") -cne $selection.GenerationId) {
+        throw "Partial Owner Identity v1 Supervisor operation does not bind the selected project instance."
+    }
+    $result = Get-RequiredJsonPropertyValue -Object $operation -Name "result" -Label "partial Owner Identity v1 Supervisor operation"
+    $null = Assert-JsonObject -Value $result -Label "partial Owner Identity v1 Supervisor result"
+    $resultExit = if ($null -ne $result.PSObject.Properties["exit_code"]) { Get-RequiredJsonInt32 -Object $result -Name "exit_code" -Label "partial Owner Identity v1 Supervisor result" } else { Get-RequiredJsonInt32 -Object $result -Name "code" -Label "partial Owner Identity v1 Supervisor result" }
+    if ($resultExit -eq 0) { throw "Partial Owner Identity v1 Supervisor operation is not a failed terminal operation." }
+    if ($null -ne $operation.child) {
+        $childPid = Get-RequiredJsonInt32 -Object $operation.child -Name "pid" -Label "partial Owner Identity v1 Supervisor child"
+        if ($childPid -le 0 -or (Get-MaterializerProcessIdentity -ProcessId $childPid).Alive) {
+            throw "Partial Owner Identity v1 Supervisor child is live or ambiguous."
+        }
+    }
+    $events = [IO.File]::ReadAllLines((Join-Path $namespace "supervisor-events.jsonl"))
+    $foundFailure = $false
+    $sequence = 0
+    foreach ($line in $events) {
+        $event = ConvertFrom-StrictJsonText -Text $line -Label "partial Owner Identity v1 Supervisor event"
+        Assert-RemoveIntegrationJsonFields -Object $event -Label "partial Owner Identity v1 Supervisor event" -Required @("schema_version", "sequence", "at_utc", "event", "detail")
+        $next = Get-RequiredJsonInt32 -Object $event -Name "sequence" -Label "partial Owner Identity v1 Supervisor event"
+        if ((Get-RequiredJsonInt32 -Object $event -Name "schema_version" -Label "partial Owner Identity v1 Supervisor event") -ne 1 -or $next -ne ($sequence + 1)) {
+            throw "Partial Owner Identity v1 Supervisor events are not a contiguous owned stream."
+        }
+        $sequence = $next
+        if ((Get-RequiredJsonString -Object $event -Name "event" -Label "partial Owner Identity v1 Supervisor event") -ceq "operation_failed" -and
+            (Get-RequiredJsonString -Object $event -Name "detail" -Label "partial Owner Identity v1 Supervisor event") -ceq (Get-RequiredJsonString -Object $operation -Name "name" -Label "partial Owner Identity v1 Supervisor operation")) {
+            $foundFailure = $true
+        }
+    }
+    if (-not $foundFailure) { throw "Partial Owner Identity v1 Supervisor failure has no matching event." }
+
+    $activation = Get-RemoveIntegrationActivationState -AuthorityKind "VERSIONED_V1" -OwnerIdentityVersion 1 -ProjectRoot $ProjectRoot -Selection $selection -RuntimeContractSha256 $runtimeHash -AllowLegacyV1CommittedOperation
+    if ($null -eq $activation) { throw "Partial Owner Identity v1 recovery requires committed activation evidence." }
+    if ($activation.Operation.Action -cne "UPGRADE") {
+        throw "Partial Owner Identity v1 recovery requires its committed upgrade operation."
+    }
+    $wrapperPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/codedb/wrapper/codedb-project-wrapper.mjs" -Label "project stable wrapper"
+    if (Test-Path -LiteralPath $wrapperPath) {
+        Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label "project stable wrapper"
+        $expectedWrapper = $instance.Generation.StableWrapperSha256
+        if (-not (Test-Path -LiteralPath $wrapperPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileSha256 -Path $wrapperPath), $expectedWrapper, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Partial Owner Identity v1 stable wrapper has drifted."
+        }
+    }
+    $holders = Get-InstanceRetirementHolderEvidence -Evidence $selection -ProjectRoot $ProjectRoot
+    if (-not $holders.Clear) { throw "Partial Owner Identity v1 instance holder is live or ambiguous." }
+    $fingerprintParts = @(
+        "PARTIAL_VERSIONED_V1", (Get-TextSha256 -Text $selection.Text),
+        $selection.InstanceManifestSha256, $selection.GenerationManifestSha256,
+        $runtimeHash, $activation.Operation.Attempt.OperationId,
+        (Get-FileSha256 -Path $activation.Context.Paths.ActivationPath),
+        (Get-FileSha256 -Path $activation.Context.Paths.OperationPath)
+    ) + @($inventory | Sort-Object Name | ForEach-Object { $_.Sha256 })
+    return [pscustomobject]@{
+        Kind = "PARTIAL_VERSIONED_V1"
+        OwnerIdentityVersion = 1
+        RelativePath = $Authority.RelativePath
+        Path = $namespace
+        OwnerFingerprint = Get-TextSha256 -Text ($fingerprintParts -join "`n")
+        Selection = $selection
+        LastKnownGood = $null
+        Inventory = $inventory
+        ActivationState = $activation
+        RuntimeContractSha256 = $runtimeHash
+    }
+}
+
 function Get-ValidatedRemoveIntegrationSelection {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -10616,6 +10736,13 @@ function Get-RemoveIntegrationAuthority {
     }
 
     $authority = $present[0]
+    if ($authority.Kind -ceq "VERSIONED_V1") {
+        $statePath = Join-Path $authority.Path "supervisor-state.json"
+        $lockPath = Join-Path $authority.Path "supervisor.lock"
+        if (-not (Test-Path -LiteralPath $statePath) -and -not (Test-Path -LiteralPath $lockPath)) {
+            return Get-PartialV1RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -Authority $authority
+        }
+    }
     $inventory = @(Get-RemoveIntegrationNamespaceInventory -NamespacePath $authority.Path -ProjectRoot $ProjectRoot)
     $selection = Get-ValidatedRemoveIntegrationSelection `
         -Manifest $Manifest `
@@ -10698,7 +10825,8 @@ function Get-RemoveIntegrationActivationState {
         [Parameter(Mandatory = $true)][ValidateSet(1, 2)][int]$OwnerIdentityVersion,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$Selection,
-        [Parameter(Mandatory = $true)][string]$RuntimeContractSha256
+        [Parameter(Mandatory = $true)][string]$RuntimeContractSha256,
+        [switch]$AllowLegacyV1CommittedOperation
     )
 
     if ($AuthorityKind -eq "LEGACY_FIXED") { return $null }
@@ -10714,7 +10842,7 @@ function Get-RemoveIntegrationActivationState {
         TargetGenerationId = $Selection.GenerationId
         TargetGenerationManifestSha256 = $Selection.GenerationManifestSha256
     }
-    $state = Get-InstanceActivationContractState -Manifest $trustedManifest -ProjectRoot $ProjectRoot
+    $state = Get-InstanceActivationContractState -Manifest $trustedManifest -ProjectRoot $ProjectRoot -AllowLegacyV1CommittedOperation:$AllowLegacyV1CommittedOperation
     if ($null -eq $state) {
         if ($OwnerIdentityVersion -eq 2) {
             throw "Owner Identity v2 removal requires committed activation evidence."

@@ -472,12 +472,16 @@ namespace Rice.AI.Codedb.Editor
                     activationEpoch);
                 hasValidatedSelection = true;
 
-                // Authenticate the stable router before the more involved
-                // previous-generation transition checks so wrapper drift is
-                // reported directly and cannot be obscured by a later
-                // validation summary.
-                if (disposition == AICodedbRuntimeGenerationDisposition.Current
-                    || disposition == AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+                // A missing stable router is permitted only for an obsolete
+                // v1 removal candidate. Present bytes must still authenticate;
+                // neither case makes the v1 instance operational.
+                var stableWrapperPath = AICodedbPaths.NormalizePath(Path.Combine(
+                    root, "AIWork", "codedb", "wrapper", "codedb-project-wrapper.mjs"));
+                if ((disposition == AICodedbRuntimeGenerationDisposition.Current
+                     || disposition == AICodedbRuntimeGenerationDisposition.TrustedPrevious)
+                    && (!legacyOwnerIdentity
+                        || File.Exists(stableWrapperPath)
+                        || Directory.Exists(stableWrapperPath)))
                 {
                     AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
                         root,
@@ -504,7 +508,8 @@ namespace Rice.AI.Codedb.Editor
                         workerRelativePath,
                         workerHash,
                         bootstrapProtocol,
-                        generationRoot);
+                        generationRoot,
+                        legacyOwnerIdentity);
                 }
                 else
                 {
@@ -612,7 +617,8 @@ namespace Rice.AI.Codedb.Editor
             string workerRelativePath,
             string workerHash,
             int bootstrapProtocol,
-            string generationRoot)
+            string generationRoot,
+            bool obsoleteV1)
         {
             if (runtimeContract.Classify(selectedIdentity)
                 != AICodedbRuntimeGenerationDisposition.TrustedPrevious)
@@ -670,7 +676,8 @@ namespace Rice.AI.Codedb.Editor
             var generationSelection = AICodedbHostGenerationStore.ResolvePointer(
                 projectRoot,
                 hostPointerPath,
-                normalizedPackageRoot);
+                normalizedPackageRoot,
+                obsoleteV1);
             if (generationSelection.State != AICodedbHostGenerationState.Previous
                 || !string.Equals(generationSelection.GenerationId, generationId, StringComparison.Ordinal)
                 || !string.Equals(generationSelection.PackageVersion, packageVersion, StringComparison.Ordinal)
