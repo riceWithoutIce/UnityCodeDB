@@ -7573,6 +7573,31 @@ function New-OwnerIdentityV2RemovalFixture {
     }
 }
 
+function New-OrphanedOwnerIdentityV1RemovalFixture {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $fixture = New-OwnerIdentityV2RemovalFixture -Root $Root
+    $contractsRoot = Get-PathFromRelative `
+        -Root $Root `
+        -RelativePath "AIWork/.runtime/codedb/control/contracts"
+    if (Test-Path -LiteralPath $contractsRoot) {
+        Remove-Item -LiteralPath $contractsRoot -Recurse -Force
+    }
+
+    foreach ($relativePath in @(
+            "AIWork/.runtime/codedb/control/current-instance.json",
+            "AIWork/.runtime/codedb/control/last-known-good-instance.json")) {
+        $path = Get-PathFromRelative -Root $Root -RelativePath $relativePath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $document = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $document.PSObject.Properties.Remove("owner_identity_version")
+        $document.PSObject.Properties.Remove("activation_epoch")
+        Write-Utf8File -Path $path -Content (($document | ConvertTo-Json -Depth 10 -Compress) + "`n")
+    }
+
+    return $fixture
+}
+
 function Invoke-OwnerIdentityRemovalScenarios {
     $safeRoot = Join-Path $runRoot "owner-v2-removal-safe"
     $safe = New-OwnerIdentityV2RemovalFixture -Root $safeRoot -ProcessId $PID
@@ -7697,7 +7722,59 @@ function Invoke-OwnerIdentityRemovalScenarios {
     Assert-True -Condition ($orphanRejected.Text.Contains("operation evidence does not match")) -Message "Ordinary orphan rejection did not report the activation boundary."
     Assert-Equal -Actual (Get-FileSnapshot -Root $orphanRoot) -Expected $orphanBefore -Message "Orphan rejection changed project state."
 
-    Write-Host "[OK] Owner Identity v2 removal blocks live, unverifiable, mismatched, and orphaned authority; removes only exact Package-owned integration state; preserves instances, indexes, leases, retirement sentinels, user data, unrelated TOML, and processes; and recovers idempotently after interruption."
+    $legacyInvalidRoot = Join-Path $runRoot "owner-v1-orphan-invalid"
+    $legacyInvalid = New-OrphanedOwnerIdentityV1RemovalFixture -Root $legacyInvalidRoot
+    $legacyPointerPath = Get-PathFromRelative `
+        -Root $legacyInvalidRoot `
+        -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"
+    $legacyPointer = Get-Content -LiteralPath $legacyPointerPath -Raw | ConvertFrom-Json
+    $legacyPointer | Add-Member -NotePropertyName "owner_identity_version" -NotePropertyValue 2
+    Write-Utf8File -Path $legacyPointerPath -Content (($legacyPointer | ConvertTo-Json -Depth 10 -Compress) + "`n")
+    $legacyInvalidBefore = Get-FileSnapshot -Root $legacyInvalidRoot
+    $legacyInvalidResult = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $legacyInvalidRoot
+    Assert-Result -Result $legacyInvalidResult -ExitCode 4 -Label "Partial Owner Identity v2 selection rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacyInvalidRoot) -Expected $legacyInvalidBefore -Message "Partial Owner Identity v2 rejection changed project state."
+
+    $legacyLiveRoot = Join-Path $runRoot "owner-v1-orphan-live"
+    $legacyLive = New-OrphanedOwnerIdentityV1RemovalFixture -Root $legacyLiveRoot
+    $legacyLiveLease = Get-Content -LiteralPath $legacyLive.LeasePath -Raw | ConvertFrom-Json
+    $legacyLiveLease.pid = $PID
+    Write-Utf8File -Path $legacyLive.LeasePath -Content (($legacyLiveLease | ConvertTo-Json -Depth 8) + "`n")
+    $legacyLiveBefore = Get-FileSnapshot -Root $legacyLiveRoot
+    $legacyLiveResult = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $legacyLiveRoot
+    Assert-Result -Result $legacyLiveResult -ExitCode 4 -Label "Live orphaned Owner Identity v1 removal rejection"
+    Assert-True -Condition ($legacyLiveResult.Text.Contains("live or ambiguous")) -Message "Live orphaned Owner Identity v1 rejection did not report its holder gate."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacyLiveRoot) -Expected $legacyLiveBefore -Message "Live orphaned Owner Identity v1 rejection changed project state."
+
+    $legacySafeRoot = Join-Path $runRoot "owner-v1-orphan-safe"
+    $legacySafe = New-OrphanedOwnerIdentityV1RemovalFixture -Root $legacySafeRoot
+    $legacyInstanceBefore = Get-FileSnapshotExcept `
+        -Root $legacySafe.Selection.Root `
+        -ExcludedRelativePaths @("logs/mcp-availability.json")
+    $legacyUserBefore = Get-ByteSnapshot -Path $legacySafe.UserSentinelPath
+    $legacyRemoved = Invoke-Materializer `
+        -Action "RemoveIntegration" `
+        -PayloadRoot $canonicalPayloadRoot `
+        -OmitPocFixture `
+        -ConfirmedProjectMutation `
+        -TargetProjectRoot $legacySafeRoot
+    Assert-Result -Result $legacyRemoved -ExitCode 0 -Label "Orphaned Owner Identity v1 integration removal"
+    Assert-StructuredCommandResult -Result $legacyRemoved -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "COMPLETE" -Label "Orphaned Owner Identity v1 integration removal" -RequiredScopes @("instance_activation")
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $legacySafeRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"))) -Message "Orphaned Owner Identity v1 removal retained current selection."
+    Assert-Equal -Actual (Get-FileSnapshotExcept -Root $legacySafe.Selection.Root -ExcludedRelativePaths @("logs/mcp-availability.json")) -Expected $legacyInstanceBefore -Message "Orphaned Owner Identity v1 removal changed the immutable instance closure."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $legacySafe.UserSentinelPath) -Expected $legacyUserBefore -Message "Orphaned Owner Identity v1 removal changed user data."
+
+    Write-Host "[OK] Owner Identity removal blocks live, unverifiable, mismatched, partial, and conflicting authority; admits only an exact orphaned v1 selection or authenticated Supervisor authority; preserves immutable instances, indexes, leases, retirement sentinels, user data, unrelated TOML, and processes; and recovers idempotently after interruption."
 }
 
 function Invoke-ControlContractReinstallFixtureRequest {

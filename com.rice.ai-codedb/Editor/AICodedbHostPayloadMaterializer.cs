@@ -422,6 +422,7 @@ namespace Rice.AI.Codedb.Editor
     {
         None,
         ControlContractReinstallRequired,
+        InstanceIdentityReinstallRequired,
         ControlContractInvalidOrAmbiguous
     }
 
@@ -595,7 +596,8 @@ namespace Rice.AI.Codedb.Editor
         internal bool IsReady => State == AICodedbProductState.Ready;
         internal bool RequiresReinstall =>
             State == AICodedbProductState.NeedsAttention
-            && AttentionReason == AICodedbProductAttentionReason.ControlContractReinstallRequired;
+            && (AttentionReason == AICodedbProductAttentionReason.ControlContractReinstallRequired
+                || AttentionReason == AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
 
         internal AICodedbProductStatus(
             AICodedbProductState state,

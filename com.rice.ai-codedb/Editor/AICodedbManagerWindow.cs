@@ -2084,13 +2084,12 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool ShouldShowPersistentDependencyAction(AICodedbProductStatus productStatus)
         {
-            return productStatus.State == AICodedbProductState.NeedsAttention;
+            return IsProviderInstallAvailable(productStatus);
         }
 
         internal static bool ShouldOfferConfigureDependencies(AICodedbProductStatus productStatus)
         {
-            return ShouldShowPersistentDependencyAction(productStatus)
-                   || IsProviderInstallAvailable(productStatus);
+            return IsProviderInstallAvailable(productStatus);
         }
 
         internal static bool CanConfigureDependencies(bool actionInFlight)

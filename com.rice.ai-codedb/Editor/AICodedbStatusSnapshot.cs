@@ -735,6 +735,13 @@ namespace Rice.AI.Codedb.Editor
                             : status.Detail;
                     }
                     if (status.AttentionReason
+                        == AICodedbProductAttentionReason.InstanceIdentityReinstallRequired)
+                    {
+                        return string.IsNullOrWhiteSpace(status.Detail)
+                            ? "This project uses an obsolete CodeDB instance identity. Remove CodeDB Integration, then reinstall the Package to continue."
+                            : status.Detail;
+                    }
+                    if (status.AttentionReason
                         == AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous)
                     {
                         return string.IsNullOrWhiteSpace(status.Detail)
@@ -756,6 +763,11 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductAttentionReason.ControlContractReinstallRequired:
                     return AICodedbStatusItem.Warning(
                         "Control contract migration",
+                        "Removal required",
+                        diagnostic);
+                case AICodedbProductAttentionReason.InstanceIdentityReinstallRequired:
+                    return AICodedbStatusItem.Warning(
+                        "Instance identity",
                         "Removal required",
                         diagnostic);
                 case AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous:
@@ -868,6 +880,13 @@ namespace Rice.AI.Codedb.Editor
                 return AICodedbStatusItem.Warning(
                     "Current instance",
                     "Updating from " + status.GenerationId,
+                    status.Detail);
+            }
+            if (status.State == AICodedbCurrentInstanceState.ObsoleteReinstallRequired)
+            {
+                return AICodedbStatusItem.Warning(
+                    "Current instance",
+                    "Removal required",
                     status.Detail);
             }
             if (status.Present)

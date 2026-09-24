@@ -938,6 +938,10 @@ namespace Rice.AI.Codedb.Editor
             var migrationStatus = AICodedbControlContractMigrationStore.Read(
                 context.ProjectRoot,
                 context.PackageRoot);
+            var currentInstance = AICodedbCurrentInstanceStore.Read(
+                context.ProjectRoot,
+                context.PackageRoot);
+            AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
             if (migrationStatus.BlocksAutomaticStart)
                 Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
             if (cancellationToken.IsCancellationRequested || !canContinue())
@@ -1075,6 +1079,43 @@ namespace Rice.AI.Codedb.Editor
                 return LifecycleReconcileResult.WithState(migrationProductStatus.State);
             }
 
+            AICodedbProductStatus obsoleteInstanceProductStatus;
+            AICodedbCommandResult obsoleteInstanceAdmissionResult;
+            if (TryResolveObsoleteInstanceBlock(
+                    integrationStatus,
+                    migrationStatus,
+                    currentInstance,
+                    independentPrerequisiteCurrent
+                        ? independentPrerequisiteResult
+                        : null,
+                    () =>
+                    {
+                        if (!coordinatorAdmissionAllowed)
+                            return independentPrerequisiteResult;
+                        var result = RunSupervisorCommand(
+                            context,
+                            "materialize",
+                            "Probe",
+                            cancellationToken);
+                        return cancellationToken.IsCancellationRequested || !canContinue()
+                            ? null
+                            : result;
+                    },
+                    out obsoleteInstanceProductStatus,
+                    out obsoleteInstanceAdmissionResult))
+            {
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.CurrentInstanceInvalid);
+                Interlocked.Exchange(ref _scheduledMigrationAdmissionBlocked, 1);
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
+                RememberLifecycleProductStatus(
+                    obsoleteInstanceProductStatus,
+                    obsoleteInstanceAdmissionResult);
+                return LifecycleReconcileResult.WithState(obsoleteInstanceProductStatus.State);
+            }
+
             if (independentPrerequisiteRead
                 && !coordinatorAdmissionAllowed
                 && !bootstrapWithoutCoordinatorAllowed)
@@ -1172,8 +1213,6 @@ namespace Rice.AI.Codedb.Editor
             // deterministic exit-4 dead end before the Deploy convergence
             // branch can publish the initial instance. Reuse the already
             // admitted prerequisite evidence for this one cold-start path.
-            var currentInstance = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
-            AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
             var skipInitialSupervisorProbe = ShouldSkipInitialSupervisorProbeForBootstrap(
                 bootstrapWithoutCoordinatorAllowed,
                 currentInstance.State);
@@ -1454,6 +1493,88 @@ namespace Rice.AI.Codedb.Editor
                 default(AICodedbMaterializerCommandStatus),
                 reason,
                 migrationStatus.DiagnosticDetail);
+            return true;
+        }
+
+        internal static bool TryResolveObsoleteInstanceBlock(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbControlContractMigrationStatus migrationStatus,
+            AICodedbCurrentInstanceStatus currentInstance,
+            AICodedbCommandResult independentPrerequisiteResult,
+            Func<AICodedbCommandResult> prerequisiteAdmissionProbe,
+            out AICodedbProductStatus productStatus,
+            out AICodedbCommandResult admissionResult)
+        {
+            admissionResult = null;
+            if (currentInstance.State != AICodedbCurrentInstanceState.ObsoleteReinstallRequired)
+            {
+                productStatus = default(AICodedbProductStatus);
+                return false;
+            }
+
+            if (integrationStatus.IsUninstalled || !integrationStatus.IsValid)
+            {
+                productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, null);
+                return true;
+            }
+
+            admissionResult = independentPrerequisiteResult
+                              ?? (prerequisiteAdmissionProbe == null
+                                  ? null
+                                  : prerequisiteAdmissionProbe());
+            var prerequisiteStatus = AICodedbProductStatusBuilder.Build(
+                integrationStatus,
+                admissionResult);
+            AICodedbProductLayerState prerequisite;
+            if (!TryReadTrustworthyPrerequisiteEvidence(
+                    admissionResult,
+                    prerequisiteStatus,
+                    out prerequisite))
+            {
+                productStatus = new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    AICodedbProductLayerState.Blocked,
+                    "CodeDB could not verify prerequisites for obsolete instance recovery.",
+                    prerequisiteStatus.Command,
+                    AICodedbProductAttentionReason.None,
+                    currentInstance.Detail);
+                return true;
+            }
+
+            if (prerequisite == AICodedbProductLayerState.Missing)
+            {
+                productStatus = new AICodedbProductStatus(
+                    AICodedbProductState.MissingPrerequisite,
+                    AICodedbProductLayerState.Missing,
+                    prerequisiteStatus.Installed,
+                    prerequisiteStatus.Configured,
+                    prerequisiteStatus.McpAvailable,
+                    prerequisiteStatus.Detail,
+                    prerequisiteStatus.Command,
+                    AICodedbProductAttentionReason.None,
+                    currentInstance.Detail);
+                return true;
+            }
+
+            var orphanedLegacySelection =
+                migrationStatus.State == AICodedbControlContractMigrationState.Missing;
+            productStatus = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                orphanedLegacySelection
+                    ? currentInstance.Detail
+                    : "Obsolete instance evidence conflicts with an active control contract. No project changes were made.",
+                default(AICodedbMaterializerCommandStatus),
+                orphanedLegacySelection
+                    ? AICodedbProductAttentionReason.InstanceIdentityReinstallRequired
+                    : AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
+                currentInstance.Detail);
             return true;
         }
 
@@ -3571,7 +3692,8 @@ namespace Rice.AI.Codedb.Editor
         {
             if (integrationState != AICodedbProjectIntegrationState.Installed)
                 return AICodedbCoordinatorAdmissionDisposition.IntegrationNotEligible;
-            if (currentInstanceState == AICodedbCurrentInstanceState.Invalid)
+            if (currentInstanceState == AICodedbCurrentInstanceState.Invalid
+                || currentInstanceState == AICodedbCurrentInstanceState.ObsoleteReinstallRequired)
                 return AICodedbCoordinatorAdmissionDisposition.CurrentInstanceInvalid;
             if (!currentInstancePresent)
                 return AICodedbCoordinatorAdmissionDisposition.CurrentInstanceMissing;

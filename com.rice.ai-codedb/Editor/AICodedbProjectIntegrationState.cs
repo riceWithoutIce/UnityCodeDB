@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -209,6 +210,7 @@ namespace Rice.AI.Codedb.Editor
         Missing,
         Current,
         TrustedPrevious,
+        ObsoleteReinstallRequired,
         Invalid
     }
 
@@ -323,14 +325,27 @@ namespace Rice.AI.Codedb.Editor
                     pointer,
                     "generation_id",
                     pointerLabel);
-                var ownerIdentityVersion = AICodedbStrictJson.GetRequiredInt32(
-                    pointer,
-                    "owner_identity_version",
-                    pointerLabel);
-                var activationEpoch = AICodedbStrictJson.GetRequiredString(
-                    pointer,
-                    "activation_epoch",
-                    pointerLabel);
+                var hasOwnerIdentityVersion = pointer.ContainsKey("owner_identity_version");
+                var hasActivationEpoch = pointer.ContainsKey("activation_epoch");
+                if (hasOwnerIdentityVersion != hasActivationEpoch)
+                {
+                    throw new InvalidOperationException(
+                        "Current CodeDB instance selection mixes Owner Identity v1 and v2 fields.");
+                }
+                var legacyOwnerIdentity = !hasOwnerIdentityVersion;
+                AssertExactPointerFields(pointer, legacyOwnerIdentity, pointerLabel);
+                var ownerIdentityVersion = legacyOwnerIdentity
+                    ? 1
+                    : AICodedbStrictJson.GetRequiredInt32(
+                        pointer,
+                        "owner_identity_version",
+                        pointerLabel);
+                var activationEpoch = legacyOwnerIdentity
+                    ? string.Empty
+                    : AICodedbStrictJson.GetRequiredString(
+                        pointer,
+                        "activation_epoch",
+                        pointerLabel);
                 var activatedAtText = AICodedbStrictJson.GetRequiredString(pointer, "activated_at_utc", pointerLabel);
                 DateTimeOffset activatedAt;
                 Guid parsedInstanceId;
@@ -348,8 +363,9 @@ namespace Rice.AI.Codedb.Editor
                     || !string.Equals(instanceRelativePath, expectedInstanceRelativePath, StringComparison.Ordinal)
                     || !IsSha256(manifestHash)
                     || !IsGenerationId(pointerGenerationId)
-                    || ownerIdentityVersion != AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
-                    || !IsAttemptId(activationEpoch)
+                    || (!legacyOwnerIdentity
+                        && (ownerIdentityVersion != AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
+                            || !IsAttemptId(activationEpoch)))
                     || !DateTimeOffset.TryParse(
                         activatedAtText,
                         CultureInfo.InvariantCulture,
@@ -424,7 +440,8 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 var runtimeContract = AICodedbPackageRuntimeContractStore.Read(packageRoot);
-                if (ownerIdentityVersion != runtimeContract.OwnerIdentityVersion)
+                if (!legacyOwnerIdentity
+                    && ownerIdentityVersion != runtimeContract.OwnerIdentityVersion)
                     throw new InvalidOperationException("Current CodeDB instance Owner Identity version is not current.");
                 var selectedIdentity = new AICodedbRuntimeIdentity(
                     packageVersion,
@@ -496,7 +513,9 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 return new AICodedbCurrentInstanceStatus(
-                    state,
+                    legacyOwnerIdentity
+                        ? AICodedbCurrentInstanceState.ObsoleteReinstallRequired
+                        : state,
                     instanceId,
                     instanceRelativePath,
                     instanceRoot,
@@ -506,9 +525,11 @@ namespace Rice.AI.Codedb.Editor
                     payloadVersion,
                     payloadSequence,
                     bootstrapProtocol,
-                    state == AICodedbCurrentInstanceState.Current
-                        ? "The selected CodeDB instance identity and generation closure are current."
-                        : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.",
+                    legacyOwnerIdentity
+                        ? "The selected CodeDB instance is authenticated Owner Identity v1 evidence. Remove CodeDB Integration, then reinstall the Package."
+                        : state == AICodedbCurrentInstanceState.Current
+                            ? "The selected CodeDB instance identity and generation closure are current."
+                            : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.",
                     ownerIdentityVersion,
                     activationEpoch);
             }
@@ -544,6 +565,37 @@ namespace Rice.AI.Codedb.Editor
                     0,
                     0,
                     exception.Message);
+            }
+        }
+
+        private static void AssertExactPointerFields(
+            Dictionary<string, object> pointer,
+            bool legacyOwnerIdentity,
+            string label)
+        {
+            var expected = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "schema_version",
+                "managed_by",
+                "project_identity",
+                "instance_id",
+                "instance_relative_path",
+                "instance_manifest_sha256",
+                "generation_id",
+                "activated_at_utc"
+            };
+            if (!legacyOwnerIdentity)
+            {
+                expected.Add("owner_identity_version");
+                expected.Add("activation_epoch");
+            }
+
+            if (pointer == null
+                || pointer.Count != expected.Count
+                || pointer.Keys.Any(field => !expected.Contains(field)))
+            {
+                throw new InvalidOperationException(
+                    label + " contains an unknown, missing, or conflicting property.");
             }
         }
 

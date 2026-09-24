@@ -203,14 +203,30 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus cachedProductStatus,
             AICodedbProjectIntegrationStatus currentIntegrationStatus,
             AICodedbControlContractMigrationStatus currentMigrationStatus,
+            AICodedbCurrentInstanceStatus currentInstanceStatus,
             bool confirmedProjectMutation)
         {
-            return confirmedProjectMutation
-                   && cachedProductStatus.RequiresReinstall
-                   && cachedProductStatus.Prerequisite == AICodedbProductLayerState.Current
-                   && currentIntegrationStatus.State == AICodedbProjectIntegrationState.Installed
+            if (!confirmedProjectMutation
+                || !cachedProductStatus.RequiresReinstall
+                || cachedProductStatus.Prerequisite != AICodedbProductLayerState.Current
+                || currentIntegrationStatus.State != AICodedbProjectIntegrationState.Installed)
+            {
+                return false;
+            }
+
+            if (cachedProductStatus.AttentionReason
+                == AICodedbProductAttentionReason.ControlContractReinstallRequired)
+            {
+                return currentMigrationStatus.State
+                       == AICodedbControlContractMigrationState.ObsoleteReinstallRequired;
+            }
+
+            return cachedProductStatus.AttentionReason
+                   == AICodedbProductAttentionReason.InstanceIdentityReinstallRequired
                    && currentMigrationStatus.State
-                   == AICodedbControlContractMigrationState.ObsoleteReinstallRequired;
+                   == AICodedbControlContractMigrationState.Missing
+                   && currentInstanceStatus.State
+                   == AICodedbCurrentInstanceState.ObsoleteReinstallRequired;
         }
 
         internal static async Task<AICodedbCommandResult> RunRemoveIntegrationCodeDBAsync(
@@ -234,10 +250,14 @@ namespace Rice.AI.Codedb.Editor
                 var migrationStatus = AICodedbControlContractMigrationStore.Read(
                     context.ProjectRoot,
                     context.PackageRoot);
+                var currentInstanceStatus = AICodedbCurrentInstanceStore.Read(
+                    context.ProjectRoot,
+                    context.PackageRoot);
                 return IsExplicitRemoveIntegrationAdmissionAllowed(
                     cachedProductStatus,
                     integrationStatus,
                     migrationStatus,
+                    currentInstanceStatus,
                     confirmedProjectMutation);
             });
             if (!currentAdmission)

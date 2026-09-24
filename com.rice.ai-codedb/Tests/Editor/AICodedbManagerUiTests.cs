@@ -598,6 +598,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbProductState.Ready, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractReinstallRequired, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.InstanceIdentityReinstallRequired, true, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous, true, false, ExpectedResult = false)]
         [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, true, true, ExpectedResult = false)]
@@ -725,8 +726,8 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
             Assert.That(AICodedbManagerWindow.IsProviderInstallAvailable(status), Is.False);
-            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.True);
-            Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.True);
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.False);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(false), Is.True);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(true), Is.False);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
@@ -3470,6 +3471,47 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "legacy",
                 "ambiguous",
                 "invalid");
+            var missingMigration = new AICodedbControlContractMigrationStatus(
+                AICodedbControlContractMigrationState.Missing,
+                AICodedbControlContract.CreateDefaultIdentity(),
+                "current",
+                "legacy",
+                "missing",
+                string.Empty);
+            var legacyInstance = new AICodedbCurrentInstanceStatus(
+                AICodedbCurrentInstanceState.ObsoleteReinstallRequired,
+                "0123456789abcdef0123456789abcdef",
+                "AIWork/.runtime/codedb/instances/0123456789abcdef0123456789abcdef",
+                string.Empty,
+                string.Empty,
+                "poc.33",
+                "legacy-package",
+                "legacy-payload",
+                33,
+                1,
+                "obsolete",
+                1);
+            var invalidInstance = new AICodedbCurrentInstanceStatus(
+                AICodedbCurrentInstanceState.Invalid,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                0,
+                0,
+                "invalid");
+            var instanceCached = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "obsolete instance",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
             var missingPrerequisite = new AICodedbProductStatus(
                 AICodedbProductState.MissingPrerequisite,
                 AICodedbProductLayerState.Missing,
@@ -3492,6 +3534,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     cached,
                     installed,
                     obsolete,
+                    invalidInstance,
                     true),
                 Is.True);
             Assert.That(
@@ -3499,6 +3542,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     cached,
                     installed,
                     obsolete,
+                    invalidInstance,
                     false),
                 Is.False,
                 "Confirmation must not be inferred from the cached reason.");
@@ -3507,6 +3551,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     missingPrerequisite,
                     installed,
                     obsolete,
+                    invalidInstance,
                     true),
                 Is.False);
             Assert.That(
@@ -3514,6 +3559,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     genericAttention,
                     installed,
                     obsolete,
+                    invalidInstance,
                     true),
                 Is.False);
             Assert.That(
@@ -3521,6 +3567,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     cached,
                     uninstalled,
                     obsolete,
+                    invalidInstance,
                     true),
                 Is.False);
             Assert.That(
@@ -3528,6 +3575,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     cached,
                     invalidIntegration,
                     obsolete,
+                    invalidInstance,
                     true),
                 Is.False);
             Assert.That(
@@ -3535,6 +3583,31 @@ namespace Rice.AI.Codedb.Editor.Tests
                     cached,
                     installed,
                     ambiguous,
+                    invalidInstance,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
+                    instanceCached,
+                    installed,
+                    missingMigration,
+                    legacyInstance,
+                    true),
+                Is.True);
+            Assert.That(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
+                    instanceCached,
+                    installed,
+                    missingMigration,
+                    invalidInstance,
+                    true),
+                Is.False);
+            Assert.That(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
+                    instanceCached,
+                    installed,
+                    ambiguous,
+                    legacyInstance,
                     true),
                 Is.False);
         }

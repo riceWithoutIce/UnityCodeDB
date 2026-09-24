@@ -10557,8 +10557,59 @@ function Get-RemoveIntegrationAuthority {
         }) | Out-Null
     }
     if ($present.Count -eq 0) {
-        if ($AllowMissing) { return $null }
-        throw "No removable Package-owned Supervisor control authority is present."
+        $selection = Get-ValidatedRemoveIntegrationSelection `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -OwnerIdentityVersion 1 `
+            -AllowMissing
+        if ($null -eq $selection) {
+            if ($AllowMissing) { return $null }
+            throw "No removable Package-owned Supervisor control authority is present."
+        }
+
+        $contractsRoot = ConvertTo-AbsoluteChildPath `
+            -Root $ProjectRoot `
+            -RelativePath "$($script:InstanceControlRelativePath)/contracts" `
+            -Label "control-contract root"
+        if ((Test-Path -LiteralPath $contractsRoot) -and
+            @(Get-ChildItem -LiteralPath $contractsRoot -File -Recurse -Force).Count -ne 0) {
+            throw "Orphaned Owner Identity v1 selection conflicts with retained control-contract evidence."
+        }
+
+        $lastKnownGood = Get-ValidatedRemoveIntegrationSelection `
+            -Manifest $Manifest `
+            -ProjectRoot $ProjectRoot `
+            -OwnerIdentityVersion 1 `
+            -LastKnownGood `
+            -AllowMissing
+        foreach ($instance in @($selection, $lastKnownGood) | Where-Object { $null -ne $_ }) {
+            $holders = Get-InstanceRetirementHolderEvidence -Evidence $instance -ProjectRoot $ProjectRoot
+            if (-not $holders.Clear) {
+                throw "Remove CodeDB Integration is blocked while an orphaned Owner Identity v1 instance owner is live or ambiguous."
+            }
+        }
+
+        $fingerprintParts = @(
+            "ORPHANED_V1_SELECTION",
+            (Get-TextSha256 -Text $selection.Text),
+            $selection.InstanceId,
+            $selection.GenerationId,
+            $selection.InstanceManifestSha256,
+            $selection.GenerationManifestSha256,
+            $(if ($null -eq $lastKnownGood) { "" } else { Get-TextSha256 -Text $lastKnownGood.Text })
+        )
+        return [pscustomobject]@{
+            Kind = "ORPHANED_V1_SELECTION"
+            OwnerIdentityVersion = 1
+            RelativePath = ""
+            Path = ""
+            OwnerFingerprint = Get-TextSha256 -Text ($fingerprintParts -join "`n")
+            Selection = $selection
+            LastKnownGood = $lastKnownGood
+            Inventory = @()
+            ActivationState = $null
+            RuntimeContractSha256 = ""
+        }
     }
     if ($present.Count -ne 1) {
         throw "Multiple Supervisor control authorities are present; removal cannot select one safely."

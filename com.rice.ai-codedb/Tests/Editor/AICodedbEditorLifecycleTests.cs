@@ -153,6 +153,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(true, AICodedbCurrentInstanceState.Missing, ExpectedResult = true)]
         [TestCase(true, AICodedbCurrentInstanceState.Current, ExpectedResult = false)]
         [TestCase(true, AICodedbCurrentInstanceState.TrustedPrevious, ExpectedResult = false)]
+        [TestCase(true, AICodedbCurrentInstanceState.ObsoleteReinstallRequired, ExpectedResult = false)]
         [TestCase(true, AICodedbCurrentInstanceState.Invalid, ExpectedResult = false)]
         [TestCase(false, AICodedbCurrentInstanceState.Missing, ExpectedResult = false)]
         public bool InitialSupervisorProbe_IsSkippedOnlyForFreshBootstrap(
@@ -3417,6 +3418,52 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CurrentInstanceStore_ExactOwnerIdentityV1RequiresExplicitRemoval()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33", true);
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+            var plan = AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                status.State,
+                default(AICodedbProductStatus));
+
+            Assert.That(
+                status.State,
+                Is.EqualTo(AICodedbCurrentInstanceState.ObsoleteReinstallRequired));
+            Assert.That(status.OwnerIdentityVersion, Is.EqualTo(1));
+            Assert.That(status.CanPublishEditorLease, Is.False);
+            Assert.That(status.Detail, Does.Contain("Remove CodeDB Integration"));
+            Assert.That(
+                plan,
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Classification must be read-only.");
+        }
+
+        [Test]
+        public void CurrentInstanceStore_OwnerIdentityV1WithUnknownFieldRemainsInvalid()
+        {
+            InstallPackageDeclaredPreviousInstance("poc.33", true);
+            var pointerPath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceCurrentRelativePath);
+            var pointerText = File.ReadAllText(pointerPath).TrimEnd('}', '\r', '\n')
+                              + ",\"unexpected\":true}";
+            WriteUtf8NoBom(pointerPath, pointerText);
+            var before = GetProjectSnapshot(_projectRoot);
+
+            var status = AICodedbCurrentInstanceStore.Read(
+                _projectRoot,
+                AICodedbPaths.PackageRootPath);
+
+            Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.Invalid));
+            Assert.That(status.Detail, Does.Contain("unknown, missing, or conflicting"));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Rejected evidence must remain read-only.");
+        }
+
+        [Test]
         public void SupervisorBridge_HandoffsOnlyAfterSuccessfulSelectedInstanceChange()
         {
             Assert.That(
@@ -4480,6 +4527,58 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(blocked, Is.False);
             Assert.That(probeCount, Is.Zero);
             Assert.That(admissionResult, Is.Null);
+        }
+
+        [TestCase(
+            AICodedbControlContractMigrationState.Missing,
+            AICodedbProductAttentionReason.InstanceIdentityReinstallRequired,
+            true)]
+        [TestCase(
+            AICodedbControlContractMigrationState.Current,
+            AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
+            false)]
+        public void ObsoleteInstance_RequiresExactOrphanedControlStateForRemoval(
+            AICodedbControlContractMigrationState migrationState,
+            AICodedbProductAttentionReason expectedReason,
+            bool expectedReinstall)
+        {
+            var obsoleteInstance = new AICodedbCurrentInstanceStatus(
+                AICodedbCurrentInstanceState.ObsoleteReinstallRequired,
+                "0123456789abcdef0123456789abcdef",
+                "AIWork/.runtime/codedb/instances/0123456789abcdef0123456789abcdef",
+                string.Empty,
+                string.Empty,
+                "poc.33",
+                "legacy-package",
+                "legacy-payload",
+                33,
+                1,
+                "authenticated obsolete instance",
+                1);
+            var probeCount = 0;
+            AICodedbProductStatus productStatus;
+            AICodedbCommandResult admissionResult;
+
+            var blocked = AICodedbEditorLifecycle.TryResolveObsoleteInstanceBlock(
+                CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed),
+                CreateMigrationStatus(migrationState),
+                obsoleteInstance,
+                null,
+                () =>
+                {
+                    probeCount++;
+                    return PrerequisiteResult("CURRENT");
+                },
+                out productStatus,
+                out admissionResult);
+
+            Assert.That(blocked, Is.True);
+            Assert.That(probeCount, Is.EqualTo(1));
+            Assert.That(admissionResult, Is.Not.Null);
+            Assert.That(productStatus.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(productStatus.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(productStatus.AttentionReason, Is.EqualTo(expectedReason));
+            Assert.That(productStatus.RequiresReinstall, Is.EqualTo(expectedReinstall));
         }
 
         [TestCase(AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
@@ -5556,7 +5655,9 @@ namespace Rice.AI.Codedb.Editor.Tests
             return Path.Combine(generationRoot, "scripts", "verify-codedb-project.ps1");
         }
 
-        private string InstallPackageDeclaredPreviousInstance(string generationId)
+        private string InstallPackageDeclaredPreviousInstance(
+            string generationId,
+            bool legacyOwnerIdentity = false)
         {
             var packageGenerationRoot = Path.Combine(
                 AICodedbPaths.PackageRootPath,
@@ -5663,6 +5764,11 @@ namespace Rice.AI.Codedb.Editor.Tests
                 _projectRoot,
                 AICodedbProjectSettings.InstanceCurrentRelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(instancePointerPath));
+            var ownerIdentityFields = legacyOwnerIdentity
+                ? string.Empty
+                : ",\"owner_identity_version\":"
+                  + AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion
+                  + ",\"activation_epoch\":\"0123456789abcdef0123456789abcdef\"";
             WriteUtf8NoBom(
                 instancePointerPath,
                 "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
@@ -5670,7 +5776,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 + "\"instance_id\":\"" + instanceId + "\","
                 + "\"instance_relative_path\":\"" + instanceRelativePath + "\","
                 + "\"instance_manifest_sha256\":\"" + GetSha256(instanceManifestPath) + "\","
-                + "\"generation_id\":\"" + generationId + "\","
+                + "\"generation_id\":\"" + generationId + "\""
+                + ownerIdentityFields + ","
                 + "\"activated_at_utc\":\"2026-08-26T00:00:02.0000000Z\"}");
             return instanceRoot;
         }
