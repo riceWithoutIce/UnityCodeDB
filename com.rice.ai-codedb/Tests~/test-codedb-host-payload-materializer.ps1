@@ -7875,15 +7875,73 @@ function Invoke-PartialV1RemovalScenarios {
     }
     $supervisorOperationPath = Join-Path $supervisorRoot "operation.json"
     Write-Utf8File -Path $supervisorOperationPath -Content (($failed | ConvertTo-Json -Depth 8) + "`n")
-    $event = [ordered]@{
+    $supervisorStarted = [ordered]@{
         schema_version = 1
         sequence = 1
+        at_utc = $timestamp
+        event = "supervisor_started"
+        detail = ""
+    }
+    $operationStarted = [ordered]@{
+        schema_version = 1
+        sequence = 2
+        at_utc = $timestamp
+        event = "operation_started"
+        detail = $failedName
+    }
+    $event = [ordered]@{
+        schema_version = 1
+        sequence = 3
         at_utc = $timestamp
         event = "operation_failed"
         detail = $failedName
     }
     $eventsPath = Join-Path $supervisorRoot "supervisor-events.jsonl"
-    Write-Utf8File -Path $eventsPath -Content (($event | ConvertTo-Json -Compress) + "`n")
+    $failedEventDocument = (Read-BoundedJsonDocument -Path $supervisorOperationPath -Label "partial v1 fixture operation" -MaximumBytes (256 * 1024)).Document
+    $writeEvents = {
+        param([object[]]$Rows)
+        $lines = @($Rows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 }) -join "`n"
+        Write-Utf8File -Path $eventsPath -Content ($lines + "`n")
+    }
+    & $writeEvents @($supervisorStarted, $operationStarted, $event)
+    Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName
+
+    $priorStarted = [ordered]@{
+        schema_version = 1
+        sequence = 1
+        at_utc = ([DateTime]::UtcNow.AddDays(-1).ToString("o"))
+        event = "supervisor_started"
+        detail = ""
+    }
+    $priorFailure = [ordered]@{
+        schema_version = 1
+        sequence = 2
+        at_utc = ([DateTime]::UtcNow.AddDays(-1).AddSeconds(1).ToString("o"))
+        event = "operation_failed"
+        detail = $failedName
+    }
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $event)
+    Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName
+
+    $operationStarted.sequence = 4
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $event)
+    Assert-ThrowsMessage -Action { Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName } -ExpectedMessage "session events are not contiguous" -Label "Partial v1 session sequence gap"
+    $operationStarted.sequence = 2
+    $supervisorStarted.event = "status_error"
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $event)
+    Assert-ThrowsMessage -Action { Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName } -ExpectedMessage "reset has no session start" -Label "Partial v1 invalid session reset"
+    $supervisorStarted.event = "supervisor_started"
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted)
+    Assert-ThrowsMessage -Action { Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName } -ExpectedMessage "no unique terminal-session event pair" -Label "Partial v1 historical same-name failure"
+    $duplicateStart = [ordered]@{ schema_version = 1; sequence = 4; at_utc = $timestamp; event = "operation_started"; detail = $failedName }
+    $duplicateFailure = [ordered]@{ schema_version = 1; sequence = 5; at_utc = $timestamp; event = "operation_failed"; detail = $failedName }
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $event, $duplicateStart, $duplicateFailure)
+    Assert-ThrowsMessage -Action { Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName } -ExpectedMessage "no unique terminal-session event pair" -Label "Partial v1 ambiguous current failure"
+    $unrelatedStart = [ordered]@{ schema_version = 1; sequence = 3; at_utc = $timestamp; event = "operation_started"; detail = "materialize:Verify" }
+    $delayedFailure = [ordered]@{ schema_version = 1; sequence = 4; at_utc = $timestamp; event = "operation_failed"; detail = $failedName }
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $unrelatedStart, $delayedFailure)
+    Assert-ThrowsMessage -Action { Assert-PartialV1SupervisorFailureEvents -EventsPath $eventsPath -Operation $failedEventDocument -FailedName $failedName } -ExpectedMessage "no unique terminal-session event pair" -Label "Partial v1 interleaved operation rejection"
+    & $writeEvents @($priorStarted, $priorFailure, $supervisorStarted, $operationStarted, $event)
     Assert-ThrowsMessage `
         -Action { Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $hostRoot } `
         -ExpectedMessage "exact field set" `

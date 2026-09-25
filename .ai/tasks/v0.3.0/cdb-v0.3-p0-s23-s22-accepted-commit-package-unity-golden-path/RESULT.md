@@ -328,3 +328,107 @@ Next action: decide exact four-source-file plus S23 evidence commit scope,
 then separately authorize commit-derived Package export and human Unity retry.
 Human decision or authorization required: commit scope, export, validation
 project Package switch, Unity retry, Verifier routing, push, and publication.
+
+## Phase C - Commit-Derived Dual-Selection Package Ready
+
+- The human authorized all prerequisites before the next human Unity
+  validation. The exact commit staged only the four reviewed Package
+  source/test paths and this S23 result record; staged `git diff --check`
+  passed. Commit: `01684f9e82fa2bb6e6c102792b90813e81931379`, parent
+  `391ed4034672d49fd7700409abffd9258c249faa`, message
+  `fix(v0.3): accept journal-bound partial v1 selections`.
+- Exported from that commit into the new, relative artifact root
+  `.artifacts/v0.3.0-preview.5-s23-v1-selection-01684f9-final/`.
+  Both commit-staged and exact-ZIP Package closure validators passed with
+  `source_count=46` and `mismatch_count=0`. Shared hashes: generation
+  `b634d66584c84f4855fb4b29a1c16f9ecc6898cca670258454d9c9c12d794666`,
+  host-current
+  `9f5b72e8ee2992e69172c9f4727d578f5a9ec35e8bab61b084ed1ee281f0612b`,
+  runtime contract
+  `df329facd024dd45b8753cff921cf340543e31798be5a485f99421e523402303`.
+- Export result: one `com.rice.ai-codedb` root, 479 files, 9,699,279 bytes,
+  479 ZIP entries. ZIP SHA-256:
+  `37075a7ea0113b1f5eefb26af9489b7ebb156e38b58ba7633adf5c247fa4424a`.
+  The ZIP hash was independently read back after export. Earlier artifacts
+  were preserved.
+- Updated only the CodeDB dependency in
+  `UnityValidationProject/Packages/manifest.json` to
+  `file:../../.artifacts/v0.3.0-preview.5-s23-v1-selection-01684f9-final/package/com.rice.ai-codedb`.
+  The JSON parses, the relative target exists, and its Package identity is
+  `com.rice.ai-codedb@0.3.0-preview.5`. Scoped manifest `git diff --check`
+  passed. `packages-lock.json` and other validation-project files were not
+  manually edited in this checkpoint.
+- The new Package has not been imported by Unity. No Unity/Unity MCP,
+  EditMode, Manager action, real `RemoveIntegration`, Provider action,
+  external process probe, push, tag, or publication occurred. Other dirty
+  and untracked workspace content remains untouched.
+
+Current task: `cdb-v0.3-p0-s23-s22-accepted-commit-package-unity-golden-path`
+Current status: `COMMIT_DERIVED_PACKAGE_CLOSURE_PASS / HUMAN_UNITY_GATE_PENDING`
+Next notification: human operator
+Next action: open `UnityValidationProject` visibly, wait for Package import
+and C# compilation, then report the first terminal result before clicking a
+Manager action or entering Play.
+Human decision or authorization required: human-owned Unity validation,
+any subsequent product mutation, Verifier routing, push, and publication.
+
+## Phase C - Historical Supervisor Event Contract Source Gate
+
+- The human reported zero Unity C# errors and three warnings after importing
+  the commit-derived dual-selection Package. Manager nevertheless settled at
+  `Needs attention`: `Partial Owner Identity v1 Supervisor events are not
+  contiguous.` No Manager action or Play transition was attempted. Unity was
+  then closed by the human before diagnosis and source work.
+- Authorized read-only inspection found exactly `operation.json` and
+  `supervisor-events.jsonl` in the v1 Supervisor namespace, both regular
+  non-reparse files. The event file has 285 valid JSON lines arranged in 36
+  sessions; every session is internally contiguous, but each starts again at
+  sequence one. Thirteen prior sessions end without `supervisor_retiring`.
+  The final session contains a start/failure pair matching the current failed
+  operation's name and UTC window. The initial/final read-only hashes were
+  unchanged: operation
+  `6096ddf9dd2db274e17e4d4e84f3ab526b616d86760a7f232985d5a37c16a007`,
+  events
+  `ee9e029e16ece7fb2a979dc6548d8811e9eb23c4eaa63e295e95e78f9d63e5b5`.
+- Root cause: the Package Supervisor appends to a persistent event file while
+  restarting its in-memory event sequence at one. Both partial-v1 readers
+  incorrectly required global monotonicity. The old fixture contained only
+  one failure event and could not expose this mismatch.
+- The approved same-S23 correction changes only five Package source/test
+  paths: the Editor v1 reader, materializer v1 reader, their focused tests,
+  and the synthetic Supervisor restart test. Both readers now validate every
+  bounded session and allow a reset only at `supervisor_started`. Only one
+  start/failure pair in the final session matching the current failed
+  operation's name and UTC times may corroborate it; historical same-name
+  failures, gaps, wrong resets, duplicate or interleaved operation events
+  remain rejected. Existing authority, holder and pre-mutation checks were
+  not relaxed. No historical event file was rewritten.
+- Initial PowerShell focused attempts stopped in Coder-authored fixture
+  plumbing before product classification: an unnecessary `GetNewClosure()`
+  hid `Write-Utf8File`, then a direct helper call passed an ordered fixture
+  map instead of the parsed JSON operation. Two stack captures identified
+  these exact causes. Both were corrected only in the test harness. The
+  subsequent focused `-PartialV1RemovalOnly` run passed, and a final run
+  after adding interleaving rejection also passed (exit 0 each, no retry
+  after a product failure).
+- The existing synthetic Supervisor `manager-action-correlation` focused
+  Node scenario passed once with its new restart-stream assertion. PowerShell
+  production/test AST parsing, Node syntax, Roslyn syntax of both C# files,
+  and five-file scoped `git diff --check` all passed. The new pure parser
+  also accepted the unchanged 36-session real event file twice in read-only
+  checks, including after the interleaving guard.
+- Final five-file binary diff identity on HEAD
+  `01684f9e82fa2bb6e6c102792b90813e81931379`:
+  `73334d2f57d0a7ca5947ba5e5b1b5483fd197f32`.
+  C# semantic compilation/EditMode on this new snapshot, Unity/Unity MCP,
+  full regression, real RemoveIntegration, holder/process probes, commit,
+  export, push and publication remain NOT RUN at this checkpoint.
+
+Current task: `cdb-v0.3-p0-s23-s22-accepted-commit-package-unity-golden-path`
+Current status: `HISTORICAL_EVENT_SOURCE_GATE_PASS / COMMIT_DERIVED_PACKAGE_PENDING`
+Next notification: UnityCodeDB v0.3 Planner / human operator
+Next action: review the stable five-file source/test patch and this
+same-S23 addendum; then form one exact commit-derived Package and prepare the
+human Unity compile gate without touching runtime evidence.
+Human decision or authorization required: human-owned Unity validation,
+Verifier routing, push and publication.

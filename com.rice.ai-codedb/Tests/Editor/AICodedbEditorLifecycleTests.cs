@@ -3541,9 +3541,19 @@ namespace Rice.AI.Codedb.Editor.Tests
                 { "child", null }, { "started_at_utc", timestamp }, { "completed_at_utc", timestamp },
                 { "result", new Dictionary<string, object> { { "exit_code", 4 } } }
             };
-            var observed = new Dictionary<string, object>
+            var supervisorStarted = new Dictionary<string, object>
             {
                 { "schema_version", 1 }, { "sequence", 1 }, { "at_utc", timestamp },
+                { "event", "supervisor_started" }, { "detail", string.Empty }
+            };
+            var operationStarted = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "sequence", 2 }, { "at_utc", timestamp },
+                { "event", "operation_started" }, { "detail", "materialize:DryRun" }
+            };
+            var observed = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "sequence", 3 }, { "at_utc", timestamp },
                 { "event", "operation_failed" }, { "detail", "materialize:DryRun" }
             };
             var failedPath = Path.Combine(supervisorRoot, "operation.json");
@@ -3552,14 +3562,66 @@ namespace Rice.AI.Codedb.Editor.Tests
             WriteUtf8NoBom(activationPath, AICodedbSupervisorBridge.SerializeJsonObject(activation));
             WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
             WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));
-            WriteUtf8NoBom(Path.Combine(supervisorRoot, "supervisor-events.jsonl"),
-                AICodedbSupervisorBridge.SerializeJsonObject(observed) + "\n");
+            var eventsPath = Path.Combine(supervisorRoot, "supervisor-events.jsonl");
+            Action<Dictionary<string, object>[]> writeEvents = records =>
+            {
+                var lines = new StringBuilder();
+                foreach (var record in records)
+                    lines.Append(AICodedbSupervisorBridge.SerializeJsonObject(record)).Append('\n');
+                WriteUtf8NoBom(eventsPath, lines.ToString());
+            };
+            writeEvents(new[] { supervisorStarted, operationStarted, observed });
             var before = GetProjectSnapshot(_projectRoot);
 
             var accepted = AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath);
             Assert.That(accepted.State, Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired));
             Assert.That(accepted.BlocksAutomaticStart, Is.True);
             Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
+
+            var priorStarted = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "sequence", 1 }, { "at_utc", "2026-08-25T00:00:00.0000000Z" },
+                { "event", "supervisor_started" }, { "detail", string.Empty }
+            };
+            var priorFailure = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "sequence", 2 }, { "at_utc", "2026-08-25T00:00:01.0000000Z" },
+                { "event", "operation_failed" }, { "detail", "materialize:DryRun" }
+            };
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, observed });
+            var segmentedBefore = GetProjectSnapshot(_projectRoot);
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(segmentedBefore));
+
+            operationStarted["sequence"] = 4;
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, observed });
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            operationStarted["sequence"] = 2;
+            supervisorStarted["event"] = "status_error";
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, observed });
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            supervisorStarted["event"] = "supervisor_started";
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted });
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous),
+                "A matching failure in an earlier session cannot authorize the current operation.");
+            var duplicateStart = new Dictionary<string, object>(operationStarted) { ["sequence"] = 4 };
+            var duplicateFailure = new Dictionary<string, object>(observed) { ["sequence"] = 5 };
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, observed, duplicateStart, duplicateFailure });
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            var unrelatedStart = new Dictionary<string, object>(operationStarted)
+            {
+                ["sequence"] = 3, ["detail"] = "materialize:Verify"
+            };
+            var delayedFailure = new Dictionary<string, object>(observed) { ["sequence"] = 4 };
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, unrelatedStart, delayedFailure });
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            writeEvents(new[] { priorStarted, priorFailure, supervisorStarted, operationStarted, observed });
 
             failed["selected_generation_id"] = "unknown";
             WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));

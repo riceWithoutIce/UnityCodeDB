@@ -640,23 +640,7 @@ namespace Rice.AI.Codedb.Editor
             var eventsInfo = new FileInfo(eventsPath);
             if (eventsInfo.Length <= 0 || eventsInfo.Length > 4 * 1024 * 1024)
                 throw new InvalidOperationException("Partial Owner Identity v1 Supervisor events have an invalid size.");
-            var sequence = 0;
-            var foundFailure = false;
-            foreach (var line in File.ReadAllLines(eventsPath))
-            {
-                var observed = AICodedbStrictJson.ParseObject(line, "partial Owner Identity v1 Supervisor event");
-                RequireExactFields(observed,
-                    new[] { "schema_version", "sequence", "at_utc", "event", "detail" },
-                    Array.Empty<string>(),
-                    "partial Owner Identity v1 Supervisor event");
-                if (AICodedbStrictJson.GetRequiredInt32(observed, "schema_version", "partial Owner Identity v1 Supervisor event") != 1
-                    || AICodedbStrictJson.GetRequiredInt32(observed, "sequence", "partial Owner Identity v1 Supervisor event") != ++sequence)
-                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor events are not contiguous.");
-                foundFailure |= string.Equals(AICodedbStrictJson.GetRequiredString(observed, "event", "partial Owner Identity v1 Supervisor event"), "operation_failed", StringComparison.Ordinal)
-                    && string.Equals(AICodedbStrictJson.GetRequiredString(observed, "detail", "partial Owner Identity v1 Supervisor event"), failedName, StringComparison.Ordinal);
-            }
-            if (!foundFailure)
-                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor failure has no matching event.");
+            RequirePartialV1SupervisorFailureEvents(eventsPath, failed, failedName);
 
             var versionRoot = Directory.GetParent(namespacePath).FullName;
             var activation = ReadEvidence(Path.Combine(versionRoot, "activation.json"), "Owner Identity v1 activation");
@@ -740,6 +724,87 @@ namespace Rice.AI.Codedb.Editor
             }
             return new NamespaceEvidence(NamespaceEvidenceKind.Obsolete, false,
                 "An authenticated partial Owner Identity v1 control state requires explicit integration removal.");
+        }
+
+        private static void RequirePartialV1SupervisorFailureEvents(
+            string eventsPath, Dictionary<string, object> failed, string failedName)
+        {
+            const string label = "partial Owner Identity v1 Supervisor event";
+            DateTimeOffset startedAt;
+            DateTimeOffset completedAt;
+            if (!DateTimeOffset.TryParse(AICodedbStrictJson.GetRequiredString(failed, "started_at_utc", label),
+                    CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out startedAt)
+                || !DateTimeOffset.TryParse(AICodedbStrictJson.GetRequiredString(failed, "completed_at_utc", label),
+                    CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out completedAt)
+                || startedAt.Offset != TimeSpan.Zero || completedAt.Offset != TimeSpan.Zero
+                || completedAt < startedAt)
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor operation timestamps are invalid.");
+
+            var sequence = 0;
+            var matchingStarts = 0;
+            var matchingFailures = 0;
+            var interleavedOperation = false;
+            var lastOperationEventMatches = false;
+            DateTimeOffset? previousAt = null;
+            foreach (var line in File.ReadAllLines(eventsPath))
+            {
+                var observed = AICodedbStrictJson.ParseObject(line, label);
+                RequireExactFields(observed,
+                    new[] { "schema_version", "sequence", "at_utc", "event", "detail" },
+                    Array.Empty<string>(), label);
+                var next = AICodedbStrictJson.GetRequiredInt32(observed, "sequence", label);
+                var eventName = AICodedbStrictJson.GetRequiredString(observed, "event", label);
+                var detail = AICodedbStrictJson.GetRequiredString(observed, "detail", label);
+                DateTimeOffset at;
+                if (!DateTimeOffset.TryParse(AICodedbStrictJson.GetRequiredString(observed, "at_utc", label),
+                        CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at)
+                    || at.Offset != TimeSpan.Zero
+                    || AICodedbStrictJson.GetRequiredInt32(observed, "schema_version", label) != 1)
+                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor event identity or timestamp is invalid.");
+                if (next == 1)
+                {
+                    if (!string.Equals(eventName, "supervisor_started", StringComparison.Ordinal))
+                        throw new InvalidOperationException("Partial Owner Identity v1 Supervisor event reset has no session start.");
+                    matchingStarts = 0;
+                    matchingFailures = 0;
+                    interleavedOperation = false;
+                    lastOperationEventMatches = false;
+                    previousAt = null;
+                }
+                else if (next != sequence + 1)
+                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor session events are not contiguous.");
+                if (previousAt.HasValue && at < previousAt.Value)
+                    throw new InvalidOperationException("Partial Owner Identity v1 Supervisor session timestamps are not ordered.");
+                sequence = next;
+                previousAt = at;
+
+                if (string.Equals(eventName, "operation_started", StringComparison.Ordinal))
+                {
+                    if (matchingStarts == 1 && matchingFailures == 0)
+                        interleavedOperation = true;
+                    lastOperationEventMatches = false;
+                    if (string.Equals(detail, failedName, StringComparison.Ordinal)
+                        && at >= startedAt && at <= completedAt)
+                        matchingStarts++;
+                }
+                else if (string.Equals(eventName, "operation_failed", StringComparison.Ordinal)
+                         || string.Equals(eventName, "operation_completed", StringComparison.Ordinal))
+                {
+                    var currentFailure = string.Equals(eventName, "operation_failed", StringComparison.Ordinal)
+                        && string.Equals(detail, failedName, StringComparison.Ordinal)
+                        && at >= completedAt && matchingStarts == 1;
+                    if (matchingStarts == 1 && matchingFailures == 0 && !currentFailure)
+                        interleavedOperation = true;
+                    lastOperationEventMatches = false;
+                    if (currentFailure)
+                    {
+                        matchingFailures++;
+                        lastOperationEventMatches = true;
+                    }
+                }
+            }
+            if (matchingStarts != 1 || matchingFailures != 1 || interleavedOperation || !lastOperationEventMatches)
+                throw new InvalidOperationException("Partial Owner Identity v1 Supervisor failure has no unique terminal-session event pair.");
         }
 
         private static void RequirePartialV1SelectionMutation(List<object> mutations, string target, string expectedHash)

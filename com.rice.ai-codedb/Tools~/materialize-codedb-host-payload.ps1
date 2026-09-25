@@ -10229,6 +10229,84 @@ function Get-RemoveIntegrationNamespaceInventory {
     return $files.ToArray()
 }
 
+function Assert-PartialV1SupervisorFailureEvents {
+    param(
+        [Parameter(Mandatory = $true)][string]$EventsPath,
+        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)][string]$FailedName
+    )
+
+    $label = "partial Owner Identity v1 Supervisor event"
+    [DateTimeOffset]$startedAt = [DateTimeOffset]::MinValue
+    [DateTimeOffset]$completedAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse((Get-RequiredJsonString -Object $Operation -Name "started_at_utc" -Label $label), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$startedAt) -or
+        -not [DateTimeOffset]::TryParse((Get-RequiredJsonString -Object $Operation -Name "completed_at_utc" -Label $label), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completedAt) -or
+        $startedAt.Offset -ne [TimeSpan]::Zero -or $completedAt.Offset -ne [TimeSpan]::Zero -or $completedAt -lt $startedAt) {
+        throw "Partial Owner Identity v1 Supervisor operation timestamps are invalid."
+    }
+
+    $sequence = 0
+    $matchingStarts = 0
+    $matchingFailures = 0
+    $interleavedOperation = $false
+    $lastOperationEventMatches = $false
+    $previousAt = $null
+    foreach ($line in [IO.File]::ReadAllLines($EventsPath)) {
+        $event = ConvertFrom-StrictJsonText -Text $line -Label $label
+        Assert-RemoveIntegrationJsonFields -Object $event -Label $label -Required @("schema_version", "sequence", "at_utc", "event", "detail")
+        $next = Get-RequiredJsonInt32 -Object $event -Name "sequence" -Label $label
+        $eventName = Get-RequiredJsonString -Object $event -Name "event" -Label $label
+        $detail = Get-RequiredJsonString -Object $event -Name "detail" -Label $label
+        [DateTimeOffset]$at = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((Get-RequiredJsonString -Object $event -Name "at_utc" -Label $label), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$at) -or
+            $at.Offset -ne [TimeSpan]::Zero -or
+            (Get-RequiredJsonInt32 -Object $event -Name "schema_version" -Label $label) -ne 1) {
+            throw "Partial Owner Identity v1 Supervisor event identity or timestamp is invalid."
+        }
+        if ($next -eq 1) {
+            if ($eventName -cne "supervisor_started") {
+                throw "Partial Owner Identity v1 Supervisor event reset has no session start."
+            }
+            $matchingStarts = 0
+            $matchingFailures = 0
+            $interleavedOperation = $false
+            $lastOperationEventMatches = $false
+            $previousAt = $null
+        } elseif ($next -ne ($sequence + 1)) {
+            throw "Partial Owner Identity v1 Supervisor session events are not contiguous."
+        }
+        if ($null -ne $previousAt -and $at -lt $previousAt) {
+            throw "Partial Owner Identity v1 Supervisor session timestamps are not ordered."
+        }
+        $sequence = $next
+        $previousAt = $at
+
+        if ($eventName -ceq "operation_started") {
+            if ($matchingStarts -eq 1 -and $matchingFailures -eq 0) {
+                $interleavedOperation = $true
+            }
+            $lastOperationEventMatches = $false
+            if ($detail -ceq $FailedName -and $at -ge $startedAt -and $at -le $completedAt) {
+                $matchingStarts++
+            }
+        } elseif ($eventName -cin @("operation_failed", "operation_completed")) {
+            $currentFailure = $eventName -ceq "operation_failed" -and $detail -ceq $FailedName -and
+                $at -ge $completedAt -and $matchingStarts -eq 1
+            if ($matchingStarts -eq 1 -and $matchingFailures -eq 0 -and -not $currentFailure) {
+                $interleavedOperation = $true
+            }
+            $lastOperationEventMatches = $false
+            if ($currentFailure) {
+                $matchingFailures++
+                $lastOperationEventMatches = $true
+            }
+        }
+    }
+    if ($matchingStarts -ne 1 -or $matchingFailures -ne 1 -or $interleavedOperation -or -not $lastOperationEventMatches) {
+        throw "Partial Owner Identity v1 Supervisor failure has no unique terminal-session event pair."
+    }
+}
+
 function Get-PartialV1RemoveIntegrationAuthority {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -10291,23 +10369,10 @@ function Get-PartialV1RemoveIntegrationAuthority {
             throw "Partial Owner Identity v1 Supervisor child is live or ambiguous."
         }
     }
-    $events = [IO.File]::ReadAllLines((Join-Path $namespace "supervisor-events.jsonl"))
-    $foundFailure = $false
-    $sequence = 0
-    foreach ($line in $events) {
-        $event = ConvertFrom-StrictJsonText -Text $line -Label "partial Owner Identity v1 Supervisor event"
-        Assert-RemoveIntegrationJsonFields -Object $event -Label "partial Owner Identity v1 Supervisor event" -Required @("schema_version", "sequence", "at_utc", "event", "detail")
-        $next = Get-RequiredJsonInt32 -Object $event -Name "sequence" -Label "partial Owner Identity v1 Supervisor event"
-        if ((Get-RequiredJsonInt32 -Object $event -Name "schema_version" -Label "partial Owner Identity v1 Supervisor event") -ne 1 -or $next -ne ($sequence + 1)) {
-            throw "Partial Owner Identity v1 Supervisor events are not a contiguous owned stream."
-        }
-        $sequence = $next
-        if ((Get-RequiredJsonString -Object $event -Name "event" -Label "partial Owner Identity v1 Supervisor event") -ceq "operation_failed" -and
-            (Get-RequiredJsonString -Object $event -Name "detail" -Label "partial Owner Identity v1 Supervisor event") -ceq (Get-RequiredJsonString -Object $operation -Name "name" -Label "partial Owner Identity v1 Supervisor operation")) {
-            $foundFailure = $true
-        }
-    }
-    if (-not $foundFailure) { throw "Partial Owner Identity v1 Supervisor failure has no matching event." }
+    Assert-PartialV1SupervisorFailureEvents `
+        -EventsPath (Join-Path $namespace "supervisor-events.jsonl") `
+        -Operation $operation `
+        -FailedName (Get-RequiredJsonString -Object $operation -Name "name" -Label "partial Owner Identity v1 Supervisor operation")
 
     $activation = Get-RemoveIntegrationActivationState -AuthorityKind "VERSIONED_V1" -OwnerIdentityVersion 1 -ProjectRoot $ProjectRoot -Selection $selection -RuntimeContractSha256 $runtimeHash -AllowLegacyV1CommittedOperation
     if ($null -eq $activation) { throw "Partial Owner Identity v1 recovery requires committed activation evidence." }

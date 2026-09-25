@@ -1104,6 +1104,21 @@ async function verifyManagerActionOperationCorrelation() {
     assert.equal(await waitForSupervisorExit(fixture), true);
     const restarted = await runSupervisor(fixture, "start");
     assert.equal(restarted.status, 0, `${restarted.stdout}\n${restarted.stderr}`);
+    const eventLines = fs.readFileSync(
+      path.join(fixture.runtime, "supervisor-events.jsonl"), "utf8")
+      .trimEnd().split("\n").map((line) => JSON.parse(line));
+    let sessionSequence = 0;
+    let sessionCount = 0;
+    for (const event of eventLines) {
+      if (event.sequence === 1) {
+        assert.equal(event.event, "supervisor_started");
+        sessionCount += 1;
+      } else {
+        assert.equal(event.sequence, sessionSequence + 1);
+      }
+      sessionSequence = event.sequence;
+    }
+    assert.ok(sessionCount >= 2, "Restart must append a second session to the existing event stream.");
     state = JSON.parse(fs.readFileSync(
       path.join(fixture.runtime, "supervisor-state.json"),
       "utf8"));
