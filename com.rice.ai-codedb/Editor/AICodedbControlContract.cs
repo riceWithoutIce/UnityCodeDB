@@ -590,9 +590,9 @@ namespace Rice.AI.Codedb.Editor
             var selection = AICodedbCurrentInstanceStore.Read(projectRoot, packageRoot);
             if (selection.State != AICodedbCurrentInstanceState.ObsoleteReinstallRequired)
                 throw new InvalidOperationException("Partial Owner Identity v1 control has no authenticated obsolete selection.");
-            if (File.Exists(Path.Combine(projectRoot, "AIWork", ".runtime", "codedb", "control",
-                    "last-known-good-instance.json")))
-                throw new InvalidOperationException("Partial Owner Identity v1 control has a second instance selection.");
+            var lastKnownGoodPath = Path.Combine(projectRoot, "AIWork", ".runtime", "codedb", "control",
+                "last-known-good-instance.json");
+            var hasLastKnownGood = File.Exists(lastKnownGoodPath) || Directory.Exists(lastKnownGoodPath);
             var selectedIdentity = new AICodedbRuntimeIdentity(
                 selection.PackageVersion, selection.PayloadVersion, selection.PayloadSequence,
                 selection.GenerationId, selection.BootstrapProtocol);
@@ -680,7 +680,7 @@ namespace Rice.AI.Codedb.Editor
             }
             RequireExactFields(journal, journalFields.ToArray(), Array.Empty<string>(),
                 "Owner Identity v1 activation operation");
-            AICodedbStrictJson.GetRequiredArray(journal, "mutations", "Owner Identity v1 activation operation");
+            var mutations = AICodedbStrictJson.GetRequiredArray(journal, "mutations", "Owner Identity v1 activation operation");
             var operationId = AICodedbStrictJson.GetRequiredString(journal, "operation_id", "Owner Identity v1 activation operation");
             var epoch = AICodedbStrictJson.GetRequiredString(journal, "activation_epoch", "Owner Identity v1 activation operation");
             if (!IsLowercaseId(operationId) || !IsLowercaseId(epoch)
@@ -695,6 +695,29 @@ namespace Rice.AI.Codedb.Editor
                 || !MatchesPartialV1Candidate(activation, "current", selection, instanceHash, generationHash)
                 || !MatchesPartialV1Candidate(journal, "candidate", selection, instanceHash, generationHash))
                 throw new InvalidOperationException("Partial Owner Identity v1 activation evidence does not bind the selection.");
+            if (hasLastKnownGood)
+            {
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, lastKnownGoodPath);
+                if (!File.Exists(lastKnownGoodPath))
+                    throw new InvalidOperationException("Partial Owner Identity v1 last-known-good selection is not a regular file.");
+                var lastKnownGoodLength = new FileInfo(lastKnownGoodPath).Length;
+                if (lastKnownGoodLength <= 0 || lastKnownGoodLength > 64 * 1024
+                    || lastKnownGoodLength != new FileInfo(selectionPath).Length)
+                    throw new InvalidOperationException("Partial Owner Identity v1 selections do not have identical bounded bytes.");
+                var currentBytes = File.ReadAllBytes(selectionPath);
+                var lastKnownGoodBytes = File.ReadAllBytes(lastKnownGoodPath);
+                if (currentBytes.Length != lastKnownGoodBytes.Length)
+                    throw new InvalidOperationException("Partial Owner Identity v1 selections do not have identical bytes.");
+                for (var index = 0; index < currentBytes.Length; index++)
+                    if (currentBytes[index] != lastKnownGoodBytes[index])
+                        throw new InvalidOperationException("Partial Owner Identity v1 selections do not have identical bytes.");
+                string selectionHash;
+                using (var algorithm = SHA256.Create())
+                    selectionHash = BitConverter.ToString(algorithm.ComputeHash(currentBytes)).Replace("-", string.Empty).ToLowerInvariant();
+                RequirePartialV1SelectionMutation(mutations, AICodedbProjectSettings.InstanceCurrentRelativePath, selectionHash);
+                RequirePartialV1SelectionMutation(mutations,
+                    AICodedbProjectSettings.InstanceControlRelativePath + "/last-known-good-instance.json", selectionHash);
+            }
             var operationDirectoryRoot = Path.Combine(versionRoot, "operations");
             if (Directory.Exists(operationDirectoryRoot))
             {
@@ -717,6 +740,32 @@ namespace Rice.AI.Codedb.Editor
             }
             return new NamespaceEvidence(NamespaceEvidenceKind.Obsolete, false,
                 "An authenticated partial Owner Identity v1 control state requires explicit integration removal.");
+        }
+
+        private static void RequirePartialV1SelectionMutation(List<object> mutations, string target, string expectedHash)
+        {
+            var matches = 0;
+            for (var index = 0; index < mutations.Count; index++)
+            {
+                var mutation = AICodedbStrictJson.RequireObject(mutations[index], "Owner Identity v1 activation mutation");
+                if (!string.Equals(AICodedbStrictJson.GetRequiredString(mutation, "target", "Owner Identity v1 activation mutation"),
+                        target, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                matches++;
+                RequireExactFields(mutation,
+                    new[] { "index", "target", "mutation", "desired_sha256", "existed_before", "pre_image_sha256" },
+                    Array.Empty<string>(), "Owner Identity v1 selection mutation");
+                var existedBefore = AICodedbStrictJson.GetRequiredBoolean(mutation, "existed_before", "Owner Identity v1 selection mutation");
+                var preImage = mutation["pre_image_sha256"] as string;
+                if (AICodedbStrictJson.GetRequiredInt32(mutation, "index", "Owner Identity v1 selection mutation") != index
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(mutation, "target", "Owner Identity v1 selection mutation"), target, StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(mutation, "mutation", "Owner Identity v1 selection mutation"), "write", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(mutation, "desired_sha256", "Owner Identity v1 selection mutation"), expectedHash, StringComparison.Ordinal)
+                    || (existedBefore ? !AICodedbControlContract.IsSha256(preImage) : mutation["pre_image_sha256"] != null))
+                    throw new InvalidOperationException("Partial Owner Identity v1 selection mutation does not bind its bytes.");
+            }
+            if (matches != 1)
+                throw new InvalidOperationException("Partial Owner Identity v1 selection mutation is missing or ambiguous.");
         }
 
         private static bool MatchesPartialV1ActivationContext(

@@ -7929,11 +7929,40 @@ function Invoke-PartialV1RemovalScenarios {
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $stateOnlyBefore -Message "Partial v1 state-only evidence changed project state."
     Remove-Item -LiteralPath $statePath -Force
 
+    $lastKnownGoodPath = Get-PathFromRelative -Root $hostRoot -RelativePath $script:InstanceLastKnownGoodRelativePath
+    Copy-Item -LiteralPath $prior.SelectionPath -Destination $lastKnownGoodPath
+    $lastKnownGoodMutation = New-InstanceActivationMutationEvidence `
+        -Index 1 `
+        -Target $script:InstanceLastKnownGoodRelativePath `
+        -Mutation Write `
+        -DesiredSha256 (Get-FileHash -LiteralPath $lastKnownGoodPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -ExistedBefore $false `
+        -PreImageSha256 $null
+    $operation.mutations = @($mutation, $lastKnownGoodMutation)
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+
+    $operation.mutations = @($mutation)
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+    $missingMutationBefore = Get-FileSnapshot -Root $hostRoot
+    $missingMutation = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $missingMutation -ExitCode 4 -Label "Partial v1 missing last-known-good mutation rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $missingMutationBefore -Message "Partial v1 missing mutation changed project state."
+    $operation.mutations = @($mutation, $lastKnownGoodMutation)
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+
+    Write-Utf8File -Path $lastKnownGoodPath -Content "{}`n"
+    $conflictingBefore = Get-FileSnapshot -Root $hostRoot
+    $conflicting = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $conflicting -ExitCode 4 -Label "Partial v1 conflicting last-known-good rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $conflictingBefore -Message "Partial v1 conflicting selection changed project state."
+    Copy-Item -LiteralPath $prior.SelectionPath -Destination $lastKnownGoodPath -Force
+
     $instanceBefore = Get-FileSnapshot -Root $prior.InstanceRoot
     $generationBefore = Get-FileSnapshot -Root $prior.GenerationRoot
     $removed = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
     Assert-Result -Result $removed -ExitCode 0 -Label "Partial v1 explicit removal"
     Assert-True -Condition (-not (Test-Path -LiteralPath $prior.SelectionPath)) -Message "Partial v1 removal retained current selection."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $lastKnownGoodPath)) -Message "Partial v1 removal retained last-known-good selection."
     Assert-True -Condition (-not (Test-Path -LiteralPath $supervisorOperationPath)) -Message "Partial v1 removal retained failed Supervisor operation."
     Assert-True -Condition (-not (Test-Path -LiteralPath $context.Paths.ActivationPath)) -Message "Partial v1 removal retained activation evidence."
     Assert-Equal -Actual (Get-FileSnapshot -Root $prior.InstanceRoot) -Expected $instanceBefore -Message "Partial v1 removal changed preserved instance."

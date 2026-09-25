@@ -3573,6 +3573,60 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
             journal["mutations"] = new List<object>();
             WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            var selectionPath = Path.Combine(_projectRoot, AICodedbProjectSettings.InstanceCurrentRelativePath);
+            var lastKnownGoodPath = Path.Combine(_projectRoot, AICodedbProjectSettings.InstanceControlRelativePath,
+                "last-known-good-instance.json");
+            File.Copy(selectionPath, lastKnownGoodPath);
+            string selectionSha256;
+            using (var algorithm = SHA256.Create())
+                selectionSha256 = BitConverter.ToString(algorithm.ComputeHash(File.ReadAllBytes(selectionPath)))
+                    .Replace("-", string.Empty).ToLowerInvariant();
+            var currentMutation = new Dictionary<string, object>
+            {
+                { "index", 0 }, { "target", AICodedbProjectSettings.InstanceCurrentRelativePath },
+                { "mutation", "write" }, { "desired_sha256", selectionSha256 },
+                { "existed_before", false }, { "pre_image_sha256", null }
+            };
+            var lastKnownGoodMutation = new Dictionary<string, object>
+            {
+                { "index", 1 }, { "target", AICodedbProjectSettings.InstanceControlRelativePath + "/last-known-good-instance.json" },
+                { "mutation", "write" }, { "desired_sha256", selectionSha256 },
+                { "existed_before", false }, { "pre_image_sha256", null }
+            };
+            journal["mutations"] = new List<object> { currentMutation, lastKnownGoodMutation };
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            var matchingBefore = GetProjectSnapshot(_projectRoot);
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(matchingBefore));
+
+            WriteUtf8NoBom(lastKnownGoodPath, "{}");
+            var conflictingBefore = GetProjectSnapshot(_projectRoot);
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(conflictingBefore));
+            File.Copy(selectionPath, lastKnownGoodPath, true);
+            journal["mutations"] = new List<object> { currentMutation };
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            var missingMutationBefore = GetProjectSnapshot(_projectRoot);
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(missingMutationBefore));
+            var duplicateMutation = new Dictionary<string, object>
+            {
+                { "index", 2 }, { "target", (AICodedbProjectSettings.InstanceControlRelativePath + "/last-known-good-instance.json").ToUpperInvariant() },
+                { "mutation", "write" }, { "desired_sha256", selectionSha256 },
+                { "existed_before", false }, { "pre_image_sha256", null }
+            };
+            journal["mutations"] = new List<object> { currentMutation, lastKnownGoodMutation, duplicateMutation };
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            var duplicateMutationBefore = GetProjectSnapshot(_projectRoot);
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(duplicateMutationBefore));
+            File.Delete(lastKnownGoodPath);
+            journal["mutations"] = new List<object>();
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
             WriteUtf8NoBom(Path.Combine(supervisorRoot, "unknown.json"), "{}");
             Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
                 Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));

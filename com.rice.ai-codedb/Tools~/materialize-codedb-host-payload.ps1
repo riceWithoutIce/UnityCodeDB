@@ -10242,9 +10242,6 @@ function Get-PartialV1RemoveIntegrationAuthority {
         throw "Partial Owner Identity v1 recovery requires a Package-declared predecessor generation."
     }
     $lastKnownGood = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 1 -LastKnownGood -AllowMissing
-    if ($null -ne $lastKnownGood) {
-        throw "Partial Owner Identity v1 recovery does not admit a second instance selection."
-    }
     $namespace = $Authority.Path
     Assert-NoReparsePoint -Path $namespace -Root $ProjectRoot -Label "partial Owner Identity v1 Supervisor namespace"
     $expected = @{
@@ -10317,6 +10314,20 @@ function Get-PartialV1RemoveIntegrationAuthority {
     if ($activation.Operation.Action -cne "UPGRADE") {
         throw "Partial Owner Identity v1 recovery requires its committed upgrade operation."
     }
+    if ($null -ne $lastKnownGood) {
+        if (-not [string]::Equals($selection.Text, $lastKnownGood.Text, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($selection.InstanceId, $lastKnownGood.InstanceId, [StringComparison]::Ordinal)) {
+            throw "Partial Owner Identity v1 selections do not have identical bytes and instance identity."
+        }
+        $selectionHash = Get-FileSha256 -Path $selection.Path
+        foreach ($target in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath)) {
+            $matches = @($activation.Operation.Mutations | Where-Object { [string]::Equals([string]$_.target, $target, [StringComparison]::Ordinal) })
+            if ($matches.Count -ne 1 -or $matches[0].mutation -cne "write" -or
+                -not [string]::Equals([string]$matches[0].desired_sha256, $selectionHash, [StringComparison]::Ordinal)) {
+                throw "Partial Owner Identity v1 selection mutation does not bind both selection files."
+            }
+        }
+    }
     $wrapperPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath "AIWork/codedb/wrapper/codedb-project-wrapper.mjs" -Label "project stable wrapper"
     if (Test-Path -LiteralPath $wrapperPath) {
         Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label "project stable wrapper"
@@ -10330,6 +10341,7 @@ function Get-PartialV1RemoveIntegrationAuthority {
     if (-not $holders.Clear) { throw "Partial Owner Identity v1 instance holder is live or ambiguous." }
     $fingerprintParts = @(
         "PARTIAL_VERSIONED_V1", (Get-TextSha256 -Text $selection.Text),
+        $(if ($null -eq $lastKnownGood) { "" } else { Get-FileSha256 -Path $lastKnownGood.Path }),
         $selection.InstanceManifestSha256, $selection.GenerationManifestSha256,
         $runtimeHash, $activation.Operation.Attempt.OperationId,
         (Get-FileSha256 -Path $activation.Context.Paths.ActivationPath),
@@ -10342,7 +10354,7 @@ function Get-PartialV1RemoveIntegrationAuthority {
         Path = $namespace
         OwnerFingerprint = Get-TextSha256 -Text ($fingerprintParts -join "`n")
         Selection = $selection
-        LastKnownGood = $null
+        LastKnownGood = $lastKnownGood
         Inventory = $inventory
         ActivationState = $activation
         RuntimeContractSha256 = $runtimeHash
