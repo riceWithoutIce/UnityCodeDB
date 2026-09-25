@@ -485,7 +485,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void PackagePaths_UseUnityResolvedPackageLocation()
         {
-            var packageInfo = PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
+            var packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(AICodedbPaths).Assembly);
 
             Assert.That(packageInfo, Is.Not.Null);
             Assert.That(packageInfo.name, Is.EqualTo(AICodedbProjectSettings.PackageName));
