@@ -532,3 +532,38 @@ the old Package's removal action and do not click Install.
 Human decision or authorization required: new Package export/import, any
 future removal attempt, fresh Install, Verifier routing, commit, push, and
 publication.
+
+## FIX 02 - Attributable Package Export Ready
+
+The user authorized completion of the pre-human-validation preparation. The
+three-path correction and this S25 record were committed as
+`6942c624f2469bce1a4d681e3396f7528f7f7f35`. No unrelated dirty path was
+staged. The canonical exporter produced a new relative artifact without
+replacing prior S25/S23 artifacts:
+
+- Relative root: `.artifacts/v0.3.0-preview.5-s25-receipt-path-6942c62-final/`.
+- Package directory: `package/com.rice.ai-codedb/` under that root.
+- ZIP: `com.rice.ai-codedb.zip` under that root.
+- ZIP SHA-256: `ff4aa561b247cb2b62bee5f71782afbb82b5d0e6e0256b6d21846c951117ecce`.
+- Staged and exact-ZIP closure: PASS, each `source_count=46`,
+  `mismatch_count=0`; 480 files and 480 ZIP entries; 9,780,408 bytes.
+- Generation, host-current, and runtime-contract hashes match the accepted
+  S25 Gate A values.
+
+The new Package contains the bounded receipt-path correction and is ready for
+the human validation-project import gate. `UnityValidationProject` has not
+yet been switched to this artifact. Unity/C# compile, EditMode, real removal
+retry, fresh Install, Verifier review, push, tag, and publication remain NOT
+RUN. The old Package's unconfirmed removal attempt remains consumed; no replay
+was performed.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: FIX_02_PACKAGE_READY / MANIFEST_SWITCH_PENDING
+Next notification: human operator / UnityCodeDB v0.3 Planner
+Next action: while Unity is visibly closed, switch only the CodeDB dependency
+in `UnityValidationProject/Packages/manifest.json` to the new relative
+Package path, preserve all other manifest/lockfile/project state, then have
+the human open the project for compile and focused EditMode validation.
+Human decision or authorization required: manifest switch while Unity is
+closed; human compile/EditMode; later real removal, fresh Install, Verifier,
+commit/publication gates.
