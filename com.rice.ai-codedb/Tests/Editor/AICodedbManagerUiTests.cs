@@ -1082,7 +1082,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductLayerState.Unknown,
                 string.Empty,
                 default(AICodedbMaterializerCommandStatus),
-                attentionReason);
+                attentionReason,
+                string.Empty,
+                reinstallAvailable && (attentionReason == AICodedbProductAttentionReason.ControlContractReinstallRequired
+                                       || attentionReason == AICodedbProductAttentionReason.InstanceIdentityReinstallRequired));
             return AICodedbManagerWindow.ResolvePrimaryAction(
                 status,
                 reinstallAvailable,
@@ -1579,7 +1582,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "migration detail",
                 default(AICodedbMaterializerCommandStatus),
                 attentionReason,
-                "migration diagnostic");
+                "migration diagnostic",
+                expectedReinstall);
             var snapshot = AICodedbStatusSnapshot.CreateCachedStatus("FixtureProject", status);
 
             Assert.That(snapshot.ProductStatus.AttentionReason, Is.EqualTo(attentionReason));
@@ -3862,20 +3866,109 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     internal sealed class AICodedbLifecycleControlTests
     {
+        [Test]
+        public void RemoveIntegrationPreflight_RequiresOneSuccessfulExactMarker()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.RemoveIntegrationPreflight, false, "C:/fixture/project");
+            Assert.That(arguments, Does.Contain("RemoveIntegrationPreflight"));
+            Assert.That(arguments, Does.Not.Contain("-ConfirmedProjectMutation"));
+            Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
+                new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] AVAILABLE\n", string.Empty, false)), Is.True);
+            Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
+                new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] AVAILABLE\n", "blocked", false)), Is.False);
+            Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
+                new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] AVAILABLE\n[REMOVAL_PREFLIGHT] AVAILABLE\n", string.Empty, false)), Is.False);
+            Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
+                new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] BLOCKED\n", string.Empty, false)), Is.False);
+        }
+
+        [Test]
+        public void UninstallPreflight_UsesReadOnlyActionAndGatesIndependentAdmission()
+        {
+            var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                AICodedbHostPayloadAction.UninstallPreflight, false, "C:/fixture/project");
+            Assert.That(arguments, Does.Contain("UninstallPreflight"));
+            Assert.That(arguments, Does.Not.Contain("-ConfirmedProjectMutation"));
+
+            AICodedbProductStatus Status(bool available) => new AICodedbProductStatus(
+                AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current,
+                string.Empty,
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.None,
+                string.Empty,
+                available);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(true), false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(false), false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(true), true), Is.False);
+            Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(Status(true)), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(Status(true), true, false), Is.False);
+
+            var needsAttention = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                string.Empty,
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.None,
+                string.Empty,
+                true);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(needsAttention, false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(needsAttention), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(needsAttention, true, false), Is.True);
+
+            var needsReinstall = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                string.Empty,
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.InstanceIdentityReinstallRequired,
+                string.Empty,
+                true);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(needsReinstall, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(needsReinstall), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(needsReinstall, true, false), Is.True);
+
+            var ambiguous = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                string.Empty,
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
+                string.Empty,
+                true);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(ambiguous, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(
+                AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), true), false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(
+                AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), false), false), Is.False);
+        }
+
         [TestCase(AICodedbHostGenerationState.Unavailable, AICodedbHostPayloadState.SetupRequired, AICodedbHostUpgradePhase.Unavailable)]
         [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Historical)]
         [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Blocked, AICodedbHostUpgradePhase.Invalid)]
         [TestCase(AICodedbHostGenerationState.Invalid, AICodedbHostPayloadState.Conflict, AICodedbHostUpgradePhase.CheckFailed)]
         [TestCase(AICodedbHostGenerationState.Previous, AICodedbHostPayloadState.UpgradeReady, AICodedbHostUpgradePhase.Rollback)]
         [TestCase(AICodedbHostGenerationState.Current, AICodedbHostPayloadState.Current, AICodedbHostUpgradePhase.Current)]
-        public void RemoveIntegration_RemainsAvailableAcrossRecoveryStates(
+        public void RemoveIntegration_RequiresCachedPreflightAcrossRecoveryStates(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
             AICodedbHostUpgradePhase upgradePhase)
         {
             Assert.That(
-                AICodedbManagerWindow.IsRemoveIntegrationAvailable(generationState, payloadState, upgradePhase),
+                AICodedbManagerWindow.IsRemoveIntegrationAvailable(generationState, payloadState, upgradePhase, true),
                 Is.True);
+            Assert.That(
+                AICodedbManagerWindow.IsRemoveIntegrationAvailable(generationState, payloadState, upgradePhase, false),
+                Is.False);
         }
 
         [Test]
@@ -3921,7 +4014,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(removeCount, Is.EqualTo(1));
             Assert.That(confirmedProjectMutation, Is.True);
             Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationTitle, Is.EqualTo("Remove CodeDB Integration"));
-            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("fresh Owner Identity v2 integration"));
+            Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("fresh integration"));
             Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("unrelated MCP content"));
             Assert.That(AICodedbManagerWindow.RemoveIntegrationConfirmationMessage, Does.Contain("external processes"));
         }
@@ -3937,7 +4030,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductLayerState.Blocked,
                 "obsolete",
                 default(AICodedbMaterializerCommandStatus),
-                AICodedbProductAttentionReason.ControlContractReinstallRequired);
+                AICodedbProductAttentionReason.ControlContractReinstallRequired,
+                string.Empty,
+                true);
             var installed = new AICodedbProjectIntegrationStatus(
                 AICodedbProjectIntegrationState.Installed,
                 AICodedbProjectCleanupState.None,
@@ -4007,7 +4102,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductLayerState.Blocked,
                 "obsolete instance",
                 default(AICodedbMaterializerCommandStatus),
-                AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
+                AICodedbProductAttentionReason.InstanceIdentityReinstallRequired,
+                string.Empty,
+                true);
             var missingPrerequisite = new AICodedbProductStatus(
                 AICodedbProductState.MissingPrerequisite,
                 AICodedbProductLayerState.Missing,
@@ -4024,6 +4121,21 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductLayerState.Blocked,
                 AICodedbProductLayerState.Blocked,
                 "attention");
+            var unverifiedCached = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "obsolete",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.ControlContractReinstallRequired);
+
+            Assert.That(
+                AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(
+                    unverifiedCached, installed, obsolete, invalidInstance, true),
+                Is.False,
+                "A reinstall reason alone cannot authorize project integration removal.");
 
             Assert.That(
                 AICodedbActions.IsExplicitRemoveIntegrationAdmissionAllowed(

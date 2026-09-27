@@ -19,6 +19,8 @@ namespace Rice.AI.Codedb.Editor
         Sync,
         Remove,
         RemoveIntegration,
+        RemoveIntegrationPreflight,
+        UninstallPreflight,
         Uninstall,
         Install,
         Reinstall
@@ -158,6 +160,38 @@ namespace Rice.AI.Codedb.Editor
                 MutationTimeoutMilliseconds);
         }
 
+        internal static AICodedbCommandResult ReadRemoveIntegrationPreflight(
+            AICodedbEditorExecutionContext context,
+            CancellationToken cancellationToken)
+        {
+            return Run(context, AICodedbHostPayloadAction.RemoveIntegrationPreflight,
+                false, cancellationToken);
+        }
+
+        internal static AICodedbCommandResult ReadUninstallPreflight(
+            AICodedbEditorExecutionContext context,
+            CancellationToken cancellationToken)
+        {
+            return Run(context, AICodedbHostPayloadAction.UninstallPreflight,
+                false, cancellationToken);
+        }
+
+        internal static bool HasAuthenticatedRemovalPreflight(AICodedbCommandResult result)
+        {
+            if (result == null || !result.Succeeded)
+                return false;
+            var matches = 0;
+            foreach (var line in (result.StandardOutput ?? string.Empty).Split('\n'))
+            {
+                if (!line.Trim().StartsWith("[REMOVAL_PREFLIGHT]", StringComparison.Ordinal))
+                    continue;
+                if (!string.Equals(line.Trim(), "[REMOVAL_PREFLIGHT] AVAILABLE", StringComparison.Ordinal))
+                    return false;
+                matches++;
+            }
+            return matches == 1;
+        }
+
         internal static AICodedbCommandResult RunUninstall()
         {
             return Run(AICodedbHostPayloadAction.Uninstall, true);
@@ -208,7 +242,7 @@ namespace Rice.AI.Codedb.Editor
                 throw new ArgumentException(
                     requiresConfirmation
                          ? "Redeploy, Repair, Sync, Remove, RemoveIntegration, Uninstall, Install, and Reinstall require second-level project mutation confirmation."
-                        : "DryRun, Probe, Verify, and Upgrade do not accept project mutation confirmation.",
+                        : "Read-only actions and Upgrade do not accept project mutation confirmation.",
                     nameof(confirmedProjectMutation));
 
             var arguments = new List<string>
@@ -568,6 +602,7 @@ namespace Rice.AI.Codedb.Editor
         internal string Detail { get; }
         internal string DiagnosticDetail { get; }
         internal AICodedbProductAttentionReason AttentionReason { get; }
+        internal bool RemovalPreflightPassed { get; }
         internal bool IsReady => State == AICodedbProductState.Ready;
         internal bool RequiresReinstall =>
             State == AICodedbProductState.NeedsAttention
@@ -582,7 +617,8 @@ namespace Rice.AI.Codedb.Editor
             string detail,
             AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
             AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
-            string diagnosticDetail = "")
+            string diagnosticDetail = "",
+            bool removalPreflightPassed = false)
             : this(
                 state,
                 AICodedbProductLayerState.Unknown,
@@ -592,7 +628,8 @@ namespace Rice.AI.Codedb.Editor
                 detail,
                 command,
                 attentionReason,
-                diagnosticDetail)
+                diagnosticDetail,
+                removalPreflightPassed)
         {
         }
 
@@ -605,7 +642,8 @@ namespace Rice.AI.Codedb.Editor
             string detail,
             AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
             AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
-            string diagnosticDetail = "")
+            string diagnosticDetail = "",
+            bool removalPreflightPassed = false)
         {
             State = state;
             Prerequisite = prerequisite;
@@ -616,6 +654,7 @@ namespace Rice.AI.Codedb.Editor
             Detail = detail ?? string.Empty;
             DiagnosticDetail = diagnosticDetail ?? string.Empty;
             AttentionReason = attentionReason;
+            RemovalPreflightPassed = removalPreflightPassed;
         }
     }
 

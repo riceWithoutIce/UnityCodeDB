@@ -8,6 +8,7 @@ $script:InstanceDesiredStateRelativePath = "$($script:InstanceControlRelativePat
 $script:InstanceOperationRelativePath = "$($script:InstanceControlRelativePath)/operation.json"
 $script:InstanceOperationsRelativePath = "$($script:InstanceControlRelativePath)/operations"
 $script:InstanceRetiredRelativePath = "$($script:InstanceControlRelativePath)/retired-instances"
+$script:InstanceRemovalIntentsRelativePath = "$($script:InstanceControlRelativePath)/removal-intents"
 $script:InstancesRelativePath = "AIWork/.runtime/codedb/instances"
 $script:InstanceWorkerRelativePath = "wrapper/codedb-project-instance-worker.mjs"
 $script:InstanceAvailabilityRelativePath = "logs/mcp-availability.json"
@@ -1469,42 +1470,27 @@ function Invoke-InstanceActivationContractRecovery {
             if ($null -ne $current -or $null -ne $lastKnownGood) {
                 throw "Fresh Install cannot supersede committed activation evidence while a selected instance remains."
             }
+            $removalIntentPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstanceRemovalIntentsRelativePath)/$FreshInstallUninstallStateId.json" -Label "fresh Install removal intent"
+            if (Test-Path -LiteralPath $removalIntentPath) {
+                $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $FreshInstallUninstallStateId
+                if ($desiredState.CleanupState -ne "PENDING" -or
+                    $null -ne $state.RetirementIntent -or
+                    [string]$removalIntent.Document.retained_instance_id -cne [string]$state.Operation.Candidate.instance_id -or
+                    [string]$removalIntent.Document.activation_sha256 -cne [string]$state.Activation.Sha256 -or
+                    [string]$removalIntent.Document.activation_operation_sha256 -cne [string]$state.Operation.Sha256) {
+                    throw "Fresh Install removal intent does not bind the retained committed activation."
+                }
+                $SupersededContractState.Value = $state
+                Write-Host "[RECOVERY] Retained the inert removal-intent closure without adopting it as an Install predecessor."
+                return $true
+            }
+            if ($desiredState.CleanupState -eq "PENDING") {
+                throw "Pending fresh Install requires the exact durable removal intent."
+            }
             $retiredInstanceRoot = Get-InstanceProjectPath `
                 -ProjectRoot $ProjectRoot `
                 -RelativePath "$($script:InstancesRelativePath)/$($state.Operation.Candidate.instance_id)" `
                 -Label "retired committed instance root"
-            if ($desiredState.CleanupState -eq "PENDING") {
-                if ($null -ne $state.RetirementIntent) {
-                    throw "Pending fresh Install cannot replace a committed contract that already owns retirement evidence."
-                }
-                $retiredInstanceItem = $null
-                try {
-                    $retiredInstanceItem = Get-Item -LiteralPath $retiredInstanceRoot -Force -ErrorAction Stop
-                } catch [System.Management.Automation.ItemNotFoundException] {
-                    $retiredInstanceItem = $null
-                } catch {
-                    throw "Pending fresh Install could not prove the retained instance path state: $($_.Exception.Message)"
-                }
-                if ($null -eq $retiredInstanceItem) {
-                    $SupersededContractState.Value = $state
-                    Write-Host "[RECOVERY] Confirmed the committed pending-Uninstall instance is absent while preserving the remaining cleanup closure."
-                    return $true
-                }
-                $retainedPrevious = Get-ValidatedRetiredInstance `
-                    -ProjectRoot $ProjectRoot `
-                    -Manifest $Manifest `
-                    -InstanceRoot $retiredInstanceRoot
-                $retainedPrevious | Add-Member -NotePropertyName InstanceRelativePath -NotePropertyValue "$($script:InstancesRelativePath)/$($retainedPrevious.InstanceId)"
-                $retainedPrevious | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Get-FileSha256 -Path $retainedPrevious.ManifestPath)
-                $retainedEvidence = New-InstanceActivationSelectionEvidence -Instance $retainedPrevious -Context $state.Context
-                if (-not (Test-InstanceActivationEvidenceEqual -Left $retainedEvidence -Right $state.Operation.Candidate)) {
-                    throw "Pending fresh Install retained instance does not match committed activation evidence."
-                }
-                $RetainedPreviousInstance.Value = $retainedPrevious
-                $SupersededContractState.Value = $state
-                Write-Host "[RECOVERY] Retained the authenticated pending-Uninstall closure for the next activation transaction."
-                return $true
-            }
             if (Test-Path -LiteralPath $retiredInstanceRoot) {
                 throw "Completed fresh Install cannot supersede activation evidence while its retired instance remains."
             }
@@ -1828,6 +1814,132 @@ function Get-InstanceDesiredState {
         CleanupState = $cleanupState
         Path = $path
         Legacy = $false
+    }
+}
+
+function Get-InstanceRemovalIntent {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId
+    )
+
+    if ($StateId -cnotmatch '^[0-9a-f]{32}$') { throw "Removal intent state identity is invalid." }
+    $relativePath = "$($script:InstanceRemovalIntentsRelativePath)/$StateId.json"
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relativePath -Label "project removal intent"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Project removal intent is missing." }
+    $document = (Read-BoundedJsonDocument -Path $path -Label "project removal intent" -MaximumBytes (64 * 1024)).Document
+    $required = @(
+        "schema_version", "managed_by", "project_root", "project_identity", "state_id",
+        "operation_id", "authority_fingerprint", "selection_sha256", "activation_sha256",
+        "activation_operation_sha256", "retained_instance_id", "retained_instance_manifest_sha256",
+        "retained_generation_id", "retained_generation_manifest_sha256", "retained_wrapper_sha256"
+    )
+    $actual = @($document.PSObject.Properties.Name)
+    if ($actual.Count -ne $required.Count -or @($actual | Where-Object { $_ -cnotin $required }).Count -ne 0) {
+        throw "Project removal intent fields are invalid."
+    }
+    $instanceId = Get-RequiredJsonString -Object $document -Name "retained_instance_id" -Label "project removal intent"
+    $instanceHash = Get-RequiredJsonString -Object $document -Name "retained_instance_manifest_sha256" -Label "project removal intent"
+    $generationHash = Get-RequiredJsonString -Object $document -Name "retained_generation_manifest_sha256" -Label "project removal intent"
+    $activationHash = [string]$document.activation_sha256
+    $operationHash = [string]$document.activation_operation_sha256
+    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "project removal intent") -ne 1 -or
+        -not [string]::Equals([string]$document.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$document.project_identity, (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string]$document.project_root), [IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$document.state_id -cne $StateId -or
+        [string]$document.operation_id -cne $StateId -or
+        [string]$document.authority_fingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$document.selection_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $activationHash -cnotmatch '^(?:[0-9a-f]{64})?$' -or
+        $operationHash -cnotmatch '^(?:[0-9a-f]{64})?$' -or
+        (($activationHash.Length -eq 0) -ne ($operationHash.Length -eq 0)) -or
+        $instanceId -cnotmatch '^[0-9a-f]{32}$' -or
+        $instanceHash -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$document.retained_generation_id -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $generationHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Project removal intent identity or schema is invalid."
+    }
+    if ([string]$document.retained_wrapper_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Project removal intent wrapper identity is invalid."
+    }
+    $instanceRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$instanceId" -Label "retained removal instance"
+    $manifestPath = Join-Path $instanceRoot "instance.json"
+    Assert-NoReparsePoint -Path $instanceRoot -Root $ProjectRoot -Label "retained removal instance"
+    Assert-NoReparsePoint -Path $manifestPath -Root $ProjectRoot -Label "retained removal instance manifest"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+        -not [string]::Equals((Get-FileSha256 -Path $manifestPath), $instanceHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Retained removal instance manifest changed."
+    }
+    $manifest = (Read-BoundedJsonDocument -Path $manifestPath -Label "retained removal instance manifest" -MaximumBytes (128 * 1024)).Document
+    if ([string]$manifest.managed_by -cne $script:ManagedBy -or
+        [string]$manifest.project_identity -cne [string]$document.project_identity -or
+        [string]$manifest.instance_id -cne $instanceId -or
+        [string]$manifest.generation_id -cne [string]$document.retained_generation_id -or
+        [string]$manifest.generation_manifest_sha256 -cne $generationHash) {
+        throw "Retained removal instance identity changed."
+    }
+    $generationRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $manifest -Name "generation_relative_path" -Label "retained removal instance manifest") -Label "retained removal generation path"
+    if ($generationRelativePath -cne "AIWork/.runtime/codedb/host/generations/$($document.retained_generation_id)") {
+        throw "Retained removal generation path changed."
+    }
+    $generationRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $generationRelativePath -Label "retained removal generation"
+    $generationManifestPath = Join-Path $generationRoot "generation-manifest.json"
+    Assert-NoReparsePoint -Path $generationRoot -Root $ProjectRoot -Label "retained removal generation"
+    Assert-NoReparsePoint -Path $generationManifestPath -Root $ProjectRoot -Label "retained removal generation manifest"
+    if (-not (Test-Path -LiteralPath $generationManifestPath -PathType Leaf) -or
+        -not [string]::Equals((Get-FileSha256 -Path $generationManifestPath), $generationHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Retained removal generation manifest changed."
+    }
+    return [pscustomobject]@{ Path = $path; Document = $document; InstanceId = $instanceId; InstanceRoot = $instanceRoot }
+}
+
+function New-InstanceRemovalIntentDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [Parameter(Mandatory = $true)][string]$AuthorityFingerprint,
+        [Parameter(Mandatory = $true)][string]$SelectionSha256,
+        [AllowEmptyString()][string]$ActivationSha256,
+        [AllowEmptyString()][string]$ActivationOperationSha256,
+        [Parameter(Mandatory = $true)][string]$InstanceId,
+        [Parameter(Mandatory = $true)][string]$InstanceManifestSha256,
+        [Parameter(Mandatory = $true)][string]$GenerationId,
+        [Parameter(Mandatory = $true)][string]$GenerationManifestSha256,
+        [Parameter(Mandatory = $true)][string]$WrapperSha256
+    )
+
+    return [ordered]@{
+        schema_version = 1
+        managed_by = $script:ManagedBy
+        project_root = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+        state_id = $StateId
+        operation_id = $StateId
+        authority_fingerprint = $AuthorityFingerprint
+        selection_sha256 = $SelectionSha256
+        activation_sha256 = $ActivationSha256
+        activation_operation_sha256 = $ActivationOperationSha256
+        retained_instance_id = $InstanceId
+        retained_instance_manifest_sha256 = $InstanceManifestSha256
+        retained_generation_id = $GenerationId
+        retained_generation_manifest_sha256 = $GenerationManifestSha256
+        retained_wrapper_sha256 = $WrapperSha256
+    }
+}
+
+function Get-InstanceRemovalIntents {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceRemovalIntentsRelativePath -Label "project removal intents"
+    if (-not (Test-Path -LiteralPath $root)) { return }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "Project removal intents root is not a directory." }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $root -Force)) {
+        Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label "project removal intent entry"
+        if ($entry.PSIsContainer -or $entry.Name -cnotmatch '^([0-9a-f]{32})\.json$') {
+            throw "Project removal intents root contains an unknown entry."
+        }
+        Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $Matches[1]
     }
 }
 
@@ -2333,6 +2445,9 @@ function Assert-InstanceTransactionTarget {
         $normalized -ceq "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/supervisor/operation.json") {
         return $normalized
     }
+    if ($normalized -cmatch '^AIWork/\.runtime/codedb/control/removal-intents/[0-9a-f]{32}\.json$') {
+        return $normalized
+    }
     if ($normalized -cmatch '^AIWork/\.runtime/codedb/instances/[0-9a-f]{32}/logs/mcp-availability\.json$') {
         return $normalized
     }
@@ -2679,6 +2794,30 @@ function Add-InstanceTransactionEntryIfNeeded {
     $Entries.Add((New-InstanceTransactionEntry -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $Target -Mutation $Mutation -DesiredBytes $DesiredBytes -Index $Entries.Count))
 }
 
+function Add-ProjectRemovalDeactivationEntries {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$Entries,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [Parameter(Mandatory = $true)][string]$StateId
+    )
+
+    $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "UNINSTALLED" -StateId $StateId -CleanupState "PENDING"
+    $desiredBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
+    Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
+    $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId $StateId
+    if (-not $mcpPlan.Current) {
+        Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:McpConfigRelativePath -Mutation "Write" -DesiredBytes $mcpPlan.DesiredBytes
+    }
+    $legacyState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
+    if ($legacyState.Present) {
+        Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:IntegrationStateRelativePath -Mutation "Delete" -DesiredBytes $null
+    }
+    foreach ($target in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath)) {
+        Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $target -Mutation "Delete" -DesiredBytes $null
+    }
+}
+
 function Get-InstanceActivationBytes {
     param([Parameter(Mandatory = $true)]$Manifest,[Parameter(Mandatory = $true)][string]$Target)
 
@@ -2724,10 +2863,11 @@ function Assert-InstancePreflight {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$MarkerPath,
         [AllowNull()]$PreviousInstance,
+        [AllowNull()]$RemovalIntent,
         [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName
     )
 
-    if ($null -ne $PreviousInstance) {
+    if ($null -ne $PreviousInstance -or $null -ne $RemovalIntent) {
         # Once a Package-owned instance is selected, the legacy marker and flat
         # payload are retirement evidence. Reinstall must only prove that its
         # unavoidable stable-launcher target is absent or still Package-owned.
@@ -2738,10 +2878,14 @@ function Assert-InstancePreflight {
                 throw "Stable instance wrapper target is not a regular file."
             }
             Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label "stable instance wrapper"
-            $previousPackageIdentity = Get-InstanceGenerationPackageIdentity `
-                -Manifest $Manifest `
-                -InstanceManifest $PreviousInstance.Manifest
-            $expectedWrapperHash = [string]$previousPackageIdentity.StableWrapperSha256
+            $expectedWrapperHash = if ($null -ne $RemovalIntent) {
+                [string]$RemovalIntent.Document.retained_wrapper_sha256
+            } else {
+                $previousPackageIdentity = Get-InstanceGenerationPackageIdentity `
+                    -Manifest $Manifest `
+                    -InstanceManifest $PreviousInstance.Manifest
+                [string]$previousPackageIdentity.StableWrapperSha256
+            }
             if (-not [string]::Equals((Get-FileSha256 -Path $wrapperPath), $expectedWrapperHash, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Stable instance wrapper target contains unowned or drifted bytes."
             }
@@ -3617,6 +3761,10 @@ function Get-InstanceCleanupState {
 
     $pending = $false
     try {
+        $retainedRemovalInstances = @{}
+        foreach ($intent in @(Get-InstanceRemovalIntents -ProjectRoot $ProjectRoot)) {
+            $retainedRemovalInstances[$intent.InstanceId] = $true
+        }
         $instancesRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label "instance root"
         if (-not (Test-Path -LiteralPath $instancesRoot)) { return "COMPLETE" }
         if (-not (Test-Path -LiteralPath $instancesRoot -PathType Container)) { return "PENDING" }
@@ -3627,6 +3775,10 @@ function Get-InstanceCleanupState {
                 continue
             }
             if ($null -ne $CurrentInstance -and [string]::Equals($item.Name, $CurrentInstance.InstanceId, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            if ($retainedRemovalInstances.ContainsKey($item.Name)) {
+                $pending = $true
                 continue
             }
             try {
@@ -3666,6 +3818,11 @@ function Get-InstanceUninstallCleanupState {
         [switch]$PerformCleanup
     )
 
+    $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+    if ($desired.DesiredState -ne "UNINSTALLED" -or $desired.CleanupState -ne "PENDING") {
+        throw "Uninstall cleanup requires the authenticated UNINSTALLED / PENDING state."
+    }
+    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desired.StateId
     $instanceState = Get-InstanceCleanupState `
         -ProjectRoot $ProjectRoot `
         -Manifest $Manifest `
@@ -4072,7 +4229,15 @@ function Invoke-InstanceConvergence {
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredLocked = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $pendingInstallHandoff = $null -ne $supersededContractState
-        $expectedInstallCleanupState = if ($pendingInstallHandoff) { "PENDING" } else { "COMPLETE" }
+        $removalIntent = $null
+        if ($ActionName -eq "Install" -and $desiredLocked.CleanupState -eq "PENDING") {
+            $removalIntentPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstanceRemovalIntentsRelativePath)/$($desiredLocked.StateId).json" -Label "fresh Install removal intent"
+            if (-not (Test-Path -LiteralPath $removalIntentPath)) {
+                throw "Pending fresh Install has no authenticated removal intent."
+            }
+            $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desiredLocked.StateId
+        }
+        $expectedInstallCleanupState = if ($null -ne $removalIntent) { "PENDING" } else { "COMPLETE" }
         if ($ActionName -eq "Install" -and
             ($desiredLocked.DesiredState -ne "UNINSTALLED" -or
              -not $desiredLocked.Present -or
@@ -4140,6 +4305,7 @@ function Invoke-InstanceConvergence {
             -ProjectRoot $ProjectRoot `
             -MarkerPath $MarkerPath `
             -PreviousInstance $previous `
+            -RemovalIntent $removalIntent `
             -ActionName $ActionName
         $generationTransactionRoot = Join-Path $lock.Root ("instance-generation-$([guid]::NewGuid().ToString('N'))")
         New-Item -ItemType Directory -Path $generationTransactionRoot | Out-Null
@@ -4183,7 +4349,14 @@ function Invoke-InstanceConvergence {
             if ($null -ne $currentBeforeActivation -or $null -ne $lastKnownGoodBeforeActivation) {
                 throw "Pending fresh Install selection changed before activation."
             }
-            if ($null -ne $retainedPreviousInstance) {
+            if ($null -ne $removalIntent) {
+                $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $freshInstallUninstallStateId
+                if ([string]$removalIntent.Document.retained_instance_id -cne [string]$contractBeforeActivation.Operation.Candidate.instance_id -or
+                    [string]$removalIntent.Document.activation_sha256 -cne [string]$contractBeforeActivation.Activation.Sha256 -or
+                    [string]$removalIntent.Document.activation_operation_sha256 -cne [string]$contractBeforeActivation.Operation.Sha256) {
+                    throw "Pending fresh Install removal intent changed before activation."
+                }
+            } elseif ($null -ne $retainedPreviousInstance) {
                 $retainedBeforeActivation = Get-ValidatedRetiredInstance `
                     -ProjectRoot $ProjectRoot `
                     -Manifest $Manifest `
@@ -4342,6 +4515,35 @@ function Invoke-InstanceConvergence {
     }
 }
 
+function Get-CurrentProjectRemovalAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+    if ($desired.DesiredState -ne "INSTALLED") {
+        throw "Current project uninstall requires an installed desired state."
+    }
+    $selected = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $selected) {
+        throw "Uninstall requires an authenticated selected instance; missing selection is not removal authority."
+    }
+    $activation = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $selectedEvidence = if ($null -eq $activation) { $null } else {
+        New-InstanceActivationSelectionEvidence -Instance $selected -Context $activation.Context
+    }
+    if ($null -eq $activation -or
+        $activation.Operation.Phase -cne "COMMITTED" -or
+        $activation.Activation.Phase -cne "COMMITTED" -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $activation.Operation.Candidate -Right $selectedEvidence) -or
+        -not (Test-InstanceActivationEvidenceEqual -Left $activation.Activation.Current -Right $selectedEvidence)) {
+        throw "Uninstall requires committed activation authority for the selected instance."
+    }
+    $null = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString("N"))
+    return [pscustomobject]@{ Selection = $selected; ActivationState = $activation }
+}
+
 function Invoke-InstanceUninstall {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -4367,8 +4569,11 @@ function Invoke-InstanceUninstall {
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
-        $previous = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED") {
+            Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+        } else { $null }
+        $previous = if ($null -eq $currentRemovalAuthority) { $null } else { $currentRemovalAuthority.Selection }
         if ($AutomaticCleanup -and
             ($desiredBefore.DesiredState -ne "UNINSTALLED" -or
              $desiredBefore.CleanupState -ne "PENDING" -or
@@ -4390,7 +4595,7 @@ function Invoke-InstanceUninstall {
                 Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "UNINSTALLED" -StateId $desiredBefore.StateId -CleanupState $cleanupState
             }
             $nextAction = if ($cleanupState -eq "PENDING") {
-                "No action is required; retained closures will be cleaned automatically after their owners drain."
+                "The prior instance remains inert and pending; use Install CodeDB to create a fresh integration."
             } else {
                 "Use Install CodeDB when this project should be integrated again."
             }
@@ -4410,22 +4615,24 @@ function Invoke-InstanceUninstall {
         New-Item -ItemType Directory -Force -Path $operationRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
         $stateId = if ($desiredBefore.StateId -match '^[0-9a-f]{32}$') { $desiredBefore.StateId } else { [guid]::NewGuid().ToString("N") }
-        $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "UNINSTALLED" -StateId $stateId -CleanupState "PENDING"
-        $desiredBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
-        $legacyIntegrationPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:IntegrationStateRelativePath -Label "legacy integration state"
-        if (Test-Path -LiteralPath $legacyIntegrationPath) {
-            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:IntegrationStateRelativePath -Mutation "Delete" -DesiredBytes $null
+        if ($null -ne $previous) {
+            $activation = $currentRemovalAuthority.ActivationState
+            $removalIntent = New-InstanceRemovalIntentDocument `
+                -ProjectRoot $ProjectRoot `
+                -StateId $stateId `
+                -AuthorityFingerprint ([string]$activation.Activation.Sha256) `
+                -SelectionSha256 (Get-TextSha256 -Text $previous.SelectionText) `
+                -ActivationSha256 ([string]$activation.Activation.Sha256) `
+                -ActivationOperationSha256 ([string]$activation.Operation.Sha256) `
+                -InstanceId $previous.InstanceId `
+                -InstanceManifestSha256 $previous.ManifestSha256 `
+                -GenerationId ([string]$previous.Manifest.generation_id) `
+                -GenerationManifestSha256 ([string]$previous.Manifest.generation_manifest_sha256) `
+                -WrapperSha256 ([string]$previous.Generation.StableWrapperSha256)
+            $intentBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $removalIntent))
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target "$($script:InstanceRemovalIntentsRelativePath)/$stateId.json" -Mutation "Write" -DesiredBytes $intentBytes
         }
-        $mcpPlan = Get-RepairMcpConfigPlan `
-            -ProjectRoot $ProjectRoot `
-            -RemoveManagedKeys `
-            -UninstallStateId $stateId
-        if (-not $mcpPlan.Current) {
-            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:McpConfigRelativePath -Mutation "Write" -DesiredBytes $mcpPlan.DesiredBytes
-        }
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:InstanceCurrentRelativePath -Mutation "Delete" -DesiredBytes $null
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:InstanceLastKnownGoodRelativePath -Mutation "Delete" -DesiredBytes $null
+        Add-ProjectRemovalDeactivationEntries -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -StateId $stateId
         Set-MaterializerCommandPhase -Phase "ACTIVATION"
         $currentSelectionPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label "current instance selection"
         $verification = {
@@ -4448,7 +4655,7 @@ function Invoke-InstanceUninstall {
             -PerformCleanup
         Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "UNINSTALLED" -StateId $stateId -CleanupState $cleanupState
         $nextAction = if ($cleanupState -eq "PENDING") {
-            "No action is required; retained closures will be cleaned automatically after their owners drain."
+            "The prior instance remains inert and pending; use Install CodeDB to create a fresh integration."
         } else {
             "Use Install CodeDB when this project should be integrated again."
         }

@@ -28,6 +28,7 @@ namespace Rice.AI.Codedb.Editor
 
         private const double ReconcileRetrySeconds = 30d;
         private const double InitialReconcileDelaySeconds = 1.5d;
+        private const double RemovalPreflightCacheSeconds = 120d;
         private const int ExplicitReconcileWaitMilliseconds = 60000;
         private const int MaximumInitializationRetries = 5;
         private const int InitializationRetryDeferralFrames = 30;
@@ -73,6 +74,8 @@ namespace Rice.AI.Codedb.Editor
         private static int _currentInstanceAvailabilityRecoveryAttempts;
         private static readonly object LeaseIoLock = new object();
         private static readonly object HostStatusCacheLock = new object();
+        private static readonly object RemovalPreflightCacheLock = new object();
+        private static RemovalPreflightCacheEntry _removalPreflightCache;
         private static readonly AICodedbEditorBackgroundScheduler BackgroundScheduler =
             new AICodedbEditorBackgroundScheduler();
         private static readonly AICodedbSupervisorIntentAdapter SupervisorIntentAdapter =
@@ -1069,6 +1072,10 @@ namespace Rice.AI.Codedb.Editor
                 }
                 else
                     Interlocked.Exchange(ref _missingPrerequisiteFingerprint, string.Empty);
+                if (integrationStatus.State == AICodedbProjectIntegrationState.Installed
+                    && migrationStatus.RequiresReinstall)
+                    migrationProductStatus = WithRemovalPreflight(
+                        context, migrationProductStatus, currentInstance, canContinue, cancellationToken);
                 RememberLifecycleProductStatus(migrationProductStatus, migrationAdmissionResult);
                 if (!integrationStatus.IsValid)
                 {
@@ -1110,6 +1117,9 @@ namespace Rice.AI.Codedb.Editor
                 Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
+                if (integrationStatus.State == AICodedbProjectIntegrationState.Installed)
+                    obsoleteInstanceProductStatus = WithRemovalPreflight(
+                        context, obsoleteInstanceProductStatus, currentInstance, canContinue, cancellationToken);
                 RememberLifecycleProductStatus(
                     obsoleteInstanceProductStatus,
                     obsoleteInstanceAdmissionResult);
@@ -1158,6 +1168,24 @@ namespace Rice.AI.Codedb.Editor
             {
                 AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
                     AICodedbPostAdmissionDisposition.BackendReconcileNotRequired);
+                if (previousProductState == AICodedbProductState.Ready
+                    && currentInstance.IsCurrent
+                    && IsRemovalPreflightDue(context, currentInstance, true))
+                {
+                    AICodedbCommandResult cachedResult;
+                    AICodedbProductStatus cachedStatus;
+                    bool hasCachedStatus;
+                    long ignoredRevision;
+                    TryGetCachedLifecycleStatus(
+                        out cachedResult, out cachedStatus, out hasCachedStatus, out ignoredRevision);
+                    if (hasCachedStatus && cachedStatus.State == AICodedbProductState.Ready)
+                    {
+                        var refreshedStatus = WithRemovalPreflight(
+                            context, cachedStatus, currentInstance, canContinue, cancellationToken, true);
+                        if (!cancellationToken.IsCancellationRequested && canContinue())
+                            RememberLifecycleProductStatus(refreshedStatus, cachedResult);
+                    }
+                }
                 return null;
             }
 
@@ -1234,6 +1262,9 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
                     AICodedbPostAdmissionDisposition.InitialSupervisorProbeEvaluated);
             }
+            if (productStatus.State == AICodedbProductState.Ready)
+                productStatus = WithRemovalPreflight(
+                    context, productStatus, currentInstance, canContinue, cancellationToken, true);
             productStatus = RememberLifecycleProductStatus(productStatus, hostResult);
             AICodedbLifecycleEvidence.RecordPostAdmissionProductLayers(productStatus);
             var workerResult = LifecycleReconcileResult.WithState(productStatus.State);
@@ -1298,6 +1329,9 @@ namespace Rice.AI.Codedb.Editor
                         "Upgrade",
                         cancellationToken);
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, retirementResult);
+                    if (productStatus.State == AICodedbProductState.Ready)
+                        productStatus = WithRemovalPreflight(
+                            context, productStatus, currentInstance, canContinue, cancellationToken, true);
                     productStatus = RememberLifecycleProductStatus(productStatus, retirementResult);
                     workerResult.ProductState = productStatus.State;
                     if (productStatus.State == AICodedbProductState.Ready)
@@ -1318,6 +1352,9 @@ namespace Rice.AI.Codedb.Editor
                         "Upgrade",
                         cancellationToken);
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, instanceResult);
+                    if (productStatus.State == AICodedbProductState.Ready)
+                        productStatus = WithRemovalPreflight(
+                            context, productStatus, currentInstance, canContinue, cancellationToken, true);
                     productStatus = RememberLifecycleProductStatus(productStatus, instanceResult);
                     workerResult.ProductState = productStatus.State;
                     if (!canContinue())
@@ -1360,6 +1397,9 @@ namespace Rice.AI.Codedb.Editor
                         return workerResult;
                     }
                     productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, verifiedInstanceResult);
+                    if (productStatus.State == AICodedbProductState.Ready)
+                        productStatus = WithRemovalPreflight(
+                            context, productStatus, currentInstance, canContinue, cancellationToken, true);
                     productStatus = RememberLifecycleProductStatus(productStatus, verifiedInstanceResult);
                     workerResult.ProductState = productStatus.State;
                     if (productStatus.State == AICodedbProductState.Ready)
@@ -1377,6 +1417,7 @@ namespace Rice.AI.Codedb.Editor
                     return RecoverCurrentInstanceAvailability(
                         context,
                         integrationStatus,
+                        currentInstance,
                         canContinue,
                         cancellationToken);
                 }
@@ -1398,6 +1439,103 @@ namespace Rice.AI.Codedb.Editor
                 workerResult.Warning, productStatus.Command,
                 productStatus.AttentionReason, productStatus.DiagnosticDetail), hostResult);
             return workerResult;
+        }
+
+        private static AICodedbProductStatus WithRemovalPreflight(
+            AICodedbEditorExecutionContext context,
+            AICodedbProductStatus status,
+            AICodedbCurrentInstanceStatus currentInstance,
+            Func<bool> canContinue,
+            CancellationToken cancellationToken,
+            bool currentIntegration = false)
+        {
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return status;
+
+            RemovalPreflightCacheEntry cached;
+            lock (RemovalPreflightCacheLock)
+                cached = _removalPreflightCache;
+            var now = DateTime.UtcNow;
+            var cacheKey = GetRemovalPreflightCacheKey(context, currentInstance, currentIntegration);
+            AICodedbCommandResult result = null;
+            bool available;
+            string diagnostic;
+            if (cached != null && cached.Key == cacheKey && now < cached.ExpiresAtUtc)
+            {
+                available = cached.Available;
+                diagnostic = cached.Diagnostic;
+            }
+            else
+            {
+                AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+                AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
+                result = currentIntegration
+                    ? AICodedbHostPayloadMaterializer.ReadUninstallPreflight(context, cancellationToken)
+                    : AICodedbHostPayloadMaterializer.ReadRemoveIntegrationPreflight(context, cancellationToken);
+                if (cancellationToken.IsCancellationRequested || !canContinue())
+                    return status;
+                available = AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(result);
+                diagnostic = !available && result != null ? result.GetSummary() : string.Empty;
+                lock (RemovalPreflightCacheLock)
+                    _removalPreflightCache = new RemovalPreflightCacheEntry(
+                        cacheKey, now.AddSeconds(RemovalPreflightCacheSeconds), available, diagnostic);
+            }
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return status;
+            var statusDiagnostic = status.DiagnosticDetail;
+            if (!available && !string.IsNullOrWhiteSpace(diagnostic))
+                statusDiagnostic = statusDiagnostic + " Removal preflight: " + diagnostic;
+            return new AICodedbProductStatus(
+                status.State,
+                status.Prerequisite,
+                status.Installed,
+                status.Configured,
+                status.McpAvailable,
+                status.Detail,
+                status.Command,
+                status.AttentionReason,
+                statusDiagnostic,
+                available);
+        }
+
+        private static bool IsRemovalPreflightDue(
+            AICodedbEditorExecutionContext context,
+            AICodedbCurrentInstanceStatus currentInstance,
+            bool currentIntegration)
+        {
+            var key = GetRemovalPreflightCacheKey(context, currentInstance, currentIntegration);
+            lock (RemovalPreflightCacheLock)
+                return _removalPreflightCache == null
+                       || _removalPreflightCache.Key != key
+                       || DateTime.UtcNow >= _removalPreflightCache.ExpiresAtUtc;
+        }
+
+        private static string GetRemovalPreflightCacheKey(
+            AICodedbEditorExecutionContext context,
+            AICodedbCurrentInstanceStatus currentInstance,
+            bool currentIntegration)
+        {
+            return string.Join("|", new[] {
+                context.ProjectRoot, context.PackageRoot, currentIntegration ? "current" : "historical",
+                currentInstance.InstanceId, currentInstance.ActivationEpoch
+            });
+        }
+
+        private sealed class RemovalPreflightCacheEntry
+        {
+            internal readonly string Key;
+            internal readonly DateTime ExpiresAtUtc;
+            internal readonly bool Available;
+            internal readonly string Diagnostic;
+
+            internal RemovalPreflightCacheEntry(string key, DateTime expiresAtUtc,
+                bool available, string diagnostic)
+            {
+                Key = key;
+                ExpiresAtUtc = expiresAtUtc;
+                Available = available;
+                Diagnostic = diagnostic;
+            }
         }
 
         internal static bool TryResolveControlContractMigrationBlock(
@@ -1984,6 +2122,7 @@ namespace Rice.AI.Codedb.Editor
         private static LifecycleReconcileResult RecoverCurrentInstanceAvailability(
             AICodedbEditorExecutionContext context,
             AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbCurrentInstanceStatus currentInstance,
             Func<bool> canContinue,
             CancellationToken cancellationToken)
         {
@@ -2020,6 +2159,9 @@ namespace Rice.AI.Codedb.Editor
             }
 
             var productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, probeResult);
+            if (productStatus.State == AICodedbProductState.Ready)
+                productStatus = WithRemovalPreflight(
+                    context, productStatus, currentInstance, canContinue, cancellationToken, true);
             productStatus = RememberLifecycleProductStatus(productStatus, probeResult);
             if (productStatus.IsReady)
             {

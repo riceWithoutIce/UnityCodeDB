@@ -59,7 +59,7 @@ namespace Rice.AI.Codedb.Editor
             "Remove the obsolete CodeDB integration from this Unity project?\n\n"
             + "CodeDB will remove only an exact Package-owned control selection, Owner Identity evidence, and generated MCP registration after proving the recorded owner has exited.\n\n"
             + "Existing instances, indexes, leases, user Assets and source, unrelated MCP content, and external processes are preserved. "
-            + "After removal, reinstall the Unity Package through Package Manager to create a fresh Owner Identity v2 integration.";
+            + "After removal reaches Uninstalled, use Install CodeDB to create a fresh integration from the current Package.";
         internal const string McpConfigurationReadyMessage = "Project configuration is ready";
         internal const string McpConfigurationAttentionMessage = "Project configuration needs attention";
         internal const string McpClientUnobservedLabel = "Not observed";
@@ -67,9 +67,9 @@ namespace Rice.AI.Codedb.Editor
         internal const string UninstallCodeDBConfirmationMessage =
             "Uninstall CodeDB integration from this Unity project?\n\n"
             + "The Unity Package remains installed. CodeDB will first publish the logical UNINSTALLED state, remove only its owned MCP registration keys and current instance selection, "
-            + "then retire authenticated Package-owned state in the background.\n\n"
+            + "then retain the prior instance as inert pending cleanup unless exact file ownership permits removal.\n\n"
             + "Provider binaries, indexes, adapters, custom runtime configuration, user policy, business files, unrelated MCP content, and external processes are preserved. "
-            + "A live external MCP keeps its exact execution closure until it exits naturally; cleanup then completes automatically.";
+            + "A live external MCP keeps its exact execution closure until it exits naturally. Unproved index and instance content will not be deleted automatically.";
         internal const string InstallCodeDBConfirmationTitle = "Install CodeDB";
         internal const string InstallCodeDBConfirmationMessage =
             "Install CodeDB integration into this Unity project?\n\n"
@@ -1169,6 +1169,7 @@ namespace Rice.AI.Codedb.Editor
 
         private void ShowHeaderMenu()
         {
+            var removalStatus = GetRemovalPresentationStatus();
             var menu = new GenericMenu();
             menu.AddItem(new GUIContent("Open/Provider"), false, AICodedbActions.OpenProviderFolder);
             menu.AddItem(new GUIContent("Open/Runtime"), false, AICodedbActions.OpenRuntimeFolder);
@@ -1185,7 +1186,16 @@ namespace Rice.AI.Codedb.Editor
             {
                 menu.AddDisabledItem(new GUIContent("Provider Guidance"));
             }
-            if (!_statusSnapshot.IsProjectUninstalled)
+            if (IsRemoveIntegrationMenuAvailable(removalStatus))
+            {
+                menu.AddSeparator(string.Empty);
+                menu.AddItem(
+                    new GUIContent("Remove CodeDB Integration"),
+                    false,
+                    RunRemoveIntegrationWithConfirmation);
+            }
+            else if (IsUninstallAvailable(
+                         removalStatus, _statusSnapshot.IsProjectUninstalled))
             {
                 menu.AddSeparator(string.Empty);
                 menu.AddItem(
@@ -1308,13 +1318,19 @@ namespace Rice.AI.Codedb.Editor
                 string.Empty,
                 null,
                 false);
+            var removalStatus = GetRemovalPresentationStatus();
             var removeIntegrationAvailable = IsRemoveIntegrationAvailable(
                 _statusSnapshot.HostGenerationSelection.State,
                 _statusSnapshot.HostPayloadStatus.State,
-                _statusSnapshot.HostUpgradeStatus.Phase);
+                _statusSnapshot.HostUpgradeStatus.Phase,
+                removalStatus != null && removalStatus.RemovalPreflightPassed);
+            var removalActionAvailable = removeIntegrationAvailable
+                                         || IsUninstallAvailable(
+                                             removalStatus,
+                                             _statusSnapshot.IsProjectUninstalled);
             var primaryAction = ResolvePrimaryAction(
-                _statusSnapshot.ProductStatus,
-                removeIntegrationAvailable,
+                removalStatus,
+                removalActionAvailable,
                 _userActionInFlight)
                     || ResolveProviderInstallAction(
                         _statusSnapshot.ProductStatus,
@@ -1983,9 +1999,14 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductState.Uninstalled:
                     return "Install CodeDB";
                 case AICodedbProductState.NeedsAttention:
-                    return _statusSnapshot.ProductStatus.RequiresReinstall
-                        ? "Remove CodeDB Integration"
+                {
+                    var removalStatus = GetRemovalPresentationStatus();
+                    if (IsRemoveIntegrationMenuAvailable(removalStatus))
+                        return "Remove CodeDB Integration";
+                    return IsUninstallAvailable(removalStatus, _statusSnapshot.IsProjectUninstalled)
+                        ? "Uninstall CodeDB from Project"
                         : string.Empty;
+                }
                 case AICodedbProductState.MissingPrerequisite:
                     return IsProviderInstallAvailable(_statusSnapshot.ProductStatus)
                         ? "Configure Dependencies"
@@ -2011,13 +2032,20 @@ namespace Rice.AI.Codedb.Editor
 
             if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
                 RunInstallCodeDBWithConfirmation();
-            else if (_statusSnapshot != null && _statusSnapshot.ProductStatus.RequiresReinstall)
+            else if (_statusSnapshot != null &&
+                     IsRemoveIntegrationMenuAvailable(GetRemovalPresentationStatus()))
                 RunRemoveIntegrationWithConfirmation();
+            else if (_statusSnapshot != null &&
+                     IsUninstallAvailable(
+                         GetRemovalPresentationStatus(), _statusSnapshot.IsProjectUninstalled))
+                RunUninstallCodeDBWithConfirmation();
         }
 
         private void RunRemoveIntegrationWithConfirmation()
         {
-            var cachedProductStatus = _statusSnapshot.ProductStatus;
+            var cachedProductStatus = GetRemovalPresentationStatus();
+            if (!IsRemoveIntegrationMenuAvailable(cachedProductStatus))
+                return;
             ConfirmAndRunRemoveIntegration(
                 () => EditorUtility.DisplayDialog(
                     RemoveIntegrationConfirmationTitle,
@@ -2047,6 +2075,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunUninstallCodeDBWithConfirmation()
         {
+            if (_statusSnapshot == null ||
+                !IsUninstallAvailable(GetRemovalPresentationStatus(), _statusSnapshot.IsProjectUninstalled))
+                return;
             ConfirmAndRunUninstallCodeDB(
                 () => EditorUtility.DisplayDialog(
                     UninstallCodeDBConfirmationTitle,
@@ -2054,6 +2085,50 @@ namespace Rice.AI.Codedb.Editor
                     "Uninstall CodeDB",
                     "Cancel"),
                 () => RunUserActionAsync("Uninstall CodeDB from Project", AICodedbActions.RunUninstallCodeDBAsync));
+        }
+
+        internal static bool IsUninstallAvailable(
+            AICodedbProductStatus status,
+            bool isProjectUninstalled)
+        {
+            return status != null
+                   && !isProjectUninstalled
+                   && !status.RequiresReinstall
+                   && (status.State == AICodedbProductState.Ready
+                       || (status.State == AICodedbProductState.NeedsAttention
+                           && status.AttentionReason == AICodedbProductAttentionReason.None))
+                   && status.RemovalPreflightPassed;
+        }
+
+        internal static bool IsRemoveIntegrationMenuAvailable(AICodedbProductStatus status)
+        {
+            return status != null
+                   && status.RequiresReinstall
+                   && status.RemovalPreflightPassed;
+        }
+
+        private AICodedbProductStatus GetRemovalPresentationStatus()
+        {
+            var displayed = _statusSnapshot == null ? null : _statusSnapshot.ProductStatus;
+            if (displayed == null)
+                return null;
+            AICodedbCommandResult ignoredResult;
+            AICodedbProductStatus cached;
+            bool hasCached;
+            long ignoredRevision;
+            AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(
+                out ignoredResult, out cached, out hasCached, out ignoredRevision);
+            return ResolveRemovalPresentationStatus(displayed, cached, hasCached);
+        }
+
+        internal static AICodedbProductStatus ResolveRemovalPresentationStatus(
+            AICodedbProductStatus displayed,
+            AICodedbProductStatus cached,
+            bool hasCached)
+        {
+            return hasCached && cached != null && displayed != null && cached.State == displayed.State
+                ? cached
+                : displayed;
         }
 
         private void RunInstallCodeDBWithConfirmation()
@@ -2093,11 +2168,12 @@ namespace Rice.AI.Codedb.Editor
         internal static bool IsRemoveIntegrationAvailable(
             AICodedbHostGenerationState generationState,
             AICodedbHostPayloadState payloadState,
-            AICodedbHostUpgradePhase upgradePhase)
+            AICodedbHostUpgradePhase upgradePhase,
+            bool removalPreflightPassed)
         {
-            // Removal performs its own fail-closed ownership preflight, so
-            // historical Host readiness never disables this recovery entry.
-            return Enum.IsDefined(typeof(AICodedbHostGenerationState), generationState)
+            // Host readiness does not grant removal; the cached worker preflight does.
+            return removalPreflightPassed
+                   && Enum.IsDefined(typeof(AICodedbHostGenerationState), generationState)
                    && Enum.IsDefined(typeof(AICodedbHostPayloadState), payloadState)
                    && Enum.IsDefined(typeof(AICodedbHostUpgradePhase), upgradePhase);
         }
@@ -2111,7 +2187,10 @@ namespace Rice.AI.Codedb.Editor
                 return false;
             if (productStatus.State == AICodedbProductState.Uninstalled)
                 return true;
-            return productStatus.RequiresReinstall && recoveryAvailable;
+            if (!recoveryAvailable || productStatus.State != AICodedbProductState.NeedsAttention)
+                return false;
+            return IsRemoveIntegrationMenuAvailable(productStatus)
+                   || IsUninstallAvailable(productStatus, false);
         }
 
         internal static bool ResolveProviderInstallAction(
@@ -2802,6 +2881,10 @@ namespace Rice.AI.Codedb.Editor
         {
             if (TryGetActionStatusOverride(out var presentation))
                 return GetActionStatusDescription(presentation);
+            if (_statusSnapshot.ProductStatus.RequiresReinstall)
+                return IsRemoveIntegrationMenuAvailable(GetRemovalPresentationStatus())
+                    ? "This integration cannot run under the current Package. Its removal authority is verified; uninstall the project integration, then install it fresh."
+                    : "This integration cannot run under the current Package. Removal requires review before any project state changes.";
             return _statusSnapshot.OverallDescription;
         }
 

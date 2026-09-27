@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")]
+    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Repair", "Reinstall", "Uninstall", "Install")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -10374,7 +10374,7 @@ function Get-PartialV1RemoveIntegrationAuthority {
         -Operation $operation `
         -FailedName (Get-RequiredJsonString -Object $operation -Name "name" -Label "partial Owner Identity v1 Supervisor operation")
 
-    $activation = Get-RemoveIntegrationActivationState -AuthorityKind "VERSIONED_V1" -OwnerIdentityVersion 1 -ProjectRoot $ProjectRoot -Selection $selection -RuntimeContractSha256 $runtimeHash -AllowLegacyV1CommittedOperation
+    $activation = Get-RemoveIntegrationActivationState -AuthorityKind "VERSIONED_V1" -OwnerIdentityVersion 1 -ProjectRoot $ProjectRoot -Selection $selection -AllowLegacyV1CommittedOperation
     if ($null -eq $activation) { throw "Partial Owner Identity v1 recovery requires committed activation evidence." }
     if ($activation.Operation.Action -cne "UPGRADE") {
         throw "Partial Owner Identity v1 recovery requires its committed upgrade operation."
@@ -10873,11 +10873,7 @@ function Get-RemoveIntegrationAuthority {
         -AuthorityKind $authority.Kind `
         -OwnerIdentityVersion $authority.OwnerIdentityVersion `
         -ProjectRoot $ProjectRoot `
-        -Selection $selection `
-        -RuntimeContractSha256 (Get-RequiredJsonString `
-            -Object $validatedState.Document `
-            -Name "runtime_contract_sha256" `
-            -Label "Supervisor state")
+        -Selection $selection
 
     return [pscustomobject]@{
         Kind = $authority.Kind
@@ -10902,7 +10898,6 @@ function Get-RemoveIntegrationActivationState {
         [Parameter(Mandatory = $true)][ValidateSet(1, 2)][int]$OwnerIdentityVersion,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$Selection,
-        [Parameter(Mandatory = $true)][string]$RuntimeContractSha256,
         [switch]$AllowLegacyV1CommittedOperation
     )
 
@@ -10913,9 +10908,23 @@ function Get-RemoveIntegrationActivationState {
         SchemaVersion = 1
         Sha256 = Get-RemoveIntegrationControlContractSha256 -Version $OwnerIdentityVersion
     }
+    $contractRoot = ConvertTo-AbsoluteChildPath `
+        -Root $ProjectRoot `
+        -RelativePath "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v$OwnerIdentityVersion" `
+        -Label "historical activation contract root"
+    $activationPath = Join-Path $contractRoot "activation.json"
+    Assert-NoReparsePoint -Path $activationPath -Root $ProjectRoot -Label "historical activation record"
+    if (-not (Test-Path -LiteralPath $activationPath -PathType Leaf)) {
+        throw "Remove CodeDB Integration requires a historical activation record."
+    }
+    $activationDocument = (Read-BoundedJsonDocument -Path $activationPath -Label "historical activation record" -MaximumBytes (256 * 1024)).Document
+    $activationRuntimeHash = Get-RequiredJsonString -Object $activationDocument -Name "runtime_contract_sha256" -Label "historical activation record"
+    if ($activationRuntimeHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Historical activation runtime contract hash is invalid."
+    }
     $trustedManifest = [pscustomobject]@{
         ControlContract = $contract
-        RuntimeContractSha256 = $RuntimeContractSha256.ToLowerInvariant()
+        RuntimeContractSha256 = $activationRuntimeHash
         TargetGenerationId = $Selection.GenerationId
         TargetGenerationManifestSha256 = $Selection.GenerationManifestSha256
     }
@@ -11036,7 +11045,7 @@ function Remove-EmptyRemoveIntegrationDirectories {
     }
 }
 
-function Assert-RemoveIntegrationCompletedState {
+function Assert-RemoveIntegrationTerminalState {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$DesiredState,
@@ -11045,10 +11054,11 @@ function Assert-RemoveIntegrationCompletedState {
 
     if (-not $DesiredState.Present -or $DesiredState.Legacy -or
         $DesiredState.DesiredState -cne "UNINSTALLED" -or
-        $DesiredState.CleanupState -cne "COMPLETE" -or
+        $DesiredState.CleanupState -cne "PENDING" -or
         $DesiredState.StateId -cnotmatch '^[0-9a-f]{32}$') {
-        throw "Idempotent integration removal requires the exact authenticated UNINSTALLED / COMPLETE desired state."
+        throw "Integration removal requires the exact authenticated UNINSTALLED / PENDING desired state."
     }
+    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $DesiredState.StateId
     foreach ($relativePath in @(
             $script:InstanceCurrentRelativePath,
             $script:InstanceLastKnownGoodRelativePath,
@@ -11060,7 +11070,7 @@ function Assert-RemoveIntegrationCompletedState {
             "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v2/operation.json")) {
         $path = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $relativePath -Label "removed integration evidence"
         if (Test-Path -LiteralPath $path) {
-            throw "Completed integration removal retains authoritative evidence: $relativePath"
+            throw "Logical integration removal retains authoritative evidence: $relativePath"
         }
     }
     foreach ($version in @(1, 2)) {
@@ -11070,7 +11080,7 @@ function Assert-RemoveIntegrationCompletedState {
             -Label "activation operations root"
         if (Test-Path -LiteralPath $operationsPath) {
             if (-not (Test-Path -LiteralPath $operationsPath -PathType Container)) {
-                throw "Completed integration removal retains invalid activation operation evidence."
+                throw "Logical integration removal retains invalid activation operation evidence."
             }
             $operationEntries = @(Get-ChildItem -LiteralPath $operationsPath -Force)
             if ($AllowEmptyCleanupDirectories) {
@@ -11078,11 +11088,11 @@ function Assert-RemoveIntegrationCompletedState {
                     if (-not $entry.PSIsContainer -or
                         $entry.Name -cnotmatch '^[0-9a-f]{32}$' -or
                         @(Get-ChildItem -LiteralPath $entry.FullName -Force).Count -ne 0) {
-                        throw "Completed integration removal retains activation operation evidence."
+                        throw "Logical integration removal retains activation operation evidence."
                     }
                 }
             } elseif ($operationEntries.Count -ne 0) {
-                throw "Completed integration removal retains activation operation evidence."
+                throw "Logical integration removal retains activation operation evidence."
             }
         }
     }
@@ -11091,7 +11101,7 @@ function Assert-RemoveIntegrationCompletedState {
         -RemoveManagedKeys `
         -UninstallStateId $DesiredState.StateId
     if (-not $mcpPlan.Current) {
-        throw "Completed integration removal retains an active generated MCP registration."
+        throw "Logical integration removal retains an active generated MCP registration."
     }
 }
 
@@ -11109,17 +11119,17 @@ function Invoke-RemoveIntegration {
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($desiredBefore.Present -and -not $desiredBefore.Legacy -and
             $desiredBefore.DesiredState -ceq "UNINSTALLED" -and
-            $desiredBefore.CleanupState -ceq "COMPLETE") {
+            $desiredBefore.CleanupState -ceq "PENDING") {
             Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $null
         }
         $authority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
         if ($null -eq $authority) {
-            Assert-RemoveIntegrationCompletedState -ProjectRoot $ProjectRoot -DesiredState $desiredBefore
+            Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $desiredBefore
             Write-Host "[RESULT] UNINSTALLED"
-            Write-Host "[CLEANUP_STATE] COMPLETE"
-            Write-Host "[NEXT] Remove or reinstall the Unity Package through Package Manager."
+            Write-Host "[CLEANUP_STATE] PENDING"
+            Write-Host "[NEXT] Use Install CodeDB to create a fresh project integration."
             Set-MaterializerCommandPhase -Phase "COMPLETE"
-            Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_CURRENT" -CleanupState "COMPLETE" -NextAction "Remove or reinstall the Unity Package through Package Manager."
+            Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_CURRENT" -CleanupState "PENDING" -NextAction "Use Install CodeDB to create a fresh project integration."
             return
         }
 
@@ -11130,36 +11140,28 @@ function Invoke-RemoveIntegration {
             -Label "integration removal operation root"
         New-Item -ItemType Directory -Force -Path $operationRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
-        $stateId = [guid]::NewGuid().ToString("N")
-        $desired = New-InstanceDesiredStateDocument `
+        $stateId = $operationId
+        $activationSha256 = if ($null -eq $authority.ActivationState) { "" } else { [string]$authority.ActivationState.Activation.Sha256 }
+        $activationOperationSha256 = if ($null -eq $authority.ActivationState) { "" } else { [string]$authority.ActivationState.Operation.Sha256 }
+        $intent = New-InstanceRemovalIntentDocument `
             -ProjectRoot $ProjectRoot `
-            -DesiredState "UNINSTALLED" `
             -StateId $stateId `
-            -CleanupState "COMPLETE"
-        $desiredBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
-        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
-
-        $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId $stateId
-        if (-not $mcpPlan.Current) {
-            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:McpConfigRelativePath -Mutation "Write" -DesiredBytes $mcpPlan.DesiredBytes
-        }
-        $legacyState = Get-ProjectIntegrationState -ProjectRoot $ProjectRoot
-        if ($legacyState.Present) {
-            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:IntegrationStateRelativePath -Mutation "Delete" -DesiredBytes $null
-        }
+            -AuthorityFingerprint ([string]$authority.OwnerFingerprint) `
+            -SelectionSha256 (Get-TextSha256 -Text $authority.Selection.Text) `
+            -ActivationSha256 $activationSha256 `
+            -ActivationOperationSha256 $activationOperationSha256 `
+            -InstanceId ([string]$authority.Selection.InstanceId) `
+            -InstanceManifestSha256 ([string]$authority.Selection.InstanceManifestSha256) `
+            -GenerationId ([string]$authority.Selection.GenerationId) `
+            -GenerationManifestSha256 ([string]$authority.Selection.GenerationManifestSha256) `
+            -WrapperSha256 ([string]$authority.Selection.Generation.StableWrapperSha256)
+        $intentBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $intent))
+        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target "$($script:InstanceRemovalIntentsRelativePath)/$stateId.json" -Mutation "Write" -DesiredBytes $intentBytes
+        Add-ProjectRemovalDeactivationEntries -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -StateId $stateId
         $globalAvailabilityPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:McpAvailabilityRelativePath -Label "MCP availability state"
         if (Test-Path -LiteralPath $globalAvailabilityPath) {
             $null = Assert-McpAvailabilityStateArtifact -Path $globalAvailabilityPath -ProjectRoot $ProjectRoot
             Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $script:McpAvailabilityRelativePath -Mutation "Delete" -DesiredBytes $null
-        }
-        foreach ($selection in @($authority.Selection, $authority.LastKnownGood) | Where-Object { $null -ne $_ } | Sort-Object InstanceId -Unique) {
-            $availability = Get-RemoveIntegrationInstanceAvailabilityTarget -ProjectRoot $ProjectRoot -Selection $selection
-            if ($null -ne $availability) {
-                Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $availability.RelativePath -Mutation "Delete" -DesiredBytes $null
-            }
-        }
-        foreach ($target in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath)) {
-            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target $target -Mutation "Delete" -DesiredBytes $null
         }
         foreach ($item in @($authority.Inventory | Sort-Object Name)) {
             $relativePath = [IO.Path]::GetFullPath($item.Path).Substring([IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/').Length + 1).Replace('\', '/')
@@ -11186,7 +11188,7 @@ function Invoke-RemoveIntegration {
         }.GetNewClosure()
         $verifyBeforeCommit = {
             $state = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-            Assert-RemoveIntegrationCompletedState `
+            Assert-RemoveIntegrationTerminalState `
                 -ProjectRoot $ProjectRoot `
                 -DesiredState $state `
                 -AllowEmptyCleanupDirectories
@@ -11210,12 +11212,12 @@ function Invoke-RemoveIntegration {
             -OperationId $operationId
         Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $authority
         $finalState = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        Assert-RemoveIntegrationCompletedState -ProjectRoot $ProjectRoot -DesiredState $finalState
+        Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $finalState
         Write-Host "[RESULT] UNINSTALLED"
-        Write-Host "[CLEANUP_STATE] COMPLETE"
-        Write-Host "[NEXT] Remove or reinstall the Unity Package through Package Manager."
+        Write-Host "[CLEANUP_STATE] PENDING"
+        Write-Host "[NEXT] Use Install CodeDB to create a fresh project integration."
         Set-MaterializerCommandPhase -Phase "COMPLETE"
-        Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_COMPLETE" -CleanupState "COMPLETE" -NextAction "Remove or reinstall the Unity Package through Package Manager."
+        Set-MaterializerCommandOutcome -Outcome "UNINSTALLED" -ReasonCode "INTEGRATION_REMOVAL_COMPLETE" -CleanupState "PENDING" -NextAction "Use Install CodeDB to create a fresh project integration."
     } catch {
         if ($script:RequestedExitCode -ne 0) { throw }
         Set-MaterializerCommandOutcome -Outcome "BLOCKED" -ReasonCode "INTEGRATION_REMOVAL_BLOCKED" -CleanupState "PENDING" -NextAction "Resolve the reported ownership ambiguity before retrying removal."
@@ -11682,7 +11684,7 @@ try {
         if (-not $script:MachinePrerequisiteStatus.Current) {
             exit 0
         }
-    } elseif ($Action -notin @("Remove", "RemoveIntegration", "Uninstall")) {
+    } elseif ($Action -notin @("Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Uninstall")) {
         $null = Assert-MachinePrerequisiteForAction -Manifest $payload -ActionName $Action
     }
 
@@ -11803,6 +11805,28 @@ try {
         }
         "RemoveIntegration" {
             Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
+        }
+        "RemoveIntegrationPreflight" {
+            try {
+                $authority = Get-RemoveIntegrationAuthority -Manifest $payload -ProjectRoot $projectRootPath
+                if ($null -eq $authority) {
+                    throw "No authenticated removable project integration is present."
+                }
+                $null = Get-RepairMcpConfigPlan -ProjectRoot $projectRootPath -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString("N"))
+                Write-Host "[REMOVAL_PREFLIGHT] AVAILABLE"
+            } catch {
+                Write-Host "[REMOVAL_PREFLIGHT] BLOCKED"
+                Throw-MaterializerError -Message "Removal preflight requires review. $($_.Exception.Message)" -ExitCode 4
+            }
+        }
+        "UninstallPreflight" {
+            try {
+                $null = Get-CurrentProjectRemovalAuthority -Manifest $payload -ProjectRoot $projectRootPath
+                Write-Host "[REMOVAL_PREFLIGHT] AVAILABLE"
+            } catch {
+                Write-Host "[REMOVAL_PREFLIGHT] BLOCKED"
+                Throw-MaterializerError -Message "Removal preflight requires review. $($_.Exception.Message)" -ExitCode 4
+            }
         }
         "Repair" {
             Invoke-Repair -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath

@@ -5761,25 +5761,32 @@ function Invoke-UninstallAcceptanceScenarios {
     $initialInstance = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
     $initialInstanceId = [string]$initialInstance.instance_id
     Assert-True -Condition ($initialInstanceId -cmatch '^[0-9a-f]{32}$') -Message "Uninstall setup did not select an immutable instance."
+    $initialInstanceRoot = Join-Path $instancesRoot $initialInstanceId
+    $initialInstanceSnapshot = Get-FileSnapshot -Root $initialInstanceRoot
+    $initialGenerationSnapshot = Get-FileSnapshot -Root $generationRoot
     Write-Utf8File -Path $configPath -Content $installedConfig
     $businessBefore = Get-ByteSnapshot -Path (Join-Path $uninstallHostRoot "Assets\BusinessSentinel.txt")
+    $preflightBefore = Get-FileSnapshot -Root $uninstallHostRoot
+    $uninstallPreflight = Invoke-Materializer -Action "UninstallPreflight" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+    Assert-Result -Result $uninstallPreflight -ExitCode 0 -Label "Current project uninstall preflight"
+    Assert-True -Condition ($uninstallPreflight.Text.Contains("[REMOVAL_PREFLIGHT] AVAILABLE")) -Message "Current uninstall preflight did not establish ownership."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $preflightBefore -Message "Current uninstall preflight changed the project."
 
     $uninstall = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $uninstall -ExitCode 0 -Label "Complete project Uninstall"
     Assert-True -Condition ($uninstall.Text.Contains("[RESULT] UNINSTALLED")) -Message "Complete Uninstall did not report UNINSTALLED."
-    Assert-True -Condition ($uninstall.Text.Contains("[CLEANUP_STATE] COMPLETE")) -Message "Complete Uninstall did not report cleanup COMPLETE."
+    Assert-True -Condition ($uninstall.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Uninstall did not report its retained closure as PENDING."
     Assert-True -Condition (Test-Path -LiteralPath $desiredStatePath -PathType Leaf) -Message "Uninstall did not persist UNINSTALLED desired state."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message "Complete Uninstall retained the installed marker."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $currentPointerPath)) -Message "Complete Uninstall retained current.json."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $generationRoot)) -Message "Complete Uninstall retained the owned immutable generation."
     Assert-True -Condition (-not (Test-Path -LiteralPath $instanceCurrentPath)) -Message "Complete Uninstall retained current-instance.json."
     Assert-True -Condition (-not (Test-Path -LiteralPath $instanceLastKnownGoodPath)) -Message "Complete Uninstall retained last-known-good-instance.json."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $stableWrapperPath)) -Message "Complete Uninstall retained the stable CodeDB wrapper."
-    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $instancesRoot $initialInstanceId))) -Message "Complete Uninstall retained the selected instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $initialInstanceRoot) -Expected $initialInstanceSnapshot -Message "Uninstall changed the retained instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $generationRoot) -Expected $initialGenerationSnapshot -Message "Uninstall changed the retained generation."
     $desiredState = [System.IO.File]::ReadAllText($desiredStatePath, $utf8NoBom) | ConvertFrom-Json
     Assert-Equal -Actual ([string]$desiredState.desired_state) -Expected "UNINSTALLED" -Message "Uninstall desired state is incorrect."
     Assert-True -Condition ([string]$desiredState.state_id -cmatch '^[0-9a-f]{32}$') -Message "Uninstall did not persist a valid state id."
-    Assert-Equal -Actual ([string]$desiredState.cleanup_state) -Expected "COMPLETE" -Message "Complete Uninstall did not persist cleanup COMPLETE."
+    Assert-Equal -Actual ([string]$desiredState.cleanup_state) -Expected "PENDING" -Message "Uninstall did not persist pending cleanup."
+    $uninstallIntentPath = Get-PathFromRelative -Root $uninstallHostRoot -RelativePath "AIWork/.runtime/codedb/control/removal-intents/$($desiredState.state_id).json"
+    Assert-True -Condition (Test-Path -LiteralPath $uninstallIntentPath -PathType Leaf) -Message "Uninstall did not retain durable removal intent."
     $preservedPrefix = "# rice-ai-codedb-uninstalled:$($desiredState.state_id): "
     $installedLines = [regex]::Split($installedConfig, "`n")
     for ($lineIndex = 4; $lineIndex -le 14; $lineIndex++) {
@@ -5796,6 +5803,21 @@ function Invoke-UninstallAcceptanceScenarios {
     Assert-Result -Result $repeatUninstall -ExitCode 0 -Label "Repeated project Uninstall"
     Assert-True -Condition ($repeatUninstall.Text.Contains("[RESULT] UNINSTALLED")) -Message "Repeated Uninstall did not remain UNINSTALLED."
     Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $uninstalledSnapshot -Message "Repeated Uninstall was not byte-exact."
+
+    $intentBytes = [System.IO.File]::ReadAllBytes($uninstallIntentPath)
+    try {
+        Remove-Item -LiteralPath $uninstallIntentPath -Force
+        $missingIntentSnapshot = Get-FileSnapshot -Root $uninstallHostRoot
+        $missingIntentUninstall = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+        Assert-True -Condition ($missingIntentUninstall.ExitCode -ne 0) -Message "Pending Uninstall accepted a missing removal intent."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $missingIntentSnapshot -Message "Missing-intent Uninstall changed the project."
+        $missingIntentInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+        Assert-True -Condition ($missingIntentInstall.ExitCode -ne 0) -Message "Pending Install accepted a missing removal intent."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $missingIntentSnapshot -Message "Missing-intent Install changed the project."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $initialInstanceRoot) -Expected $initialInstanceSnapshot -Message "Missing-intent Uninstall changed the retained instance."
+    } finally {
+        [System.IO.File]::WriteAllBytes($uninstallIntentPath, $intentBytes)
+    }
 
     foreach ($suppressedAction in @("DryRun", "Verify")) {
         $suppressed = Invoke-Materializer -Action $suppressedAction -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
@@ -5814,13 +5836,14 @@ function Invoke-UninstallAcceptanceScenarios {
     $installedDesiredState = [System.IO.File]::ReadAllText($desiredStatePath, $utf8NoBom) | ConvertFrom-Json
     Assert-Equal -Actual ([string]$installedDesiredState.desired_state) -Expected "INSTALLED" -Message "Install did not transition desired state to INSTALLED."
     Assert-Equal -Actual ([string]$installedDesiredState.cleanup_state) -Expected "COMPLETE" -Message "Install did not persist cleanup COMPLETE."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message "Instance Install unexpectedly published a legacy flat marker."
+    Assert-True -Condition (Test-Path -LiteralPath $uninstallIntentPath -PathType Leaf) -Message "Install lost the retained cleanup authority."
     Assert-True -Condition (Test-Path -LiteralPath $currentPointerPath -PathType Leaf) -Message "Install did not restore current.json."
     Assert-True -Condition (Test-Path -LiteralPath $generationRoot -PathType Container) -Message "Install did not restore the immutable generation."
     Assert-True -Condition (Test-Path -LiteralPath $instanceCurrentPath -PathType Leaf) -Message "Install did not select a current instance."
     Assert-True -Condition (Test-Path -LiteralPath $stableWrapperPath -PathType Leaf) -Message "Install did not restore the stable wrapper."
     $installedInstance = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
     Assert-True -Condition (-not [string]::Equals([string]$installedInstance.instance_id, $initialInstanceId, [StringComparison]::Ordinal)) -Message "Install reused the retired instance identity."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $initialInstanceRoot) -Expected $initialInstanceSnapshot -Message "Install changed the predecessor instance."
     $installedAfter = [System.IO.File]::ReadAllText($configPath, $utf8NoBom)
     Assert-True -Condition ($installedAfter.Contains('custom_direct = "keep"')) -Message "Install changed the custom target key."
     Assert-True -Condition ($installedAfter.Contains("[$targetTable.tools.codedb_text_search]")) -Message "Install changed the target tools descendant."
@@ -5843,6 +5866,11 @@ function Invoke-UninstallAcceptanceScenarios {
         Assert-True -Condition (-not (Test-Path -LiteralPath $instanceCurrentPath)) -Message "Rejected missing-selection recovery synthesized a current selection."
         Assert-Equal -Actual (Get-FileSnapshot -Root $activationContractRoot) -Expected $activationContractBeforeMissingSelection -Message "Rejected missing-selection recovery changed committed activation evidence."
         Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $projectBeforeMissingSelectionRefusal -Message "Rejected missing-selection recovery changed the project."
+        $missingSelectionPreflight = Invoke-Materializer -Action "UninstallPreflight" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+        Assert-Result -Result $missingSelectionPreflight -ExitCode 4 -Label "Current uninstall missing-selection preflight refusal"
+        $missingSelectionUninstall = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
+        Assert-True -Condition ($missingSelectionUninstall.ExitCode -ne 0) -Message "Uninstall treated missing selection as removal authority."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $uninstallHostRoot) -Expected $projectBeforeMissingSelectionRefusal -Message "Rejected missing-selection Uninstall changed the project."
     } finally {
         [System.IO.File]::WriteAllBytes($instanceCurrentPath, $installedSelectionBytes)
     }
@@ -5966,7 +5994,7 @@ function Invoke-UninstallAcceptanceScenarios {
         $cleanupInvocation = $null
         Assert-Result -Result $automaticCleanup -ExitCode 0 -Label "Post-drain automatic Uninstall cleanup"
         Assert-True -Condition ($automaticCleanup.Text.Contains("[RESULT] UNINSTALLED")) -Message "Automatic cleanup did not retain UNINSTALLED result."
-        Assert-True -Condition ($automaticCleanup.Text.Contains("[CLEANUP_STATE] COMPLETE")) -Message "Automatic cleanup did not converge to COMPLETE."
+        Assert-True -Condition ($automaticCleanup.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Automatic cleanup lost the retained removal closure."
         $cleanupBoundaryInstall = Complete-MaterializerInvocation -Invocation $cleanupBoundaryInstallInvocation -TimeoutMilliseconds 45000
         $cleanupBoundaryInstallInvocation = $null
         Assert-Result -Result $cleanupBoundaryInstall -ExitCode 0 -Label "Install waiting behind automatic cleanup"
@@ -5984,7 +6012,7 @@ function Invoke-UninstallAcceptanceScenarios {
     }
     $postCleanupInstallState = [System.IO.File]::ReadAllText($desiredStatePath, $utf8NoBom) | ConvertFrom-Json
     Assert-Equal -Actual ([string]$postCleanupInstallState.desired_state) -Expected "INSTALLED" -Message "Install left UNINSTALLED state after the cleanup/Install interleaving."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message "Instance Install published a legacy marker after cleanup completed first."
+    Assert-True -Condition (Test-Path -LiteralPath $initialInstanceRoot -PathType Container) -Message "Cleanup/Install removed the retained old instance."
     Assert-True -Condition (Test-Path -LiteralPath $generationRoot -PathType Container) -Message "Install did not restore the current generation after cleanup completed first."
     Assert-True -Condition (Test-Path -LiteralPath $instanceCurrentPath -PathType Leaf) -Message "Install did not select a new instance after cleanup completed first."
     Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Cleanup/Install interleaving terminated the external owner process."
@@ -5992,11 +6020,12 @@ function Invoke-UninstallAcceptanceScenarios {
 
     $installBoundaryPreviousSelection = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
     $installBoundaryPreviousInstanceRoot = Join-Path $instancesRoot ([string]$installBoundaryPreviousSelection.instance_id)
+    $installBoundaryPreviousInstanceBefore = Get-FileSnapshot -Root $installBoundaryPreviousInstanceRoot
     $installBoundaryLease = New-TestGenerationLease -Owner "mcp" -Root $uninstallHostRoot
     $installBoundaryUninstall = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $installBoundaryUninstall -ExitCode 0 -Label "Install-boundary pending Uninstall"
     Assert-True -Condition ($installBoundaryUninstall.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Install-boundary fixture did not retain an external closure."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install-boundary fixture did not remove the holder-free prior instance."
+    Assert-True -Condition (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot -PathType Container) -Message "Install-boundary fixture removed the retained prior instance."
     $installBoundaryLeaseBefore = Get-ByteSnapshot -Path $installBoundaryLease
     $installBoundaryGenerationBefore = Get-FileSnapshot -Root $generationRoot
     $installBoundaryRetirementsRoot = Join-Path $activationContractRoot "retirements"
@@ -6036,7 +6065,7 @@ function Invoke-UninstallAcceptanceScenarios {
         $installBoundaryState = [System.IO.File]::ReadAllText($desiredStatePath, $utf8NoBom) | ConvertFrom-Json
         Assert-Equal -Actual ([string]$installBoundaryState.desired_state) -Expected "UNINSTALLED" -Message "Install changed desired state before atomic activation."
         Assert-True -Condition (-not (Test-Path -LiteralPath $instanceCurrentPath)) -Message "Install selected the candidate before its activation boundary."
-        Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install candidate verification recreated the absent prior instance."
+        Assert-Equal -Actual (Get-FileSnapshot -Root $installBoundaryPreviousInstanceRoot) -Expected $installBoundaryPreviousInstanceBefore -Message "Install candidate verification changed the retained prior instance."
         Assert-Equal -Actual (Get-ByteSnapshot -Path $installBoundaryLease) -Expected $installBoundaryLeaseBefore -Message "Install candidate verification changed the retained generation lease."
         Assert-Equal -Actual (Get-FileSnapshot -Root $generationRoot) -Expected $installBoundaryGenerationBefore -Message "Install candidate verification changed the retained generation."
         Assert-True -Condition ($null -ne (Get-Process -Id $PID -ErrorAction SilentlyContinue)) -Message "Install candidate verification terminated the generation lease owner."
@@ -6074,7 +6103,7 @@ function Invoke-UninstallAcceptanceScenarios {
     Assert-True -Condition (Test-Path -LiteralPath $instanceCurrentPath -PathType Leaf) -Message "Obsolete cleanup deleted the selected instance after Install."
     $installBoundaryCurrentSelection = [System.IO.File]::ReadAllText($instanceCurrentPath, $utf8NoBom) | ConvertFrom-Json
     Assert-True -Condition (-not [string]::Equals([string]$installBoundaryCurrentSelection.instance_id, [string]$installBoundaryPreviousSelection.instance_id, [StringComparison]::Ordinal)) -Message "Pending-Uninstall Install reused the retained instance identity."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $installBoundaryPreviousInstanceRoot)) -Message "Install or obsolete cleanup recreated the absent prior instance."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $installBoundaryPreviousInstanceRoot) -Expected $installBoundaryPreviousInstanceBefore -Message "Install or obsolete cleanup changed the retained prior instance."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $installBoundaryLease) -Expected $installBoundaryLeaseBefore -Message "Install or obsolete cleanup changed the retained generation lease."
     Assert-Equal -Actual (Get-FileSnapshot -Root $generationRoot) -Expected $installBoundaryGenerationBefore -Message "Install or obsolete cleanup changed the retained generation."
     Assert-Equal -Actual (Get-FileSnapshot -Root $installBoundaryRetirementsRoot) -Expected $installBoundaryRetirementsBefore -Message "Install minted retirement authority for the absent prior instance."
@@ -6155,9 +6184,9 @@ function Invoke-UninstallAcceptanceScenarios {
     }
     $ownerFreeWatcherCleanup = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $ownerFreeWatcherCleanup -ExitCode 0 -Label "Owner-free automatic cleanup after watcher drain"
-    Assert-True -Condition ($ownerFreeWatcherCleanup.Text.Contains("[CLEANUP_STATE] COMPLETE")) -Message "Automatic cleanup did not complete after the watcher drained."
+    Assert-True -Condition ($ownerFreeWatcherCleanup.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Automatic cleanup lost the retained instance after the watcher drained."
     if (-not $watcherUninstallDeferred) {
-        Write-Host "[OK] Logical Uninstall preserved the active watcher and its closure; automatic cleanup completed after fixture-owned drain."
+        Write-Host "[OK] Logical Uninstall preserved the active watcher and its closure; the retained instance stayed pending after fixture-owned drain."
     }
 
     $reinstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
@@ -6168,12 +6197,12 @@ function Invoke-UninstallAcceptanceScenarios {
         -TargetProjectRoot $uninstallHostRoot `
         -TestCrashAfterMutation 1
     Assert-Result -Result $crashedUninstall -ExitCode 86 -Label "Uninstall desired-state crash"
-    Assert-True -Condition (Test-Path -LiteralPath $desiredStatePath -PathType Leaf) -Message "Uninstall crash did not durably publish UNINSTALLED desired state first."
+    Assert-Equal -Actual ([string]((Get-Content -LiteralPath $desiredStatePath -Raw | ConvertFrom-Json).desired_state)) -Expected "INSTALLED" -Message "Uninstall crash published UNINSTALLED before the intent-bound transaction completed."
     $crashRetry = Invoke-Materializer -Action "Uninstall" -PayloadRoot $canonicalPayloadRoot -TargetProjectRoot $uninstallHostRoot
     Assert-Result -Result $crashRetry -ExitCode 0 -Label "Uninstall crash retry"
     Assert-True -Condition ($crashRetry.Text.Contains("[RESULT] UNINSTALLED")) -Message "Uninstall crash retry did not converge."
-    Assert-True -Condition ($crashRetry.Text.Contains("[CLEANUP_STATE] COMPLETE")) -Message "Uninstall crash retry did not finish cleanup."
-    Write-Host "[OK] Uninstall desired-state publication survived process crash and converged idempotently on retry."
+    Assert-True -Condition ($crashRetry.Text.Contains("[CLEANUP_STATE] PENDING")) -Message "Uninstall crash retry lost its retained closure."
+    Write-Host "[OK] Uninstall intent publication survived process crash and converged to pending logical removal on retry."
 }
 
 function Install-LegacyPoc21Fixture {
@@ -7640,9 +7669,7 @@ function Invoke-OwnerIdentityRemovalScenarios {
     $lockDocument.owner_epoch = $originalOwnerEpoch
     Write-Utf8File -Path $safe.Authority.LockPath -Content (($lockDocument | ConvertTo-Json -Depth 10) + "`n")
 
-    $instanceRootBefore = Get-FileSnapshotExcept `
-        -Root $safe.Selection.Root `
-        -ExcludedRelativePaths @("logs/mcp-availability.json")
+    $instanceRootBefore = Get-FileSnapshot -Root $safe.Selection.Root
     $indexBefore = Get-ByteSnapshot -Path $safe.IndexSentinelPath
     $leaseBefore = Get-ByteSnapshot -Path $safe.LeasePath
     $retiredBefore = Get-ByteSnapshot -Path $safe.RetiredControlPath
@@ -7655,7 +7682,7 @@ function Invoke-OwnerIdentityRemovalScenarios {
         -ConfirmedProjectMutation `
         -TargetProjectRoot $safeRoot
     Assert-Result -Result $removed -ExitCode 0 -Label "Dead Owner Identity v2 integration removal"
-    Assert-StructuredCommandResult -Result $removed -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "COMPLETE" -Label "Dead Owner Identity v2 integration removal" -RequiredScopes @("instance_activation")
+    Assert-StructuredCommandResult -Result $removed -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "PENDING" -Label "Dead Owner Identity v2 integration removal" -RequiredScopes @("instance_activation")
     foreach ($removedPath in @(
             $safe.Authority.StatePath,
             $safe.Authority.LockPath,
@@ -7663,11 +7690,10 @@ function Invoke-OwnerIdentityRemovalScenarios {
             (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/last-known-good-instance.json"),
             (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/activation.json"),
             (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/operation.json"),
-            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"),
-            (Join-Path $safe.Selection.Root "logs\mcp-availability.json"))) {
+            (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/payload-materializer/mcp-availability.json"))) {
         Assert-True -Condition (-not (Test-Path -LiteralPath $removedPath)) -Message "Owned integration evidence remains after removal: $removedPath"
     }
-    Assert-Equal -Actual (Get-FileSnapshotExcept -Root $safe.Selection.Root -ExcludedRelativePaths @("logs/mcp-availability.json")) -Expected $instanceRootBefore -Message "Removal changed the preserved immutable instance closure."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $safe.Selection.Root) -Expected $instanceRootBefore -Message "Removal changed the preserved instance closure."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.IndexSentinelPath) -Expected $indexBefore -Message "Removal changed the instance index sentinel."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.LeasePath) -Expected $leaseBefore -Message "Removal changed the stale instance lease."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $safe.RetiredControlPath) -Expected $retiredBefore -Message "Removal changed a retirement sentinel."
@@ -7678,7 +7704,11 @@ function Invoke-OwnerIdentityRemovalScenarios {
     Assert-True -Condition (-not [string]::Equals($configBefore, $configAfter, [StringComparison]::Ordinal)) -Message "Removal did not disable its generated MCP registration."
     $desired = Get-Content -LiteralPath (Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/desired-state.json") -Raw | ConvertFrom-Json
     Assert-Equal -Actual ([string]$desired.desired_state) -Expected "UNINSTALLED" -Message "Removal desired state mismatch."
-    Assert-Equal -Actual ([string]$desired.cleanup_state) -Expected "COMPLETE" -Message "Removal cleanup state mismatch."
+    Assert-Equal -Actual ([string]$desired.cleanup_state) -Expected "PENDING" -Message "Removal cleanup state mismatch."
+    $removalIntentPath = Get-PathFromRelative -Root $safeRoot -RelativePath "AIWork/.runtime/codedb/control/removal-intents/$($desired.state_id).json"
+    Assert-True -Condition (Test-Path -LiteralPath $removalIntentPath -PathType Leaf) -Message "Removal did not retain its exact durable intent."
+    $removalIntent = Get-Content -LiteralPath $removalIntentPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual ([string]$removalIntent.retained_instance_id) -Expected ([string]$safe.Selection.Selection.instance_id) -Message "Removal intent lost the retained instance binding."
     $afterFirstRemoval = Get-FileSnapshot -Root $safeRoot
     $repeated = Invoke-Materializer `
         -Action "RemoveIntegration" `
@@ -7760,9 +7790,7 @@ function Invoke-OwnerIdentityRemovalScenarios {
 
     $legacySafeRoot = Join-Path $runRoot "owner-v1-orphan-safe"
     $legacySafe = New-OrphanedOwnerIdentityV1RemovalFixture -Root $legacySafeRoot
-    $legacyInstanceBefore = Get-FileSnapshotExcept `
-        -Root $legacySafe.Selection.Root `
-        -ExcludedRelativePaths @("logs/mcp-availability.json")
+    $legacyInstanceBefore = Get-FileSnapshot -Root $legacySafe.Selection.Root
     $legacyUserBefore = Get-ByteSnapshot -Path $legacySafe.UserSentinelPath
     $legacyRemoved = Invoke-Materializer `
         -Action "RemoveIntegration" `
@@ -7771,9 +7799,9 @@ function Invoke-OwnerIdentityRemovalScenarios {
         -ConfirmedProjectMutation `
         -TargetProjectRoot $legacySafeRoot
     Assert-Result -Result $legacyRemoved -ExitCode 0 -Label "Orphaned Owner Identity v1 integration removal"
-    Assert-StructuredCommandResult -Result $legacyRemoved -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "COMPLETE" -Label "Orphaned Owner Identity v1 integration removal" -RequiredScopes @("instance_activation")
+    Assert-StructuredCommandResult -Result $legacyRemoved -Action "REMOVEINTEGRATION" -Outcome "UNINSTALLED" -CleanupState "PENDING" -Label "Orphaned Owner Identity v1 integration removal" -RequiredScopes @("instance_activation")
     Assert-True -Condition (-not (Test-Path -LiteralPath (Get-PathFromRelative -Root $legacySafeRoot -RelativePath "AIWork/.runtime/codedb/control/current-instance.json"))) -Message "Orphaned Owner Identity v1 removal retained current selection."
-    Assert-Equal -Actual (Get-FileSnapshotExcept -Root $legacySafe.Selection.Root -ExcludedRelativePaths @("logs/mcp-availability.json")) -Expected $legacyInstanceBefore -Message "Orphaned Owner Identity v1 removal changed the immutable instance closure."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $legacySafe.Selection.Root) -Expected $legacyInstanceBefore -Message "Orphaned Owner Identity v1 removal changed the instance closure."
     Assert-Equal -Actual (Get-ByteSnapshot -Path $legacySafe.UserSentinelPath) -Expected $legacyUserBefore -Message "Orphaned Owner Identity v1 removal changed user data."
 
     Write-Host "[OK] Owner Identity removal blocks live, unverifiable, mismatched, partial, and conflicting authority; admits only an exact orphaned v1 selection or authenticated Supervisor authority; preserves immutable instances, indexes, leases, retirement sentinels, user data, unrelated TOML, and processes; and recovers idempotently after interruption."
@@ -7812,6 +7840,7 @@ function Invoke-PartialV1RemovalScenarios {
         Sha256 = Get-RemoveIntegrationControlContractSha256 -Version 1
     }
     $runtimeHash = "a" * 64
+    $supervisorRuntimeHash = "b" * 64
     $manifest = [pscustomobject]@{
         ControlContract = $contract
         RuntimeContractSha256 = $runtimeHash
@@ -7866,7 +7895,7 @@ function Invoke-PartialV1RemovalScenarios {
         runtime = $supervisorRoot
         selected_instance_id = $prior.InstanceId
         selected_generation_id = $prior.GenerationId
-        runtime_contract_sha256 = $runtimeHash
+        runtime_contract_sha256 = $supervisorRuntimeHash
         child = $null
         started_at_utc = $timestamp
         completed_at_utc = $timestamp
@@ -7948,15 +7977,30 @@ function Invoke-PartialV1RemovalScenarios {
         -Label "Ordinary activation reading rejects historical v1 operation shape"
 
     $liveBefore = Get-FileSnapshot -Root $hostRoot
+    $livePreflight = Invoke-Materializer -Action "RemoveIntegrationPreflight" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture
+    Assert-Result -Result $livePreflight -ExitCode 4 -Label "Partial v1 live-holder preflight rejection"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $liveBefore -Message "Live-holder preflight changed project state."
     $live = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
     Assert-Result -Result $live -ExitCode 4 -Label "Partial v1 live-holder rejection"
     Assert-True -Condition ($live.Text.Contains("holder is live or ambiguous")) -Message "Partial v1 live holder was not rejected.`n$($live.Text)"
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $liveBefore -Message "Partial v1 live-holder rejection changed project state."
     Remove-Item -LiteralPath $prior.InstanceLeasePath -Force
 
+    Write-Utf8File -Path $prior.InstanceLeasePath -Content "{invalid lease evidence`n"
+    $invalidLeaseBefore = Get-FileSnapshot -Root $hostRoot
+    $invalidLeasePreflight = Invoke-Materializer -Action "RemoveIntegrationPreflight" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture
+    Assert-Result -Result $invalidLeasePreflight -ExitCode 4 -Label "Partial v1 invalid-holder preflight"
+    $invalidLeaseRemoval = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $invalidLeaseRemoval -ExitCode 2 -Label "Partial v1 invalid-holder removal"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $invalidLeaseBefore -Message "Invalid-holder rejection changed project state."
+    Remove-Item -LiteralPath $prior.InstanceLeasePath -Force
+
     $failed.selected_generation_id = "unknown"
     Write-Utf8File -Path $supervisorOperationPath -Content (($failed | ConvertTo-Json -Depth 8) + "`n")
     $mismatchBefore = Get-FileSnapshot -Root $hostRoot
+    $mismatchPreflight = Invoke-Materializer -Action "RemoveIntegrationPreflight" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture
+    Assert-Result -Result $mismatchPreflight -ExitCode 4 -Label "Partial v1 identity mismatch preflight"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $mismatchBefore -Message "Identity-mismatch preflight changed project state."
     $mismatch = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
     Assert-Result -Result $mismatch -ExitCode 4 -Label "Partial v1 identity mismatch rejection"
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $mismatchBefore -Message "Partial v1 mismatch changed project state."
@@ -7999,6 +8043,15 @@ function Invoke-PartialV1RemovalScenarios {
     $operation.mutations = @($mutation, $lastKnownGoodMutation)
     Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
 
+    $operation.runtime_contract_sha256 = $supervisorRuntimeHash
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+    $crossRecordBefore = Get-FileSnapshot -Root $hostRoot
+    $crossRecordMismatch = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
+    Assert-Result -Result $crossRecordMismatch -ExitCode 4 -Label "Partial v1 activation-journal hash mismatch"
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $crossRecordBefore -Message "Partial v1 activation-journal mismatch changed project state."
+    $operation.runtime_contract_sha256 = $runtimeHash
+    Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
+
     $operation.mutations = @($mutation)
     Write-Utf8File -Path $context.Paths.OperationPath -Content (ConvertTo-InstanceJsonText -Value $operation)
     $missingMutationBefore = Get-FileSnapshot -Root $hostRoot
@@ -8015,6 +8068,24 @@ function Invoke-PartialV1RemovalScenarios {
     Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $conflictingBefore -Message "Partial v1 conflicting selection changed project state."
     Copy-Item -LiteralPath $prior.SelectionPath -Destination $lastKnownGoodPath -Force
 
+    $readyBefore = Get-FileSnapshot -Root $hostRoot
+    $readyPreflight = Invoke-Materializer -Action "RemoveIntegrationPreflight" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture
+    Assert-Result -Result $readyPreflight -ExitCode 0 -Label "Partial v1 authenticated removal preflight"
+    Assert-True -Condition ($readyPreflight.Text.Contains("[REMOVAL_PREFLIGHT] AVAILABLE")) -Message "Authenticated partial v1 preflight did not advertise exact availability."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $readyBefore -Message "Authenticated removal preflight changed project state."
+    $failedRemovalBefore = Get-FileSnapshot -Root $hostRoot
+    $failedRemoval = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -TestFailAfterMutation 1
+    Assert-True -Condition ($failedRemoval.ExitCode -ne 0 -and $failedRemoval.Text.Contains("Injected POC failure after mutation 1")) -Message "Removal fault did not reach the first mutation."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $hostRoot) -Expected $failedRemovalBefore -Message "Interrupted removal did not restore the original project files."
+    Assert-Equal -Actual (Get-InstanceDesiredState -ProjectRoot $hostRoot).DesiredState -Expected "INSTALLED" -Message "Interrupted removal published UNINSTALLED."
+    $prematureInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $prematureInstall -ExitCode 4 -Label "Fresh Install before completed removal"
+    $crashedRemoval = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -TestCrashAfterMutation 1
+    Assert-Result -Result $crashedRemoval -ExitCode 86 -Label "Partial v1 interrupted removal"
+    Assert-True -Condition ($crashedRemoval.Text.Contains("Injected POC process crash after mutation 1")) -Message "Removal crash did not reach its durable mutation window."
+    $installDuringRecovery = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot
+    Assert-True -Condition ($installDuringRecovery.ExitCode -ne 0) -Message "Fresh Install was admitted from interrupted removal."
+    Assert-True -Condition (Test-Path -LiteralPath $prior.SelectionPath -PathType Leaf) -Message "Interrupted removal recovery lost the predecessor selection."
     $instanceBefore = Get-FileSnapshot -Root $prior.InstanceRoot
     $generationBefore = Get-FileSnapshot -Root $prior.GenerationRoot
     $removed = Invoke-Materializer -Action "RemoveIntegration" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture -ConfirmedProjectMutation
@@ -8026,7 +8097,54 @@ function Invoke-PartialV1RemovalScenarios {
     Assert-Equal -Actual (Get-FileSnapshot -Root $prior.InstanceRoot) -Expected $instanceBefore -Message "Partial v1 removal changed preserved instance."
     Assert-Equal -Actual (Get-FileSnapshot -Root $prior.GenerationRoot) -Expected $generationBefore -Message "Partial v1 removal changed immutable generation."
     Assert-True -Condition (Test-Path -LiteralPath $prior.GenerationLeasePath) -Message "Partial v1 removal deleted an external generation lease."
-    Write-Host "[OK] Partial Owner Identity v1 removal rejects live, mismatched, and unknown evidence; deletes only certified control targets and preserves instance and generation bytes."
+    $uninstalled = Get-InstanceDesiredState -ProjectRoot $hostRoot
+    Assert-Equal -Actual $uninstalled.DesiredState -Expected "UNINSTALLED" -Message "Partial v1 removal did not publish UNINSTALLED."
+    Assert-Equal -Actual $uninstalled.CleanupState -Expected "PENDING" -Message "Partial v1 removal did not report its retained closure."
+    $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $hostRoot -StateId $uninstalled.StateId
+    Assert-Equal -Actual $removalIntent.InstanceId -Expected $prior.InstanceId -Message "Partial v1 removal intent lost the predecessor binding."
+    $removedPreflight = Invoke-Materializer -Action "RemoveIntegrationPreflight" -PayloadRoot $canonicalPayloadRoot -OmitPocFixture
+    Assert-Result -Result $removedPreflight -ExitCode 4 -Label "Already removed integration preflight"
+    $removalIntentBytes = [IO.File]::ReadAllBytes($removalIntent.Path)
+    try {
+        [IO.File]::Delete($removalIntent.Path)
+        $missingIntentInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $missingIntentInstall -ExitCode 6 -Label "Fresh Install missing removal intent"
+        Assert-True -Condition (-not (Test-Path -LiteralPath $prior.SelectionPath)) -Message "Missing-intent Install selected the predecessor."
+    } finally {
+        [IO.File]::WriteAllBytes($removalIntent.Path, $removalIntentBytes)
+    }
+    try {
+        $tamperedIntent = Get-Content -LiteralPath $removalIntent.Path -Raw | ConvertFrom-Json
+        $tamperedIntent.retained_instance_id = [guid]::NewGuid().ToString("N")
+        Write-Utf8File -Path $removalIntent.Path -Content (($tamperedIntent | ConvertTo-Json -Depth 8) + "`n")
+        $mismatchedIntentInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot
+        Assert-Result -Result $mismatchedIntentInstall -ExitCode 6 -Label "Fresh Install mismatched removal intent"
+        Assert-True -Condition (-not (Test-Path -LiteralPath $prior.SelectionPath)) -Message "Mismatched-intent Install selected the predecessor."
+    } finally {
+        [IO.File]::WriteAllBytes($removalIntent.Path, $removalIntentBytes)
+    }
+    $candidateFailure = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot -TestFailInstanceCandidate
+    Assert-Result -Result $candidateFailure -ExitCode 6 -Label "Partial v1 fresh Install candidate failure"
+    Assert-True -Condition (-not (Test-Path -LiteralPath $prior.SelectionPath)) -Message "Failed fresh Install selected a candidate."
+    Assert-Equal -Actual (Get-InstanceDesiredState -ProjectRoot $hostRoot).DesiredState -Expected "UNINSTALLED" -Message "Failed fresh Install lost UNINSTALLED."
+    $freshInstall = Invoke-Materializer -Action "Install" -PayloadRoot $canonicalPayloadRoot
+    Assert-Result -Result $freshInstall -ExitCode 0 -Label "Partial v1 fresh Install"
+    $freshSelection = Get-TestCurrentInstanceSelection -Root $hostRoot
+    Assert-True -Condition ($freshSelection.Selection.instance_id -cne $prior.InstanceId) -Message "Fresh Install adopted the predecessor instance."
+    Assert-Equal -Actual $freshSelection.Selection.generation_id -Expected $canonicalPayloadManifest.generation_id -Message "Fresh Install did not select the current Package generation."
+    $freshContractRoot = Get-PathFromRelative -Root $hostRoot -RelativePath "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2"
+    $freshActivation = Get-Content -LiteralPath (Join-Path $freshContractRoot "activation.json") -Raw | ConvertFrom-Json
+    $freshJournal = Get-Content -LiteralPath (Join-Path $freshContractRoot "operation.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $freshActivation.publication_phase -Expected "COMMITTED" -Message "Fresh Install did not commit its activation."
+    Assert-Equal -Actual $freshJournal.phase -Expected "COMMITTED" -Message "Fresh Install did not commit its operation."
+    Assert-Equal -Actual $freshJournal.action -Expected "INSTALL" -Message "Fresh Install reused the predecessor action."
+    Assert-True -Condition ($freshActivation.activation_epoch -cne $attempt.ActivationEpoch) -Message "Fresh Install reused the predecessor activation epoch."
+    Assert-Equal -Actual $freshActivation.current.instance_id -Expected $freshSelection.Selection.instance_id -Message "Fresh activation does not bind the new selection."
+    Assert-True -Condition (Test-Path -LiteralPath $prior.InstanceRoot -PathType Container) -Message "Fresh Install removed the predecessor closure."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $prior.InstanceRoot) -Expected $instanceBefore -Message "Fresh Install changed the retained predecessor instance."
+    Assert-True -Condition (Test-Path -LiteralPath $removalIntent.Path -PathType Leaf) -Message "Fresh Install lost the predecessor cleanup authority."
+    Assert-True -Condition (-not (Test-Path -LiteralPath $context.Paths.ActivationPath)) -Message "Fresh Install restored the predecessor activation journal."
+    Write-Host "[OK] Partial Owner Identity v1 removal independently authenticates the later Supervisor failure and historical activation, rejects live, mismatched, and unknown evidence, and preserves instance and generation bytes."
 }
 
 function Invoke-ControlContractReinstallFixtureRequest {

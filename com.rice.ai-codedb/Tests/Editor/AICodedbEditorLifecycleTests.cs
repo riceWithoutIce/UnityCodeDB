@@ -3578,6 +3578,19 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(accepted.BlocksAutomaticStart, Is.True);
             Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before));
 
+            failed["runtime_contract_sha256"] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            WriteUtf8NoBom(failedPath, AICodedbSupervisorBridge.SerializeJsonObject(failed));
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.ObsoleteReinstallRequired),
+                "A later authenticated Supervisor failure does not rewrite the historical activation contract.");
+            journal["runtime_contract_sha256"] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+            Assert.That(AICodedbControlContractMigrationStore.Read(_projectRoot, AICodedbPaths.PackageRootPath).State,
+                Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous),
+                "The activation and journal must retain their own matching historical runtime contract.");
+            journal["runtime_contract_sha256"] = runtimeHash;
+            WriteUtf8NoBom(journalPath, AICodedbSupervisorBridge.SerializeJsonObject(journal));
+
             var priorStarted = new Dictionary<string, object>
             {
                 { "schema_version", 1 }, { "sequence", 1 }, { "at_utc", "2026-08-25T00:00:00.0000000Z" },

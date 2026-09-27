@@ -213,23 +213,19 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation)
         {
             if (!confirmedProjectMutation
-                || !cachedProductStatus.RequiresReinstall
-                || cachedProductStatus.Prerequisite != AICodedbProductLayerState.Current
+                || !cachedProductStatus.RemovalPreflightPassed
                 || currentIntegrationStatus.State != AICodedbProjectIntegrationState.Installed)
             {
                 return false;
             }
 
-            if (cachedProductStatus.AttentionReason
-                == AICodedbProductAttentionReason.ControlContractReinstallRequired)
+            if (currentMigrationStatus.State
+                == AICodedbControlContractMigrationState.ObsoleteReinstallRequired)
             {
-                return currentMigrationStatus.State
-                       == AICodedbControlContractMigrationState.ObsoleteReinstallRequired;
+                return true;
             }
 
-            return cachedProductStatus.AttentionReason
-                   == AICodedbProductAttentionReason.InstanceIdentityReinstallRequired
-                   && currentMigrationStatus.State
+            return currentMigrationStatus.State
                    == AICodedbControlContractMigrationState.Missing
                    && currentInstanceStatus.State
                    == AICodedbCurrentInstanceState.ObsoleteReinstallRequired;
@@ -242,8 +238,7 @@ namespace Rice.AI.Codedb.Editor
             if (!confirmedProjectMutation)
                 return RemoveIntegrationAdmissionRejected(
                     "Removing CodeDB integration requires explicit project mutation confirmation.");
-            if (!cachedProductStatus.RequiresReinstall
-                || cachedProductStatus.Prerequisite != AICodedbProductLayerState.Current)
+            if (!cachedProductStatus.RemovalPreflightPassed)
             {
                 return RemoveIntegrationAdmissionRejected(
                     "The cached CodeDB state does not admit integration removal. Refresh the Manager before trying again.");

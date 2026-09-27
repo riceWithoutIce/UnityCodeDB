@@ -645,6 +645,8 @@ namespace Rice.AI.Codedb.Editor
             var versionRoot = Directory.GetParent(namespacePath).FullName;
             var activation = ReadEvidence(Path.Combine(versionRoot, "activation.json"), "Owner Identity v1 activation");
             var journal = ReadEvidence(Path.Combine(versionRoot, "operation.json"), "Owner Identity v1 activation operation");
+            var activationRuntimeHash = AICodedbStrictJson.GetRequiredString(
+                activation, "runtime_contract_sha256", "Owner Identity v1 activation");
             RequireExactFields(activation,
                 new[] { "schema_version", "managed_by", "control_contract", "runtime_contract_sha256", "project_root", "project_identity", "activation_epoch", "operation_id", "candidate", "current", "last_known_good", "publication_phase", "updated_at_utc" },
                 Array.Empty<string>(), "Owner Identity v1 activation");
@@ -673,8 +675,9 @@ namespace Rice.AI.Codedb.Editor
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(activation, "publication_phase", "Owner Identity v1 activation"), "COMMITTED", StringComparison.Ordinal)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(journal, "phase", "Owner Identity v1 activation operation"), "COMMITTED", StringComparison.Ordinal)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(journal, "action", "Owner Identity v1 activation operation"), "UPGRADE", StringComparison.Ordinal)
-                || !MatchesPartialV1ActivationContext(activation, projectRoot, projectIdentity, contract, runtimeHash)
-                || !MatchesPartialV1ActivationContext(journal, projectRoot, projectIdentity, contract, runtimeHash)
+                || !AICodedbControlContract.IsSha256(activationRuntimeHash)
+                || !MatchesPartialV1ActivationContext(activation, projectRoot, projectIdentity, contract, activationRuntimeHash)
+                || !MatchesPartialV1ActivationContext(journal, projectRoot, projectIdentity, contract, activationRuntimeHash)
                 || !MatchesPartialV1Candidate(activation, "candidate", selection, instanceHash, generationHash)
                 || !MatchesPartialV1Candidate(activation, "current", selection, instanceHash, generationHash)
                 || !MatchesPartialV1Candidate(journal, "candidate", selection, instanceHash, generationHash))
