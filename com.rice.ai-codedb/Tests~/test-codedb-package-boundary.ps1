@@ -58,11 +58,13 @@ function Invoke-ManagerActionWriterScenarios {
         Copy-Item -LiteralPath $sourceWriter -Destination $writerPath
         $projectKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($projectRoot).Replace('\', '/').ToLowerInvariant())
         $packageKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($packageRoot).Replace('\', '/').ToLowerInvariant())
+        $projectPhysicalKey = $projectKey.Substring(0, 24)
+        $packagePhysicalKey = $packageKey.Substring(0, 24)
         $writerHash = (Get-FileHash -LiteralPath $writerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
         foreach ($scenario in @('success', 'timeout', 'identity-rejected')) {
             $actionId = [Guid]::NewGuid().ToString('N')
-            $actionRoot = Join-Path (Join-Path (Join-Path $receiptRoot $projectKey) $packageKey) $actionId
+            $actionRoot = Join-Path (Join-Path (Join-Path $receiptRoot $projectPhysicalKey) $packagePhysicalKey) $actionId
             $actionRoots.Add($actionRoot)
             $commandPath = Join-Path $projectRoot ($scenario + '.ps1')
             $commandText = if ($scenario -eq 'timeout') {

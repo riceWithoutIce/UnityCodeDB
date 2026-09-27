@@ -42,6 +42,14 @@ function Test-Id {
     return $null -ne $Value -and $Value.Length -eq $Length -and $Value -cmatch '^[0-9a-f]+$'
 }
 
+function Get-PhysicalIdentityKey {
+    param([Parameter(Mandatory = $true)][string]$IdentityKey)
+    if (-not (Test-Id $IdentityKey 64)) {
+        throw 'Manager action identity key is invalid.'
+    }
+    return $IdentityKey.Substring(0, 24)
+}
+
 function Get-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
@@ -158,7 +166,7 @@ if (-not (Test-Id ([string]$admitted.action_id) 32) -or -not (Test-Id ([string]$
 if (-not (Test-Id ([string]$admitted.project_key) 64) -or -not (Test-Id ([string]$admitted.package_key) 64)) {
     throw 'Manager action project or Package key is invalid.'
 }
-$expectedSuffix = Join-Path (Join-Path (Join-Path ([string]$admitted.project_key) ([string]$admitted.package_key)) ([string]$admitted.action_id)) ([string]$admitted.stage_id)
+$expectedSuffix = Join-Path (Join-Path (Join-Path (Get-PhysicalIdentityKey ([string]$admitted.project_key)) (Get-PhysicalIdentityKey ([string]$admitted.package_key))) ([string]$admitted.action_id)) ([string]$admitted.stage_id)
 if (-not $receiptPath.EndsWith($expectedSuffix, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Manager action receipt path does not match its admitted identity.'
 }

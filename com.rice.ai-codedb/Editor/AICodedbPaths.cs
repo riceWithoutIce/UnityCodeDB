@@ -267,8 +267,8 @@ namespace Rice.AI.Codedb.Editor
                 throw new ArgumentException("The Manager action id is invalid.", nameof(actionId));
             return NormalizePath(Path.Combine(
                 GetManagerActionsRoot(),
-                GetManagerActionProjectKey(context),
-                GetManagerActionPackageKey(context),
+                GetManagerActionPhysicalKey(GetManagerActionProjectKey(context)),
+                GetManagerActionPhysicalKey(GetManagerActionPackageKey(context)),
                 actionId));
         }
 
@@ -298,6 +298,21 @@ namespace Rice.AI.Codedb.Editor
             return ComputeIdentityKey(context.PackageRoot);
         }
 
+        private static string GetManagerActionPhysicalKey(string identityKey)
+        {
+            // Keep the complete identity in every receipt document, but use a
+            // bounded physical directory component so the admission temp file
+            // remains below the Windows legacy path limit. Receipt collisions
+            // still fail closed through the full project/package keys and roots
+            // validated by ReadTerminalReceipt.
+            const int PhysicalKeyLength = 24;
+            if (string.IsNullOrWhiteSpace(identityKey)
+                || identityKey.Length != 64
+                || !IsLowerHex(identityKey))
+                throw new ArgumentException("The Manager action identity key is invalid.", nameof(identityKey));
+            return identityKey.Substring(0, PhysicalKeyLength);
+        }
+
         internal static string ComputeIdentityKey(string value)
         {
             var normalized = NormalizePath(value).TrimEnd('/', '\\').ToLowerInvariant();
@@ -309,6 +324,17 @@ namespace Rice.AI.Codedb.Editor
                     builder.Append(item.ToString("x2"));
                 return builder.ToString();
             }
+        }
+
+        private static bool IsLowerHex(string value)
+        {
+            foreach (var character in value)
+            {
+                if (!((character >= '0' && character <= '9')
+                      || (character >= 'a' && character <= 'f')))
+                    return false;
+            }
+            return true;
         }
 
         private static string GetHostPath(string generationRelativePath, string legacyRelativePath)
