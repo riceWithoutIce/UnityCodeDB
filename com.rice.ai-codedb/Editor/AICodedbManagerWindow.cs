@@ -1323,7 +1323,7 @@ namespace Rice.AI.Codedb.Editor
                 _statusSnapshot.HostGenerationSelection.State,
                 _statusSnapshot.HostPayloadStatus.State,
                 _statusSnapshot.HostUpgradeStatus.Phase,
-                removalStatus != null && removalStatus.RemovalPreflightPassed);
+                removalStatus.RemovalPreflightPassed);
             var removalActionAvailable = removeIntegrationAvailable
                                          || IsUninstallAvailable(
                                              removalStatus,
@@ -2091,8 +2091,7 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus status,
             bool isProjectUninstalled)
         {
-            return status != null
-                   && !isProjectUninstalled
+            return !isProjectUninstalled
                    && !status.RequiresReinstall
                    && (status.State == AICodedbProductState.Ready
                        || (status.State == AICodedbProductState.NeedsAttention
@@ -2102,16 +2101,15 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool IsRemoveIntegrationMenuAvailable(AICodedbProductStatus status)
         {
-            return status != null
-                   && status.RequiresReinstall
+            return status.RequiresReinstall
                    && status.RemovalPreflightPassed;
         }
 
         private AICodedbProductStatus GetRemovalPresentationStatus()
         {
-            var displayed = _statusSnapshot == null ? null : _statusSnapshot.ProductStatus;
-            if (displayed == null)
-                return null;
+            if (_statusSnapshot == null)
+                return default(AICodedbProductStatus);
+            var displayed = _statusSnapshot.ProductStatus;
             AICodedbCommandResult ignoredResult;
             AICodedbProductStatus cached;
             bool hasCached;
@@ -2126,7 +2124,7 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus cached,
             bool hasCached)
         {
-            return hasCached && cached != null && displayed != null && cached.State == displayed.State
+            return hasCached && cached.State == displayed.State
                 ? cached
                 : displayed;
         }

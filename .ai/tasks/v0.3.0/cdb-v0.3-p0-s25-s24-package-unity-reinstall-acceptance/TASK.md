@@ -5,7 +5,7 @@
 - Product: UnityCodeDB
 - Version: v0.3.0 preview
 - Workflow: codedb-workflow-v2, revision 2.3
-- Status: GATE_A_COMMIT_AUTHORIZED / PACKAGE_EXPORT_PENDING
+- Status: FIX_01_SOURCE_READY / COMMIT_EXPORT_PENDING
 - Planner: UnityCodeDB v0.3 Planner
 - Coder: not dispatched; source correction requires a stable finding and route decision
 - Verifier: independent RELEASE review after a stable artifact and acceptance record
@@ -120,11 +120,12 @@ continuous recovery outcome, not a set of per-error micro-tasks.
 ## Handoff
 
 - Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
-- Current status: GATE_A_COMMIT_AUTHORIZED / PACKAGE_EXPORT_PENDING
+- Current status: FIX_01_SOURCE_READY / COMMIT_EXPORT_PENDING
 - Next notification: UnityCodeDB v0.3 Planner/User
-- Next action: commit the exact 19-path scope recorded in `RESULT.md`, then
-  stop before Package export. The reconciled ten-path candidate is not the
-  accepted S24 seven-path identity or independent C# / Unity verification.
-- Human decision or authorization required: local Package
-  export, validation-project manifest maintenance, Unity compile/EditMode,
+- Next action: commit the two-file FIX 01 source/test correction with S25
+  records, export a new commit-derived local Package, and switch only the
+  validation project's CodeDB manifest entry while Unity remains closed.
+  Preserve the failed artifact. Unity compile remains unverified until the
+  human visibly opens the new Package.
+- Human decision or authorization required: human Unity compile/EditMode,
   real removal, fresh Install, Verifier routing, push, and publication.

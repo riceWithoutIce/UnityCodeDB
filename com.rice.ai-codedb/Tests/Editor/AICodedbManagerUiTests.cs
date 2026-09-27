@@ -3867,6 +3867,15 @@ namespace Rice.AI.Codedb.Editor.Tests
     internal sealed class AICodedbLifecycleControlTests
     {
         [Test]
+        public void MissingRemovalStatus_DoesNotOfferProjectMutation()
+        {
+            var status = default(AICodedbProductStatus);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(status, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(status), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, false, false), Is.False);
+        }
+
+        [Test]
         public void RemoveIntegrationPreflight_RequiresOneSuccessfulExactMarker()
         {
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
