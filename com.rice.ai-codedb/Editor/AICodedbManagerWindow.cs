@@ -167,6 +167,7 @@ namespace Rice.AI.Codedb.Editor
                 _activityPanel = new AICodedbActivityPanel();
                 _userActionStatus = new AICodedbUserActionStatus();
                 AttachCurrentActionSession();
+                RestoreDurableActionAsync();
                 _watcherStatus = AICodedbWatcherStatusBuilder.Build(null);
                 _watcherStatusLoaded = false;
                 EditorApplication.update -= ObserveTransientHostStatus;
@@ -355,6 +356,7 @@ namespace Rice.AI.Codedb.Editor
             AttachCurrentActionSession();
             var recoveringAction = AICodedbManagerActionSession.CurrentFor(_executionContext);
             if (recoveringAction != null && recoveringAction.IsRecovering
+                && !recoveringAction.IsEvidenceConflict
                 && !_actionRecoveryInspectionInFlight
                 && EditorApplication.timeSinceStartup >= _nextActionRecoveryInspectionAt
                 && !EditorApplication.isCompiling && !EditorApplication.isUpdating)
@@ -437,6 +439,19 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        private async void RestoreDurableActionAsync()
+        {
+            var context = _executionContext;
+            var read = await Task.Run(() => AICodedbManagerActionJournal.Read(context));
+            if (this == null || !string.Equals(_executionContext.ProjectRoot,
+                    context.ProjectRoot, StringComparison.OrdinalIgnoreCase))
+                return;
+            AICodedbManagerActionSession.RestoreDurable(context, read,
+                EditorApplication.timeSinceStartup);
+            AttachCurrentActionSession();
+            Repaint();
+        }
+
         private async void InspectActionRecoveryAsync(AICodedbManagerActionSession session)
         {
             _actionRecoveryInspectionInFlight = true;
@@ -451,7 +466,11 @@ namespace Rice.AI.Codedb.Editor
                 if (this == null || !ReferenceEquals(
                         AICodedbManagerActionSession.CurrentFor(_executionContext), session))
                     return;
-                if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                if ((outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                     || outcome.State == AICodedbManagerActionRecoveryState.PreEffectRefusal)
+                    && outcome.Result != null
+                    && string.Equals(outcome.Result.ActionId, session.ActionId, StringComparison.Ordinal)
+                    && await Task.Run(() => session.TryReleaseDurableIndex(outcome.Result, out var _))
                     && session.TryCompleteRecovery(outcome.Result,
                         EditorApplication.timeSinceStartup))
                 {
@@ -460,7 +479,10 @@ namespace Rice.AI.Codedb.Editor
                 }
                 else
                 {
-                    session.SetRecoveryDetail(outcome.Detail);
+                    session.SetRecoveryDetail(outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                                              || outcome.State == AICodedbManagerActionRecoveryState.PreEffectRefusal
+                        ? "Authenticated command evidence exists, but the project action index could not be released."
+                        : outcome.Detail);
                 }
                 Repaint();
             }
@@ -2309,7 +2331,9 @@ namespace Rice.AI.Codedb.Editor
             if (!preflightResult.Succeeded)
             {
                 _lastResultTitle = "Host Payload Redeploy Preflight";
-                return preflightResult;
+                return BuildPreEffectManagerDecision(preflightResult.ExitCode,
+                    preflightResult.StandardOutput, preflightResult.StandardError,
+                    preflightResult.ElapsedMilliseconds);
             }
 
             var hostPayload = _statusSnapshot.HostPayloadStatus;
@@ -2319,11 +2343,10 @@ namespace Rice.AI.Codedb.Editor
                     "Redeploy status changed",
                     "The Manager refreshed CodeDB status and Redeploy is no longer available. Review the updated Host status before continuing.",
                     "OK");
-                return new AICodedbCommandResult(
+                return BuildPreEffectManagerDecision(
                     4,
                     preflightResult.StandardOutput,
                     "Redeploy is no longer available after the background preflight.",
-                    false,
                     preflightResult.ElapsedMilliseconds);
             }
 
@@ -2338,11 +2361,10 @@ namespace Rice.AI.Codedb.Editor
                     "Redeploy host is blocked",
                     mcpGuidance + " The Manager never terminates external client processes.",
                     "OK");
-                return new AICodedbCommandResult(
+                return BuildPreEffectManagerDecision(
                     4,
                     preflightResult.StandardOutput,
                     mcpGuidance,
-                    false,
                     preflightResult.ElapsedMilliseconds);
             }
 
@@ -2368,12 +2390,20 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult BuildCancelledHostPayloadRedeployResult(
             AICodedbCommandResult preflightResult)
         {
-            return new AICodedbCommandResult(
+            return BuildPreEffectManagerDecision(
                 1,
                 preflightResult == null ? string.Empty : preflightResult.StandardOutput,
                 "Host Payload Redeploy was cancelled by the user.",
-                false,
                 preflightResult == null ? 0 : preflightResult.ElapsedMilliseconds);
+        }
+
+        private static AICodedbCommandResult BuildPreEffectManagerDecision(
+            int exitCode, string output, string detail, long elapsedMilliseconds,
+            string actionId = null)
+        {
+            return new AICodedbCommandResult(exitCode, output, detail, false,
+                elapsedMilliseconds, false, false, actionId ?? AICodedbPaths.CurrentActionId,
+                false, AICodedbManagerActionEvidenceKind.PreEffectRefusal);
         }
 
         private void RunHostPayloadRemoveWithConfirmation()
@@ -2425,6 +2455,112 @@ namespace Rice.AI.Codedb.Editor
                 refreshStatusAfterAction: false);
         }
 
+        private static bool IsSupervisorAction(string title)
+        {
+            switch (title)
+            {
+                case "Refresh If Stale":
+                case "Refresh Index":
+                case "Build Shader Adapter":
+                case "Clean Index":
+                case "Rebuild Index":
+                case "Start Now":
+                case "Stop Now":
+                case "Restart":
+                case "Enable Start with Unity Editor":
+                case "Disable Start with Unity Editor":
+                case "Install CodeDB":
+                case "Uninstall CodeDB from Project":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsDualRouteAction(string title)
+        {
+            return title == "Install CodeDB" || title == "Uninstall CodeDB from Project";
+        }
+
+        private static bool IsDirectOnlyAction(string title)
+        {
+            switch (title)
+            {
+                case "Remove CodeDB Integration":
+                case "Configure CodeDB Dependencies":
+                case "Host Payload DryRun":
+                case "Host Payload Verify":
+                case "Host Payload Upgrade":
+                case "Host Payload Redeploy":
+                case "Host Payload Sync":
+                case "Host Payload Remove":
+                case "Provider Guidance":
+                case "Verify Runtime":
+                case "Prepare Runtime":
+                case "Regenerate Runtime Config":
+                case "Check Freshness":
+                case "Runtime Health":
+                case "Unity Project Smoke":
+                case "Language Probe":
+                case "C# Probe":
+                case "Shader Adapter Probe":
+                case "Project Config Validation":
+                case "Registration Draft":
+                case "Language Custom Probe":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static AICodedbCommandResult UnconfirmedActionResult(string actionId, string detail)
+        {
+            return new AICodedbCommandResult(4, string.Empty, detail, false,
+                0, false, false, actionId, false,
+                AICodedbManagerActionEvidenceKind.Indeterminate);
+        }
+
+        private static async Task<AICodedbCommandResult> ResolveActionEvidenceAsync(
+            AICodedbManagerActionSession session, AICodedbCommandResult reported)
+        {
+            if (reported != null
+                && reported.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                && string.Equals(reported.ActionId, session.ActionId, StringComparison.Ordinal))
+                return reported;
+
+            var direct = await Task.Run(() => AICodedbProcessRunner.RecoverManagerAction(
+                session.Context, session.ActionId));
+            if (direct.State == AICodedbManagerActionRecoveryState.Conflict
+                || direct.State == AICodedbManagerActionRecoveryState.Pending)
+                return UnconfirmedActionResult(session.ActionId, direct.Detail);
+
+            if (direct.State == AICodedbManagerActionRecoveryState.PreEffectRefusal)
+                return direct.Result;
+
+            if (IsSupervisorAction(session.Title))
+            {
+                var supervisor = await AICodedbEditorLifecycle.RecoverManagerActionAsync(
+                    session.Context, session.ActionId);
+                if (direct.State == AICodedbManagerActionRecoveryState.Terminal
+                    && supervisor.State == AICodedbManagerActionRecoveryState.Terminal)
+                    return UnconfirmedActionResult(session.ActionId,
+                        "Both direct writer and Supervisor claim the same action; neither result was adopted.");
+                if (direct.State == AICodedbManagerActionRecoveryState.Terminal)
+                    return IsDualRouteAction(session.Title) ? direct.Result
+                        : UnconfirmedActionResult(session.ActionId,
+                            "A Supervisor-owned action has an unexpected direct writer terminal.");
+                if (supervisor.State == AICodedbManagerActionRecoveryState.Terminal)
+                    return supervisor.Result;
+                return UnconfirmedActionResult(session.ActionId,
+                    "No authenticated Supervisor terminal is available: " + supervisor.Detail);
+            }
+
+            return direct.State == AICodedbManagerActionRecoveryState.Terminal
+                ? direct.Result
+                : UnconfirmedActionResult(session.ActionId,
+                    "No authenticated one-shot writer terminal is available: " + direct.Detail);
+        }
+
         private void RunUserActionAsync(
             string title,
             Func<Task<AICodedbCommandResult>> action,
@@ -2468,6 +2604,37 @@ namespace Rice.AI.Codedb.Editor
                     out var session))
                 return;
 
+            // These two local/read-only controls do not dispatch a durable
+            // writer or Supervisor operation.
+            var durable = title != "Automatic Host Updates" && title != "Watcher Status";
+            if (durable)
+            {
+                var durableIndex = session.DurableIndex;
+                var admission = await Task.Run(() =>
+                {
+                    var admitted = AICodedbManagerActionJournal.TryAdmit(durableIndex, out var detail);
+                    return new { Admitted = admitted, Detail = detail };
+                });
+                if (!admission.Admitted)
+                {
+                    var read = await Task.Run(() => AICodedbManagerActionJournal.Read(session.Context));
+                    if (read.State == AICodedbManagerActionIndexState.Empty)
+                    {
+                        session.CompletePreEffectRefusal(admission.Detail, EditorApplication.timeSinceStartup);
+                    }
+                    else
+                    {
+                        session.AbortBeforeAdmission();
+                        AICodedbManagerActionSession.RestoreDurable(session.Context, read,
+                            EditorApplication.timeSinceStartup);
+                    }
+                    AttachCurrentActionSession();
+                    Repaint();
+                    return;
+                }
+                session.MarkDurableAdmitted();
+            }
+
             InvalidateReadySnapshot(_executionContext.ProjectRoot);
             _transientStatusRefreshAttempts = 0;
             _transientStatusRefreshPending = false;
@@ -2480,16 +2647,20 @@ namespace Rice.AI.Codedb.Editor
             ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
             Repaint();
             AICodedbCommandResult result;
+            AICodedbManagerDispatchTracker dispatchTracker;
+            var returnedNormally = false;
             using (AICodedbPaths.UseActionContext(
-                       _executionContext, session.ActionId,
+                       session.Context, durable ? session.ActionId : string.Empty,
                        session.EffectClass, session.AuthorizationSource))
             {
+                dispatchTracker = AICodedbPaths.CurrentActionDispatchTracker;
                 try
                 {
                     result = await action(line => { actionStatus.UpdateProgressLine(line); });
                     session.RecordInitialCommandResult(result);
                     if (continueOnMainThread != null && this != null)
                         result = await continueOnMainThread(result);
+                    returnedNormally = true;
                 }
                 catch (Exception exception)
                 {
@@ -2497,8 +2668,40 @@ namespace Rice.AI.Codedb.Editor
                         -1,
                         string.Empty,
                         exception.Message,
-                        false);
+                        false, 0, false, false, session.ActionId, false,
+                        AICodedbManagerActionEvidenceKind.Indeterminate);
                 }
+            }
+            if (durable)
+            {
+                if (returnedNormally && result != null && !result.Succeeded
+                    && result.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.Indeterminate
+                    && !dispatchTracker.DirectWriterDispatchAttempted
+                    && IsDirectOnlyAction(title))
+                    result = BuildPreEffectManagerDecision(result.ExitCode,
+                        result.StandardOutput, result.StandardError,
+                        result.ElapsedMilliseconds, session.ActionId);
+                try
+                {
+                    result = await ResolveActionEvidenceAsync(session, result);
+                }
+                catch (Exception exception)
+                {
+                    result = UnconfirmedActionResult(session.ActionId,
+                        "Exact action evidence lookup failed: " + exception.Message);
+                }
+            }
+            if (durable && result != null
+                && ((result.HasAuthoritativeTerminalEvidence && result.TerminalForManagerAction)
+                    || result.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal)
+                && string.Equals(result.ActionId, session.ActionId, StringComparison.Ordinal))
+            {
+                var released = await Task.Run(() => session.TryReleaseDurableIndex(result, out var _));
+                if (!released)
+                    result = new AICodedbCommandResult(4, string.Empty,
+                        "The command outcome is recorded, but its project action index could not be released.",
+                        false, 0, false, false, session.ActionId, false,
+                        AICodedbManagerActionEvidenceKind.Indeterminate);
             }
             if (this == null)
             {
@@ -2996,6 +3199,11 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbProductState? PostActionProductState { get; private set; }
         internal bool IsRunning { get; private set; }
         internal bool IsRecovering { get; private set; }
+        internal bool IsEvidenceConflict { get; private set; }
+        private bool _durableAdmitted;
+        private bool _legacyReceipt;
+        internal AICodedbManagerActionIndex DurableIndex => new AICodedbManagerActionIndex(
+            ActionId, Title, EffectClass, AuthorizationSource, Context);
 
         private AICodedbManagerActionSession(
             string title,
@@ -3051,10 +3259,100 @@ namespace Rice.AI.Codedb.Editor
                 return _current != null
                        && string.Equals(_current.Context.ProjectRoot, context.ProjectRoot,
                            StringComparison.OrdinalIgnoreCase)
-                       && string.Equals(_current.Context.PackageRoot, context.PackageRoot,
-                           StringComparison.OrdinalIgnoreCase)
                     ? _current : null;
             }
+        }
+
+        internal static void RestoreDurable(AICodedbEditorExecutionContext currentContext,
+            AICodedbManagerActionIndexRead read, double now)
+        {
+            lock (Gate)
+            {
+                if (read.State == AICodedbManagerActionIndexState.Empty
+                    || (_current != null && _current.IsRunning))
+                    return;
+                if (read.State == AICodedbManagerActionIndexState.Conflict)
+                {
+                    var prior = _current != null && _current.IsRecovering
+                        && AICodedbSupervisorProtocol.IsManagerActionId(_current.ActionId)
+                        ? _current : null;
+                    var retainedId = AICodedbSupervisorProtocol.IsManagerActionId(read.ActionId)
+                        ? read.ActionId : prior?.ActionId ?? string.Empty;
+                    _current = new AICodedbManagerActionSession(
+                        "Previous CodeDB action", prior?.Context ?? currentContext,
+                        now, retainedId, true);
+                    _current.IsEvidenceConflict = true;
+                    _current.Status.SetRecoveryDetail(read.Detail);
+                    return;
+                }
+                if (_current != null && _current.IsRecovering
+                    && string.Equals(_current.ActionId, read.Index.ActionId, StringComparison.Ordinal)
+                    && string.Equals(_current.Context.PackageRoot,
+                        read.Index.Context.PackageRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    _current._durableAdmitted = !read.IsLegacyReceipt;
+                    _current._legacyReceipt = read.IsLegacyReceipt;
+                    return;
+                }
+                _current = new AICodedbManagerActionSession(read.Index.Title,
+                    read.Index.Context, now, read.Index.ActionId, true);
+                _current._durableAdmitted = !read.IsLegacyReceipt;
+                _current._legacyReceipt = read.IsLegacyReceipt;
+            }
+        }
+
+        internal void MarkDurableAdmitted()
+        {
+            _durableAdmitted = true;
+            _legacyReceipt = false;
+        }
+
+        internal void AbortBeforeAdmission()
+        {
+            lock (Gate)
+            {
+                if (!ReferenceEquals(_current, this) || !IsRunning)
+                    return;
+                IsRunning = false;
+                _current = null;
+                if (SessionState.GetString(PendingKey(Context), string.Empty)
+                    .StartsWith(ActionId + "|", StringComparison.Ordinal))
+                    SessionState.SetString(PendingKey(Context), string.Empty);
+            }
+        }
+
+        internal bool TryReleaseDurableIndex(AICodedbCommandResult result, out string detail)
+        {
+            if (result == null || !string.Equals(result.ActionId, ActionId, StringComparison.Ordinal)
+                || (result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                    && (!result.HasAuthoritativeTerminalEvidence || !result.TerminalForManagerAction)))
+            {
+                detail = "The original action has no authenticated final disposition.";
+                return false;
+            }
+            if (_legacyReceipt)
+            {
+                detail = string.Empty;
+                return true;
+            }
+            if (!_durableAdmitted)
+            {
+                detail = "The Manager action has no durable admission.";
+                return false;
+            }
+            var disposition = result.ManagerActionEvidenceKind
+                              == AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                ? AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                : AICodedbManagerActionEvidenceKind.CommandTerminal;
+            return AICodedbManagerActionJournal.TryRelease(DurableIndex, disposition, out detail);
+        }
+
+        internal void CompletePreEffectRefusal(string detail, double now)
+        {
+            Complete(new AICodedbCommandResult(4, string.Empty, detail, false,
+                    0, false, false, ActionId, false,
+                    AICodedbManagerActionEvidenceKind.PreEffectRefusal),
+                AICodedbProductState.Starting, false, now);
         }
 
         internal void Complete(
@@ -3067,7 +3365,12 @@ namespace Rice.AI.Codedb.Editor
             {
                 if (!ReferenceEquals(_current, this) || !IsRunning)
                     return;
-                if (result == null || !result.HasAuthoritativeTerminalEvidence)
+                if (result == null || (_durableAdmitted
+                    && (!string.Equals(result.ActionId, ActionId, StringComparison.Ordinal)
+                        || (!result.TerminalForManagerAction
+                            && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal)))
+                    || (!result.HasAuthoritativeTerminalEvidence
+                    && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal))
                 {
                     Status.Recover(Title, now);
                     if (result != null)
@@ -3108,7 +3411,12 @@ namespace Rice.AI.Codedb.Editor
 
         internal void FinishAfterWindowClose(AICodedbCommandResult result, double now)
         {
-            if (result == null || !result.HasAuthoritativeTerminalEvidence)
+            if (result == null || (_durableAdmitted
+                && (!string.Equals(result.ActionId, ActionId, StringComparison.Ordinal)
+                    || (!result.TerminalForManagerAction
+                        && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal)))
+                || (!result.HasAuthoritativeTerminalEvidence
+                && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal))
                 RecoverAfterWindowClose(result, now);
             else
                 Complete(result, AICodedbProductState.Starting, false, now);
@@ -3119,7 +3427,9 @@ namespace Rice.AI.Codedb.Editor
             lock (Gate)
             {
                 if (!ReferenceEquals(_current, this) || !IsRecovering
-                    || result == null || !result.HasAuthoritativeTerminalEvidence
+                    || IsEvidenceConflict
+                    || result == null || (!result.HasAuthoritativeTerminalEvidence
+                        && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal)
                     || !string.Equals(result.ActionId, ActionId, StringComparison.Ordinal))
                     return false;
                 Result = result;
@@ -3191,16 +3501,16 @@ namespace Rice.AI.Codedb.Editor
             if (string.IsNullOrEmpty(pending))
                 return;
             var parts = pending.Split(new[] { '|' }, 3);
-            if (parts.Length != 3 || !Guid.TryParseExact(parts[0], "N", out _)
-                || !string.Equals(parts[2], context.PackageRoot,
-                    StringComparison.OrdinalIgnoreCase))
+            if (parts.Length != 3 || !Guid.TryParseExact(parts[0], "N", out _))
             {
                 _current = new AICodedbManagerActionSession(
-                    "Previous CodeDB action", context, now, Guid.NewGuid().ToString("N"), true);
+                    "Previous CodeDB action", context, now, string.Empty, true);
                 return;
             }
+            var originalContext = new AICodedbEditorExecutionContext(context.Platform,
+                context.ProjectRoot, parts[2], context.ProjectDisplayName);
             _current = new AICodedbManagerActionSession(
-                parts[1], context, now, parts[0], true);
+                parts[1], originalContext, now, parts[0], true);
         }
 
         private static string PendingKey(AICodedbEditorExecutionContext context)

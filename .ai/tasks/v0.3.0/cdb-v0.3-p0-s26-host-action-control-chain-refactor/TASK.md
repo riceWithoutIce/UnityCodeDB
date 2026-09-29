@@ -6,10 +6,10 @@
 - Version: v0.3.0 P0
 - Workflow: codedb-workflow-v2
 - Workflow revision: 2.3
-- Status: READY
+- Status: ACCEPTED / SOURCE_AND_FOCUSED_GATES_COMPLETE
 - Planner: UnityCodeDB v0.3 Planner
-- Coder: v0.3.coder.deep (pending dispatch)
-- Verifier: not yet dispatched
+- Coder: v0.3.coder.deep (complete)
+- Verifier: v0.3.verifier.deep (complete; PASS)
 - Review mode: RELEASE
 - Execution mode: DURABLE_SESSION
 - Execution profile: v0.3.coder.deep
@@ -91,7 +91,8 @@ existing project integration uninstall and fresh-install safety contract.
 - Active time budget: DEEP_60M per active role window; keep continuation in
   this task rather than creating microtasks.
 - Output budget: V2_DEFAULT; broad search/full diff/full regression: FORBIDDEN.
-- EditMode authorization: NOT_REQUESTED.
+- EditMode authorization: completed as a human-owned focused gate; four new
+  Manager action tests passed and no C# compile errors were reported.
 - Side-effect authorization: task-owned synthetic L0 fixture processes only
   after Coder routing; no real Unity or project/Provider mutation.
 - Stop conditions: identity drift, need for a new executable/resident service,
@@ -113,8 +114,14 @@ existing project integration uninstall and fresh-install safety contract.
 ## Handoff
 
 - Current task: `cdb-v0.3-p0-s26-host-action-control-chain-refactor`
-- Current status: READY; design frozen, no implementation begun
-- Next notification: UnityCodeDB v0.3 Planner/User
-- Next action: dispatch the bounded Coder task after commit and Project update
-- Human decision or authorization required: later Unity,
-  commit, Package export, push, tag, and publication remain separate gates
+- Current status: ACCEPTED; focused synthetic L0, human C# compile/focused
+  EditMode evidence, and targeted Verifier review are complete.
+- Frozen accepted identity: HEAD
+  `1f2fcb23e6d840956063aa398d1bb6ece6a01717`; ordered eight-path identity
+  `640e27807619bdc01cc5857127a8f37b61ecfd93ce791a5bbc9631120c3e5f5f`.
+- Next action: create the authorized commit, then produce and verify one
+  commit-derived Package before requesting the human Remove-to-fresh-Install
+  gate. Do not replay the S25 real Remove attempt.
+- Human decision or authorization required: commit, Package export, real
+  Remove/Install, push, tag, publication, and release acceptance remain
+  separate gates.

@@ -41,6 +41,7 @@ function Get-FixtureSha256 {
 
 function Invoke-ManagerActionWriterScenarios {
     $sourceWriter = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Tools~\invoke-codedb-manager-action.ps1'))
+    Assert-True -Condition (-not ([IO.File]::ReadAllText($sourceWriter) -match '(?i)\bAdd-Type\b')) -Message 'The one-shot writer still requires runtime source compilation.'
     $fixtureTag = [Guid]::NewGuid().ToString('N')
     $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('codedb-manager-action-' + $fixtureTag)
     $projectRoot = Join-Path $fixtureRoot 'project'
@@ -56,26 +57,36 @@ function Invoke-ManagerActionWriterScenarios {
     try {
         [void](New-Item -ItemType Directory -Path $projectRoot, (Split-Path $writerPath -Parent) -Force)
         Copy-Item -LiteralPath $sourceWriter -Destination $writerPath
-        $projectKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($projectRoot).Replace('\', '/').ToLowerInvariant())
         $packageKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($packageRoot).Replace('\', '/').ToLowerInvariant())
-        $projectPhysicalKey = $projectKey.Substring(0, 24)
         $packagePhysicalKey = $packageKey.Substring(0, 24)
         $writerHash = (Get-FileHash -LiteralPath $writerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $powerShellExe = Join-Path $PSHOME 'powershell.exe'
 
-        foreach ($scenario in @('success', 'timeout', 'identity-rejected')) {
+        foreach ($scenario in @('success', 'failure', 'timeout', 'overflow', 'start-failure', 'identity-rejected')) {
             $actionId = [Guid]::NewGuid().ToString('N')
+            $scenarioProjectRoot = if ($scenario -eq 'start-failure') {
+                Join-Path $fixtureRoot 'missing-project'
+            } else { $projectRoot }
+            $projectKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($scenarioProjectRoot).Replace('\', '/').ToLowerInvariant())
+            $projectPhysicalKey = $projectKey.Substring(0, 24)
             $actionRoot = Join-Path (Join-Path (Join-Path $receiptRoot $projectPhysicalKey) $packagePhysicalKey) $actionId
             $actionRoots.Add($actionRoot)
-            $commandPath = Join-Path $projectRoot ($scenario + '.ps1')
+            $commandPath = if ($scenario -eq 'start-failure') {
+                Join-Path $packageRoot 'Tools~\start-failure.ps1'
+            } else { Join-Path $projectRoot ($scenario + '.ps1') }
             $commandText = if ($scenario -eq 'timeout') {
                 'Start-Sleep -Seconds 2'
+            } elseif ($scenario -eq 'failure') {
+                '[Console]::Error.WriteLine("fixture-error"); exit 7'
+            } elseif ($scenario -eq 'overflow') {
+                '[Console]::Out.Write(("x" * 1200000))'
             } else {
                 'Write-Output "fixture-ok"'
             }
             [IO.File]::WriteAllText($commandPath, $commandText, (New-Object Text.UTF8Encoding($false)))
             $commandHash = (Get-FileHash -LiteralPath $commandPath -Algorithm SHA256).Hash.ToLowerInvariant()
             $argumentHash = Get-FixtureSha256 ''
-            $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 10000 }
+            $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 30000 }
             $commandIdentity = Get-FixtureSha256 ("$commandHash`n$argumentHash`n$timeoutMs")
             $stageId = Get-FixtureSha256 ("$actionId`n$scenario`n$commandIdentity")
             $stageRoot = Join-Path $actionRoot $stageId
@@ -95,7 +106,7 @@ function Invoke-ManagerActionWriterScenarios {
                 authorization_source = 'PackageMaterializer'
                 command_identity_sha256 = $commandIdentity
                 writer_sha256 = $writerHash
-                project_root = [IO.Path]::GetFullPath($projectRoot).Replace('\', '/')
+                project_root = [IO.Path]::GetFullPath($scenarioProjectRoot).Replace('\', '/')
                 package_root = [IO.Path]::GetFullPath($packageRoot).Replace('\', '/')
                 command = [ordered]@{
                     script_path = [IO.Path]::GetFullPath($commandPath).Replace('\', '/')
@@ -112,15 +123,17 @@ function Invoke-ManagerActionWriterScenarios {
             [IO.File]::WriteAllText($admittedPath,
                 ($admitted | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
             $ErrorActionPreference = 'Continue'
-            $writerOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $writerPath -ReceiptPath $stageRoot 2>&1
+            $writerOutput = & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $writerPath -ReceiptPath $stageRoot 2>&1
             $writerExit = $LASTEXITCODE
             $ErrorActionPreference = 'Stop'
             $claimPath = Join-Path $stageRoot 'claim.json'
             $terminalPath = Join-Path $stageRoot 'terminal.json'
+            $startFailurePath = Join-Path $stageRoot 'start-failure.json'
             if ($scenario -eq 'identity-rejected') {
                 Assert-True -Condition ($writerExit -ne 0) -Message 'Mismatched identity was accepted.'
                 Assert-True -Condition (-not (Test-Path -LiteralPath $claimPath)) -Message 'Rejected identity acquired a claim.'
                 Assert-True -Condition (-not (Test-Path -LiteralPath $terminalPath)) -Message 'Rejected identity acquired a terminal receipt.'
+                Assert-True -Condition (-not (Test-Path -LiteralPath $startFailurePath)) -Message 'Rejected identity acquired a start-failure receipt.'
                 continue
             }
             if ($writerExit -ne 0) {
@@ -135,6 +148,16 @@ function Invoke-ManagerActionWriterScenarios {
             }
             Assert-Equal -Actual $writerExit -Expected 0 -Label "$scenario writer exit"
             Assert-True -Condition (Test-Path -LiteralPath $claimPath) -Message "$scenario writer claim missing. $writerOutput"
+            if ($scenario -eq 'start-failure') {
+                Assert-True -Condition (Test-Path -LiteralPath $startFailurePath) -Message 'Proven child start failure has no receipt.'
+                Assert-True -Condition (-not (Test-Path -LiteralPath $terminalPath)) -Message 'Child start failure invented a command terminal.'
+                $startFailure = [IO.File]::ReadAllText($startFailurePath) | ConvertFrom-Json
+                Assert-Equal -Actual $startFailure.state -Expected 'start_failed' -Label 'Start failure state'
+                Assert-Equal -Actual $startFailure.action_id -Expected $actionId -Label 'Start failure action id'
+                Assert-Equal -Actual $startFailure.reason -Expected 'CHILD_START_FAILED' -Label 'Start failure reason'
+                continue
+            }
+            Assert-True -Condition (-not (Test-Path -LiteralPath $startFailurePath)) -Message "$scenario invented a start-failure receipt."
             Assert-True -Condition (Test-Path -LiteralPath $terminalPath) -Message "$scenario terminal receipt missing. $writerOutput"
             $terminal = [IO.File]::ReadAllText($terminalPath) | ConvertFrom-Json
             Assert-Equal -Actual $terminal.action_id -Expected $actionId -Label "$scenario action id"
@@ -143,9 +166,16 @@ function Invoke-ManagerActionWriterScenarios {
             if ($scenario -eq 'success') {
                 Assert-Equal -Actual $terminal.exit_code -Expected 0 -Label 'Success exit'
                 Assert-True -Condition ($terminal.stdout -match 'fixture-ok') -Message 'Success output missing.'
-            } else {
+            } elseif ($scenario -eq 'failure') {
+                Assert-Equal -Actual $terminal.exit_code -Expected 7 -Label 'Failure exit'
+                Assert-True -Condition ($terminal.stderr -match 'fixture-error') -Message 'Failure output missing.'
+            } elseif ($scenario -eq 'timeout') {
                 Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Timeout exit'
                 Assert-True -Condition $terminal.timed_out -Message 'Timeout bit missing.'
+            } else {
+                Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Overflow exit'
+                Assert-True -Condition $terminal.output_overflow -Message 'Overflow bit missing.'
+                Assert-True -Condition (-not $terminal.timed_out) -Message 'Overflow was misclassified as timeout.'
             }
         }
         Write-Host '[OK] Focused Manager action writer receipt scenarios passed.'

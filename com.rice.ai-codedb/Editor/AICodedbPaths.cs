@@ -8,6 +8,15 @@ using UnityEngine;
 
 namespace Rice.AI.Codedb.Editor
 {
+    internal sealed class AICodedbManagerDispatchTracker
+    {
+        private int _directWriterDispatchAttempted;
+        internal bool DirectWriterDispatchAttempted =>
+            Interlocked.CompareExchange(ref _directWriterDispatchAttempted, 0, 0) != 0;
+        internal void MarkDirectWriterDispatchAttempted() =>
+            Interlocked.Exchange(ref _directWriterDispatchAttempted, 1);
+    }
+
     internal readonly struct AICodedbEditorExecutionContext
     {
         internal RuntimePlatform Platform { get; }
@@ -63,6 +72,8 @@ namespace Rice.AI.Codedb.Editor
         private static readonly AsyncLocal<string> ActionAuthority = new AsyncLocal<string>();
         private static readonly AsyncLocal<string> ActionStage = new AsyncLocal<string>();
         private static readonly AsyncLocal<bool?> ActionStageTerminal = new AsyncLocal<bool?>();
+        private static readonly AsyncLocal<AICodedbManagerDispatchTracker> ActionDispatch =
+            new AsyncLocal<AICodedbManagerDispatchTracker>();
         private static string _cachedPackageRootPath = string.Empty;
 
         internal static string ProjectRoot => ActionContext.Value?.ProjectRoot
@@ -75,6 +86,7 @@ namespace Rice.AI.Codedb.Editor
         internal static string CurrentActionAuthority => ActionAuthority.Value ?? string.Empty;
         internal static string CurrentActionStage => ActionStage.Value ?? string.Empty;
         internal static bool CurrentActionStageIsTerminal => ActionStageTerminal.Value ?? true;
+        internal static AICodedbManagerDispatchTracker CurrentActionDispatchTracker => ActionDispatch.Value;
 
         internal static IDisposable UseActionContext(
             AICodedbEditorExecutionContext context,
@@ -89,15 +101,19 @@ namespace Rice.AI.Codedb.Editor
             var previousActionId = ActionId.Value;
             var previousEffect = ActionEffect.Value;
             var previousAuthority = ActionAuthority.Value;
+            var previousDispatch = ActionDispatch.Value;
             ActionContext.Value = context;
             ActionId.Value = actionId ?? string.Empty;
             ActionEffect.Value = effectClass ?? string.Empty;
             ActionAuthority.Value = authorizationSource ?? string.Empty;
+            ActionDispatch.Value = string.Equals(previousActionId, actionId, StringComparison.Ordinal)
+                ? previousDispatch : new AICodedbManagerDispatchTracker();
             return new ActionContextScope(
                 previous,
                 previousActionId,
                 previousEffect,
-                previousAuthority);
+                previousAuthority,
+                previousDispatch);
         }
 
         internal static IDisposable UseActionStage(string stage, bool terminalForAction)
@@ -117,17 +133,20 @@ namespace Rice.AI.Codedb.Editor
             private readonly string _previousActionId;
             private readonly string _previousEffect;
             private readonly string _previousAuthority;
+            private readonly AICodedbManagerDispatchTracker _previousDispatch;
 
             internal ActionContextScope(
                 AICodedbEditorExecutionContext? previous,
                 string previousActionId,
                 string previousEffect,
-                string previousAuthority)
+                string previousAuthority,
+                AICodedbManagerDispatchTracker previousDispatch)
             {
                 _previous = previous;
                 _previousActionId = previousActionId;
                 _previousEffect = previousEffect;
                 _previousAuthority = previousAuthority;
+                _previousDispatch = previousDispatch;
             }
 
             public void Dispose()
@@ -136,6 +155,7 @@ namespace Rice.AI.Codedb.Editor
                 ActionId.Value = _previousActionId;
                 ActionEffect.Value = _previousEffect;
                 ActionAuthority.Value = _previousAuthority;
+                ActionDispatch.Value = _previousDispatch;
             }
         }
 
@@ -286,6 +306,23 @@ namespace Rice.AI.Codedb.Editor
                 "Rice",
                 "CodeDB",
                 "manager-actions"));
+        }
+
+        internal static string GetManagerActionIndexDirectory(AICodedbEditorExecutionContext context)
+        {
+            return NormalizePath(Path.Combine(
+                GetManagerActionsRoot(),
+                GetManagerActionPhysicalKey(GetManagerActionProjectKey(context))));
+        }
+
+        internal static string GetManagerActionIndexPath(
+            AICodedbEditorExecutionContext context, string actionId)
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                throw new ArgumentException("The Manager action id is invalid.", nameof(actionId));
+            return NormalizePath(Path.Combine(
+                GetManagerActionIndexDirectory(context),
+                "current-action-" + actionId + ".json"));
         }
 
         internal static string GetManagerActionProjectKey(AICodedbEditorExecutionContext context)

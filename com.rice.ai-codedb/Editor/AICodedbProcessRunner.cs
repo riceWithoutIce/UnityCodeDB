@@ -12,6 +12,13 @@ using Debug = UnityEngine.Debug;
 
 namespace Rice.AI.Codedb.Editor
 {
+    internal enum AICodedbManagerActionEvidenceKind
+    {
+        CommandTerminal,
+        PreEffectRefusal,
+        Indeterminate
+    }
+
     internal sealed class AICodedbCommandResult
     {
         internal int ExitCode { get; }
@@ -22,6 +29,7 @@ namespace Rice.AI.Codedb.Editor
         internal string ActionId { get; }
         internal bool HasAuthoritativeTerminalEvidence { get; }
         internal bool TerminalForManagerAction { get; }
+        internal AICodedbManagerActionEvidenceKind ManagerActionEvidenceKind { get; }
         // Only the Supervisor Bridge may set this bit. It records a
         // read-only proof that the command is in the empty-runtime bootstrap
         // case; callers must never infer fallback permission from text output.
@@ -43,9 +51,11 @@ namespace Rice.AI.Codedb.Editor
             bool timedOut,
             long elapsedMilliseconds = 0,
             bool oneShotFallbackAuthorized = false,
-            bool authoritativeTerminalEvidence = true,
+            bool? authoritativeTerminalEvidence = null,
             string actionId = null,
-            bool terminalForManagerAction = true)
+            bool terminalForManagerAction = true,
+            AICodedbManagerActionEvidenceKind managerActionEvidenceKind =
+                AICodedbManagerActionEvidenceKind.CommandTerminal)
         {
             ExitCode = exitCode;
             StandardOutput = standardOutput ?? string.Empty;
@@ -54,8 +64,12 @@ namespace Rice.AI.Codedb.Editor
             ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
             ActionId = actionId ?? AICodedbPaths.CurrentActionId;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
-            HasAuthoritativeTerminalEvidence = authoritativeTerminalEvidence;
+            var isManagerAction = AICodedbSupervisorProtocol.IsManagerActionId(ActionId);
+            HasAuthoritativeTerminalEvidence = authoritativeTerminalEvidence ?? !isManagerAction;
             TerminalForManagerAction = terminalForManagerAction;
+            ManagerActionEvidenceKind = !authoritativeTerminalEvidence.HasValue && isManagerAction
+                ? AICodedbManagerActionEvidenceKind.Indeterminate
+                : managerActionEvidenceKind;
         }
 
         /// <summary>
@@ -63,6 +77,10 @@ namespace Rice.AI.Codedb.Editor
         /// </summary>
         internal string GetSummary()
         {
+            if (ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal)
+                return "Command did not start.";
+            if (ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.Indeterminate)
+                return "Command outcome unconfirmed.";
             if (TimedOut)
                 return "Command timed out.";
 
@@ -167,6 +185,7 @@ namespace Rice.AI.Codedb.Editor
         NotFound,
         Pending,
         Terminal,
+        PreEffectRefusal,
         Conflict
     }
 
@@ -195,6 +214,9 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbManagerActionRecoveryOutcome Terminal(AICodedbCommandResult result) =>
             new AICodedbManagerActionRecoveryOutcome(
                 AICodedbManagerActionRecoveryState.Terminal, result, string.Empty);
+        internal static AICodedbManagerActionRecoveryOutcome PreEffectRefusal(AICodedbCommandResult result) =>
+            new AICodedbManagerActionRecoveryOutcome(
+                AICodedbManagerActionRecoveryState.PreEffectRefusal, result, string.Empty);
         internal static AICodedbManagerActionRecoveryOutcome Conflict(string detail) =>
             new AICodedbManagerActionRecoveryOutcome(
                 AICodedbManagerActionRecoveryState.Conflict, null, detail);
@@ -516,7 +538,9 @@ namespace Rice.AI.Codedb.Editor
                     out normalizedScriptPath,
                     out authorizationError))
             {
-                return new AICodedbCommandResult(-1, string.Empty, authorizationError, false);
+                return AICodedbSupervisorProtocol.IsManagerActionId(AICodedbPaths.CurrentActionId)
+                    ? PreEffectManagerActionResult(AICodedbPaths.CurrentActionId, authorizationError)
+                    : new AICodedbCommandResult(-1, string.Empty, authorizationError, false);
             }
 
             if (AICodedbSupervisorProtocol.IsManagerActionId(AICodedbPaths.CurrentActionId))
@@ -612,9 +636,10 @@ namespace Rice.AI.Codedb.Editor
                     out var normalizedWriterPath,
                     out var writerError))
             {
-                return UnconfirmedManagerActionResult(actionId, writerError);
+                return PreEffectManagerActionResult(actionId, writerError);
             }
 
+            var writerDispatched = false;
             try
             {
                 var arguments = scriptArguments ?? new string[0];
@@ -633,7 +658,8 @@ namespace Rice.AI.Codedb.Editor
                 var admittedPath = Path.Combine(stageRoot, "admitted.json");
                 if (File.Exists(admittedPath)
                     || File.Exists(Path.Combine(stageRoot, "claim.json"))
-                    || File.Exists(Path.Combine(stageRoot, "terminal.json")))
+                    || File.Exists(Path.Combine(stageRoot, "terminal.json"))
+                    || File.Exists(Path.Combine(stageRoot, "start-failure.json")))
                 {
                     return UnconfirmedManagerActionResult(
                         actionId,
@@ -653,6 +679,8 @@ namespace Rice.AI.Codedb.Editor
                     arguments);
                 WriteNewUtf8FileAtomic(admittedPath, admitted);
 
+                writerDispatched = true;
+                AICodedbPaths.CurrentActionDispatchTracker?.MarkDirectWriterDispatchAttempted();
                 var writerResult = RunProcess(
                     BuildPowerShellStartInfo(
                         context,
@@ -661,6 +689,16 @@ namespace Rice.AI.Codedb.Editor
                         new[] { "-ReceiptPath", stageRoot }),
                     checked(timeoutMilliseconds + ManagerActionWriterGraceMilliseconds));
                 var terminalPath = Path.Combine(stageRoot, "terminal.json");
+                var startFailurePath = Path.Combine(stageRoot, "start-failure.json");
+                if (File.Exists(startFailurePath))
+                {
+                    if (File.Exists(terminalPath))
+                        return UnconfirmedManagerActionResult(actionId,
+                            "Conflicting terminal and start-failure receipts exist for the same stage.");
+                    var failure = ReadStartFailureReceipt(context, actionId, startFailurePath);
+                    return failure.State == AICodedbManagerActionRecoveryState.PreEffectRefusal
+                        ? failure.Result : UnconfirmedManagerActionResult(actionId, failure.Detail);
+                }
                 if (!File.Exists(terminalPath))
                 {
                     var detail = writerResult.TimedOut
@@ -678,7 +716,9 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (Exception exception)
             {
-                return UnconfirmedManagerActionResult(actionId, exception.Message);
+                return writerDispatched
+                    ? UnconfirmedManagerActionResult(actionId, exception.Message)
+                    : PreEffectManagerActionResult(actionId, exception.Message);
             }
         }
 
@@ -695,20 +735,59 @@ namespace Rice.AI.Codedb.Editor
                     return AICodedbManagerActionRecoveryOutcome.NotFound(
                         "No Package-owned direct-command receipt exists for this action.");
                 AssertReceiptPath(context, actionRoot);
+                if (Directory.GetFiles(actionRoot).Length != 0)
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "Unexpected files exist at the Manager action receipt root.");
                 var stageDirectories = Directory.GetDirectories(actionRoot);
                 if (stageDirectories.Length > 32)
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "The Manager action receipt contains too many stage entries.");
 
                 AICodedbCommandResult terminalResult = null;
+                AICodedbCommandResult refusalResult = null;
                 var evidenceObserved = false;
+                var pendingObserved = false;
                 foreach (var stageDirectory in stageDirectories)
                 {
                     AssertReceiptPath(context, stageDirectory);
+                    if (Directory.GetDirectories(stageDirectory).Length != 0)
+                        return AICodedbManagerActionRecoveryOutcome.Conflict(
+                            "A Manager action stage contains an unexpected directory.");
+                    foreach (var file in Directory.GetFiles(stageDirectory))
+                    {
+                        AssertReceiptPath(context, file);
+                        var name = Path.GetFileName(file);
+                        if (name != "admitted.json" && name != "claim.json"
+                            && name != "terminal.json" && name != "start-failure.json")
+                            return AICodedbManagerActionRecoveryOutcome.Conflict(
+                                "An unexpected Manager action stage file exists.");
+                    }
                     evidenceObserved = true;
+                    var admittedPath = Path.Combine(stageDirectory, "admitted.json");
+                    if (!File.Exists(admittedPath))
+                        return AICodedbManagerActionRecoveryOutcome.Conflict(
+                            "A Manager action stage has no admission record.");
                     var terminalPath = Path.Combine(stageDirectory, "terminal.json");
-                    if (!File.Exists(terminalPath))
+                    var startFailurePath = Path.Combine(stageDirectory, "start-failure.json");
+                    if (File.Exists(startFailurePath))
+                    {
+                        if (File.Exists(terminalPath) || refusalResult != null || terminalResult != null)
+                            return AICodedbManagerActionRecoveryOutcome.Conflict(
+                                "Conflicting Manager action stage outcomes exist.");
+                        var failure = ReadStartFailureReceipt(context, actionId, startFailurePath);
+                        if (failure.State != AICodedbManagerActionRecoveryState.PreEffectRefusal)
+                            return failure;
+                        refusalResult = failure.Result;
                         continue;
+                    }
+                    if (!File.Exists(terminalPath))
+                    {
+                        var pending = ValidatePendingStage(context, actionId, stageDirectory);
+                        if (pending.State == AICodedbManagerActionRecoveryState.Conflict)
+                            return pending;
+                        pendingObserved = true;
+                        continue;
+                    }
                     var outcome = ReadTerminalReceipt(context, actionId, terminalPath);
                     if (outcome.State == AICodedbManagerActionRecoveryState.Conflict)
                         return outcome;
@@ -716,14 +795,19 @@ namespace Rice.AI.Codedb.Editor
                         continue;
                     if (!outcome.Result.TerminalForManagerAction)
                         continue;
-                    if (terminalResult != null)
+                    if (terminalResult != null || refusalResult != null)
                         return AICodedbManagerActionRecoveryOutcome.Conflict(
                             "Multiple terminal stages claim the same Manager action.");
                     terminalResult = outcome.Result;
                 }
 
+                if (pendingObserved && (terminalResult != null || refusalResult != null))
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "A Manager action has both pending and terminal stage evidence.");
                 if (terminalResult != null)
                     return AICodedbManagerActionRecoveryOutcome.Terminal(terminalResult);
+                if (refusalResult != null)
+                    return AICodedbManagerActionRecoveryOutcome.PreEffectRefusal(refusalResult);
                 return evidenceObserved
                     ? AICodedbManagerActionRecoveryOutcome.Pending(
                         "The direct command has admitted or claimed evidence but no matching terminal receipt; no replay was attempted.")
@@ -858,6 +942,153 @@ namespace Rice.AI.Codedb.Editor
             return AICodedbManagerActionRecoveryOutcome.Terminal(result);
         }
 
+        private static AICodedbManagerActionRecoveryOutcome ValidatePendingStage(
+            AICodedbEditorExecutionContext context, string actionId, string stageRoot)
+        {
+            try
+            {
+                const string admissionLabel = "CodeDB Manager action admission";
+                const string claimLabel = "CodeDB Manager action writer claim";
+                var stageId = Path.GetFileName(stageRoot);
+                var admitted = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "admitted.json"),
+                    ManagerActionReceiptMaximumBytes, admissionLabel);
+                if (stageId.Length != 64 || !IsLowerHex(stageId)
+                    || AICodedbStrictJson.GetRequiredInt32(admitted, "schema_version", admissionLabel) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "managed_by", admissionLabel),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "state", admissionLabel),
+                        "admitted", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "action_id", admissionLabel),
+                        actionId, StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "stage_id", admissionLabel),
+                        stageId, StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "project_key", admissionLabel),
+                        AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "package_key", admissionLabel),
+                        AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "project_identity", admissionLabel),
+                        "sha256:" + AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "package_identity", admissionLabel),
+                        "sha256:" + AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "project_root", admissionLabel),
+                        context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "package_root", admissionLabel),
+                        context.PackageRoot, StringComparison.OrdinalIgnoreCase))
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "A pending Manager action stage has conflicting admission identity.");
+                var claimPath = Path.Combine(stageRoot, "claim.json");
+                if (File.Exists(claimPath))
+                {
+                    var claim = AICodedbStrictJson.ReadObject(claimPath,
+                        ManagerActionReceiptMaximumBytes, claimLabel);
+                    if (AICodedbStrictJson.GetRequiredInt32(claim, "schema_version", claimLabel) != 1
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "managed_by", claimLabel),
+                            "com.rice.ai-codedb", StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "state", claimLabel),
+                            "claimed", StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "action_id", claimLabel),
+                            actionId, StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "stage_id", claimLabel),
+                            stageId, StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "project_key", claimLabel),
+                            AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "package_key", claimLabel),
+                            AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                        || AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", claimLabel) <= 0)
+                        return AICodedbManagerActionRecoveryOutcome.Conflict(
+                            "A pending Manager action stage has conflicting writer claim.");
+                }
+                return AICodedbManagerActionRecoveryOutcome.Pending(
+                    "The original Manager action has no authenticated command terminal; no replay was attempted.");
+            }
+            catch (Exception exception)
+            {
+                return AICodedbManagerActionRecoveryOutcome.Conflict(
+                    "Pending Manager action stage validation failed: " + exception.Message);
+            }
+        }
+
+        private static AICodedbManagerActionRecoveryOutcome ReadStartFailureReceipt(
+            AICodedbEditorExecutionContext context, string actionId, string path)
+        {
+            try
+            {
+                AssertReceiptPath(context, path);
+                var stageRoot = Path.GetDirectoryName(path);
+                var stageId = Path.GetFileName(stageRoot);
+                const string admissionLabel = "CodeDB Manager action admission";
+                const string claimLabel = "CodeDB Manager action writer claim";
+                const string failureLabel = "CodeDB Manager action start failure";
+                var admitted = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "admitted.json"),
+                    ManagerActionReceiptMaximumBytes, admissionLabel);
+                var claim = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "claim.json"),
+                    ManagerActionReceiptMaximumBytes, claimLabel);
+                var failure = AICodedbStrictJson.ReadObject(path,
+                    ManagerActionReceiptMaximumBytes, failureLabel);
+                var writerTicksText = AICodedbStrictJson.GetRequiredString(
+                    claim, "writer_start_utc_ticks", claimLabel);
+                var completedText = AICodedbStrictJson.GetRequiredString(
+                    failure, "completed_at_utc", failureLabel);
+                var reason = AICodedbStrictJson.GetRequiredString(failure, "reason", failureLabel);
+                if (stageId.Length != 64 || !IsLowerHex(stageId)
+                    || AICodedbStrictJson.GetRequiredInt32(admitted, "schema_version", admissionLabel) != 1
+                    || AICodedbStrictJson.GetRequiredInt32(claim, "schema_version", claimLabel) != 1
+                    || AICodedbStrictJson.GetRequiredInt32(failure, "schema_version", failureLabel) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "state", admissionLabel), "admitted", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "state", claimLabel), "claimed", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(failure, "state", failureLabel), "start_failed", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "managed_by", admissionLabel), "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "managed_by", claimLabel), "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(failure, "managed_by", failureLabel), "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || (reason != "CHILD_START_FAILED" && reason != "CHILD_START_RETURNED_FALSE")
+                    || !long.TryParse(writerTicksText, NumberStyles.None, CultureInfo.InvariantCulture, out var writerTicks)
+                    || writerTicks <= DateTime.MinValue.Ticks || writerTicks > DateTime.MaxValue.Ticks
+                    || !completedText.EndsWith("Z", StringComparison.Ordinal)
+                    || !DateTime.TryParseExact(completedText, "O", CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var completed)
+                    || completed.Kind != DateTimeKind.Utc || completed.Ticks < writerTicks
+                    || AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", claimLabel) <= 0
+                    || AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", claimLabel)
+                       != AICodedbStrictJson.GetRequiredInt32(failure, "writer_pid", failureLabel))
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "The Manager action start-failure envelope is invalid.");
+
+                foreach (var key in new[] { "action_id", "stage_id", "project_key", "package_key" })
+                {
+                    var expected = key == "action_id" ? actionId
+                        : key == "stage_id" ? stageId
+                        : key == "project_key" ? AICodedbPaths.GetManagerActionProjectKey(context)
+                        : AICodedbPaths.GetManagerActionPackageKey(context);
+                    if (!string.Equals(AICodedbStrictJson.GetRequiredString(admitted, key, admissionLabel), expected, StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, key, claimLabel), expected, StringComparison.Ordinal)
+                        || !string.Equals(AICodedbStrictJson.GetRequiredString(failure, key, failureLabel), expected, StringComparison.Ordinal))
+                        return AICodedbManagerActionRecoveryOutcome.Conflict(
+                            "The Manager action start-failure identity does not match its admission.");
+                }
+                if (!string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "project_root", admissionLabel),
+                        context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "package_root", admissionLabel),
+                        context.PackageRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "project_identity", admissionLabel),
+                        "sha256:" + AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "package_identity", admissionLabel),
+                        "sha256:" + AICodedbPaths.GetManagerActionPackageKey(context), StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "command_identity_sha256", admissionLabel),
+                        AICodedbStrictJson.GetRequiredString(failure, "command_identity_sha256", failureLabel),
+                        StringComparison.Ordinal))
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(
+                        "The Manager action start-failure command identity is invalid.");
+                return AICodedbManagerActionRecoveryOutcome.PreEffectRefusal(
+                    PreEffectManagerActionResult(actionId,
+                        "The one-shot writer proved that the business child did not start (" + reason + ")."));
+            }
+            catch (Exception exception)
+            {
+                return AICodedbManagerActionRecoveryOutcome.Conflict(
+                    "Manager action start-failure validation failed: " + exception.Message);
+            }
+        }
+
         internal static bool HasValidManagerActionReceiptEnvelope(
             Dictionary<string, object> admitted,
             Dictionary<string, object> claim,
@@ -945,7 +1176,16 @@ namespace Rice.AI.Codedb.Editor
                 0,
                 false,
                 false,
-                actionId);
+                actionId,
+                false,
+                AICodedbManagerActionEvidenceKind.Indeterminate);
+        }
+
+        private static AICodedbCommandResult PreEffectManagerActionResult(string actionId, string detail)
+        {
+            return new AICodedbCommandResult(4, string.Empty, detail, false, 0,
+                false, false, actionId, false,
+                AICodedbManagerActionEvidenceKind.PreEffectRefusal);
         }
 
         private static string BuildManagerActionAdmissionJson(
@@ -1012,8 +1252,9 @@ namespace Rice.AI.Codedb.Editor
             var normalized = AICodedbPaths.NormalizePath(path);
             if (!normalized.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Manager action receipt path escapes its scoped root.");
-            var current = root;
-            var relative = normalized.Substring(root.Length).TrimStart('/');
+            var volume = Path.GetPathRoot(normalized);
+            var current = volume;
+            var relative = normalized.Substring(volume.Length).TrimStart('/');
             foreach (var segment in relative.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 current = Path.Combine(current, segment);
@@ -1100,6 +1341,9 @@ namespace Rice.AI.Codedb.Editor
 
         private static AICodedbCommandResult UnsupportedPlatformResult()
         {
+            if (AICodedbSupervisorProtocol.IsManagerActionId(AICodedbPaths.CurrentActionId))
+                return PreEffectManagerActionResult(AICodedbPaths.CurrentActionId,
+                    "PowerShell codedb scripts are currently supported only in the Windows Editor.");
             return new AICodedbCommandResult(
                 -1,
                 string.Empty,

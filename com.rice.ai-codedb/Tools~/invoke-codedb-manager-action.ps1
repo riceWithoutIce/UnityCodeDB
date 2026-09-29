@@ -70,8 +70,9 @@ function Assert-NoReparseTraversal {
     if (-not (Test-PathInside $normalizedRoot $normalizedTarget)) {
         throw "$Label escapes its reviewed root."
     }
-    $relative = $normalizedTarget.Substring($normalizedRoot.Length).TrimStart('\', '/')
-    $current = $normalizedRoot
+    $volume = [IO.Path]::GetPathRoot($normalizedTarget)
+    $relative = $normalizedTarget.Substring($volume.Length).TrimStart('\', '/')
+    $current = $volume
     foreach ($segment in @($relative -split '[\\/]' | Where-Object { $_ })) {
         $current = Join-Path $current $segment
         if (-not (Test-Path -LiteralPath $current)) { break }
@@ -151,10 +152,12 @@ Assert-NoReparseTraversal $receiptRoot $receiptPath 'Manager action receipt path
 $admittedPath = Join-Path $receiptPath 'admitted.json'
 $claimPath = Join-Path $receiptPath 'claim.json'
 $terminalPath = Join-Path $receiptPath 'terminal.json'
+$startFailurePath = Join-Path $receiptPath 'start-failure.json'
 if (-not (Test-Path -LiteralPath $admittedPath -PathType Leaf)) { throw 'Manager action admission record is missing.' }
 if ((Get-Item -LiteralPath $admittedPath).Length -gt $maximumReceiptBytes) { throw 'Manager action admission record exceeds its bound.' }
 if (Test-Path -LiteralPath $claimPath) { throw 'Manager action stage already has a writer claim.' }
 if (Test-Path -LiteralPath $terminalPath) { throw 'Manager action stage already has a terminal receipt.' }
+if (Test-Path -LiteralPath $startFailurePath) { throw 'Manager action stage already has a start-failure receipt.' }
 
 $admitted = [IO.File]::ReadAllText($admittedPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
 if ($admitted.schema_version -ne $schemaVersion -or $admitted.managed_by -cne $managedBy -or $admitted.state -cne 'admitted') {
@@ -208,6 +211,19 @@ if ((Get-Sha256Hex $utf8NoBom.GetBytes($argumentText)) -cne ([string]$admitted.c
 $timeoutMilliseconds = [int]$admitted.command.timeout_ms
 if ($timeoutMilliseconds -lt 1 -or $timeoutMilliseconds -gt 1800000) { throw 'Manager action timeout is invalid.' }
 
+$startInfo = New-Object Diagnostics.ProcessStartInfo
+$startInfo.FileName = 'powershell.exe'
+$commandArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $commandPath) + $arguments
+$startInfo.Arguments = (($commandArguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' ')
+$startInfo.WorkingDirectory = $projectRoot
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$startInfo.EnvironmentVariables['RICE_CODEDB_UNITY_ROOT'] = $projectRoot
+$child = New-Object Diagnostics.Process
+$child.StartInfo = $startInfo
+
 $writerProcess = [Diagnostics.Process]::GetCurrentProcess()
 $claim = [ordered]@{
     schema_version = $schemaVersion
@@ -223,109 +239,95 @@ $claim = [ordered]@{
 }
 Write-AtomicJson $claimPath $claim
 
-$startInfo = New-Object Diagnostics.ProcessStartInfo
-$startInfo.FileName = 'powershell.exe'
-$commandArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $commandPath) + $arguments
-$startInfo.Arguments = (($commandArguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' ')
-$startInfo.WorkingDirectory = $projectRoot
-$startInfo.UseShellExecute = $false
-$startInfo.CreateNoWindow = $true
-$startInfo.RedirectStandardOutput = $false
-$startInfo.RedirectStandardError = $false
-$startInfo.EnvironmentVariables['RICE_CODEDB_UNITY_ROOT'] = $projectRoot
-
-Add-Type -TypeDefinition @'
-using System;
-using System.Diagnostics;
-using System.Text;
-using System.Threading.Tasks;
-
-public sealed class CodeDbBoundedChildResult {
-    public int ProcessId;
-    public int ExitCode;
-    public bool TimedOut;
-    public bool OutputOverflow;
-    public string StandardOutput;
-    public string StandardError;
+$startError = $null
+try {
+    if (-not $child.Start()) { $startError = 'CHILD_START_RETURNED_FALSE' }
 }
-
-public static class CodeDbBoundedChildRunner {
-    private sealed class Capture {
-        public readonly StringBuilder Text = new StringBuilder();
-        public volatile bool Overflow;
+catch [ComponentModel.Win32Exception] {
+    if ($_.Exception.NativeErrorCode -in @(2, 3, 193, 267)) {
+        $startError = 'CHILD_START_FAILED'
     }
-
-    private static void Drain(System.IO.StreamReader reader, Capture capture, int maxBytes) {
-        var buffer = new char[4096];
-        int read;
-        var bytes = 0;
-        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0) {
-            if (capture.Overflow) continue;
-            var next = Encoding.UTF8.GetByteCount(buffer, 0, read);
-            if (next > maxBytes - bytes) {
-                capture.Overflow = true;
-                continue;
-            }
-            capture.Text.Append(buffer, 0, read);
-            bytes += next;
-        }
-    }
-
-    public static CodeDbBoundedChildResult Run(ProcessStartInfo startInfo, int timeoutMs, int maxBytes) {
-        using (var process = new Process()) {
-            process.StartInfo = startInfo;
-            if (!process.Start()) throw new InvalidOperationException("Manager action command child did not start.");
-            var stdout = new Capture();
-            var stderr = new Capture();
-            var outputTask = Task.Factory.StartNew(() => Drain(process.StandardOutput, stdout, maxBytes));
-            var errorTask = Task.Factory.StartNew(() => Drain(process.StandardError, stderr, maxBytes));
-            var stopwatch = Stopwatch.StartNew();
-            var timedOut = false;
-            try {
-                while (!process.WaitForExit(100)) {
-                    if (stdout.Overflow || stderr.Overflow || stopwatch.ElapsedMilliseconds >= timeoutMs) {
-                        timedOut = !stdout.Overflow && !stderr.Overflow;
-                        process.Kill();
-                        break;
-                    }
-                }
-                process.WaitForExit();
-                if (!Task.WaitAll(new Task[] { outputTask, errorTask }, 5000))
-                    throw new InvalidOperationException("Manager action output did not drain.");
-                return new CodeDbBoundedChildResult {
-                    ProcessId = process.Id,
-                    ExitCode = process.ExitCode,
-                    TimedOut = timedOut,
-                    OutputOverflow = stdout.Overflow || stderr.Overflow,
-                    StandardOutput = stdout.Text.ToString(),
-                    StandardError = stderr.Text.ToString()
-                };
-            }
-            finally {
-                if (!process.HasExited) process.Kill();
-            }
-        }
-    }
+    else { throw }
 }
-'@
+if ($null -ne $startError) {
+    $child.Dispose()
+    $startFailure = [ordered]@{
+        schema_version = $schemaVersion
+        managed_by = $managedBy
+        state = 'start_failed'
+        action_id = [string]$admitted.action_id
+        stage_id = [string]$admitted.stage_id
+        project_key = [string]$admitted.project_key
+        package_key = [string]$admitted.package_key
+        command_identity_sha256 = [string]$admitted.command_identity_sha256
+        writer_pid = $writerProcess.Id
+        reason = $startError
+        completed_at_utc = [DateTime]::UtcNow.ToString('O', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    Write-AtomicJson $startFailurePath $startFailure
+    exit 0
+}
 
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 $timedOut = $false
 $outputOverflow = $false
-$childPid = 0
-$exitCode = 1
-$startInfo.RedirectStandardOutput = $true
-$startInfo.RedirectStandardError = $true
-$childResult = [CodeDbBoundedChildRunner]::Run($startInfo, $timeoutMilliseconds, $maximumOutputBytes)
-$childPid = $childResult.ProcessId
-$timedOut = $childResult.TimedOut
-$outputOverflow = $childResult.OutputOverflow
-$stdout = $childResult.StandardOutput
-$stderr = $childResult.StandardError
+$childPid = $child.Id
+$stdoutBytes = New-Object IO.MemoryStream
+$stderrBytes = New-Object IO.MemoryStream
+$stdoutBuffer = New-Object byte[] 4096
+$stderrBuffer = New-Object byte[] 4096
+$stdoutTask = $child.StandardOutput.BaseStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+$stderrTask = $child.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+$drainDeadline = [long]::MaxValue
+try {
+    while ($null -ne $stdoutTask -or $null -ne $stderrTask -or -not $child.HasExited) {
+        if ($child.HasExited -and $drainDeadline -eq [long]::MaxValue) {
+            $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
+        }
+        if ($null -ne $stdoutTask -and $stdoutTask.IsCompleted) {
+            $count = $stdoutTask.GetAwaiter().GetResult()
+            $stdoutTask = $null
+            if ($count -gt 0) {
+                if ($stdoutBytes.Length + $count -gt $maximumOutputBytes) { $outputOverflow = $true }
+                elseif (-not $outputOverflow) { $stdoutBytes.Write($stdoutBuffer, 0, $count) }
+                $stdoutTask = $child.StandardOutput.BaseStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+            }
+        }
+        if ($null -ne $stderrTask -and $stderrTask.IsCompleted) {
+            $count = $stderrTask.GetAwaiter().GetResult()
+            $stderrTask = $null
+            if ($count -gt 0) {
+                if ($stderrBytes.Length + $count -gt $maximumOutputBytes) { $outputOverflow = $true }
+                elseif (-not $outputOverflow) { $stderrBytes.Write($stderrBuffer, 0, $count) }
+                $stderrTask = $child.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+            }
+        }
+        if (-not $child.HasExited -and ($outputOverflow -or $stopwatch.ElapsedMilliseconds -ge $timeoutMilliseconds)) {
+            $timedOut = -not $outputOverflow
+            $child.Kill()
+            $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
+        }
+        if ($stopwatch.ElapsedMilliseconds -gt $drainDeadline) {
+            throw 'Manager action output did not drain after the child stopped.'
+        }
+        if ($null -ne $stdoutTask -or $null -ne $stderrTask -or -not $child.HasExited) {
+            Start-Sleep -Milliseconds 20
+        }
+    }
+    $child.WaitForExit()
+    $stdout = [Text.Encoding]::UTF8.GetString($stdoutBytes.ToArray())
+    $stderr = [Text.Encoding]::UTF8.GetString($stderrBytes.ToArray())
+    $exitCode = if ($timedOut -or $outputOverflow) { 4 } else { $child.ExitCode }
+}
+finally {
+    if (-not $child.HasExited) { $child.Kill() }
+    $child.Dispose()
+    $stdoutBytes.Dispose()
+    $stderrBytes.Dispose()
+}
 if ($outputOverflow) {
     $stderr = $stderr.TrimEnd() + "`nManager action output exceeded the bounded receipt limit."
 }
-$exitCode = if ($timedOut -or $outputOverflow) { 4 } else { $childResult.ExitCode }
 $stopwatch.Stop()
 
 $terminal = [ordered]@{

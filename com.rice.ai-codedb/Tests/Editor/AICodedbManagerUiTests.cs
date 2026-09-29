@@ -46,6 +46,11 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 Assert.That(AICodedbPaths.CurrentActionEffect, Is.EqualTo("Observation"));
                 Assert.That(AICodedbPaths.CurrentActionAuthority, Is.EqualTo("PackageMaterializer"));
+                var dispatch = AICodedbPaths.CurrentActionDispatchTracker;
+                Assert.That(dispatch.DirectWriterDispatchAttempted, Is.False);
+                Task.Run(() => AICodedbPaths.CurrentActionDispatchTracker
+                    .MarkDirectWriterDispatchAttempted()).GetAwaiter().GetResult();
+                Assert.That(dispatch.DirectWriterDispatchAttempted, Is.True);
                 using (AICodedbPaths.UseActionStage("preflight", false))
                 {
                     Assert.That(Task.Run(() => AICodedbPaths.CurrentActionStage)
@@ -181,6 +186,179 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 AICodedbManagerActionSession.ClearCompleted();
                 SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        public void ManagerActionJournal_RestoresOriginalIdAfterFullExitAndPackageReplacement()
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var project = Path.Combine(Path.GetTempPath(), "codedb-journal-project-" + tag);
+            var original = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                project, Path.Combine(Path.GetTempPath(), "codedb-original-package-" + tag), tag);
+            var replacement = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                project, Path.Combine(Path.GetTempPath(), "codedb-replacement-package-" + tag), tag);
+            var actionId = Guid.NewGuid().ToString("N");
+            var index = new AICodedbManagerActionIndex(actionId, "Host Payload Sync",
+                "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission", original);
+            var indexPath = AICodedbPaths.GetManagerActionIndexPath(original, actionId);
+            try
+            {
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(index, out var error),
+                    Is.True, error);
+                var read = AICodedbManagerActionJournal.Read(replacement);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Pending));
+                Assert.That(read.Index.ActionId, Is.EqualTo(actionId));
+                Assert.That(read.Index.Context.PackageRoot, Is.EqualTo(original.PackageRoot));
+                AICodedbManagerActionSession.ClearCompleted();
+                AICodedbManagerActionSession.RestoreDurable(replacement, read, 1d);
+                var recovered = AICodedbManagerActionSession.CurrentFor(replacement);
+                Assert.That(recovered.ActionId, Is.EqualTo(actionId));
+                Assert.That(recovered.IsRecovering, Is.True);
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Host Payload Verify", replacement, 2d, out _), Is.False);
+                var second = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"),
+                    "Host Payload Verify", "Observation", "PackageMaterializer", replacement);
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(second, out _), Is.False);
+                var terminal = new AICodedbCommandResult(0,
+                    string.Empty, string.Empty, false, 1, false, true, actionId);
+                Assert.That(recovered.TryReleaseDurableIndex(terminal, out error), Is.True, error);
+                Assert.That(recovered.TryCompleteRecovery(terminal, 3d), Is.True);
+                Assert.That(AICodedbManagerActionJournal.Read(replacement).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                var directory = Path.GetDirectoryName(indexPath);
+                if (Directory.Exists(directory)
+                    && Path.GetFileName(directory).Length == 24)
+                    Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void ManagerActionJournal_CorruptOrConflictingIndexFailsClosed()
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-journal-conflict-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-journal-package-" + tag), tag);
+            var index = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"),
+                "Host Payload Verify", "Observation", "PackageMaterializer", context);
+            var path = AICodedbPaths.GetManagerActionIndexPath(context, index.ActionId);
+            try
+            {
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(index, out var error),
+                    Is.True, error);
+                var changedPackage = new AICodedbManagerActionIndex(index.ActionId,
+                    index.Title, index.EffectClass, index.AuthorizationSource,
+                    new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                        context.ProjectRoot, context.PackageRoot + "-other", context.ProjectDisplayName));
+                Assert.That(AICodedbManagerActionJournal.TryRelease(changedPackage,
+                    AICodedbManagerActionEvidenceKind.CommandTerminal, out _), Is.False);
+                File.WriteAllText(path, "{\"schema_version\":1,\"state\":\"pending\"}");
+                var read = AICodedbManagerActionJournal.Read(context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(read.ActionId, Is.EqualTo(index.ActionId));
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(index, out _), Is.False);
+                Assert.That(AICodedbManagerActionJournal.TryRelease(index,
+                    AICodedbManagerActionEvidenceKind.CommandTerminal, out _), Is.False);
+            }
+            finally
+            {
+                var directory = Path.GetDirectoryName(path);
+                if (Directory.Exists(directory)
+                    && Path.GetFileName(directory).Length == 24)
+                    Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void ManagerActionResult_SeparatesPreEffectAndIndeterminateFromCommandTerminal()
+        {
+            var refused = new AICodedbCommandResult(4, string.Empty, "No child started", false,
+                0, false, false, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false,
+                AICodedbManagerActionEvidenceKind.PreEffectRefusal);
+            var unknown = new AICodedbCommandResult(4, string.Empty, "Writer disappeared", false,
+                0, false, false, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false,
+                AICodedbManagerActionEvidenceKind.Indeterminate);
+            Assert.That(refused.GetSummary(), Is.EqualTo("Command did not start."));
+            Assert.That(unknown.GetSummary(), Is.EqualTo("Command outcome unconfirmed."));
+            Assert.That(refused.HasAuthoritativeTerminalEvidence, Is.False);
+            Assert.That(unknown.HasAuthoritativeTerminalEvidence, Is.False);
+        }
+
+        [Test]
+        public void ManagerActionRecovery_ClaimWithoutTerminalStaysUnknownAndStartFailureIsDistinct()
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-receipt-project-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-receipt-package-" + tag), tag);
+            var actionId = Guid.NewGuid().ToString("N");
+            var stageId = new string('a', 64);
+            var projectKey = AICodedbPaths.GetManagerActionProjectKey(context);
+            var packageKey = AICodedbPaths.GetManagerActionPackageKey(context);
+            var commandIdentity = new string('b', 64);
+            var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
+            var stageRoot = Path.Combine(actionRoot, stageId);
+            var admittedPath = Path.Combine(stageRoot, "admitted.json");
+            var claimPath = Path.Combine(stageRoot, "claim.json");
+            var failurePath = Path.Combine(stageRoot, "start-failure.json");
+            var writerTicks = DateTime.UtcNow.AddMinutes(-1).Ticks;
+            try
+            {
+                Directory.CreateDirectory(stageRoot);
+                File.WriteAllText(admittedPath,
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"state\":\"admitted\","
+                    + "\"action_id\":\"" + actionId + "\",\"stage_id\":\"" + stageId + "\","
+                    + "\"project_key\":\"" + projectKey + "\",\"package_key\":\"" + packageKey + "\","
+                    + "\"project_identity\":\"sha256:" + projectKey + "\","
+                    + "\"package_identity\":\"sha256:" + packageKey + "\","
+                    + "\"project_root\":\"" + context.ProjectRoot + "\","
+                    + "\"package_root\":\"" + context.PackageRoot + "\","
+                    + "\"command_identity_sha256\":\"" + commandIdentity + "\"}");
+                var claim = "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                    + "\"state\":\"claimed\",\"action_id\":\"" + actionId + "\","
+                    + "\"stage_id\":\"" + stageId + "\",\"project_key\":\"" + projectKey + "\","
+                    + "\"package_key\":\"" + packageKey + "\",\"writer_pid\":4242,"
+                    + "\"writer_start_utc_ticks\":\"" + writerTicks.ToString(CultureInfo.InvariantCulture) + "\"}";
+                File.WriteAllText(claimPath, claim);
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Pending));
+                var legacy = AICodedbManagerActionJournal.Read(context);
+                Assert.That(legacy.State, Is.EqualTo(AICodedbManagerActionIndexState.Pending));
+                Assert.That(legacy.IsLegacyReceipt, Is.True);
+                Assert.That(legacy.ActionId, Is.EqualTo(actionId));
+                File.WriteAllText(claimPath, claim.Replace("\"writer_pid\":4242", "\"writer_pid\":0"));
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                File.WriteAllText(claimPath, claim);
+                File.WriteAllText(failurePath,
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                    + "\"state\":\"start_failed\",\"action_id\":\"" + actionId + "\","
+                    + "\"stage_id\":\"" + stageId + "\",\"project_key\":\"" + projectKey + "\","
+                    + "\"package_key\":\"" + packageKey + "\","
+                    + "\"command_identity_sha256\":\"" + commandIdentity + "\","
+                    + "\"writer_pid\":4242,\"reason\":\"CHILD_START_FAILED\","
+                    + "\"completed_at_utc\":\"" + DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture) + "\"}");
+                var recovery = AICodedbProcessRunner.RecoverManagerAction(context, actionId);
+                Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.PreEffectRefusal));
+                Assert.That(recovery.Result.HasAuthoritativeTerminalEvidence, Is.False);
+                Assert.That(recovery.Result.ActionId, Is.EqualTo(actionId));
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+            }
+            finally
+            {
+                if (Directory.Exists(actionRoot)
+                    && Path.GetFileName(actionRoot) == actionId
+                    && actionRoot.StartsWith(AICodedbPaths.GetManagerActionsRoot() + "/",
+                        StringComparison.OrdinalIgnoreCase))
+                    Directory.Delete(actionRoot, true);
             }
         }
 
