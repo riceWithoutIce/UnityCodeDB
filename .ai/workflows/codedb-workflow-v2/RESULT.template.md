@@ -4,7 +4,7 @@
 
 - Status: COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.3
+- Workflow revision: 2.4
 - Actual execution mode/profile/model/reasoning:
 - Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
 - Frozen identity:
@@ -15,6 +15,7 @@
 
 - Declared scenario and result:
 - Focused command/test result:
+- Path provenance gate: NOT_APPLICABLE | PASS | FAIL, with path sources and command:
 - Correction summary: none | <one consolidated summary>
 - Budget use:
 - Identity/diff check:

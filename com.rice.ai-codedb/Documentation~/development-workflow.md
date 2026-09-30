@@ -1,11 +1,12 @@
-# Development Workflow v2.3
+# Development Workflow v2.4
 
 Status: active project workflow (`codedb-workflow-v2`).
 
-Revision `2.3` adds the Package Release Closure Gate on top of the Package
-Identity Authority Gate and hybrid execution-mode routing. The stable workflow ID and
-existing task directories remain `codedb-workflow-v2`; do not rewrite frozen
-tasks solely to add this revision.
+Revision `2.4` adds a pre-freeze Package path-provenance gate. Revision `2.3`
+added the Package Release Closure Gate on top of the Package Identity Authority
+Gate and hybrid execution-mode routing. The stable workflow ID and existing
+task directories remain `codedb-workflow-v2`; do not rewrite frozen tasks
+solely to add this revision.
 
 This document defines how development and validation work is executed. It is
 not a product requirements document. Version roadmaps remain the authority for
@@ -790,6 +791,27 @@ consumer, or publication evidence.
 - Unity/EditMode and external consumer acceptance are downstream gates. They
   must record the exact artifact identity and may not be used to compensate for
   a failed release closure.
+
+## Package Path Provenance Gate
+
+Every path consumed by Package code or tests must have an explicit source:
+the current execution/project context, a Package-owned contract, or a
+test-owned temporary root created or derived at test runtime. A serialized
+fixture may use a symbolic template only when the test binds it to such a root
+before invoking production validation. Do not embed a developer machine path
+or a fixed drive-root "fixture" path in shipped Package source or tests, and
+do not exempt a path merely because its name says `fixture` or `synthetic`.
+
+For any change to Package text, run the focused
+`Tests~/test-codedb-package-boundary.ps1 -PathProvenanceOnly` check before
+freezing the Coder snapshot. It uses the same text-file selection and Windows
+drive-root rejection as the full Package-boundary gate. Record the result in
+the task handoff; a failure is corrected inside the task before Verifier
+routing. For a task with no Package text changes, record `NOT_APPLICABLE`.
+The focused check does not replace the full Package-boundary gate or prove
+Unity/consumer behavior. Review relative paths, environment-derived paths,
+and test-to-production binding at the directly affected call sites as part
+of the task's normal source review.
 
 ## Focused Testing And Regression Convergence
 

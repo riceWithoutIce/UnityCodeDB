@@ -4159,10 +4159,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void RemoveIntegrationPreflight_RequiresOneSuccessfulExactMarker()
         {
+            var projectRoot = Path.Combine(Path.GetTempPath(), "codedb-preflight-" + Guid.NewGuid().ToString("N"));
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
-                AICodedbHostPayloadAction.RemoveIntegrationPreflight, false, "C:/fixture/project");
-            Assert.That(arguments, Does.Contain("RemoveIntegrationPreflight"));
-            Assert.That(arguments, Does.Not.Contain("-ConfirmedProjectMutation"));
+                AICodedbHostPayloadAction.RemoveIntegrationPreflight, false, projectRoot);
+            Assert.That(arguments, Is.EqualTo(new[] { "-Action", "RemoveIntegrationPreflight", "-ProjectRoot", projectRoot }));
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
                 new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] AVAILABLE\n", string.Empty, false)), Is.True);
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
@@ -4176,10 +4176,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void UninstallPreflight_UsesReadOnlyActionAndGatesIndependentAdmission()
         {
+            var projectRoot = Path.Combine(Path.GetTempPath(), "codedb-preflight-" + Guid.NewGuid().ToString("N"));
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
-                AICodedbHostPayloadAction.UninstallPreflight, false, "C:/fixture/project");
-            Assert.That(arguments, Does.Contain("UninstallPreflight"));
-            Assert.That(arguments, Does.Not.Contain("-ConfirmedProjectMutation"));
+                AICodedbHostPayloadAction.UninstallPreflight, false, projectRoot);
+            Assert.That(arguments, Is.EqualTo(new[] { "-Action", "UninstallPreflight", "-ProjectRoot", projectRoot }));
 
             AICodedbProductStatus Status(bool available) => new AICodedbProductStatus(
                 AICodedbProductState.Ready,

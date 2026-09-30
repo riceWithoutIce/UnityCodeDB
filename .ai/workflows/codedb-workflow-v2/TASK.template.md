@@ -5,7 +5,7 @@
 - Product:
 - Version:
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.3
+- Workflow revision: 2.4
 - Status: READY
 - Planner:
 - Coder:
@@ -42,6 +42,7 @@
 - Affected L1 tests:
 - Explicitly not run:
 - Test rationale:
+- Path provenance gate: NOT_APPLICABLE | <runtime path sources and pre-freeze focused check>
 - Package identity gate:
 - Package release closure gate:
 - Canonical generator/closure validator:

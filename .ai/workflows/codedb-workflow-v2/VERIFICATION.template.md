@@ -4,7 +4,7 @@
 
 - Verdict: PASS | FAIL | BLOCKED | DEFERRED
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.3
+- Workflow revision: 2.4
 - Review mode: GUARDED | RELEASE | <explicit request>
 - Actual execution mode/profile/model/reasoning:
 - Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
@@ -14,6 +14,7 @@
 ## Evidence
 
 - Reused Coder evidence:
+- Path provenance gate admission: NOT_APPLICABLE | <reused Coder result and affected path review>
 - Targeted read-only checks:
 - Tests rerun: none | <explicitly authorized run>
 - Identity stability:

@@ -1,10 +1,17 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param([switch]$ManagerActionWriterOnly)
+param(
+    [switch]$ManagerActionWriterOnly,
+    [switch]$PathProvenanceOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($ManagerActionWriterOnly -and $PathProvenanceOnly) {
+    throw 'Focused package-boundary switches are mutually exclusive.'
+}
 
 function Assert-True {
     param(
@@ -211,6 +218,26 @@ function Get-RelativePath {
     return $Path.Substring($Root.TrimEnd('\', '/').Length + 1).Replace('\', '/')
 }
 
+function Get-PackageTextFiles {
+    param([string]$Root)
+    $textExtensions = @(".asmdef", ".bat", ".cmd", ".cs", ".json", ".md", ".meta", ".mjs", ".ps1", ".svg", ".toml")
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {
+        $textExtensions -contains $_.Extension.ToLowerInvariant() -or
+        $_.Name -in @(".gitattributes", "codedbignore.example")
+    })
+}
+
+function Assert-PackagePathProvenance {
+    param([string]$Root, [object[]]$Files)
+    foreach ($file in $Files) {
+        $content = [System.IO.File]::ReadAllText($file.FullName)
+        if ($content -match '(?im)(^|[^A-Za-z0-9+.-])[A-Z]:[\\/]') {
+            $relativeFilePath = Get-RelativePath -Root $Root -Path $file.FullName
+            throw "Package contains a machine-local absolute path: $relativeFilePath"
+        }
+    }
+}
+
 function Assert-SafeRelativePath {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -230,6 +257,11 @@ function Assert-SafeRelativePath {
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if ($PathProvenanceOnly) {
+    Assert-PackagePathProvenance -Root $packageRoot -Files @(Get-PackageTextFiles -Root $packageRoot)
+    Write-Host '[PASS] Package path provenance.'
+    return
+}
 $packageManifestPath = Join-Path $packageRoot "package.json"
 $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
@@ -348,11 +380,8 @@ $binaryFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-
 $binaryFilePaths = @($binaryFiles | ForEach-Object { $_.FullName })
 Assert-True -Condition ($binaryFiles.Count -eq 0) -Message "Package contains forbidden provider or archive binaries: $($binaryFilePaths -join ', ')"
 
-$textExtensions = @(".asmdef", ".cs", ".json", ".md", ".meta", ".mjs", ".ps1", ".svg", ".toml")
-$textFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object {
-    $textExtensions -contains $_.Extension.ToLowerInvariant() -or
-    $_.Name -in @(".gitattributes", "codedbignore.example")
-})
+$textFiles = @(Get-PackageTextFiles -Root $packageRoot)
+Assert-PackagePathProvenance -Root $packageRoot -Files $textFiles
 foreach ($file in $textFiles) {
     if ([string]::Equals($file.FullName, $PSCommandPath, [StringComparison]::OrdinalIgnoreCase)) {
         continue
@@ -379,10 +408,6 @@ foreach ($file in $textFiles) {
             $remainingContent -match '(?i)\bbalance\b') {
             throw "Package contains a host-specific identifier: $relativeFilePath"
         }
-    }
-
-    if ($content -match '(?im)(^|[^A-Za-z0-9+.-])[A-Z]:[\\/]') {
-        throw "Package contains a machine-local absolute path: $relativeFilePath"
     }
 }
 
@@ -1089,6 +1114,19 @@ $runtimePolicySources = @(
 )
 foreach ($runtimePolicyFile in $runtimePolicySources) {
     $runtimePolicySource = [System.IO.File]::ReadAllText($runtimePolicyFile.FullName)
+    $relativeRuntimePolicyPath = Get-RelativePath -Root $packageRoot -Path $runtimePolicyFile.FullName
+    if ($relativeRuntimePolicyPath -ceq 'Tools~/materialize-codedb-host-payload.ps1') {
+        $historicalPredicate = '[string]$authority.Selection.GenerationId -cne ''poc.34'''
+        $predicateIndex = $runtimePolicySource.IndexOf($historicalPredicate, [StringComparison]::Ordinal)
+        if ($predicateIndex -ge 0) {
+            $proofStart = $runtimePolicySource.IndexOf('function Get-HistoricalUnknownProjectProof {', [StringComparison]::Ordinal)
+            $proofEnd = $runtimePolicySource.IndexOf('function Invoke-ReconcileHistoricalUnknown {', [StringComparison]::Ordinal)
+            Assert-True `
+                -Condition ($proofStart -ge 0 -and $predicateIndex -gt $proofStart -and $proofEnd -gt $predicateIndex) `
+                -Message 'The S25 historical generation predicate moved outside its reviewed proof function.'
+            $runtimePolicySource = $runtimePolicySource.Remove($predicateIndex, $historicalPredicate.Length)
+        }
+    }
     foreach ($forbiddenRuntimePolicyName in $forbiddenRuntimePolicyNames) {
         Assert-True `
             -Condition ($runtimePolicySource.IndexOf($forbiddenRuntimePolicyName, [StringComparison]::Ordinal) -lt 0) `

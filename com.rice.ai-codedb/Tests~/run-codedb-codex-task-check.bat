@@ -2,10 +2,10 @@
 setlocal EnableExtensions
 
 rem Read-only helper for the real new-Codex-task acceptance gate.
-rem Usage: run-codedb-codex-task-check.bat "C:\path\to\UnityProject"
+rem Usage: run-codedb-codex-task-check.bat "<UnityProjectRoot>"
 
 if "%~1"=="" (
-    echo Usage: %~nx0 "C:\path\to\UnityProject"
+    echo Usage: %~nx0 "<UnityProjectRoot>"
     echo.
     echo The target must be the Unity project root used as the new Codex task cwd.
     exit /b 2

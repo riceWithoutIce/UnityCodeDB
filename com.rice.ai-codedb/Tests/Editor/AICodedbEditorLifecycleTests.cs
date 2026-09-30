@@ -3136,6 +3136,27 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void CurrentUninstalledPendingState_ExposesInstallWithoutEditorLease()
+        {
+            var statePath = Path.Combine(
+                _projectRoot,
+                AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+            WriteIntegrationState(_projectRoot, statePath);
+
+            var integration = AICodedbProjectIntegrationStateStore.Read(_projectRoot);
+            var product = AICodedbProductStatusBuilder.Build(integration, null);
+            var snapshot = AICodedbStatusSnapshot.CreateCachedStatus("FixtureProject", product);
+
+            Assert.That(integration.State, Is.EqualTo(AICodedbProjectIntegrationState.Uninstalled));
+            Assert.That(integration.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.Pending));
+            Assert.That(AICodedbEditorLifecycle.ShouldPublishEditorLease(integration), Is.False);
+            Assert.That(AICodedbEditorLifecycle.ShouldRunAutomaticUninstallCleanup(integration), Is.True);
+            Assert.That(product.State, Is.EqualTo(AICodedbProductState.Uninstalled));
+            Assert.That(snapshot.IsProjectUninstalled, Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(product, false, false), Is.True);
+        }
+
+        [Test]
         public void ProjectIntegrationState_CompleteSuppressesLeaseAndAutomaticCleanup()
         {
             var statePath = Path.Combine(
@@ -5029,6 +5050,32 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "AICodedbEditorLifecycle.cs"));
 
             Assert.That(source, Does.Not.Contain("\"Reinstall\""));
+        }
+
+        [Test]
+        public void LifecycleSource_UninstalledStatePrecedesEditorLeaseRejection()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbEditorLifecycle.cs"));
+            var workerStart = source.IndexOf(
+                "private static LifecycleReconcileResult RunReconcileWorker(",
+                StringComparison.Ordinal);
+            Assert.That(workerStart, Is.GreaterThanOrEqualTo(0));
+
+            var uninstalledBranch = source.IndexOf(
+                "if (integrationStatus.IsUninstalled)", workerStart, StringComparison.Ordinal);
+            var cleanupBranch = source.IndexOf(
+                "if (ShouldRunAutomaticUninstallCleanup(integrationStatus))",
+                workerStart, StringComparison.Ordinal);
+            var leaseRejection = source.IndexOf(
+                "&& !coordinatorAdmissionAllowed", workerStart, StringComparison.Ordinal);
+
+            Assert.That(uninstalledBranch, Is.GreaterThan(workerStart));
+            Assert.That(cleanupBranch, Is.GreaterThan(uninstalledBranch));
+            Assert.That(leaseRejection, Is.GreaterThan(cleanupBranch),
+                "A valid UNINSTALLED state must not be rejected for lacking an Editor lease.");
         }
 
         private static AICodedbControlContractMigrationStatus CreateMigrationStatus(

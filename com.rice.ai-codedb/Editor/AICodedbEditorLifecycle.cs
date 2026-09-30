@@ -1126,6 +1126,40 @@ namespace Rice.AI.Codedb.Editor
                 return LifecycleReconcileResult.WithState(obsoleteInstanceProductStatus.State);
             }
 
+            if (integrationStatus.IsUninstalled)
+            {
+                Interlocked.Exchange(ref _scheduledMigrationAdmissionBlocked, 0);
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                DeleteEditorLease();
+                if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
+                {
+                    AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                        AICodedbPostAdmissionDisposition.UninstallCleanup);
+                    if (!canContinue())
+                    {
+                        RememberLifecycleProductStatus(
+                            AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                        return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
+                    }
+                    var cleanupResult = RememberHostStatusResult(
+                        RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
+                    RememberLifecycleProductStatus(
+                        AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                    return cleanupResult.Succeeded
+                        ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
+                        : LifecycleReconcileResult.WithWarning(
+                            AICodedbProductState.Uninstalled,
+                            $"CodeDB automatic uninstall cleanup failed: {cleanupResult.GetSummary()} {cleanupResult.StandardError}".Trim());
+                }
+
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.Uninstalled);
+                RememberLifecycleProductStatus(
+                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
+            }
+
             if (independentPrerequisiteRead
                 && !coordinatorAdmissionAllowed
                 && !bootstrapWithoutCoordinatorAllowed)
@@ -1201,39 +1235,6 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbProductState.NeedsAttention,
                     "CodeDB project integration desired state is invalid: " + integrationStatus.Detail);
             }
-            if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
-            {
-                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
-                    AICodedbPostAdmissionDisposition.UninstallCleanup);
-                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
-                DeleteEditorLease();
-                if (!canContinue())
-                {
-                    RememberLifecycleProductStatus(
-                        AICodedbProductStatusBuilder.Build(integrationStatus, null));
-                    return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
-                }
-                var cleanupResult = RememberHostStatusResult(
-                    RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
-                RememberLifecycleProductStatus(
-                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
-                return cleanupResult.Succeeded
-                    ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
-                    : LifecycleReconcileResult.WithWarning(
-                        AICodedbProductState.Uninstalled,
-                        $"CodeDB automatic uninstall cleanup failed: {cleanupResult.GetSummary()} {cleanupResult.StandardError}".Trim());
-            }
-            if (integrationStatus.IsUninstalled)
-            {
-                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
-                    AICodedbPostAdmissionDisposition.Uninstalled);
-                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
-                DeleteEditorLease();
-                RememberLifecycleProductStatus(
-                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
-                return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
-            }
-
             if (!canContinue())
                 return null;
             // A fresh project has no selected instance yet. A Probe requires

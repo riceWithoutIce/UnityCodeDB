@@ -9762,7 +9762,7 @@ function Invoke-HistoricalUnknownReconciliationScenarios {
             ActionId = '3049af7cfc9f4260928e3f89d18672c0'
             StageId = 'b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56'
             IndexDirectory = $indexDirectory; ProjectKey = ('a' * 64); PackageKey = ('b' * 64)
-            PackageRoot = 'C:/synthetic-package'; AdmissionSha256 = ('c' * 64)
+            PackageRoot = (Join-Path $runRoot 'synthetic-package'); AdmissionSha256 = ('c' * 64)
             ClaimSha256 = ('d' * 64); CommandIdentity = ('e' * 64)
             WriterPid = 4242; WriterTicks = '123456789012345678'
         }
