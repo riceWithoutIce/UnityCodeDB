@@ -5,7 +5,7 @@
 - Product: UnityCodeDB
 - Version: v0.3.0 P0
 - Workflow: codedb-workflow-v2, revision 2.3
-- Status: FIX_01_SOURCE_AND_FOCUSED_L0_PASS / CORRECTED_PACKAGE_PENDING
+- Status: REAL_S25_HISTORICAL_RECONCILIATION_PASS / FRESH_REMOVE_PENDING
 - Planner: UnityCodeDB v0.3 Planner
 - Coder: Planner-local source implementation; no separate Coder session
 - Verifier: independent targeted review after a stable source snapshot
@@ -95,11 +95,12 @@ sequence of symptom-specific FIX cards.
   reported zero C# compile errors and the S27-added single EditMode test PASS
   on the temporarily source-bound validation project; its Package files were
   restored to their pre-gate hashes. The old S25 Remove outcome remains
-  unknown and S25 Gate C remains BLOCKED.
+  unknown, and the corrected Package real proof published the allowed
+  `HistoricalUnknownReconciled` disposition while retaining that unknown
+  outcome. The historical S25 block is closed; fresh removal remains pending.
 - Next notification: UnityCodeDB v0.3 Planner/User
-- Next action: create and verify the corrected commit-derived Package, then
-  perform one bounded real S25 proof attempt. The existing and corrected
-  Package closures do not authorize replay or a fresh Remove/Install.
-- Human decision or authorization required: corrected Package closure,
-  Unity/real process observation, real reconciliation, Remove/Install, push,
-  and publication.
+- Next action: separately authorize the fresh Remove preflight and one new
+  Remove action. Do not replay the historical command. Fresh Install remains
+  a later gate after authenticated `UNINSTALLED / PENDING` evidence.
+- Human decision or authorization required: fresh Remove preflight/action,
+  fresh Install, push, and publication.

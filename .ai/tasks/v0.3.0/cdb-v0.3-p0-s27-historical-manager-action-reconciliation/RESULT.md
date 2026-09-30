@@ -304,3 +304,38 @@ Current status: `FIX_01_SOURCE_AND_FOCUSED_L0_PASS /
 CORRECTED_PACKAGE_PENDING`. The prior commit and Package remain preserved;
 the next real proof must use the corrected artifact once and stop on the first
 failure.
+
+## FIX 01 Corrected Package And Real Proof - 2026-09-30
+
+The correction was committed as
+`5cb4862ab41a30d7819e036c8da18b8f0bf30783` (`Fix S27 reconciliation
+confirmation admission`). The corrected commit-derived Package was exported
+and passed both staged and exact-ZIP closure: `source_count=46`,
+`mismatch_count=0`, `files=482`, `bytes=9920306`, `zip_entries=482`.
+The ZIP is
+`.artifacts/v0.3.0-preview.5-s27-reconciliation-fix01-5cb4862-final/com.rice.ai-codedb.zip`
+with SHA-256
+`8afcf9cfc0879f92d43accd69123713700d17f73fd55be24c38b0842a0700ece`.
+
+Using that exact Package, the single newly authorized real proof attempt for
+the historical action `3049af7cfc9f4260928e3f89d18672c0` completed with exit
+`0` and emitted:
+
+`[HISTORICAL_ACTION] RECONCILED_UNKNOWN`
+
+The published marker is under the project-key action index, has
+`disposition=HistoricalUnknownReconciled`, `command_outcome=unknown`, and
+SHA-256
+`134fecaf0236a44de95aad99ce2aa33a6931117ee727f3e9e4c1cfe35d876adf`.
+The original S25 stage still contains only `admitted.json` and `claim.json`;
+no terminal or start-failure file was created. The proof observed the original
+writer/command as quiescent and rechecked the project under the materializer
+and Manager index locks. The project remains `INSTALLED / COMPLETE`, the
+current selection remains `poc.34`, and operation/removal-intent paths remain
+absent. No process was stopped and no Remove/Install or old-command replay was
+performed.
+
+Status: `REAL_S25_HISTORICAL_RECONCILIATION_PASS /
+FRESH_REMOVE_PENDING`. This closes the old unknown-action block only. A fresh
+Remove still requires a separate human confirmation and backend preflight;
+fresh Install still requires authenticated `UNINSTALLED / PENDING` evidence.
