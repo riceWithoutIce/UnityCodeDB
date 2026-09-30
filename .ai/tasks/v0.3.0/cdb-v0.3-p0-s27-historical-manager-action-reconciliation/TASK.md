@@ -5,7 +5,7 @@
 - Product: UnityCodeDB
 - Version: v0.3.0 P0
 - Workflow: codedb-workflow-v2, revision 2.3
-- Status: ACCEPTED / FOCUSED_CSHARP_EDITOR_GATE_PASS / REAL_S25_GATE_BLOCKED
+- Status: FIX_01_SOURCE_AND_FOCUSED_L0_PASS / CORRECTED_PACKAGE_PENDING
 - Planner: UnityCodeDB v0.3 Planner
 - Coder: Planner-local source implementation; no separate Coder session
 - Verifier: independent targeted review after a stable source snapshot
@@ -97,9 +97,9 @@ sequence of symptom-specific FIX cards.
   restored to their pre-gate hashes. The old S25 Remove outcome remains
   unknown and S25 Gate C remains BLOCKED.
 - Next notification: UnityCodeDB v0.3 Planner/User
-- Next action: separately authorize a scoped commit and commit-derived Package
-  closure before proposing the human-owned real S25 proof gate. Acceptance of
-  this source gate does not authorize reconciliation or a fresh Remove/Install.
-- Human decision or authorization required: commit, Package export, Unity/real
-  process observation, real reconciliation, Remove/Install, push, and
-  publication.
+- Next action: create and verify the corrected commit-derived Package, then
+  perform one bounded real S25 proof attempt. The existing and corrected
+  Package closures do not authorize replay or a fresh Remove/Install.
+- Human decision or authorization required: corrected Package closure,
+  Unity/real process observation, real reconciliation, Remove/Install, push,
+  and publication.

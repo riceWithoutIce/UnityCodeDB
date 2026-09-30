@@ -11779,8 +11779,8 @@ function Invoke-Remove {
 . (Join-Path $PSScriptRoot "codedb-instance-engine.ps1")
 
 try {
-    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")) {
-        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, RemoveIntegration, Repair, Reinstall, Uninstall, or Install." -ExitCode 4
+    if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")) {
+        Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, RemoveIntegration, Repair, Reinstall, Uninstall, Install, or ReconcileHistoricalUnknown." -ExitCode 4
     }
     if ($PocFixture -and $ConfirmedProjectMutation) {
         Throw-MaterializerError -Message "Fixture and confirmed project mutation modes are mutually exclusive." -ExitCode 4

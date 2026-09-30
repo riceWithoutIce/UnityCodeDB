@@ -9569,7 +9569,8 @@ function Invoke-HistoricalUnknownReconciliationScenarios {
         "'admitted.json', 'claim.json'",
         'A project removal intent remains present.',
         'Historical action evidence changed before publication.',
-        'The Manager action index contains a competing or prior disposition.'
+        'The Manager action index contains a competing or prior disposition.',
+        '$Action -notin @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")'
     )) {
         Assert-True -Condition ($source.Contains($required)) -Message "Historical reconciliation proof is missing $required."
     }

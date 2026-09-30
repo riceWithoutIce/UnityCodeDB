@@ -218,3 +218,89 @@ Before the scoped commit, Planner normalized only the Verifier report's
 presentation: replaced the local absolute repository path with a portable
 workspace label and removed Markdown hard-break trailing spaces. Its verdict,
 findings, reviewed identity, evidence, and scope boundaries were unchanged.
+
+## Scoped Commit And Commit-Derived Package Closure - 2026-09-30
+
+The exact nine-path S27 commit is
+`a0cd3d966fa8550930da5576d202f10030498f0a` (`S27 guard historical Manager
+action reconciliation`). Before commit, the staged four-file patch identity
+matched the Verifier-reviewed
+`4ecb40b44e091652bd57b04b8f67ecd521a2881e`; the staged nine-path
+`git diff --check` passed with no output. No S25 record, validation-project
+file, unrelated task/workflow change, or prior artifact was included.
+
+The canonical exporter produced a new local artifact from that exact commit:
+
+- Root: `.artifacts/v0.3.0-preview.5-s27-reconciliation-a0cd3d9-final/`
+- Package: `package/com.rice.ai-codedb` under that root
+- ZIP: `com.rice.ai-codedb.zip` under that root
+- ZIP SHA-256: `1ba866102e8a7bdc439731c081fb2e37c53284e60a559b5e8acc69ae4fd80b84`
+- Commit-staged and exact-ZIP closure: PASS / PASS; `source_count=46`,
+  `mismatch_count=0` each
+- Export summary: `files=482`, `bytes=9919715`, `zip_entries=482`
+- Cross-hashes: generation
+  `b634d66584c84f4855fb4b29a1c16f9ecc6898cca670258454d9c9c12d794666`,
+  host-current
+  `9f5b72e8ee2992e69172c9f4727d578f5a9ec35e8bab61b084ed1ee281f0612b`,
+  runtime contract
+  `df329facd024dd45b8753cff921cf340543e31798be5a485f99421e523402303`
+
+An independent file hash matched the reported ZIP SHA-256. The four S27
+source/test files and Host Action contract in the exported Package each
+matched their exact commit blob. Prior artifacts and the restored validation
+project bindings were not changed. This artifact is not yet a real S25 Gate C
+PASS: old Remove outcome remains unknown, and no real process/project proof,
+reconciliation, fresh Remove/Install, Unity import of this artifact, push,
+tag, or publication occurred.
+
+Current status: `S27_COMMIT_AND_PACKAGE_CLOSURE_PASS /
+S25_REAL_GATE_C_BLOCKED`. Next action requires a separately authorized,
+human-owned real proof and validation-project integration plan; any failed
+exact-action proof stops without replay or cleanup.
+
+## Real S25 Proof Attempt 01 - 2026-09-30
+
+The separately authorized one-shot real proof was invoked from the exact S27
+commit-derived Package against `UnityValidationProject` and the exact
+historical action `3049af7cfc9f4260928e3f89d18672c0`, with the required
+administrative confirmation. It stopped before project-lock acquisition,
+process observation, project-state proof, or marker publication with exit
+`1`:
+
+`Project mutation confirmation is valid only for Redeploy, Sync, Remove,
+RemoveIntegration, Repair, Reinstall, Uninstall, or Install.`
+
+This is a deterministic contract mismatch in the shipped route: the
+`ReconcileHistoricalUnknown` implementation requires
+`ConfirmedProjectMutation`, while the top-level argument guard rejects that
+same combination. The command therefore could not reach any real proof logic;
+no old receipt, runtime state, process, marker, Remove, Install, or project
+bytes were changed by this attempt. Removing the confirmation switch would
+not be a valid workaround because the reconciliation function rejects an
+unconfirmed call. No retry was performed.
+
+Status: `REAL_S25_PROOF_BLOCKED / RECONCILIATION_CONFIRMATION_GUARD_MISMATCH`.
+Next action requires a separately authorized same-task FIX to align the
+command admission guard and reconciliation confirmation contract, followed by
+one new bounded proof attempt. The existing S27 commit and Package remain
+immutable; do not replay the old Remove or start a fresh Remove/Install.
+
+## FIX 01 - Reconciliation Confirmation Guard - 2026-09-30
+
+The user authorized the same-task FIX after the pre-observation guard failure.
+The top-level materializer admission now includes `ReconcileHistoricalUnknown`
+in the actions that accept `-ConfirmedProjectMutation`, matching the explicit
+confirmation required by `Invoke-ReconcileHistoricalUnknown`. The normal
+mutation actions retain their existing confirmation behavior.
+
+The focused `-HistoricalReconciliationOnly` L0 passed after the correction,
+including the new source assertion that the reconciliation action is present
+in the confirmation allowlist. Both the materializer and focused fixture
+PowerShell AST parses passed, and their scoped `git diff --check` passed. No
+real project proof was retried before producing the corrected commit-derived
+Package.
+
+Current status: `FIX_01_SOURCE_AND_FOCUSED_L0_PASS /
+CORRECTED_PACKAGE_PENDING`. The prior commit and Package remain preserved;
+the next real proof must use the corrected artifact once and stop on the first
+failure.
