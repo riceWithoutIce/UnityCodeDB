@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Rice.AI.Codedb.Editor
@@ -58,12 +59,22 @@ namespace Rice.AI.Codedb.Editor
     {
         private const int MaximumBytes = 16384;
         private const int LegacyAdmissionMaximumBytes = 262144;
+        private const string HistoricalActionId = "3049af7cfc9f4260928e3f89d18672c0";
+        private const string HistoricalStageId = "b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56";
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
 
         private sealed class ResolvedMarker
         {
             internal string PackageKey;
             internal AICodedbManagerActionEvidenceKind Disposition;
+            internal bool HistoricalUnknown;
+            internal string StageId;
+            internal string AdmissionSha256;
+            internal string ClaimSha256;
+            internal string CommandIdentitySha256;
+            internal string ProjectProofSha256;
+            internal int WriterPid;
+            internal string WriterStartTicks;
         }
 
         internal static AICodedbManagerActionIndexRead Read(AICodedbEditorExecutionContext context)
@@ -172,7 +183,9 @@ namespace Rice.AI.Codedb.Editor
             var previous = new AICodedbEditorExecutionContext(context.Platform,
                 context.ProjectRoot, packageRoot, context.ProjectDisplayName);
             var dispositionText = AICodedbStrictJson.GetRequiredString(record, "disposition", label);
-            if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
+            var historicalUnknown = dispositionText == "HistoricalUnknownReconciled";
+            var schemaVersion = AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label);
+            if (schemaVersion != (historicalUnknown ? 2 : 1)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "managed_by", label),
                     "com.rice.ai-codedb", StringComparison.Ordinal)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "state", label),
@@ -185,14 +198,67 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbPaths.GetManagerActionProjectKey(context), StringComparison.Ordinal)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "package_key", label),
                     AICodedbPaths.GetManagerActionPackageKey(previous), StringComparison.Ordinal)
-                || (dispositionText != "CommandTerminal" && dispositionText != "PreEffectRefusal"))
+                || (dispositionText != "CommandTerminal" && dispositionText != "PreEffectRefusal"
+                    && !historicalUnknown))
                 throw new InvalidOperationException("The resolved Manager action marker is invalid.");
+            var stageId = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "stage_id", label) : string.Empty;
+            var admissionSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "admission_sha256", label) : string.Empty;
+            var claimSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "claim_sha256", label) : string.Empty;
+            var commandIdentitySha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "command_identity_sha256", label) : string.Empty;
+            var firstProcessSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "process_observation_first_sha256", label) : string.Empty;
+            var secondProcessSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "process_observation_second_sha256", label) : string.Empty;
+            var projectProofSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "project_proof_sha256", label) : string.Empty;
+            var proofSha256 = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "proof_sha256", label) : string.Empty;
+            var writerPid = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredInt32(record, "writer_pid", label) : 0;
+            var writerStartTicks = historicalUnknown
+                ? AICodedbStrictJson.GetRequiredString(record, "writer_start_utc_ticks", label) : string.Empty;
+            if (historicalUnknown && (!IsLowerHex64(stageId)
+                || !IsLowerHex64(admissionSha256) || !IsLowerHex64(claimSha256)
+                || !IsLowerHex64(commandIdentitySha256)
+                || !IsLowerHex64(firstProcessSha256) || !IsLowerHex64(secondProcessSha256)
+                || !IsLowerHex64(projectProofSha256) || !IsLowerHex64(proofSha256)
+                || !string.Equals(actionId, HistoricalActionId, StringComparison.Ordinal)
+                || !string.Equals(stageId, HistoricalStageId, StringComparison.Ordinal)
+                || writerPid <= 0 || writerStartTicks.Length < 15 || writerStartTicks.Length > 20
+                || !IsDigits(writerStartTicks)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "proof_source", label),
+                    "S27_WIN32_PROCESS_AND_LOCKED_MATERIALIZER_AUTHORITY", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(AICodedbStrictJson.GetRequiredString(record,
+                    "observed_at_utc", label))
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "command_outcome", label),
+                    "unknown", StringComparison.Ordinal)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "project_state", label),
+                    "INSTALLED", StringComparison.Ordinal)
+                || !string.Equals(proofSha256, ComputeTextSha256(string.Join("\n", new[]
+                    {
+                        actionId, stageId, admissionSha256, claimSha256, commandIdentitySha256,
+                        firstProcessSha256, secondProcessSha256, projectProofSha256, projectProofSha256
+                    })), StringComparison.Ordinal)))
+                throw new InvalidOperationException("The historical unknown-action marker is invalid.");
             return new ResolvedMarker
             {
                 PackageKey = AICodedbPaths.GetManagerActionPackageKey(previous),
                 Disposition = dispositionText == "CommandTerminal"
                     ? AICodedbManagerActionEvidenceKind.CommandTerminal
-                    : AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                    : historicalUnknown ? AICodedbManagerActionEvidenceKind.Indeterminate
+                        : AICodedbManagerActionEvidenceKind.PreEffectRefusal,
+                HistoricalUnknown = historicalUnknown,
+                StageId = stageId,
+                AdmissionSha256 = admissionSha256,
+                ClaimSha256 = claimSha256,
+                CommandIdentitySha256 = commandIdentitySha256,
+                ProjectProofSha256 = projectProofSha256,
+                WriterPid = writerPid,
+                WriterStartTicks = writerStartTicks
             };
         }
 
@@ -201,6 +267,7 @@ namespace Rice.AI.Codedb.Editor
             Dictionary<string, ResolvedMarker> resolved)
         {
             AICodedbManagerActionIndex pending = null;
+            var matchedHistorical = new HashSet<string>(StringComparer.Ordinal);
             var packageDirectories = Directory.GetDirectories(directory);
             if (packageDirectories.Length > 64)
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
@@ -262,9 +329,28 @@ namespace Rice.AI.Codedb.Editor
                             if (!string.Equals(marker.PackageKey,
                                     AICodedbPaths.GetManagerActionPackageKey(original), StringComparison.Ordinal)
                                 || (marker.Disposition == AICodedbManagerActionEvidenceKind.CommandTerminal
-                                    && outcome.State != AICodedbManagerActionRecoveryState.Terminal))
+                                    && outcome.State != AICodedbManagerActionRecoveryState.Terminal)
+                                || (marker.HistoricalUnknown
+                                    && (outcome.State != AICodedbManagerActionRecoveryState.Pending
+                                        || stages.Length != 1
+                                        || !string.Equals(Path.GetFileName(stages[0]), marker.StageId,
+                                            StringComparison.Ordinal)
+                                        || !string.Equals(GetFileSha256(Path.Combine(stages[0], "admitted.json")),
+                                            marker.AdmissionSha256, StringComparison.Ordinal)
+                                        || !string.Equals(GetFileSha256(Path.Combine(stages[0], "claim.json")),
+                                            marker.ClaimSha256, StringComparison.Ordinal)
+                                        || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted,
+                                                "command_identity_sha256", label),
+                                            marker.CommandIdentitySha256, StringComparison.Ordinal)
+                                        || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted,
+                                                "writer_sha256", label),
+                                            "d6fa8f5a828fcc823e54b44683903e0ec3173d23b1af64931324fa2093a039cf",
+                                            StringComparison.Ordinal)
+                                        || !MatchesHistoricalClaim(stages[0], marker))))
                                 throw new InvalidOperationException(
                                     "A resolved action marker conflicts with its original receipt.");
+                            if (marker.HistoricalUnknown)
+                                matchedHistorical.Add(actionId);
                             continue;
                         }
                         if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
@@ -286,6 +372,11 @@ namespace Rice.AI.Codedb.Editor
                     }
                 }
             }
+            foreach (var closure in resolved)
+                if (closure.Value.HistoricalUnknown && !matchedHistorical.Contains(closure.Key))
+                    return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
+                        null, "A historical unknown-action marker has no matching original receipt.",
+                        closure.Key);
             return pending == null
                 ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty)
                 : new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
@@ -300,6 +391,54 @@ namespace Rice.AI.Codedb.Editor
                       || (character >= 'a' && character <= 'f')))
                     return false;
             return true;
+        }
+
+        private static bool IsLowerHex64(string value)
+        {
+            if (value == null || value.Length != 64) return false;
+            foreach (var character in value)
+                if (!((character >= '0' && character <= '9')
+                      || (character >= 'a' && character <= 'f')))
+                    return false;
+            return true;
+        }
+
+        private static bool IsDigits(string value)
+        {
+            foreach (var character in value)
+                if (character < '0' || character > '9') return false;
+            return true;
+        }
+
+        private static bool MatchesHistoricalClaim(string stageDirectory, ResolvedMarker marker)
+        {
+            const string label = "historical Manager action claim";
+            var claim = AICodedbStrictJson.ReadObject(
+                Path.Combine(stageDirectory, "claim.json"), 65536, label);
+            return AICodedbStrictJson.GetRequiredInt32(claim, "writer_pid", label) == marker.WriterPid
+                && string.Equals(AICodedbStrictJson.GetRequiredString(claim,
+                        "writer_start_utc_ticks", label), marker.WriterStartTicks,
+                    StringComparison.Ordinal);
+        }
+
+        private static string GetFileSha256(string path)
+        {
+            AssertPath(path);
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var algorithm = SHA256.Create())
+            {
+                if (stream.Length <= 0 || stream.Length > LegacyAdmissionMaximumBytes)
+                    throw new InvalidOperationException("Historical action evidence exceeds its size bound.");
+                return BitConverter.ToString(algorithm.ComputeHash(stream))
+                    .Replace("-", string.Empty).ToLowerInvariant();
+            }
+        }
+
+        private static string ComputeTextSha256(string value)
+        {
+            using (var algorithm = SHA256.Create())
+                return BitConverter.ToString(algorithm.ComputeHash(Utf8.GetBytes(value)))
+                    .Replace("-", string.Empty).ToLowerInvariant();
         }
 
         internal static bool TryAdmit(AICodedbManagerActionIndex index, out string detail)

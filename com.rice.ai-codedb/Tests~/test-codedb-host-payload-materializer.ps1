@@ -24,6 +24,8 @@ param(
 
     [switch]$OperationalReadinessOnly,
 
+    [switch]$HistoricalReconciliationOnly,
+
     [switch]$ControlContractReinstallOnly,
 
     [switch]$OwnerIdentityRemovalOnly,
@@ -38,7 +40,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
 }
 
@@ -9547,6 +9549,252 @@ function Invoke-OperationalReadinessAuthorityScenarios {
     Write-Host "[OK] Supervisor operational readiness authority is validated, passed through, and never recomputed by PowerShell."
 }
 
+function Invoke-HistoricalUnknownReconciliationScenarios {
+    $parseErrors = $null
+    $parseTokens = $null
+    $materializerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $materializerPath, [ref]$parseTokens, [ref]$parseErrors)
+    Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Message 'Historical reconciler source did not parse.'
+    foreach ($statement in $materializerAst.EndBlock.Statements) {
+        if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    $source = [IO.File]::ReadAllText($materializerPath)
+    foreach ($required in @(
+        'function Get-HistoricalUnknownActionEvidence',
+        'function Get-HistoricalUnknownProcessProof',
+        'function Get-HistoricalUnknownProjectProof',
+        'Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot',
+        "'admitted.json', 'claim.json'",
+        'A project removal intent remains present.',
+        'Historical action evidence changed before publication.',
+        'The Manager action index contains a competing or prior disposition.'
+    )) {
+        Assert-True -Condition ($source.Contains($required)) -Message "Historical reconciliation proof is missing $required."
+    }
+
+    $HistoricalActionId = '3049af7cfc9f4260928e3f89d18672c0'
+    $script:ManagedBy = 'com.rice.ai-codedb'
+    $stageId = 'b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56'
+    $oldScriptSha = '0495ba0c03e460d41ee0f00686f787031def534972b3b84162a2a722ae7876e1'
+    $oldWriterSha = 'd6fa8f5a828fcc823e54b44683903e0ec3173d23b1af64931324fa2093a039cf'
+    $oldPackage = Join-Path $runRoot 'historical-package-fixture'
+    $oldTools = Join-Path $oldPackage 'Tools~'
+    New-Item -ItemType Directory -Force -Path $oldTools | Out-Null
+    $oldScript = Join-Path $oldTools 'materialize-codedb-host-payload.ps1'
+    $oldWriter = Join-Path $oldTools 'invoke-codedb-manager-action.ps1'
+    Write-Utf8File -Path $oldScript -Content 'synthetic historical script'
+    Write-Utf8File -Path $oldWriter -Content 'synthetic historical writer'
+    $realTextSha = (Get-Command Get-TextSha256).ScriptBlock
+    $realFileSha = (Get-Command Get-FileSha256).ScriptBlock
+    $script:BadOldScriptHash = $false
+    function Get-TextSha256 {
+        param([string]$Text)
+        if ($Text.StartsWith("$HistoricalActionId`nmaterialize-codedb-host-payload.ps1:", [StringComparison]::Ordinal)) {
+            return $stageId
+        }
+        return & $realTextSha -Text $Text
+    }
+    function Get-FileSha256 {
+        param([string]$Path)
+        if ([string]::Equals($Path, $oldScript, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($script:BadOldScriptHash) { return ('0' * 64) }
+            return $oldScriptSha
+        }
+        if ([string]::Equals($Path, $oldWriter, [StringComparison]::OrdinalIgnoreCase)) { return $oldWriterSha }
+        return & $realFileSha -Path $Path
+    }
+    $projectKey = (Get-MaterializerProjectIdentity -ProjectRoot $hostRoot).Substring(7)
+    $packageKey = Get-TextSha256 -Text ($oldPackage.Replace('\', '/').TrimEnd('/').ToLowerInvariant())
+    $indexRoot = Join-Path $fixtureLocalAppData 'Rice/CodeDB/manager-actions'
+    $projectReceiptRoot = Join-Path $indexRoot ($projectKey.Substring(0, 24))
+    $packageReceiptRoot = Join-Path $projectReceiptRoot ($packageKey.Substring(0, 24))
+    $stageRoot = Join-Path (Join-Path $packageReceiptRoot $HistoricalActionId) $stageId
+    New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+    $admissionPath = Join-Path $stageRoot 'admitted.json'
+    $claimPath = Join-Path $stageRoot 'claim.json'
+    $oldArguments = @('-Action', 'RemoveIntegration', '-ProjectRoot', $hostRoot.Replace('\', '/'), '-ConfirmedProjectMutation')
+    $argumentSha = Get-TextSha256 -Text ($oldArguments -join "`n")
+    $commandIdentity = Get-TextSha256 -Text "$oldScriptSha`n$argumentSha`n600000"
+    $admission = [ordered]@{
+        schema_version = 1; managed_by = 'com.rice.ai-codedb'; state = 'admitted'
+        action_id = $HistoricalActionId; stage_id = $stageId; terminal_for_action = $true
+        project_key = $projectKey; package_key = $packageKey
+        project_identity = "sha256:$projectKey"; package_identity = "sha256:$packageKey"
+        effect_class = 'ConfirmedProjectMutation'; authorization_source = 'UserConfirmationAndBackendAdmission'
+        command_identity_sha256 = $commandIdentity; writer_sha256 = $oldWriterSha
+        project_root = $hostRoot.Replace('\', '/'); package_root = $oldPackage.Replace('\', '/')
+        command = [ordered]@{
+            script_path = $oldScript.Replace('\', '/'); script_sha256 = $oldScriptSha
+            arguments_sha256 = $argumentSha; timeout_ms = 600000; arguments = $oldArguments
+        }
+    }
+    $claim = [ordered]@{
+        schema_version = 1; managed_by = 'com.rice.ai-codedb'; state = 'claimed'
+        action_id = $HistoricalActionId; stage_id = $stageId
+        project_key = $projectKey; package_key = $packageKey
+        writer_pid = 4242; writer_start_utc_ticks = '123456789012345678'
+    }
+    Write-Utf8File -Path $admissionPath -Content (($admission | ConvertTo-Json -Depth 6) + "`n")
+    Write-Utf8File -Path $claimPath -Content (($claim | ConvertTo-Json -Depth 4) + "`n")
+    $envelope = Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot
+    Assert-Equal -Actual $envelope.CommandIdentity -Expected $commandIdentity -Message 'Historical command identity was not bound.'
+    $terminalPath = Join-Path $stageRoot 'terminal.json'
+    Write-Utf8File -Path $terminalPath -Content '{}'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot } -ExpectedMessage 'conflicting command evidence' -Label 'Competing terminal receipt'
+    Remove-Item -LiteralPath $terminalPath -Force
+    $extraStage = Join-Path (Split-Path -Parent $stageRoot) ('9' * 64)
+    New-Item -ItemType Directory -Force -Path $extraStage | Out-Null
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot } -ExpectedMessage 'stage cardinality' -Label 'Competing historical stage'
+    Remove-Item -LiteralPath $extraStage -Force
+    $claim.package_key = ('0' * 64)
+    Write-Utf8File -Path $claimPath -Content (($claim | ConvertTo-Json -Depth 4) + "`n")
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot } -ExpectedMessage 'outside the reviewed' -Label 'Changed Package claim'
+    $claim.package_key = $packageKey
+    Write-Utf8File -Path $claimPath -Content (($claim | ConvertTo-Json -Depth 4) + "`n")
+    $script:BadOldScriptHash = $true
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot } -ExpectedMessage 'script bytes changed' -Label 'Changed historical Package bytes'
+    $script:BadOldScriptHash = $false
+    $admission.command.arguments[1] = 'Install'
+    Write-Utf8File -Path $admissionPath -Content (($admission | ConvertTo-Json -Depth 6) + "`n")
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownActionEvidence -ProjectRoot $hostRoot } -ExpectedMessage 'arguments changed' -Label 'Changed historical command'
+
+    $script:ReconcileWriterState = 'absent'
+    $script:ReconcileShellCommand = 'powershell.exe -NoProfile'
+    $script:ReconcileCimHasShell = $true
+    function Get-MaterializerProcessIdentity {
+        param($ProcessId)
+        if ($script:ReconcileWriterState -eq 'live') {
+            return [pscustomobject]@{ Alive = $true; StartTicks = '123456789012345678' }
+        }
+        if ($script:ReconcileWriterState -eq 'unknown') {
+            return [pscustomobject]@{ Alive = $true; StartTicks = $null }
+        }
+        return [pscustomobject]@{ Alive = $false; StartTicks = $null }
+    }
+    function Get-CimInstance {
+        param($ClassName, $ErrorAction)
+        if (-not $script:ReconcileCimHasShell) { return @() }
+        return [pscustomobject]@{ Name = 'powershell.exe'; ProcessId = $PID; CommandLine = $script:ReconcileShellCommand }
+    }
+    function Get-Process {
+        param($Name, $ErrorAction)
+        return [pscustomobject]@{ Id = $PID }
+    }
+    $processEvidence = [pscustomobject]@{ WriterPid = 123; WriterTicks = '123456789012345678' }
+    $null = Get-HistoricalUnknownProcessProof -Evidence $processEvidence
+    $script:ReconcileWriterState = 'live'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProcessProof -Evidence $processEvidence } -ExpectedMessage 'writer is live' -Label 'Live original writer'
+    $script:ReconcileWriterState = 'unknown'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProcessProof -Evidence $processEvidence } -ExpectedMessage 'unobservable' -Label 'Unobservable original writer'
+    $script:ReconcileWriterState = 'absent'
+    $script:ReconcileShellCommand = 'powershell.exe -File materialize-codedb-host-payload.ps1 -Action RemoveIntegration'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProcessProof -Evidence $processEvidence } -ExpectedMessage 'business child' -Label 'Live historical child'
+    $script:ReconcileShellCommand = ''
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProcessProof -Evidence $processEvidence } -ExpectedMessage 'unobservable' -Label 'Unobservable shell command'
+    $script:ReconcileShellCommand = 'powershell.exe -NoProfile'
+    $script:ReconcileCimHasShell = $false
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProcessProof -Evidence $processEvidence } -ExpectedMessage 'missing from the shell inventory' -Label 'Incomplete process census'
+
+    $script:InstanceOperationRelativePath = 'AIWork/.runtime/codedb/control/operation.json'
+    $script:InstanceOperationsRelativePath = 'AIWork/.runtime/codedb/control/operations'
+    $script:InstanceRemovalIntentsRelativePath = 'AIWork/.runtime/codedb/control/removal-intents'
+    $script:InstanceCurrentRelativePath = 'AIWork/.runtime/codedb/control/current-instance.json'
+    $controlRoot = Join-Path $hostRoot 'AIWork/.runtime/codedb/control'
+    New-Item -ItemType Directory -Force -Path $controlRoot | Out-Null
+    $desiredPath = Join-Path $controlRoot 'desired-state.json'
+    $selectionPath = Join-Path $controlRoot 'current-instance.json'
+    Write-Utf8File -Path $desiredPath -Content '{"desired_state":"INSTALLED"}'
+    Write-Utf8File -Path $selectionPath -Content '{"generation_id":"poc.34"}'
+    $script:ReconcileDesiredState = 'INSTALLED'
+    $script:ReconcileGeneration = 'poc.34'
+    function Get-InstanceProjectPath {
+        param($ProjectRoot, $RelativePath, $Label)
+        return Join-Path $ProjectRoot $RelativePath
+    }
+    function Get-InstanceDesiredState {
+        param($ProjectRoot)
+        return [pscustomobject]@{
+            Present = $true; Legacy = $false; DesiredState = $script:ReconcileDesiredState
+            CleanupState = 'COMPLETE'; Path = $desiredPath
+        }
+    }
+    function Get-RemoveIntegrationAuthority {
+        param($Manifest, $ProjectRoot)
+        return [pscustomobject]@{
+            OwnerFingerprint = ('a' * 64)
+            Selection = [pscustomobject]@{ GenerationId = $script:ReconcileGeneration; InstanceId = ('b' * 32) }
+        }
+    }
+    $null = Get-HistoricalUnknownProjectProof -Manifest @{} -ProjectRoot $hostRoot
+    $script:ReconcileDesiredState = 'UNINSTALLED'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProjectProof -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'installed and complete' -Label 'Changed desired state'
+    $script:ReconcileDesiredState = 'INSTALLED'
+    $script:ReconcileGeneration = 'poc.35'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProjectProof -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'selection changed' -Label 'Changed current selection'
+    $script:ReconcileGeneration = 'poc.34'
+    $intentRoot = Join-Path $controlRoot 'removal-intents'
+    New-Item -ItemType Directory -Force -Path $intentRoot | Out-Null
+    Write-Utf8File -Path (Join-Path $intentRoot 'intent.json') -Content '{}'
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProjectProof -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'removal intent' -Label 'Competing removal intent'
+    Remove-Item -LiteralPath (Join-Path $intentRoot 'intent.json') -Force
+    $operationsRoot = Join-Path $controlRoot 'operations'
+    New-Item -ItemType Directory -Force -Path $operationsRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $operationsRoot 'operation-other') | Out-Null
+    Assert-ThrowsMessage -Action { Get-HistoricalUnknownProjectProof -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'operation directory' -Label 'Competing operation directory'
+    Remove-Item -LiteralPath (Join-Path $operationsRoot 'operation-other') -Force
+
+    $indexDirectory = Join-Path $fixtureLocalAppData 'Rice/CodeDB/manager-actions/historical-reconcile'
+    New-Item -ItemType Directory -Force -Path $indexDirectory | Out-Null
+    $script:ReconcileProjectCalls = 0
+    $script:ReconcileProjectDrift = $false
+    $script:ReconcileProcessFailure = $false
+    $script:ManagedBy = 'com.rice.ai-codedb'
+    $ConfirmedProjectMutation = $true
+    $PocFixture = $false
+    function Enter-MaterializerLock { param($ProjectRoot) return [pscustomobject]@{ Root = $indexDirectory } }
+    function Exit-MaterializerLock { param($Lock) }
+    function Get-HistoricalUnknownActionEvidence {
+        param($ProjectRoot)
+        return [pscustomobject]@{
+            ActionId = '3049af7cfc9f4260928e3f89d18672c0'
+            StageId = 'b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56'
+            IndexDirectory = $indexDirectory; ProjectKey = ('a' * 64); PackageKey = ('b' * 64)
+            PackageRoot = 'C:/synthetic-package'; AdmissionSha256 = ('c' * 64)
+            ClaimSha256 = ('d' * 64); CommandIdentity = ('e' * 64)
+            WriterPid = 4242; WriterTicks = '123456789012345678'
+        }
+    }
+    function Get-HistoricalUnknownProcessProof {
+        param($Evidence)
+        if ($script:ReconcileProcessFailure) { throw 'Synthetic process observation incomplete.' }
+        return ('f' * 64)
+    }
+    function Get-HistoricalUnknownProjectProof {
+        param($Manifest, $ProjectRoot)
+        $script:ReconcileProjectCalls++
+        if ($script:ReconcileProjectDrift -and $script:ReconcileProjectCalls -eq 2) { return ('2' * 64) }
+        return ('1' * 64)
+    }
+    $script:ReconcileProcessFailure = $true
+    Assert-ThrowsMessage -Action { Invoke-ReconcileHistoricalUnknown -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'process observation incomplete' -Label 'Incomplete publication process observation'
+    $script:ReconcileProcessFailure = $false
+    $script:ReconcileProjectDrift = $true
+    $script:ReconcileProjectCalls = 0
+    Assert-ThrowsMessage -Action { Invoke-ReconcileHistoricalUnknown -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'drifted' -Label 'Project drift before publication'
+    $script:ReconcileProjectDrift = $false
+    $script:ReconcileProjectCalls = 0
+    $markerPath = Join-Path $indexDirectory 'resolved-action-3049af7cfc9f4260928e3f89d18672c0.json'
+    Assert-True -Condition (-not (Test-Path -LiteralPath $markerPath)) -Message 'A failed proof left a marker.'
+    Invoke-ReconcileHistoricalUnknown -Manifest @{} -ProjectRoot $hostRoot
+    $marker = (Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json)
+    Assert-Equal -Actual $marker.command_outcome -Expected 'unknown' -Message 'Reconciliation forged a command result.'
+    Assert-Equal -Actual $marker.disposition -Expected 'HistoricalUnknownReconciled' -Message 'Reconciliation published the wrong disposition.'
+    Assert-ThrowsMessage -Action { Invoke-ReconcileHistoricalUnknown -Manifest @{} -ProjectRoot $hostRoot } -ExpectedMessage 'prior disposition' -Label 'Repeated reconciliation'
+    Write-Host '[OK] Historical unknown-action proof and publication fail closed on live, incomplete, drifting, and repeated evidence.'
+}
+
 $packageSnapshotBefore = $null
 $sentinelSnapshot = $null
 try {
@@ -9624,6 +9872,13 @@ try {
         Invoke-OperationalReadinessAuthorityScenarios
         Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message "Focused operational readiness acceptance modified package source files."
         Write-Host "[OK] Focused operational readiness authority scenarios passed."
+        $fixturePassed = $true
+        return
+    }
+
+    if ($HistoricalReconciliationOnly) {
+        Invoke-HistoricalUnknownReconciliationScenarios
+        Assert-Equal -Actual (Get-FileSnapshot -Root $packageRoot) -Expected $packageSnapshotBefore -Message 'Focused historical reconciliation changed Package source files.'
         $fixturePassed = $true
         return
     }

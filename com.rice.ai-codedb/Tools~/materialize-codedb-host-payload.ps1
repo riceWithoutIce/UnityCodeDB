@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Repair", "Reinstall", "Uninstall", "Install")]
+    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -22,6 +22,9 @@ param(
     [switch]$PocFixture,
 
     [switch]$ConfirmedProjectMutation,
+
+    [ValidatePattern('^[0-9a-f]{32}$')]
+    [string]$HistoricalActionId,
 
     [ValidateRange(0, 1000)]
     [int]$TestFailAfterMutation = 0,
@@ -72,6 +75,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($Action -ne 'ReconcileHistoricalUnknown' -and -not [string]::IsNullOrEmpty($HistoricalActionId)) {
+    throw 'HistoricalActionId is only valid for explicit reconciliation.'
+}
 
 $script:ManagedBy = "com.rice.ai-codedb"
 $script:MarkerRelativePath = "AIWork/codedb/.rice-ai-codedb-payload.json"
@@ -11105,6 +11111,247 @@ function Assert-RemoveIntegrationTerminalState {
     }
 }
 
+function Get-HistoricalUnknownActionEvidence {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $actionId = '3049af7cfc9f4260928e3f89d18672c0'
+    $stageId = 'b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56'
+    if ($HistoricalActionId -cne $actionId) { throw 'The historical action id is outside this reconciliation contract.' }
+    $localData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+    if ([string]::IsNullOrWhiteSpace($localData)) {
+        $localData = [Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
+    }
+    if ([string]::IsNullOrWhiteSpace($localData)) { throw 'Manager action storage is unavailable.' }
+    $managerRoot = [IO.Path]::GetFullPath((Join-Path $localData 'Rice/CodeDB/manager-actions'))
+    $projectKey = (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot).Substring(7)
+    $indexDirectory = Join-Path $managerRoot $projectKey.Substring(0, 24)
+    Assert-NoReparsePoint -Path $indexDirectory -Root $managerRoot -Label 'historical Manager action index'
+    if (-not (Test-Path -LiteralPath $indexDirectory -PathType Container)) { throw 'Historical action index is missing.' }
+    $packageDirectories = @(Get-ChildItem -LiteralPath $indexDirectory -Directory -Force)
+    if ($packageDirectories.Count -ne 1) { throw 'Historical action Package cardinality is not one.' }
+    $packageDirectory = $packageDirectories[0].FullName
+    Assert-NoReparsePoint -Path $packageDirectory -Root $managerRoot -Label 'historical Package receipts'
+    $actions = @(Get-ChildItem -LiteralPath $packageDirectory -Force)
+    if ($actions.Count -ne 1 -or -not $actions[0].PSIsContainer -or $actions[0].Name -cne $actionId) {
+        throw 'Historical action receipt cardinality or identity changed.'
+    }
+    $stages = @(Get-ChildItem -LiteralPath $actions[0].FullName -Force)
+    if ($stages.Count -ne 1 -or -not $stages[0].PSIsContainer -or $stages[0].Name -cne $stageId) {
+        throw 'Historical action stage cardinality or identity changed.'
+    }
+    $stagePath = $stages[0].FullName
+    Assert-NoReparsePoint -Path $stagePath -Root $managerRoot -Label 'historical action stage'
+    $files = @(Get-ChildItem -LiteralPath $stagePath -Force)
+    if ($files.Count -ne 2 -or @($files | Where-Object { $_.PSIsContainer -or $_.Name -cnotin @('admitted.json', 'claim.json') }).Count -ne 0) {
+        throw 'Historical action stage has missing or conflicting command evidence.'
+    }
+    $admissionPath = Join-Path $stagePath 'admitted.json'
+    $claimPath = Join-Path $stagePath 'claim.json'
+    $admission = (Read-BoundedJsonDocument -Path $admissionPath -Label 'historical Manager admission' -MaximumBytes (256 * 1024)).Document
+    $claim = (Read-BoundedJsonDocument -Path $claimPath -Label 'historical Manager claim' -MaximumBytes (64 * 1024)).Document
+    $packageRoot = [IO.Path]::GetFullPath((Get-RequiredJsonString -Object $admission -Name 'package_root' -Label 'historical Manager admission'))
+    $packageKey = (Get-TextSha256 -Text ($packageRoot.Replace('\', '/').TrimEnd('/').ToLowerInvariant()))
+    $command = $admission.command
+    if ($null -eq $command) { throw 'Historical command envelope is missing.' }
+    $scriptPath = [IO.Path]::GetFullPath((Get-RequiredJsonString -Object $command -Name 'script_path' -Label 'historical command'))
+    $expectedScript = [IO.Path]::GetFullPath((Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'))
+    $writerPath = [IO.Path]::GetFullPath((Join-Path $packageRoot 'Tools~/invoke-codedb-manager-action.ps1'))
+    $arguments = Get-RequiredJsonArray -Object $command -Name 'arguments' -Label 'historical command'
+    $expectedArguments = @('-Action', 'RemoveIntegration', '-ProjectRoot', $ProjectRoot, '-ConfirmedProjectMutation')
+    if ((Get-RequiredJsonInt32 -Object $admission -Name 'schema_version' -Label 'historical Manager admission') -ne 1 -or
+        (Get-RequiredJsonInt32 -Object $claim -Name 'schema_version' -Label 'historical Manager claim') -ne 1 -or
+        [string]$admission.managed_by -cne $script:ManagedBy -or [string]$claim.managed_by -cne $script:ManagedBy -or
+        [string]$admission.state -cne 'admitted' -or [string]$claim.state -cne 'claimed' -or
+        [string]$admission.action_id -cne $actionId -or [string]$claim.action_id -cne $actionId -or
+        [string]$admission.stage_id -cne $stageId -or [string]$claim.stage_id -cne $stageId -or
+        [string]$admission.project_key -cne $projectKey -or [string]$claim.project_key -cne $projectKey -or
+        [string]$admission.package_key -cne $packageKey -or [string]$claim.package_key -cne $packageKey -or
+        [string]$admission.project_identity -cne "sha256:$projectKey" -or
+        [string]$admission.package_identity -cne "sha256:$packageKey" -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string]$admission.project_root), $ProjectRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($scriptPath, $expectedScript, [StringComparison]::OrdinalIgnoreCase) -or
+        $packageDirectories[0].Name -cne $packageKey.Substring(0, 24) -or
+        [string]$admission.effect_class -cne 'ConfirmedProjectMutation' -or
+        [string]$admission.authorization_source -cne 'UserConfirmationAndBackendAdmission' -or
+        -not (Get-RequiredJsonBoolean -Object $admission -Name 'terminal_for_action' -Label 'historical Manager admission') -or
+        [string]$admission.writer_sha256 -cne 'd6fa8f5a828fcc823e54b44683903e0ec3173d23b1af64931324fa2093a039cf' -or
+        [string]$command.script_sha256 -cne '0495ba0c03e460d41ee0f00686f787031def534972b3b84162a2a722ae7876e1' -or
+        (Get-RequiredJsonInt32 -Object $command -Name 'timeout_ms' -Label 'historical command') -ne 600000 -or
+        $arguments.Count -ne $expectedArguments.Count) {
+        throw 'Historical admission or claim is outside the reviewed S25 command contract.'
+    }
+    for ($i = 0; $i -lt $arguments.Count; $i++) {
+        $matches = if ($i -eq 3) {
+            [string]::Equals([IO.Path]::GetFullPath([string]$arguments[$i]), $ProjectRoot, [StringComparison]::OrdinalIgnoreCase)
+        } else {
+            [string]::Equals([string]$arguments[$i], [string]$expectedArguments[$i], [StringComparison]::Ordinal)
+        }
+        if (-not $matches) {
+            throw 'Historical command arguments changed.'
+        }
+    }
+    Assert-NoReparsePoint -Path $scriptPath -Root $packageRoot -Label 'historical materializer'
+    Assert-NoReparsePoint -Path $writerPath -Root $packageRoot -Label 'historical Manager writer'
+    if ((Get-FileSha256 -Path $scriptPath) -cne [string]$command.script_sha256 -or
+        (Get-FileSha256 -Path $writerPath) -cne [string]$admission.writer_sha256) {
+        throw 'Historical Package script bytes changed.'
+    }
+    $argumentsSha256 = Get-TextSha256 -Text (($arguments | ForEach-Object { [string]$_ }) -join "`n")
+    $commandIdentity = Get-TextSha256 -Text "$($command.script_sha256)`n$argumentsSha256`n600000"
+    $derivedStageId = Get-TextSha256 -Text "$actionId`nmaterialize-codedb-host-payload.ps1:$($argumentsSha256.Substring(0, 16))`n$commandIdentity"
+    if ([string]$command.arguments_sha256 -cne $argumentsSha256 -or
+        [string]$admission.command_identity_sha256 -cne $commandIdentity -or
+        $derivedStageId -cne $stageId) {
+        throw 'Historical command identity is invalid.'
+    }
+    $writerPid = Get-RequiredJsonInt32 -Object $claim -Name 'writer_pid' -Label 'historical Manager claim'
+    $writerTicks = Get-RequiredJsonString -Object $claim -Name 'writer_start_utc_ticks' -Label 'historical Manager claim'
+    if ($writerPid -le 0 -or $writerTicks -cnotmatch '^[0-9]{15,20}$') {
+        throw 'Historical writer process identity is invalid.'
+    }
+    return [pscustomobject]@{
+        ActionId = $actionId; StageId = $stageId; IndexDirectory = $indexDirectory
+        ProjectKey = $projectKey; PackageKey = $packageKey; PackageRoot = $packageRoot
+        ScriptPath = $scriptPath; WriterPid = $writerPid; WriterTicks = $writerTicks
+        CommandIdentity = $commandIdentity
+        AdmissionSha256 = Get-FileSha256 -Path $admissionPath
+        ClaimSha256 = Get-FileSha256 -Path $claimPath
+    }
+}
+
+function Get-HistoricalUnknownProcessProof {
+    param([Parameter(Mandatory = $true)]$Evidence)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'Historical process observation requires Windows.'
+    }
+    $writer = Get-MaterializerProcessIdentity -ProcessId $Evidence.WriterPid
+    if ($writer.Alive -and ($null -eq $writer.StartTicks -or
+        [string]::Equals([string]$writer.StartTicks, $Evidence.WriterTicks, [StringComparison]::Ordinal))) {
+        throw 'The historical Manager writer is live or its identity is unobservable.'
+    }
+    $cimProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $shellProcesses = @($cimProcesses | Where-Object { $_.Name -in @('powershell.exe', 'pwsh.exe') })
+    $visibleShells = @(Get-Process -Name powershell,pwsh -ErrorAction SilentlyContinue)
+    if (@($shellProcesses | Where-Object { [int]$_.ProcessId -eq $PID }).Count -ne 1 -or
+        @($visibleShells | Where-Object { $_.Id -eq $PID }).Count -ne 1) {
+        throw 'The reconciliation process is missing from the shell inventory.'
+    }
+    foreach ($process in $visibleShells) {
+        if (@($shellProcesses | Where-Object { [int]$_.ProcessId -eq $process.Id }).Count -ne 1) {
+            throw 'PowerShell process inventory is incomplete.'
+        }
+    }
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($process in $shellProcesses) {
+        $commandLine = [string]$process.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            throw 'A PowerShell process command line is unobservable.'
+        }
+        if ($commandLine.IndexOf('materialize-codedb-host-payload.ps1', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf('RemoveIntegration', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw 'A possible historical RemoveIntegration business child is still live.'
+        }
+        $rows.Add("$($process.ProcessId)|$($process.Name)|$commandLine") | Out-Null
+    }
+    return Get-TextSha256 -Text (($rows.ToArray() | Sort-Object) -join "`n")
+}
+
+function Get-HistoricalUnknownProjectProof {
+    param([Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+    if (-not $desired.Present -or $desired.Legacy -or
+        $desired.DesiredState -cne 'INSTALLED' -or $desired.CleanupState -cne 'COMPLETE') {
+        throw 'The historical project is not in the required installed and complete state.'
+    }
+    $operationPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceOperationRelativePath -Label 'instance operation journal'
+    if (Test-Path -LiteralPath $operationPath) { throw 'An instance operation journal is present.' }
+    $operationsRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceOperationsRelativePath -Label 'instance operations'
+    if ((Test-Path -LiteralPath $operationsRoot) -and
+        @(Get-ChildItem -LiteralPath $operationsRoot -Force).Count -ne 0) {
+        throw 'An instance operation directory remains present.'
+    }
+    $intentRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceRemovalIntentsRelativePath -Label 'removal intents'
+    if ((Test-Path -LiteralPath $intentRoot) -and
+        @(Get-ChildItem -LiteralPath $intentRoot -Force).Count -ne 0) {
+        throw 'A project removal intent remains present.'
+    }
+    $authority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $authority -or [string]$authority.Selection.GenerationId -cne 'poc.34') {
+        throw 'The historical current-instance selection changed.'
+    }
+    $selectionPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label 'current instance selection'
+    return Get-TextSha256 -Text ((@(
+        (Get-FileSha256 -Path $desired.Path),
+        (Get-FileSha256 -Path $selectionPath),
+        [string]$authority.OwnerFingerprint,
+        [string]$authority.Selection.InstanceId,
+        [string]$authority.Selection.GenerationId
+    )) -join "`n")
+}
+
+function Invoke-ReconcileHistoricalUnknown {
+    param([Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    if (-not $ConfirmedProjectMutation -or $PocFixture) {
+        throw 'Historical reconciliation requires an explicit non-fixture administrative confirmation.'
+    }
+    $lock = $null
+    $indexLock = $null
+    try {
+        $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot
+        $evidence = Get-HistoricalUnknownActionEvidence -ProjectRoot $ProjectRoot
+        $firstProcess = Get-HistoricalUnknownProcessProof -Evidence $evidence
+        $firstProject = Get-HistoricalUnknownProjectProof -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $indexPath = Join-Path $evidence.IndexDirectory 'index.lock'
+        Assert-NoReparsePoint -Path $indexPath -Root $evidence.IndexDirectory -Label 'historical action index lock'
+        $indexLock = [IO.File]::Open($indexPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $current = Get-HistoricalUnknownActionEvidence -ProjectRoot $ProjectRoot
+        if ($current.AdmissionSha256 -cne $evidence.AdmissionSha256 -or
+            $current.ClaimSha256 -cne $evidence.ClaimSha256 -or
+            $current.CommandIdentity -cne $evidence.CommandIdentity) {
+            throw 'Historical action evidence changed before publication.'
+        }
+        $secondProcess = Get-HistoricalUnknownProcessProof -Evidence $current
+        $secondProject = Get-HistoricalUnknownProjectProof -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if ($secondProject -cne $firstProject) { throw 'Historical project state drifted before publication.' }
+        $indexFiles = @(Get-ChildItem -LiteralPath $evidence.IndexDirectory -File -Force |
+            Where-Object { $_.Name -cne 'index.lock' })
+        if ($indexFiles.Count -ne 0) { throw 'The Manager action index contains a competing or prior disposition.' }
+        $proofDigest = Get-TextSha256 -Text ((@(
+            $evidence.ActionId, $evidence.StageId, $evidence.AdmissionSha256,
+            $evidence.ClaimSha256, $evidence.CommandIdentity,
+            $firstProcess, $secondProcess, $firstProject, $secondProject
+        )) -join "`n")
+        $markerPath = Join-Path $evidence.IndexDirectory "resolved-action-$($evidence.ActionId).json"
+        $marker = [ordered]@{
+            schema_version = 2; managed_by = $script:ManagedBy; state = 'resolved'
+            action_id = $evidence.ActionId; project_key = $evidence.ProjectKey
+            package_key = $evidence.PackageKey; project_root = $ProjectRoot.Replace('\', '/').TrimEnd('/')
+            package_root = $evidence.PackageRoot.Replace('\', '/').TrimEnd('/'); disposition = 'HistoricalUnknownReconciled'
+            command_outcome = 'unknown'; project_state = 'INSTALLED'
+            stage_id = $evidence.StageId; admission_sha256 = $evidence.AdmissionSha256
+            claim_sha256 = $evidence.ClaimSha256
+            command_identity_sha256 = $evidence.CommandIdentity
+            proof_source = 'S27_WIN32_PROCESS_AND_LOCKED_MATERIALIZER_AUTHORITY'
+            writer_pid = $evidence.WriterPid; writer_start_utc_ticks = $evidence.WriterTicks
+            process_observation_first_sha256 = $firstProcess
+            process_observation_second_sha256 = $secondProcess
+            project_proof_sha256 = $secondProject; proof_sha256 = $proofDigest
+            observed_at_utc = [DateTime]::UtcNow.ToString('o')
+        }
+        Write-DurableUtf8File -Path $markerPath -Content (($marker | ConvertTo-Json -Depth 4) + "`n")
+        Write-Host '[HISTORICAL_ACTION] RECONCILED_UNKNOWN'
+        Write-Host '[NEXT] A fresh Remove requires separate confirmation and backend preflight.'
+    } finally {
+        if ($null -ne $indexLock) { $indexLock.Dispose() }
+        Exit-MaterializerLock -Lock $lock
+    }
+}
+
 function Invoke-RemoveIntegration {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -11684,7 +11931,7 @@ try {
         if (-not $script:MachinePrerequisiteStatus.Current) {
             exit 0
         }
-    } elseif ($Action -notin @("Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Uninstall")) {
+    } elseif ($Action -notin @("Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Uninstall", "ReconcileHistoricalUnknown")) {
         $null = Assert-MachinePrerequisiteForAction -Manifest $payload -ActionName $Action
     }
 
@@ -11805,6 +12052,9 @@ try {
         }
         "RemoveIntegration" {
             Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
+        }
+        "ReconcileHistoricalUnknown" {
+            Invoke-ReconcileHistoricalUnknown -Manifest $payload -ProjectRoot $projectRootPath
         }
         "RemoveIntegrationPreflight" {
             try {

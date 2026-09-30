@@ -363,6 +363,109 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ManagerActionJournal_HistoricalUnknownMarkerReleasesOnlyBoundPendingStage()
+        {
+            const string actionId = "3049af7cfc9f4260928e3f89d18672c0";
+            const string stageId = "b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56";
+            const string writerSha = "d6fa8f5a828fcc823e54b44683903e0ec3173d23b1af64931324fa2093a039cf";
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-historical-project-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-historical-package-" + tag), tag);
+            var stageRoot = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId), stageId);
+            var admissionPath = Path.Combine(stageRoot, "admitted.json");
+            var claimPath = Path.Combine(stageRoot, "claim.json");
+            var markerPath = Path.Combine(AICodedbPaths.GetManagerActionIndexDirectory(context),
+                "resolved-action-" + actionId + ".json");
+            var commandIdentity = new string('e', 64);
+            var projectKey = AICodedbPaths.GetManagerActionProjectKey(context);
+            var packageKey = AICodedbPaths.GetManagerActionPackageKey(context);
+            const string writerTicks = "123456789012345678";
+            Func<string, string> sha = value =>
+            {
+                using (var algorithm = SHA256.Create())
+                    return BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(value)))
+                        .Replace("-", string.Empty).ToLowerInvariant();
+            };
+            Func<string, string> fileSha = path =>
+            {
+                using (var stream = File.OpenRead(path))
+                using (var algorithm = SHA256.Create())
+                    return BitConverter.ToString(algorithm.ComputeHash(stream))
+                        .Replace("-", string.Empty).ToLowerInvariant();
+            };
+            try
+            {
+                Directory.CreateDirectory(stageRoot);
+                File.WriteAllText(admissionPath,
+                    "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"state\":\"admitted\","
+                    + "\"action_id\":\"" + actionId + "\",\"stage_id\":\"" + stageId + "\","
+                    + "\"project_key\":\"" + projectKey + "\",\"package_key\":\"" + packageKey + "\","
+                    + "\"project_identity\":\"sha256:" + projectKey + "\","
+                    + "\"package_identity\":\"sha256:" + packageKey + "\","
+                    + "\"project_root\":\"" + context.ProjectRoot + "\","
+                    + "\"package_root\":\"" + context.PackageRoot + "\","
+                    + "\"command_identity_sha256\":\"" + commandIdentity + "\","
+                    + "\"writer_sha256\":\"" + writerSha + "\"}");
+                var claim = "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                    + "\"state\":\"claimed\",\"action_id\":\"" + actionId + "\","
+                    + "\"stage_id\":\"" + stageId + "\",\"project_key\":\"" + projectKey + "\","
+                    + "\"package_key\":\"" + packageKey + "\",\"writer_pid\":4242,"
+                    + "\"writer_start_utc_ticks\":\"" + writerTicks + "\"}";
+                File.WriteAllText(claimPath, claim);
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Pending));
+                var projectProof = new string('1', 64);
+                var processProof = new string('f', 64);
+                var proof = sha(string.Join("\n", new[] { actionId, stageId,
+                    fileSha(admissionPath), fileSha(claimPath), commandIdentity,
+                    processProof, processProof, projectProof, projectProof }));
+                Directory.CreateDirectory(Path.GetDirectoryName(markerPath));
+                var marker = "{\"schema_version\":2,\"managed_by\":\"com.rice.ai-codedb\","
+                    + "\"state\":\"resolved\",\"action_id\":\"" + actionId + "\","
+                    + "\"project_key\":\"" + projectKey + "\",\"package_key\":\"" + packageKey + "\","
+                    + "\"project_root\":\"" + context.ProjectRoot + "\","
+                    + "\"package_root\":\"" + context.PackageRoot + "\","
+                    + "\"disposition\":\"HistoricalUnknownReconciled\",\"command_outcome\":\"unknown\","
+                    + "\"project_state\":\"INSTALLED\",\"stage_id\":\"" + stageId + "\","
+                    + "\"admission_sha256\":\"" + fileSha(admissionPath) + "\","
+                    + "\"claim_sha256\":\"" + fileSha(claimPath) + "\","
+                    + "\"command_identity_sha256\":\"" + commandIdentity + "\","
+                    + "\"proof_source\":\"S27_WIN32_PROCESS_AND_LOCKED_MATERIALIZER_AUTHORITY\","
+                    + "\"writer_pid\":4242,\"writer_start_utc_ticks\":\"" + writerTicks + "\","
+                    + "\"process_observation_first_sha256\":\"" + processProof + "\","
+                    + "\"process_observation_second_sha256\":\"" + processProof + "\","
+                    + "\"project_proof_sha256\":\"" + projectProof + "\","
+                    + "\"proof_sha256\":\"" + proof + "\",\"observed_at_utc\":\"2026-09-29T00:00:00Z\"}";
+                File.WriteAllText(markerPath, marker);
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                File.WriteAllText(Path.Combine(stageRoot, "terminal.json"), "{}");
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                File.Delete(Path.Combine(stageRoot, "terminal.json"));
+                File.WriteAllText(claimPath, claim.Replace("4242", "4243"));
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                File.WriteAllText(claimPath, claim);
+                File.WriteAllText(markerPath, marker.Replace(proof, new string('0', 64)));
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                File.WriteAllText(markerPath, marker);
+                Directory.Delete(stageRoot, true);
+                Directory.Delete(Path.GetDirectoryName(stageRoot));
+                Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+            }
+            finally
+            {
+                var indexDirectory = Path.GetDirectoryName(markerPath);
+                if (Directory.Exists(indexDirectory) && Path.GetFileName(indexDirectory).Length == 24)
+                    Directory.Delete(indexDirectory, true);
+            }
+        }
+
+        [Test]
         public void ManagerActionReceipt_CompleteEnvelopeIsValid()
         {
             var records = CreateManagerActionReceiptEnvelope();
