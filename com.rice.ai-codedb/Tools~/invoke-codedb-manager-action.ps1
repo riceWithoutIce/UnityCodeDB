@@ -87,7 +87,7 @@ function Write-AtomicJson {
     param([string]$Path, [object]$Value)
     $text = ($Value | ConvertTo-Json -Depth 12) -replace "`r`n", "`n"
     if (-not $text.EndsWith("`n", [StringComparison]::Ordinal)) { $text += "`n" }
-    $temp = $Path + '.' + [Diagnostics.Process]::GetCurrentProcess().Id + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $temp = Join-Path (Split-Path -Path $Path -Parent) ('r.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         [IO.File]::WriteAllText($temp, $text, $utf8NoBom)
         if (Test-Path -LiteralPath $Path) {
@@ -271,6 +271,7 @@ if ($null -ne $startError) {
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 $timedOut = $false
 $outputOverflow = $false
+$outputDrainIncomplete = $false
 $childPid = $child.Id
 $stdoutBytes = New-Object IO.MemoryStream
 $stderrBytes = New-Object IO.MemoryStream
@@ -308,7 +309,8 @@ try {
             $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
         }
         if ($stopwatch.ElapsedMilliseconds -gt $drainDeadline) {
-            throw 'Manager action output did not drain after the child stopped.'
+            $outputDrainIncomplete = $true
+            break
         }
         if ($null -ne $stdoutTask -or $null -ne $stderrTask -or -not $child.HasExited) {
             Start-Sleep -Milliseconds 20
@@ -327,6 +329,9 @@ finally {
 }
 if ($outputOverflow) {
     $stderr = $stderr.TrimEnd() + "`nManager action output exceeded the bounded receipt limit."
+}
+if ($outputDrainIncomplete) {
+    $stderr = $stderr.TrimEnd() + "`nManager action output did not reach EOF after the child exited; captured output may be incomplete."
 }
 $stopwatch.Stop()
 
@@ -349,6 +354,7 @@ $terminal = [ordered]@{
     exit_code = [int]$exitCode
     timed_out = [bool]$timedOut
     output_overflow = [bool]$outputOverflow
+    output_drain_incomplete = [bool]$outputDrainIncomplete
     elapsed_milliseconds = [Math]::Max(0, [Math]::Min([int]::MaxValue, $stopwatch.ElapsedMilliseconds))
     stdout = $stdout
     stderr = $stderr

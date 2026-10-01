@@ -1777,6 +1777,7 @@ function publicStatus(
     process_start_identity: state.owner_evidence?.process_start_identity ?? null,
     executable_path: state.owner_evidence?.executable_path ?? null,
     argv_sha256: state.owner_evidence?.argv_sha256 ?? null,
+    command_line_sha256: state.owner_evidence?.command_line_sha256 ?? null,
     lifecycle_id: state.lifecycle_id,
     desired_state: state.desired_state,
     editor_demand: state.editor_demand,

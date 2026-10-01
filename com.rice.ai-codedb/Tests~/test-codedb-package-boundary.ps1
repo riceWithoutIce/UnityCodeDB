@@ -69,7 +69,7 @@ function Invoke-ManagerActionWriterScenarios {
         $writerHash = (Get-FileHash -LiteralPath $writerPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $powerShellExe = Join-Path $PSHOME 'powershell.exe'
 
-        foreach ($scenario in @('success', 'failure', 'timeout', 'overflow', 'start-failure', 'identity-rejected')) {
+        foreach ($scenario in @('success', 'failure', 'timeout', 'overflow', 'inherited-output-handle', 'start-failure', 'identity-rejected')) {
             $actionId = [Guid]::NewGuid().ToString('N')
             $scenarioProjectRoot = if ($scenario -eq 'start-failure') {
                 Join-Path $fixtureRoot 'missing-project'
@@ -87,6 +87,8 @@ function Invoke-ManagerActionWriterScenarios {
                 '[Console]::Error.WriteLine("fixture-error"); exit 7'
             } elseif ($scenario -eq 'overflow') {
                 '[Console]::Out.Write(("x" * 1200000))'
+            } elseif ($scenario -eq 'inherited-output-handle') {
+                'Start-Process -FilePath powershell.exe -ArgumentList ''-NoProfile -Command "Start-Sleep -Seconds 8"'' -NoNewWindow; Write-Output "fixture-ok"'
             } else {
                 'Write-Output "fixture-ok"'
             }
@@ -179,6 +181,10 @@ function Invoke-ManagerActionWriterScenarios {
             } elseif ($scenario -eq 'timeout') {
                 Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Timeout exit'
                 Assert-True -Condition $terminal.timed_out -Message 'Timeout bit missing.'
+            } elseif ($scenario -eq 'inherited-output-handle') {
+                Assert-Equal -Actual $terminal.exit_code -Expected 0 -Label 'Inherited handle child exit'
+                Assert-True -Condition $terminal.output_drain_incomplete -Message 'Inherited output handle did not exercise bounded drain.'
+                Assert-True -Condition ($terminal.stderr -match 'captured output may be incomplete') -Message 'Incomplete output warning missing.'
             } else {
                 Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Overflow exit'
                 Assert-True -Condition $terminal.output_overflow -Message 'Overflow bit missing.'

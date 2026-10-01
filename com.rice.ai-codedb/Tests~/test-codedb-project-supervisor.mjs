@@ -1353,6 +1353,9 @@ async function verifyOwnerEvidenceAndSingleStarter() {
     }), true, "Normal refresh did not advance the readiness snapshot.");
     const refreshed = await requestPipe(state.pipe_name, state.auth_token, { command: "status" });
     assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.status.command_line_sha256,
+      state.owner_evidence.command_line_sha256,
+      "Public status must bind the authenticated owner command line.");
     const stableOwnerMatches = predicates.identityMatches(state, refreshed.status);
     const readinessSnapshotEqual = state.operational_readiness.observation_id
         === refreshed.status.operational_readiness.observation_id
