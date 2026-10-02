@@ -25,6 +25,8 @@ namespace Rice.AI.Codedb.Editor
         internal string StandardOutput { get; }
         internal string StandardError { get; }
         internal bool TimedOut { get; }
+        internal bool OutputOverflow { get; }
+        internal bool OutputDrainIncomplete { get; }
         internal long ElapsedMilliseconds { get; }
         internal string ActionId { get; }
         internal bool HasAuthoritativeTerminalEvidence { get; }
@@ -34,7 +36,7 @@ namespace Rice.AI.Codedb.Editor
         // read-only proof that the command is in the empty-runtime bootstrap
         // case; callers must never infer fallback permission from text output.
         internal bool OneShotFallbackAuthorized { get; }
-        internal bool Succeeded => !TimedOut && ExitCode == 0;
+        internal bool Succeeded => !TimedOut && !OutputOverflow && ExitCode == 0;
 
         /// <summary>
         /// Creates a command result captured from a local process run.
@@ -55,12 +57,16 @@ namespace Rice.AI.Codedb.Editor
             string actionId = null,
             bool terminalForManagerAction = true,
             AICodedbManagerActionEvidenceKind managerActionEvidenceKind =
-                AICodedbManagerActionEvidenceKind.CommandTerminal)
+                AICodedbManagerActionEvidenceKind.CommandTerminal,
+            bool outputOverflow = false,
+            bool outputDrainIncomplete = false)
         {
             ExitCode = exitCode;
             StandardOutput = standardOutput ?? string.Empty;
             StandardError = standardError ?? string.Empty;
             TimedOut = timedOut;
+            OutputOverflow = outputOverflow;
+            OutputDrainIncomplete = outputDrainIncomplete;
             ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
             ActionId = actionId ?? AICodedbPaths.CurrentActionId;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
@@ -83,6 +89,8 @@ namespace Rice.AI.Codedb.Editor
                 return "Command outcome unconfirmed.";
             if (TimedOut)
                 return "Command timed out.";
+            if (OutputOverflow)
+                return "Command output exceeded the receipt limit.";
 
             if (!Succeeded)
                 return $"Command failed with exit code {ExitCode}.";
@@ -109,6 +117,8 @@ namespace Rice.AI.Codedb.Editor
 
             if (TimedOut)
                 builder.AppendLine("Timed Out: True");
+            if (OutputDrainIncomplete)
+                builder.AppendLine("Output collection incomplete; project effects remain unproved.");
 
             AppendSection(builder, "Output", StandardOutput);
             AppendSection(builder, "Error", StandardError);
@@ -938,7 +948,10 @@ namespace Rice.AI.Codedb.Editor
                 true,
                 actionId,
                 AICodedbStrictJson.GetRequiredBoolean(
-                    receipt, "terminal_for_action", "CodeDB Manager action terminal receipt"));
+                    receipt, "terminal_for_action", "CodeDB Manager action terminal receipt"),
+                AICodedbManagerActionEvidenceKind.CommandTerminal,
+                AICodedbStrictJson.GetRequiredBoolean(receipt, "output_overflow", "CodeDB Manager action terminal receipt"),
+                AICodedbStrictJson.GetRequiredBoolean(receipt, "output_drain_incomplete", "CodeDB Manager action terminal receipt"));
             return AICodedbManagerActionRecoveryOutcome.Terminal(result);
         }
 

@@ -370,6 +370,9 @@ function Invoke-BoundedNativeProcess {
     }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
+    $observationClock = [Diagnostics.Stopwatch]::StartNew()
+    $observationDeadline = [long]::MaxValue
+    $terminationRequested = $false
     try {
         $null = $process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -379,11 +382,22 @@ function Invoke-BoundedNativeProcess {
         while (-not ($process.HasExited -and $stdoutTask.IsCompleted -and $stderrTask.IsCompleted)) {
             $remaining = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
             if ($remaining -le 0) {
-                if (-not $process.HasExited) {
-                    $process.Kill()
-                    $process.WaitForExit()
+                if ($observationDeadline -eq [long]::MaxValue) {
+                    $observationDeadline = $observationClock.ElapsedMilliseconds + 5000
                 }
-                return [pscustomobject]@{ ExitCode = -1; StandardOutput = ''; StandardError = 'Package-owned native client timed out.'; TimedOut = $true }
+                if (-not $process.HasExited) {
+                    $terminationRequested = $true
+                    try { $process.Kill() } catch { }
+                    $exitWait = [int][Math]::Max(0, $observationDeadline - $observationClock.ElapsedMilliseconds)
+                    if ($exitWait -gt 0) { $null = $process.WaitForExit($exitWait) }
+                }
+                return [pscustomobject]@{ ExitCode = $(if ($process.HasExited) { $process.ExitCode } else { $null }); StandardOutput = ''; StandardError = 'Package-owned native client timed out; project effects are not proved stopped.'; TimedOut = $true; TerminationConfirmed = $process.HasExited; OutputDrainIncomplete = -not ($stdoutTask.IsCompleted -and $stderrTask.IsCompleted) }
+            }
+            if ($process.HasExited -and $observationDeadline -eq [long]::MaxValue) {
+                $observationDeadline = $observationClock.ElapsedMilliseconds + 5000
+            }
+            if ($observationClock.ElapsedMilliseconds -ge $observationDeadline) {
+                return [pscustomobject]@{ ExitCode = $process.ExitCode; StandardOutput = ''; StandardError = 'Native output collection is incomplete; project effects are not proved stopped.'; TimedOut = $false; TerminationConfirmed = $true; OutputDrainIncomplete = $true }
             }
             if ($null -ne $WhileRunning -and [DateTime]::UtcNow -ge $nextHeartbeat) {
                 & $WhileRunning
@@ -400,13 +414,17 @@ function Invoke-BoundedNativeProcess {
             StandardOutput = $stdoutTask.Result
             StandardError = $stderrTask.Result
             TimedOut = $false
+            TerminationConfirmed = $true
+            OutputDrainIncomplete = $false
         }
     } finally {
         if ($null -ne $WhileRunning) {
             try {
-                if (-not $process.HasExited) {
+                if (-not $process.HasExited -and -not $terminationRequested) {
+                    if ($observationDeadline -eq [long]::MaxValue) { $observationDeadline = $observationClock.ElapsedMilliseconds + 5000 }
                     $process.Kill()
-                    $process.WaitForExit()
+                    $exitWait = [int][Math]::Max(0, $observationDeadline - $observationClock.ElapsedMilliseconds)
+                    if ($exitWait -gt 0) { $null = $process.WaitForExit($exitWait) }
                 }
             } catch {
                 # The child may have exited between the check and cleanup.
@@ -440,6 +458,11 @@ function Invoke-BoundedNativeProcessWithFileOutput {
     $argumentText = (@($Arguments | ForEach-Object { ConvertTo-NativeProcessArgument -Value $_ }) -join ' ')
     $savedEnvironment = @{}
     $process = $null
+    $observationClock = [Diagnostics.Stopwatch]::StartNew()
+    $observationDeadline = [long]::MaxValue
+    $terminationRequested = $false
+    $timedOut = $false
+    $collection = @{ Incomplete = $false }
     try {
         if ($null -ne $Environment) {
             foreach ($name in $Environment.Keys) {
@@ -478,14 +501,13 @@ function Invoke-BoundedNativeProcessWithFileOutput {
         while (-not $process.HasExited) {
             $remaining = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
             if ($remaining -le 0) {
-                $process.Kill()
-                $process.WaitForExit()
-                return [pscustomobject]@{
-                    ExitCode = -1
-                    StandardOutput = ''
-                    StandardError = 'Package-owned native client timed out.'
-                    TimedOut = $true
-                }
+                $timedOut = $true
+                $terminationRequested = $true
+                $observationDeadline = $observationClock.ElapsedMilliseconds + 5000
+                try { $process.Kill() } catch { }
+                $exitWait = [int][Math]::Max(0, $observationDeadline - $observationClock.ElapsedMilliseconds)
+                if ($exitWait -gt 0) { $null = $process.WaitForExit($exitWait) }
+                break
             }
             if ($null -ne $WhileRunning -and [DateTime]::UtcNow -ge $nextHeartbeat) {
                 & $WhileRunning
@@ -493,7 +515,9 @@ function Invoke-BoundedNativeProcessWithFileOutput {
             }
             $null = $process.WaitForExit([Math]::Min(250, $remaining))
         }
-        $process.WaitForExit()
+        if ($observationDeadline -eq [long]::MaxValue) {
+            $observationDeadline = $observationClock.ElapsedMilliseconds + 5000
+        }
         $process.Refresh()
 
         $maximumOutputBytes = 4 * 1024 * 1024
@@ -504,26 +528,42 @@ function Invoke-BoundedNativeProcessWithFileOutput {
             Assert-NoReparsePoint -Path $Path -Root $OutputRoot -Label "native process output"
             $file = Get-Item -LiteralPath $Path -Force
             if ($file.Length -gt $maximumOutputBytes) {
+                $collection.Incomplete = $true
                 return '[Package-owned native client output exceeded the diagnostic limit.]'
             }
-            try {
-                return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::Default)
-            } catch [System.IO.IOException] {
-                return '[Package-owned native client output remained locked after the direct process exited.]'
+            while ($true) {
+                try {
+                    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::Default)
+                } catch [System.IO.IOException] {
+                    if ($observationClock.ElapsedMilliseconds -ge $observationDeadline) {
+                        $collection.Incomplete = $true
+                        return '[Package-owned native client output remained locked after the direct process exited.]'
+                    }
+                    Start-Sleep -Milliseconds 20
+                }
             }
         }.GetNewClosure()
+        $exitObserved = $process.HasExited
+        $stdout = & $readOutput -Path $stdoutPath
+        $stderr = & $readOutput -Path $stderrPath
+        if ($timedOut) { $stderr += "`nPackage-owned native client timed out; project effects are not proved stopped." }
+        if (-not $exitObserved) { $stderr += "`nDirect-child termination was not observed." }
         return [pscustomobject]@{
-            ExitCode = $process.ExitCode
-            StandardOutput = & $readOutput -Path $stdoutPath
-            StandardError = & $readOutput -Path $stderrPath
-            TimedOut = $false
+            ExitCode = $(if ($exitObserved) { $process.ExitCode } else { $null })
+            StandardOutput = $stdout
+            StandardError = $stderr
+            TimedOut = $timedOut
+            TerminationConfirmed = $exitObserved
+            OutputDrainIncomplete = ($collection.Incomplete -or -not $exitObserved)
         }
     } finally {
         if ($null -ne $process) {
             try {
-                if (-not $process.HasExited) {
+                if (-not $process.HasExited -and -not $terminationRequested) {
+                    if ($observationDeadline -eq [long]::MaxValue) { $observationDeadline = $observationClock.ElapsedMilliseconds + 5000 }
                     $process.Kill()
-                    $process.WaitForExit()
+                    $exitWait = [int][Math]::Max(0, $observationDeadline - $observationClock.ElapsedMilliseconds)
+                    if ($exitWait -gt 0) { $null = $process.WaitForExit($exitWait) }
                 }
             } catch {
                 # The direct child may have exited between the check and cleanup.
@@ -11362,6 +11402,7 @@ function Invoke-RemoveIntegration {
     Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($desiredBefore.Present -and -not $desiredBefore.Legacy -and
@@ -11380,6 +11421,7 @@ function Invoke-RemoveIntegration {
             return
         }
 
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $operationId = [guid]::NewGuid().ToString("N")
         $operationRoot = Get-InstanceProjectPath `
             -ProjectRoot $ProjectRoot `
@@ -11424,6 +11466,7 @@ function Invoke-RemoveIntegration {
 
         $expectedFingerprint = [string]$authority.OwnerFingerprint
         $verifyBeforeMutation = {
+            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint
             $currentAuthority = Get-RemoveIntegrationAuthority `
                 -Manifest $Manifest `
                 -ProjectRoot $ProjectRoot `

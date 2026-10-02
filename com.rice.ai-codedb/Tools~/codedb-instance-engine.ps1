@@ -1534,7 +1534,8 @@ function Publish-InstanceActivationTransaction {
         [Parameter(Mandatory = $true)][ValidateSet("Install", "Upgrade", "Reinstall")][string]$ActionName,
         [Parameter(Mandatory = $true)][string]$StageRoot,
         [AllowNull()][string]$UninstallStateId,
-        [AllowNull()][scriptblock]$VerifyBeforeCommit
+        [AllowNull()][scriptblock]$VerifyBeforeCommit,
+        [AllowNull()][scriptblock]$VerifyBeforeMutation
     )
 
     $existing = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
@@ -1574,6 +1575,7 @@ function Publish-InstanceActivationTransaction {
         -OperationDocument $preparedOperation | Out-Null
 
     try {
+        if ($null -ne $VerifyBeforeMutation) { & $VerifyBeforeMutation }
         $activation = Get-InstanceActivationEntries `
             -Manifest $Manifest `
             -ProjectRoot $ProjectRoot `
@@ -1662,6 +1664,7 @@ function Publish-InstanceActivationTransaction {
 
         $publishedEntries = New-Object System.Collections.Generic.List[object]
         try {
+            if ($null -ne $VerifyBeforeMutation) { & $VerifyBeforeMutation }
             foreach ($entry in @($activation.Entries)) {
                 Assert-NoReparsePoint -Path $entry.TargetPath -Root $ProjectRoot -Label "instance activation target"
                 if ($entry.ExistedBefore) {
@@ -2180,6 +2183,11 @@ function Invoke-InstancePowerShellScript {
             RICE_CODEDB_INSTANCE_ROOT = [System.IO.Path]::GetFullPath($InstanceRoot)
         } `
         -WhileRunning $WhileRunning
+    if ($result.TimedOut -or -not $result.TerminationConfirmed -or $result.OutputDrainIncomplete) {
+        $incomplete = [InvalidOperationException]::new('Instance execution observation is incomplete; candidate effects remain unknown.')
+        $incomplete.Data['InstanceExecutionObservationIncomplete'] = $true
+        throw $incomplete
+    }
     if ($result.ExitCode -ne 0) {
         $detail = @($result.StandardError, $result.StandardOutput) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         throw "Package-owned instance script failed ($([System.IO.Path]::GetFileName($ScriptPath)), exit $($result.ExitCode)): $($detail -join ' ')"
@@ -2253,6 +2261,11 @@ function Invoke-InstanceCandidateProbe {
         ) `
         -TimeoutMilliseconds 180000 `
         -WhileRunning $WhileRunning
+    if ($result.TimedOut -or -not $result.TerminationConfirmed -or $result.OutputDrainIncomplete) {
+        $incomplete = [InvalidOperationException]::new('Candidate probe observation is incomplete; candidate effects remain unknown.')
+        $incomplete.Data['InstanceExecutionObservationIncomplete'] = $true
+        throw $incomplete
+    }
     if ($result.ExitCode -ne 0) {
         throw "Candidate instance MCP verification failed: $($result.StandardError) $($result.StandardOutput)"
     }
@@ -2383,8 +2396,13 @@ function New-VerifiedInstanceCandidate {
             ManifestSha256 = Get-FileSha256 -Path $manifestPath
             LifecycleId = $lifecycleId
             ProbeLeasePath = if ($null -eq $lease) { $null } else { $lease.Path }
+            ExecutionObservationComplete = $true
         }
     } catch {
+        if ($_.Exception.Data['InstanceExecutionObservationIncomplete']) {
+            Write-Warning 'Candidate retained without cleanup because its execution effects are unproved.'
+            throw
+        }
         if (Test-Path -LiteralPath $instanceRoot -PathType Container) {
             $candidateEvidence = $null
             try {
@@ -2855,6 +2873,71 @@ function Get-InstanceSelectedInstance {
     )
     try { return Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing }
     catch { throw "Existing CodeDB instance selection is ambiguous; Reinstall cannot safely replace it: $($_.Exception.Message)" }
+}
+
+function Assert-InstanceNextChangeAdmission {
+    # Called by the existing project-lock owner. This is a read-only admission
+    # check, not a new journal, executor, process collector or recovery service.
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()]$Candidate,
+        [AllowNull()][string]$ExpectedFingerprint
+    )
+
+    $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+    $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+    $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
+    $bound = @{}
+    foreach ($selected in @($current, $lkg)) {
+        if ($null -ne $selected) { $bound[$selected.InstanceId] = $selected.ManifestSha256 }
+    }
+    foreach ($retired in @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest)) {
+        $bound[$retired.InstanceId] = $retired.ManifestSha256
+    }
+    if ($desired.Present -and -not $desired.Legacy -and $desired.CleanupState -eq 'PENDING' -and $desired.DesiredState -eq 'UNINSTALLED') {
+        $intent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desired.StateId
+        if ($null -ne $intent) { $bound[[string]$intent.Document.retained_instance_id] = [string]$intent.Document.retained_instance_manifest_sha256 }
+    }
+    try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+    catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+    if ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING')) {
+        $bound[[string]$contract.Operation.Candidate.instance_id] = [string]$contract.Operation.Candidate.instance_manifest_sha256
+    }
+    if ($null -ne $Candidate) {
+        if (-not $Candidate.ExecutionObservationComplete) { throw 'Candidate execution observation is unproved.' }
+        $bound[$Candidate.InstanceId] = $Candidate.ManifestSha256
+    }
+    $instancesRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'next-change instance root'
+    if (Test-Path -LiteralPath $instancesRoot) {
+        Assert-NoReparsePoint -Path $instancesRoot -Root $ProjectRoot -Label 'next-change instance root'
+        foreach ($item in @(Get-ChildItem -LiteralPath $instancesRoot -Force -ErrorAction Stop)) {
+            Assert-NoReparsePoint -Path $item.FullName -Root $ProjectRoot -Label 'next-change instance'
+            if (-not $item.PSIsContainer -or $item.Name -cnotmatch '^[0-9a-f]{32}$' -or -not $bound.ContainsKey($item.Name)) {
+                throw 'Next project change refused: relevant candidate execution is unbound or ambiguous.'
+            }
+            $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $item.FullName
+            if (-not [string]::Equals((Get-FileSha256 -Path $evidence.ManifestPath), [string]$bound[$item.Name], [StringComparison]::Ordinal)) {
+                throw 'Next project change refused: instance evidence drifted.'
+            }
+            if (($null -ne $Candidate -and $item.Name -ceq $Candidate.InstanceId) -or
+                ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING') -and $item.Name -ceq [string]$contract.Operation.Candidate.instance_id)) {
+                if ($null -eq (Get-ValidatedInstanceAvailabilityEvidence -ProjectRoot $ProjectRoot -Instance $evidence)) {
+                    throw 'Next project change refused: candidate verification is missing.'
+                }
+            }
+        }
+    }
+    $fingerprint = Get-TextSha256 -Text (@(
+        [string]$desired.Present, [string]$desired.Legacy, [string]$desired.DesiredState,
+        [string]$desired.CleanupState, [string]$desired.StateId,
+        $(if ($null -eq $current) { '' } else { $current.InstanceId + ':' + $current.ManifestSha256 }),
+        $(if ($null -eq $lkg) { '' } else { $lkg.InstanceId + ':' + $lkg.ManifestSha256 })
+    ) -join "`n")
+    if (-not [string]::IsNullOrEmpty($ExpectedFingerprint) -and $fingerprint -cne $ExpectedFingerprint) {
+        throw 'Next project change refused: desired state or selection changed after preflight.'
+    }
+    return $fingerprint
 }
 
 function Assert-InstancePreflight {
@@ -4225,6 +4308,7 @@ function Invoke-InstanceConvergence {
         if (-not [string]::IsNullOrWhiteSpace($freshInstallUninstallStateId)) {
             $activationRecoveryParameters.FreshInstallUninstallStateId = $freshInstallUninstallStateId
         }
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $null = Invoke-InstanceActivationContractRecovery @activationRecoveryParameters
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredLocked = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
@@ -4307,6 +4391,7 @@ function Invoke-InstanceConvergence {
             -PreviousInstance $previous `
             -RemovalIntent $removalIntent `
             -ActionName $ActionName
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $generationTransactionRoot = Join-Path $lock.Root ("instance-generation-$([guid]::NewGuid().ToString('N'))")
         New-Item -ItemType Directory -Path $generationTransactionRoot | Out-Null
         $generationMutated = $false
@@ -4407,6 +4492,9 @@ function Invoke-InstanceConvergence {
             -ActionName $ActionName `
             -StageRoot $lock.Root `
             -UninstallStateId $(if ($ActionName -eq "Install") { $desiredLocked.StateId } else { $null }) `
+            -VerifyBeforeMutation {
+                $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -Candidate $candidate -ExpectedFingerprint $nextChangeFingerprint
+            }.GetNewClosure() `
             -VerifyBeforeCommit $verification
 
         $cleanupState = "PENDING"
@@ -4568,12 +4656,14 @@ function Invoke-InstanceUninstall {
             Invoke-TestAutomaticCleanupStateCapturedSignal
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED") {
             Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
         } else { $null }
         $previous = if ($null -eq $currentRemovalAuthority) { $null } else { $currentRemovalAuthority.Selection }
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         if ($AutomaticCleanup -and
             ($desiredBefore.DesiredState -ne "UNINSTALLED" -or
              $desiredBefore.CleanupState -ne "PENDING" -or
@@ -4645,7 +4735,10 @@ function Invoke-InstanceUninstall {
             $stateVerification = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
             if ($stateVerification.DesiredState -ne "UNINSTALLED") { throw "Logical Uninstall did not publish UNINSTALLED desired state." }
         }.GetNewClosure()
-        Publish-InstanceOperation -ProjectRoot $ProjectRoot -ActionName "Uninstall" -CandidateInstanceId $operationId -Entries $entries.ToArray() -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeCommit $verification -OperationId $operationId
+        $verifyBeforeMutation = {
+            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint
+        }.GetNewClosure()
+        Publish-InstanceOperation -ProjectRoot $ProjectRoot -ActionName "Uninstall" -CandidateInstanceId $operationId -Entries $entries.ToArray() -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeMutation $verifyBeforeMutation -VerifyBeforeCommit $verification -OperationId $operationId
         Invoke-TestUninstallAfterMcpHandshake
         $cleanupState = Get-InstanceUninstallCleanupState `
             -ProjectRoot $ProjectRoot `

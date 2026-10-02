@@ -280,6 +280,8 @@ $stderrBuffer = New-Object byte[] 4096
 $stdoutTask = $child.StandardOutput.BaseStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
 $stderrTask = $child.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
 $drainDeadline = [long]::MaxValue
+$terminationRequested = $false
+$exitObserved = $false
 try {
     while ($null -ne $stdoutTask -or $null -ne $stderrTask -or -not $child.HasExited) {
         if ($child.HasExited -and $drainDeadline -eq [long]::MaxValue) {
@@ -303,10 +305,13 @@ try {
                 $stderrTask = $child.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
             }
         }
-        if (-not $child.HasExited -and ($outputOverflow -or $stopwatch.ElapsedMilliseconds -ge $timeoutMilliseconds)) {
+        if (-not $child.HasExited -and -not $terminationRequested -and ($outputOverflow -or $stopwatch.ElapsedMilliseconds -ge $timeoutMilliseconds)) {
             $timedOut = -not $outputOverflow
-            $child.Kill()
-            $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
+            $terminationRequested = $true
+            if ($drainDeadline -eq [long]::MaxValue) {
+                $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
+            }
+            try { $child.Kill() } catch { $outputDrainIncomplete = $true }
         }
         if ($stopwatch.ElapsedMilliseconds -gt $drainDeadline) {
             $outputDrainIncomplete = $true
@@ -316,16 +321,28 @@ try {
             Start-Sleep -Milliseconds 20
         }
     }
-    $child.WaitForExit()
     $stdout = [Text.Encoding]::UTF8.GetString($stdoutBytes.ToArray())
     $stderr = [Text.Encoding]::UTF8.GetString($stderrBytes.ToArray())
-    $exitCode = if ($timedOut -or $outputOverflow) { 4 } else { $child.ExitCode }
+    $exitObserved = $child.HasExited
+    if ($exitObserved) { $exitCode = $child.ExitCode }
 }
 finally {
-    if (-not $child.HasExited) { $child.Kill() }
+    if (-not $child.HasExited -and -not $terminationRequested) {
+        if ($drainDeadline -eq [long]::MaxValue) {
+            $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
+        }
+        try { $child.Kill() } catch { }
+        $remaining = [int][Math]::Max(0, $drainDeadline - $stopwatch.ElapsedMilliseconds)
+        if ($remaining -gt 0) { $null = $child.WaitForExit($remaining) }
+    }
     $child.Dispose()
     $stdoutBytes.Dispose()
     $stderrBytes.Dispose()
+}
+if (-not $exitObserved) {
+    # No terminal receipt is preferable to a fabricated child exit. Admission
+    # remains durable and exact recovery reports the outcome as unknown.
+    throw 'Manager action direct-child exit was not observed within the shared post-command budget.'
 }
 if ($outputOverflow) {
     $stderr = $stderr.TrimEnd() + "`nManager action output exceeded the bounded receipt limit."

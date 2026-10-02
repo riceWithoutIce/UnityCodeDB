@@ -34,14 +34,440 @@ param(
 
     [switch]$PortabilityOnly,
 
+    [switch]$NextChangeAdmissionOnly,
+
+    [switch]$NextChangeAdmissionIntegrationOnly,
+
     [switch]$TransactionOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
+}
+
+
+function Invoke-NextChangeAdmissionIntegrationScenarios {
+    # Records are fixture-owned; every production function body is imported
+    # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
+    $familyClock = [Diagnostics.Stopwatch]::StartNew()
+    $tag = [guid]::NewGuid().ToString('N')
+    $fixtureContainer = Join-Path ([IO.Path]::GetTempPath()) ('codedb-s28-integration-' + $tag)
+    $fixtureRoot = Join-Path $fixtureContainer 'installed'
+    $integrationPackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $definitionBodies = @{}
+    $caseCount = 0
+    function Import-PhaseCDefinitions {
+        param([string]$Path)
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+        if (@($errors).Count -ne 0) { throw 'Phase C production definition source failed parse.' }
+        $beforeFunctions = $true
+        foreach ($statement in $ast.EndBlock.Statements) {
+            if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) {
+                $beforeFunctions = $false
+                $body = $statement.Body.Extent.Text
+                $exactBody = $body.Substring(1, $body.Length - 2)
+                Set-Item -Path ('Function:global:' + $statement.Name) -Value ([scriptblock]::Create($exactBody))
+                $definitionBodies[$statement.Name] = $exactBody
+            } elseif ($beforeFunctions -and
+                (($statement -is [Management.Automation.Language.AssignmentStatementAst] -and $statement.Left.Extent.Text.StartsWith('$script:', [StringComparison]::Ordinal)) -or
+                 ($statement -is [Management.Automation.Language.ForEachStatementAst]))) {
+                # Exact pre-function constants/allowlists only, never main entry.
+                . ([scriptblock]::Create($statement.Extent.Text))
+            }
+        }
+    }
+    function Write-PhaseCRecord {
+        param([string]$Path, $Document)
+        Assert-PathInside -Path $Path -Root $fixtureContainer -Label 'Phase C fixture record'
+        New-Item -ItemType Directory -Force -Path (Split-Path $Path -Parent) | Out-Null
+        [IO.File]::WriteAllText($Path, (ConvertTo-InstanceJsonText -Value $Document), [Text.UTF8Encoding]::new($false))
+    }
+    function Assert-PhaseC {
+        param([bool]$Condition, [string]$Label)
+        if (-not $Condition) { throw ('Phase C assertion failed: ' + $Label) }
+        $script:PhaseCCaseCount++
+        Write-Host ('[OK] integration: ' + $Label)
+    }
+    function Assert-PhaseCRejected {
+        param([scriptblock]$Body, [string]$Expected, [string]$Label)
+        $message = ''
+        try { & $Body | Out-Null } catch { $message = $_.Exception.Message }
+        if ([string]::IsNullOrEmpty($message) -or $message.IndexOf($Expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $safe = $message.Replace($fixtureContainer, '<fixture>')
+            if ($safe.Length -gt 600) { $safe = $safe.Substring(0, 600) }
+            throw "Phase C rejection mismatch ($Label); expected '$Expected'; actual '$safe'."
+        }
+        $script:PhaseCCaseCount++
+        Write-Host ('[OK] integration refusal: ' + $Label)
+    }
+    function Invoke-PhaseCRecordFault {
+        param([string]$Path, [scriptblock]$Change, [scriptblock]$Read, [string]$Expected, [string]$Label)
+        $before = [IO.File]::ReadAllBytes($Path)
+        try {
+            $document = (Read-BoundedJsonDocument -Path $Path -Label 'fixture fault input' -MaximumBytes 1048576).Document
+            & $Change $document
+            Write-PhaseCRecord -Path $Path -Document $document
+            Assert-PhaseCRejected -Body $Read -Expected $Expected -Label $Label
+        } finally { [IO.File]::WriteAllBytes($Path, $before) }
+    }
+    function New-PhaseCInstance {
+        param([string]$Root, $Manifest, [string]$State = 'READY')
+        $id = [guid]::NewGuid().ToString('N')
+        $relative = $script:InstancesRelativePath + '/' + $id
+        $instanceRoot = Get-InstanceProjectPath -ProjectRoot $Root -RelativePath $relative -Label 'Phase C instance'
+        foreach ($name in $script:InstanceAllowedDirectories) { New-Item -ItemType Directory -Force -Path (Join-Path $instanceRoot $name) | Out-Null }
+        $document = New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $Root -InstanceId $id -State $State -CreatedAtUtc ([DateTime]::UtcNow.ToString('o'))
+        $manifestPath = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $document
+        return [pscustomobject]@{ InstanceId = $id; InstanceRelativePath = $relative; InstanceRoot = $instanceRoot; ManifestPath = $manifestPath; ManifestSha256 = Get-FileSha256 -Path $manifestPath; ExecutionObservationComplete = $false }
+    }
+    function Copy-PhaseCCanonicalClosure {
+        param([string]$Root)
+        New-Item -ItemType Directory -Force -Path $Root | Out-Null
+        $manifest = Read-PayloadManifest -Root (Join-Path $integrationPackageRoot 'Payload~') -ProjectRoot $Root
+        foreach ($file in $manifest.Files) {
+            if ($file.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::Ordinal) -or $file.Target -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs') {
+                Assert-PathInside -Path $file.TargetPath -Root $Root -Label 'Phase C canonical fixture copy'
+                New-Item -ItemType Directory -Force -Path (Split-Path $file.TargetPath -Parent) | Out-Null
+                Copy-Item -LiteralPath $file.SourcePath -Destination $file.TargetPath
+            }
+        }
+        return $manifest
+    }
+    function Write-PhaseCDesired {
+        param([string]$Root, [string]$State = 'INSTALLED', [string]$Cleanup = 'COMPLETE', [string]$StateId)
+        Write-PhaseCRecord -Path (Get-InstanceProjectPath -ProjectRoot $Root -RelativePath $script:InstanceDesiredStateRelativePath -Label 'fixture desired') -Document (New-InstanceDesiredStateDocument -ProjectRoot $Root -DesiredState $State -StateId $StateId -CleanupState $Cleanup)
+    }
+    function Set-PhaseCContract {
+        param([string]$Phase)
+        $currentEvidence = New-InstanceActivationSelectionEvidence -Instance $selectedCurrent -Context $context
+        $lkgEvidence = New-InstanceActivationSelectionEvidence -Instance $selectedLkg -Context $context
+        $candidateEvidence = New-InstanceActivationCandidateEvidence -Candidate $current -Context $context
+        $activation = New-InstanceActivationRecordDocument -Context $context -Attempt $attempt -Candidate $candidateEvidence -Current $currentEvidence -LastKnownGood $lkgEvidence -PublicationPhase $Phase
+        $operation = New-InstanceActivationOperationDocument -Context $context -Attempt $attempt -Action UPGRADE -Candidate $candidateEvidence -PreviousActivationRecordSha256 $null -Phase $Phase -Mutations @()
+        Write-PhaseCRecord -Path $context.Paths.ActivationPath -Document $activation
+        Write-PhaseCRecord -Path $context.Paths.OperationPath -Document $operation
+    }
+    function Invoke-PhaseCEffectDrift {
+        param([string]$Kind)
+        $lock = Enter-MaterializerLock -ProjectRoot $fixtureRoot
+        $operationId = [guid]::NewGuid().ToString('N')
+        $operationRoot = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath ($script:InstanceOperationsRelativePath + '/operation-' + $operationId) -Label 'fixture effect operation'
+        $selectionBytes = [IO.File]::ReadAllBytes($currentSelectionPath)
+        $lkgSelectionBytes = [IO.File]::ReadAllBytes($lkgSelectionPath)
+        $desiredBytes = [IO.File]::ReadAllBytes($desiredPath)
+        try {
+            $fingerprint = Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $fixtureRoot
+            New-Item -ItemType Directory -Force -Path $operationRoot | Out-Null
+            $sentinelBefore = [IO.File]::ReadAllBytes($desiredPath)
+            $entry = New-InstanceTransactionEntry -ProjectRoot $fixtureRoot -OperationRoot $operationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation Write -DesiredBytes $sentinelBefore -Index 0
+            if ($Kind -eq 'desired') { Write-PhaseCDesired -Root $fixtureRoot -StateId ([guid]::NewGuid().ToString('N')) }
+            else {
+                # Swap both selections so every instance remains attributable;
+                # the failure must be the captured selection fingerprint, not
+                # an accidentally unbound former-current directory.
+                Write-PhaseCRecord -Path $currentSelectionPath -Document (New-InstanceSelectionDocument -ProjectRoot $fixtureRoot -Candidate $lkg -ActivationEpoch $attempt.ActivationEpoch)
+                Write-PhaseCRecord -Path $lkgSelectionPath -Document (New-InstanceSelectionDocument -ProjectRoot $fixtureRoot -Candidate $current -ActivationEpoch $attempt.ActivationEpoch)
+            }
+            $atEffectHash = Get-FileSha256 -Path $desiredPath
+            $effectManifest = $manifest
+            $effectProjectRoot = $fixtureRoot
+            # Publish invokes this synchronously before this helper returns.
+            # Keep the actual imported readers in the harness script scope;
+            # GetNewClosure would introduce a module-local script namespace.
+            $effectBoundary = { $null = Assert-InstanceNextChangeAdmission -Manifest $effectManifest -ProjectRoot $effectProjectRoot -ExpectedFingerprint $fingerprint }
+            Assert-PhaseCRejected -Body { Publish-InstanceOperation -ProjectRoot $fixtureRoot -ActionName Upgrade -CandidateInstanceId $current.InstanceId -Entries @($entry) -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeMutation $effectBoundary -OperationId $operationId } -Expected 'changed after preflight' -Label ('actual-effect-callback-' + $Kind + '-drift')
+            Assert-PhaseC -Condition ((Get-FileSha256 -Path $desiredPath) -ceq $atEffectHash) -Label ('no-effect-publication-after-' + $Kind + '-drift')
+        } finally {
+            [IO.File]::WriteAllBytes($currentSelectionPath, $selectionBytes)
+            [IO.File]::WriteAllBytes($lkgSelectionPath, $lkgSelectionBytes)
+            [IO.File]::WriteAllBytes($desiredPath, $desiredBytes)
+            Exit-MaterializerLock -Lock $lock
+        }
+    }
+
+    New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+    try {
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\materialize-codedb-host-payload.ps1')
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\codedb-instance-engine.ps1')
+        $script:PhaseCCaseCount = 0
+        foreach ($name in @('Get-ValidatedCurrentInstance', 'Get-ValidatedInstanceRetirementControls', 'Get-InstanceActivationContractState', 'Assert-InstanceNextChangeAdmission', 'Enter-MaterializerLock', 'Publish-InstanceOperation', 'Read-InstanceOperationJournal', 'Invoke-InstanceOperationRecovery')) {
+            Assert-PhaseC -Condition ((Get-Command $name).ScriptBlock.ToString() -ceq $definitionBodies[$name]) -Label ('exact-production-body-' + $name)
+        }
+        $manifest = Copy-PhaseCCanonicalClosure -Root $fixtureRoot
+        $current = New-PhaseCInstance -Root $fixtureRoot -Manifest $manifest
+        $lkg = New-PhaseCInstance -Root $fixtureRoot -Manifest $manifest
+        $retired = New-PhaseCInstance -Root $fixtureRoot -Manifest $manifest
+        $attempt = New-InstanceActivationAttemptIdentity
+        $context = New-InstanceActivationContractContext -Manifest $manifest -ProjectRoot $fixtureRoot -OperationId $attempt.OperationId
+        $currentSelectionPath = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath $script:InstanceCurrentRelativePath -Label 'fixture current'
+        $lkgSelectionPath = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath $script:InstanceLastKnownGoodRelativePath -Label 'fixture LKG'
+        Write-PhaseCRecord -Path $currentSelectionPath -Document (New-InstanceSelectionDocument -ProjectRoot $fixtureRoot -Candidate $current -ActivationEpoch $attempt.ActivationEpoch)
+        Write-PhaseCRecord -Path $lkgSelectionPath -Document (New-InstanceSelectionDocument -ProjectRoot $fixtureRoot -Candidate $lkg -ActivationEpoch $attempt.ActivationEpoch)
+        $desiredId = [guid]::NewGuid().ToString('N')
+        Write-PhaseCDesired -Root $fixtureRoot -StateId $desiredId
+        $desiredPath = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath $script:InstanceDesiredStateRelativePath -Label 'fixture desired'
+        $retirementPath = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath ($script:InstanceRetiredRelativePath + '/' + $retired.InstanceId + '.json') -Label 'fixture retirement control'
+        Write-PhaseCRecord -Path $retirementPath -Document @{ schema_version = 1; managed_by = $script:ManagedBy; project_identity = Get-MaterializerProjectIdentity -ProjectRoot $fixtureRoot; instance_id = $retired.InstanceId; generation_id = $manifest.GenerationId; instance_manifest_sha256 = $retired.ManifestSha256; created_at_utc = [DateTime]::UtcNow.ToString('o') }
+
+        $selectedCurrent = Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot
+        $selectedLkg = Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot -LastKnownGood
+        Assert-PhaseC -Condition ($selectedCurrent.InstanceId -ceq $current.InstanceId -and $selectedLkg.InstanceId -ceq $lkg.InstanceId) -Label 'canonical-current-and-distinct-LKG-full-generation-closure'
+        $controls = @(Get-ValidatedInstanceRetirementControls -Manifest $manifest -ProjectRoot $fixtureRoot)
+        Assert-PhaseC -Condition ($controls.Count -eq 1 -and $controls[0].ManifestSha256 -ceq $retired.ManifestSha256) -Label 'canonical-retirement-control-binding'
+        Set-PhaseCContract -Phase COMMITTED
+        $contract = Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $fixtureRoot
+        Assert-PhaseC -Condition ($contract.Operation.Phase -ceq 'COMMITTED' -and $contract.Operation.Attempt.OperationId -ceq $attempt.OperationId) -Label 'canonical-COMMITTED-activation-operation-pair'
+        Assert-PhaseC -Condition ((Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $fixtureRoot) -cmatch '^[0-9a-f]{64}$') -Label 'real-reader-installed-admission'
+
+        $missingSelection = $currentSelectionPath + '.held'
+        Move-Item -LiteralPath $currentSelectionPath -Destination $missingSelection
+        try {
+            Assert-PhaseC -Condition ($null -eq (Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot -AllowMissing)) -Label 'missing-current-allowmissing-is-null-not-ready'
+            Assert-PhaseCRejected -Body { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'selection is missing' -Label 'missing-current-required-refusal'
+        } finally { Move-Item -LiteralPath $missingSelection -Destination $currentSelectionPath }
+        Invoke-PhaseCRecordFault -Path $currentSelectionPath -Change { param($d) $d.project_identity = 'sha256:' + ('0' * 64) } -Read { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'identity is invalid' -Label 'current-foreign-project-binding'
+        Invoke-PhaseCRecordFault -Path $currentSelectionPath -Change { param($d) $d.instance_manifest_sha256 = '0' * 64 } -Read { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'manifest hash is invalid' -Label 'current-manifest-hash-conflict'
+        Invoke-PhaseCRecordFault -Path $lkgSelectionPath -Change { param($d) $d.instance_relative_path = '../outside' } -Read { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot -LastKnownGood } -Expected 'unsafe path segment' -Label 'LKG-path-binding-escape'
+        $rawSelection = [IO.File]::ReadAllBytes($currentSelectionPath)
+        try {
+            [IO.File]::WriteAllText($currentSelectionPath, '{', [Text.UTF8Encoding]::new($false))
+            Assert-PhaseCRejected -Body { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'current instance selection' -Label 'corrupt-selection-json'
+        } finally { [IO.File]::WriteAllBytes($currentSelectionPath, $rawSelection) }
+        Invoke-PhaseCRecordFault -Path $retirementPath -Change { param($d) $d.project_identity = 'sha256:' + ('0' * 64) } -Read { Get-ValidatedInstanceRetirementControls -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'identity is invalid' -Label 'retirement-project-binding'
+        Invoke-PhaseCRecordFault -Path $retirementPath -Change { param($d) $d.instance_manifest_sha256 = '0' * 64 } -Read { Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'evidence drifted' -Label 'retirement-hash-caller-recheck'
+
+        $wrapperPath = $manifest.TargetMap['AIWork/codedb/wrapper/codedb-project-wrapper.mjs'].TargetPath
+        $wrapperBytes = [IO.File]::ReadAllBytes($wrapperPath)
+        try {
+            [IO.File]::AppendAllText($wrapperPath, ' ')
+            Assert-PhaseCRejected -Body { Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'stable wrapper does not match' -Label 'wrapper-byte-drift'
+        } finally { [IO.File]::WriteAllBytes($wrapperPath, $wrapperBytes) }
+
+        Invoke-PhaseCRecordFault -Path $context.Paths.OperationPath -Change { param($d) $d.runtime_contract_sha256 = '0' * 64 } -Read { Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'does not match its trusted contract or project context' -Label 'activation-runtime-contract-conflict'
+        $heldOperation = Join-Path $fixtureContainer 'held-activation-operation.json'
+        Move-Item -LiteralPath $context.Paths.OperationPath -Destination $heldOperation
+        try { Assert-PhaseCRejected -Body { Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'only one contract record' -Label 'activation-missing-operation' }
+        finally { Move-Item -LiteralPath $heldOperation -Destination $context.Paths.OperationPath }
+        Set-PhaseCContract -Phase PREPARED
+        New-Item -ItemType Directory -Force -Path $context.Paths.OperationRoot | Out-Null
+        $prepared = Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $fixtureRoot
+        Assert-PhaseC -Condition ($prepared.Operation.Phase -ceq 'PREPARED') -Label 'unfinished-authenticated-PREPARED-is-classified-not-COMMITTED'
+        Assert-PhaseCRejected -Body { Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'candidate verification is missing' -Label 'unfinished-candidate-unverified-refusal'
+        $extraOperation = Join-Path (Split-Path $context.Paths.OperationRoot -Parent) ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $extraOperation | Out-Null
+        try { Assert-PhaseCRejected -Body { Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $fixtureRoot } -Expected 'authoritative operation_id' -Label 'unfinished-conflicting-operation-directory' }
+        finally { Remove-Item -LiteralPath $extraOperation -Force }
+        Set-PhaseCContract -Phase COMMITTED
+
+        $lock = Enter-MaterializerLock -ProjectRoot $fixtureRoot
+        try {
+            Assert-PhaseCRejected -Body { Enter-MaterializerLock -ProjectRoot $fixtureRoot -WaitForExisting -WaitTimeoutMilliseconds 100 } -Expected 'Another payload materialization is active' -Label 'actual-project-lock-contention'
+            $journalId = [guid]::NewGuid().ToString('N')
+            $journalRoot = Get-InstanceProjectPath -ProjectRoot $fixtureRoot -RelativePath ($script:InstanceOperationsRelativePath + '/operation-' + $journalId) -Label 'fixture prepared operation'
+            $journalEntry = New-InstanceTransactionEntry -ProjectRoot $fixtureRoot -OperationRoot $journalRoot -Target $script:InstanceDesiredStateRelativePath -Mutation Write -DesiredBytes ([IO.File]::ReadAllBytes($desiredPath)) -Index 0
+            Write-InstanceOperationJournal -ProjectRoot $fixtureRoot -OperationId $journalId -State PREPARED -ActionName Upgrade -CandidateInstanceId $current.InstanceId -OperationRoot $journalRoot -Entries @($journalEntry) -StageRoot $lock.Root
+            $journal = Read-InstanceOperationJournal -ProjectRoot $fixtureRoot
+            Assert-PhaseC -Condition ($journal.State -ceq 'PREPARED' -and $journal.OperationId -ceq $journalId -and $journal.Entries.Count -eq 1 -and $journal.Entries[0].Index -eq 0 -and $journal.Entries[0].DesiredSha256 -ceq $journalEntry.DesiredSha256) -Label 'actual-PREPARED-operation-reader-full-entry-binding'
+            Invoke-PhaseCRecordFault -Path $journal.Path -Change { param($d) $d.project_identity = 'sha256:' + ('0' * 64) } -Read { Read-InstanceOperationJournal -ProjectRoot $fixtureRoot } -Expected 'identity or schema is invalid' -Label 'operation-foreign-project-binding'
+            Invoke-PhaseCRecordFault -Path $journal.Path -Change { param($d) $d.entries[0].backup = '../outside' } -Read { Read-InstanceOperationJournal -ProjectRoot $fixtureRoot } -Expected 'unsafe path segment' -Label 'operation-entry-backup-path-escape'
+            $journalBytes = [IO.File]::ReadAllBytes($journal.Path)
+            try {
+                [IO.File]::WriteAllText($journal.Path, '{', [Text.UTF8Encoding]::new($false))
+                Assert-PhaseCRejected -Body { Read-InstanceOperationJournal -ProjectRoot $fixtureRoot } -Expected 'instance operation journal' -Label 'operation-corrupt-json'
+            } finally { [IO.File]::WriteAllBytes($journal.Path, $journalBytes) }
+            $desiredBeforeRecovery = Get-FileSha256 -Path $desiredPath
+            Assert-PhaseC -Condition (Invoke-InstanceOperationRecovery -ProjectRoot $fixtureRoot -StageRoot $lock.Root) -Label 'actual-unpublished-PREPARED-operation-recovery'
+            Assert-PhaseC -Condition ($null -eq (Read-InstanceOperationJournal -ProjectRoot $fixtureRoot) -and -not (Test-Path -LiteralPath $journalRoot) -and (Get-FileSha256 -Path $desiredPath) -ceq $desiredBeforeRecovery) -Label 'PREPARED-recovery-clears-owned-journal-without-selection-effects'
+            $uncertain = New-PhaseCInstance -Root $fixtureRoot -Manifest $manifest -State PROVISIONING
+            try { Assert-PhaseCRejected -Body { Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $fixtureRoot -Candidate $uncertain } -Expected 'observation is unproved' -Label 'uncertain-in-pass-candidate-refusal' }
+            finally {
+                Assert-PathInside -Path $uncertain.InstanceRoot -Root $fixtureContainer -Label 'fixture candidate cleanup'
+                Remove-Item -LiteralPath $uncertain.InstanceRoot -Recurse -Force
+            }
+        } finally { Exit-MaterializerLock -Lock $lock }
+        Invoke-PhaseCEffectDrift -Kind desired
+        Invoke-PhaseCEffectDrift -Kind selection
+
+        $uninstalledRoot = Join-Path $fixtureContainer 'uninstalled'
+        $uninstalledManifest = Copy-PhaseCCanonicalClosure -Root $uninstalledRoot
+        Write-PhaseCDesired -Root $uninstalledRoot -State UNINSTALLED -StateId ([guid]::NewGuid().ToString('N'))
+        Assert-PhaseC -Condition ($null -eq (Get-ValidatedCurrentInstance -Manifest $uninstalledManifest -ProjectRoot $uninstalledRoot -AllowMissing) -and $null -eq (Get-InstanceActivationContractState -Manifest $uninstalledManifest -ProjectRoot $uninstalledRoot) -and @(Get-ValidatedInstanceRetirementControls -Manifest $uninstalledManifest -ProjectRoot $uninstalledRoot).Count -eq 0) -Label 'ordinary-UNINSTALLED-complete-with-no-selections-contract-or-retirement'
+        Assert-PhaseC -Condition ((Assert-InstanceNextChangeAdmission -Manifest $uninstalledManifest -ProjectRoot $uninstalledRoot) -cmatch '^[0-9a-f]{64}$') -Label 'ordinary-UNINSTALLED-real-readers-attributable-admission'
+
+        $pendingRoot = Join-Path $fixtureContainer 'inert-pending'
+        $pendingManifest = Copy-PhaseCCanonicalClosure -Root $pendingRoot
+        $retained = New-PhaseCInstance -Root $pendingRoot -Manifest $pendingManifest
+        $pendingStateId = [guid]::NewGuid().ToString('N')
+        Write-PhaseCDesired -Root $pendingRoot -State UNINSTALLED -Cleanup PENDING -StateId $pendingStateId
+        $retainedSelection = New-InstanceSelectionDocument -ProjectRoot $pendingRoot -Candidate $retained -ActivationEpoch ([guid]::NewGuid().ToString('N'))
+        $intent = New-InstanceRemovalIntentDocument -ProjectRoot $pendingRoot -StateId $pendingStateId -AuthorityFingerprint (Get-TextSha256 -Text 'fixture-authority') -SelectionSha256 (Get-TextSha256 -Text (ConvertTo-InstanceJsonText -Value $retainedSelection)) -ActivationSha256 '' -ActivationOperationSha256 '' -InstanceId $retained.InstanceId -InstanceManifestSha256 $retained.ManifestSha256 -GenerationId $pendingManifest.GenerationId -GenerationManifestSha256 $pendingManifest.TargetGenerationManifestSha256 -WrapperSha256 $pendingManifest.TargetMap['AIWork/codedb/wrapper/codedb-project-wrapper.mjs'].Sha256
+        $intentPath = Get-InstanceProjectPath -ProjectRoot $pendingRoot -RelativePath ($script:InstanceRemovalIntentsRelativePath + '/' + $pendingStateId + '.json') -Label 'fixture pending removal intent'
+        Write-PhaseCRecord -Path $intentPath -Document $intent
+        $pendingDesired = Get-InstanceDesiredState -ProjectRoot $pendingRoot
+        $pendingIntent = Get-InstanceRemovalIntent -ProjectRoot $pendingRoot -StateId $pendingStateId
+        Assert-PhaseC -Condition ($pendingDesired.DesiredState -ceq 'UNINSTALLED' -and $pendingDesired.CleanupState -ceq 'PENDING' -and $pendingIntent.InstanceId -ceq $retained.InstanceId -and $null -eq (Get-ValidatedCurrentInstance -Manifest $pendingManifest -ProjectRoot $pendingRoot -AllowMissing)) -Label 'ordinary-inert-PENDING-real-desired-removal-no-selection'
+        Assert-PhaseC -Condition ((Assert-InstanceNextChangeAdmission -Manifest $pendingManifest -ProjectRoot $pendingRoot) -cmatch '^[0-9a-f]{64}$') -Label 'intent-bound-inert-PENDING-readonly-prerequisites'
+        Invoke-PhaseCRecordFault -Path $intentPath -Change { param($d) $d.retained_instance_manifest_sha256 = '0' * 64 } -Read { Assert-InstanceNextChangeAdmission -Manifest $pendingManifest -ProjectRoot $pendingRoot } -Expected 'manifest changed' -Label 'inert-PENDING-retained-hash-mismatch'
+        Assert-PhaseCRejected -Body { Invoke-InstanceConvergence -Manifest $uninstalledManifest -ProjectRoot $uninstalledRoot -MarkerPath (Join-Path $uninstalledRoot 'unused-marker') -ActionName Upgrade } -Expected 'explicit UNINSTALLED' -Label 'ordinary-upgrade-cannot-override-uninstalled-before-dispatch'
+        Assert-PhaseCRejected -Body { Invoke-InstanceConvergence -Manifest $manifest -ProjectRoot $fixtureRoot -MarkerPath (Join-Path $fixtureRoot 'unused-marker') -ActionName Install } -Expected 'explicitly UNINSTALLED' -Label 'ordinary-install-precondition-before-dispatch'
+        Write-Host ("[PASS] NextChangeAdmissionIntegrationOnly; cases=" + $script:PhaseCCaseCount + "; native_children=0; elapsed_ms=" + $familyClock.ElapsedMilliseconds + "; canonical generation=" + $manifest.GenerationId)
+    } finally {
+        $resolved = [IO.Path]::GetFullPath($fixtureContainer)
+        $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolved.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -cne ('codedb-s28-integration-' + $tag)) { throw 'Integration fixture cleanup target is not the exact owned root.' }
+        if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop }
+    }
+}
+
+if ($NextChangeAdmissionIntegrationOnly) {
+    Invoke-NextChangeAdmissionIntegrationScenarios
+    return
+}
+
+
+function Invoke-NextChangeAdmissionScenarios {
+    # Early focused route: no canonical payload setup, provider install, Git
+    # fixture or production receipts. Authority readers are isolated typed
+    # seams; desired-state, path/hash checks and native execution are real.
+    $tag = [guid]::NewGuid().ToString('N')
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('codedb-next-change-' + $tag)
+    New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Tools~'))
+    foreach ($sourceName in @('materialize-codedb-host-payload.ps1', 'codedb-instance-engine.ps1')) {
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $sourceRoot $sourceName), [ref]$tokens, [ref]$errors)
+        if (@($errors).Count -ne 0) { throw 'Next-change source failed PowerShell parse.' }
+        foreach ($statement in $ast.EndBlock.Statements) {
+            if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) {
+                . ([scriptblock]::Create($statement.Extent.Text))
+                # GetNewClosure creates a module-bound readOutput block. The
+                # isolated harness PowerShell process also needs its source
+                # primitives in global command scope, as in the real script.
+                $body = $statement.Body.Extent.Text
+                Set-Item -Path ('Function:global:' + $statement.Name) -Value ([scriptblock]::Create($body.Substring(1, $body.Length - 2)))
+            }
+        }
+    }
+    $script:ManagedBy = 'com.rice.ai-codedb'
+    $script:InstancesRelativePath = 'AIWork/.runtime/codedb/instances'
+    $script:InstanceDesiredStateRelativePath = 'AIWork/.runtime/codedb/control/desired-state.json'
+    $script:GenerationId = 'fixture.generation'
+    $script:InstanceAvailabilityRelativePath = 'logs/mcp-availability.json'
+    $fixtureCurrent = $null
+    $fixtureContract = $null
+    $fixtureControls = @()
+    function Get-ValidatedCurrentInstance { param($Manifest, $ProjectRoot, [switch]$AllowMissing, [switch]$LastKnownGood); if (-not $LastKnownGood) { return $fixtureCurrent } }
+    function Get-ValidatedInstanceRetirementControls { param($ProjectRoot, $Manifest); return $fixtureControls }
+    function Get-InstanceActivationContractState { param($Manifest, $ProjectRoot); return $fixtureContract }
+    function Get-ValidatedRetiredInstance {
+        param($ProjectRoot, $Manifest, $InstanceRoot)
+        $path = Join-Path $InstanceRoot 'instance-manifest.json'
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Fixture candidate manifest missing.' }
+        $document = Read-BoundedJsonDocument -Path $path -Label 'fixture candidate' -MaximumBytes 65536
+        if ((Get-RequiredJsonString -Object $document.Document -Name 'state' -Label 'fixture candidate') -cne 'READY') { throw 'Fixture execution is unfinished.' }
+        return [pscustomobject]@{ InstanceId = Split-Path $InstanceRoot -Leaf; InstanceRoot = $InstanceRoot; ManifestPath = $path }
+    }
+    function Assert-AdmissionRefused {
+        param([scriptblock]$Action, [string]$Label)
+        $refused = $false
+        try { & $Action | Out-Null } catch { $refused = $true }
+        if (-not $refused) { throw "Next-change refusal missing: $Label" }
+        Write-Host "[OK] Next-change refusal: $Label"
+    }
+    function Write-FixtureDesired {
+        param([string]$State = 'UNINSTALLED', [string]$StateId)
+        $path = Join-Path $fixtureRoot ($script:InstanceDesiredStateRelativePath.Replace('/', '\'))
+        New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+        $value = @{ schema_version = 1; managed_by = $script:ManagedBy; project_root = $fixtureRoot; project_identity = Get-MaterializerProjectIdentity -ProjectRoot $fixtureRoot; desired_state = $State; cleanup_state = 'COMPLETE'; state_id = $StateId }
+        [IO.File]::WriteAllText($path, ($value | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    }
+    try {
+        $stateId = [guid]::NewGuid().ToString('N')
+        Write-FixtureDesired -StateId $stateId
+        $fingerprint = Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot
+        if ($fingerprint -cnotmatch '^[0-9a-f]{64}$') { throw 'Ordinary empty UNINSTALLED admission was not attributable.' }
+        $null = Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -ExpectedFingerprint $fingerprint
+        Write-Host '[OK] Authenticated UNINSTALLED snapshot and unchanged effect-point admission.'
+
+        $instances = Join-Path $fixtureRoot ($script:InstancesRelativePath.Replace('/', '\'))
+        $candidateId = [guid]::NewGuid().ToString('N')
+        $candidateRoot = Join-Path $instances $candidateId
+        New-Item -ItemType Directory -Path $candidateRoot -Force | Out-Null
+        foreach ($kind in @('live-unbound', 'unobservable', 'missing-proof', 'legacy-unknown', 'failed-command-unknown-effects', 'timeout-unknown-effects')) {
+            Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot } -Label $kind
+        }
+        $manifestPath = Join-Path $candidateRoot 'instance-manifest.json'
+        [IO.File]::WriteAllText($manifestPath, '{"state":"READY"}', [Text.UTF8Encoding]::new($false))
+        $candidate = [pscustomobject]@{ InstanceId = $candidateId; ManifestSha256 = Get-FileSha256 -Path $manifestPath; ExecutionObservationComplete = $false }
+        Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label 'candidate-result-is-not-stopped-proof'
+        $candidate.ExecutionObservationComplete = $true
+        Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label 'missing-candidate-verification'
+        $availabilityPath = Join-Path $candidateRoot 'logs\mcp-availability.json'
+        New-Item -ItemType Directory -Path (Split-Path $availabilityPath -Parent) -Force | Out-Null
+        $availability = @{ schema_version = 1; managed_by = $script:ManagedBy; project_identity = Get-MaterializerProjectIdentity -ProjectRoot $fixtureRoot; instance_id = $candidateId; generation_id = $script:GenerationId; availability = 'AVAILABLE'; codedb_status_usable = $true; codedb_text_search_callable = $true; verified_at_utc = [DateTime]::UtcNow.ToString('o') }
+        [IO.File]::WriteAllText($availabilityPath, ($availability | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        $null = Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate -ExpectedFingerprint $fingerprint
+        Write-Host '[OK] Explicit candidate execution and verification seam binds exact file bytes.'
+        $manifestLock = [IO.File]::Open($manifestPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label 'conflicting-resource-lock'
+        } finally { $manifestLock.Dispose() }
+        [IO.File]::AppendAllText($manifestPath, ' ')
+        Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label 'manifest-drift'
+        $candidate.ManifestSha256 = Get-FileSha256 -Path $manifestPath
+        Write-FixtureDesired -State 'INSTALLED' -StateId ([guid]::NewGuid().ToString('N'))
+        Assert-AdmissionRefused -Action { Invoke-InstanceConvergence -Manifest @{} -ProjectRoot $fixtureRoot -MarkerPath (Join-Path $fixtureRoot 'unused-marker') -ActionName Install } -Label 'ordinary-install-requires-uninstalled'
+        Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate -ExpectedFingerprint $fingerprint } -Label 'desired-state-drift'
+        $desiredPath = Join-Path $fixtureRoot ($script:InstanceDesiredStateRelativePath.Replace('/', '\'))
+        [IO.File]::WriteAllText($desiredPath, '{"schema_version":1}', [Text.UTF8Encoding]::new($false))
+        Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label 'conflicting-state'
+
+        $nativeRoot = Join-Path $fixtureRoot 'native'
+        New-Item -ItemType Directory -Path $nativeRoot | Out-Null
+        $powershellExe = (Get-Command powershell.exe -CommandType Application -ErrorAction Stop).Source
+        foreach ($case in @('success', 'failure', 'timeout')) {
+            $commandPath = Join-Path $nativeRoot ($case + '.ps1')
+            $text = switch ($case) { 'success' { '[Console]::Out.WriteLine("fixture-native-ok"); exit 0' }; 'failure' { '[Console]::Error.WriteLine("fixture-native-error"); exit 7' }; default { 'Start-Sleep -Seconds 10' } }
+            [IO.File]::WriteAllText($commandPath, $text, [Text.UTF8Encoding]::new($false))
+            $tokens = $null; $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile($commandPath, [ref]$tokens, [ref]$errors)
+            if (@($errors).Count -gt 0) { throw 'Materialized native fixture did not parse.' }
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $result = Invoke-BoundedNativeProcessWithFileOutput -FilePath $powershellExe -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $commandPath) -OutputRoot $nativeRoot -TimeoutMilliseconds $(if ($case -eq 'timeout') { 100 } else { 10000 })
+            if ($clock.ElapsedMilliseconds -gt 16000) { throw 'Native fixture exceeded command plus shared observation budget.' }
+            if ($case -eq 'success' -and ($result.ExitCode -ne 0 -or $result.OutputDrainIncomplete -or $result.StandardOutput -notmatch 'fixture-native-ok')) { throw 'Native success/result collection failed.' }
+            if ($case -eq 'failure' -and ($result.ExitCode -ne 7 -or $result.StandardError -notmatch 'fixture-native-error')) { throw 'Native actual failure was not preserved.' }
+            if ($case -eq 'timeout' -and (-not $result.TimedOut -or $clock.ElapsedMilliseconds -gt 6500)) { throw 'Native timeout observation was not bounded.' }
+            if (-not $result.TerminationConfirmed) { throw 'Fixture-owned direct child exit remained unconfirmed; no retry is implied.' }
+            Write-FixtureDesired -StateId $stateId
+            if ($case -eq 'success') {
+                $candidate.ExecutionObservationComplete = ($result.ExitCode -eq 0 -and $result.TerminationConfirmed -and -not $result.TimedOut -and -not $result.OutputDrainIncomplete)
+                $null = Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate -ExpectedFingerprint $fingerprint
+                Write-Host '[OK] Observed successful fixture execution plus exact verified candidate admits the ordinary branch.'
+            } else {
+                $candidate.ExecutionObservationComplete = $false
+                Assert-AdmissionRefused -Action { Assert-InstanceNextChangeAdmission -Manifest @{} -ProjectRoot $fixtureRoot -Candidate $candidate } -Label ($case + '-observed-direct-exit-does-not-admit-effects')
+            }
+            Assert-AdmissionRefused -Action { Invoke-InstanceConvergence -Manifest @{} -ProjectRoot $fixtureRoot -MarkerPath (Join-Path $fixtureRoot 'unused-marker') -ActionName Upgrade } -Label 'ordinary-upgrade-cannot-override-uninstalled'
+            Write-Host "[OK] Native $case; actual exit=$($result.ExitCode); timed_out=$($result.TimedOut); wall_ms=$($clock.ElapsedMilliseconds)."
+        }
+        Write-Host '[OK] Focused next-change admission/native observation passed; no business replay or production state access.'
+    } finally {
+        $resolved = [IO.Path]::GetFullPath($fixtureRoot)
+        $expected = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if ($resolved.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $resolved -Leaf) -ceq ('codedb-next-change-' + $tag)) {
+            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+        } else { throw 'Fixture cleanup target failed exact-root validation.' }
+    }
+}
+
+if ($NextChangeAdmissionOnly) {
+    Invoke-NextChangeAdmissionScenarios
+    return
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))

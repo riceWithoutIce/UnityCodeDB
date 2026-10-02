@@ -61,6 +61,7 @@ function Invoke-ManagerActionWriterScenarios {
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($localAppData)) -Message 'Fixture LocalApplicationData is unavailable.'
     $receiptRoot = Join-Path $localAppData 'Rice\CodeDB\manager-actions'
     $actionRoots = New-Object 'System.Collections.Generic.List[string]'
+    $ownedHolderProofs = New-Object 'System.Collections.Generic.List[string]'
     try {
         [void](New-Item -ItemType Directory -Path $projectRoot, (Split-Path $writerPath -Parent) -Force)
         Copy-Item -LiteralPath $sourceWriter -Destination $writerPath
@@ -88,14 +89,20 @@ function Invoke-ManagerActionWriterScenarios {
             } elseif ($scenario -eq 'overflow') {
                 '[Console]::Out.Write(("x" * 1200000))'
             } elseif ($scenario -eq 'inherited-output-handle') {
-                'Start-Process -FilePath powershell.exe -ArgumentList ''-NoProfile -Command "Start-Sleep -Seconds 8"'' -NoNewWindow; Write-Output "fixture-ok"'
+                $holderProof = Join-Path $fixtureRoot 'owned-holder.json'
+                $ownedHolderProofs.Add($holderProof)
+                '$info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = "powershell.exe"; $info.Arguments = "-NoProfile -Command Start-Sleep -Seconds 8"; $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $holder = [Diagnostics.Process]::Start($info); [IO.File]::WriteAllText(''' + $holderProof.Replace("'", "''") + ''', ($holder.Id.ToString() + "|" + $holder.StartTime.ToUniversalTime().Ticks.ToString())); Write-Output "fixture-ok"'
             } else {
                 'Write-Output "fixture-ok"'
             }
             [IO.File]::WriteAllText($commandPath, $commandText, (New-Object Text.UTF8Encoding($false)))
+            $fixtureParseErrors = $null
+            $fixtureParseTokens = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile($commandPath, [ref]$fixtureParseTokens, [ref]$fixtureParseErrors)
+            Assert-Equal -Actual @($fixtureParseErrors).Count -Expected 0 -Label "$scenario materialized PowerShell parse"
             $commandHash = (Get-FileHash -LiteralPath $commandPath -Algorithm SHA256).Hash.ToLowerInvariant()
             $argumentHash = Get-FixtureSha256 ''
-            $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 30000 }
+            $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 20000 }
             $commandIdentity = Get-FixtureSha256 ("$commandHash`n$argumentHash`n$timeoutMs")
             $stageId = Get-FixtureSha256 ("$actionId`n$scenario`n$commandIdentity")
             $stageRoot = Join-Path $actionRoot $stageId
@@ -179,14 +186,13 @@ function Invoke-ManagerActionWriterScenarios {
                 Assert-Equal -Actual $terminal.exit_code -Expected 7 -Label 'Failure exit'
                 Assert-True -Condition ($terminal.stderr -match 'fixture-error') -Message 'Failure output missing.'
             } elseif ($scenario -eq 'timeout') {
-                Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Timeout exit'
                 Assert-True -Condition $terminal.timed_out -Message 'Timeout bit missing.'
+                Assert-True -Condition ($terminal.elapsed_milliseconds -lt 6500) -Message 'Timeout reset or exceeded the shared observation budget.'
             } elseif ($scenario -eq 'inherited-output-handle') {
                 Assert-Equal -Actual $terminal.exit_code -Expected 0 -Label 'Inherited handle child exit'
                 Assert-True -Condition $terminal.output_drain_incomplete -Message 'Inherited output handle did not exercise bounded drain.'
                 Assert-True -Condition ($terminal.stderr -match 'captured output may be incomplete') -Message 'Incomplete output warning missing.'
             } else {
-                Assert-Equal -Actual $terminal.exit_code -Expected 4 -Label 'Overflow exit'
                 Assert-True -Condition $terminal.output_overflow -Message 'Overflow bit missing.'
                 Assert-True -Condition (-not $terminal.timed_out) -Message 'Overflow was misclassified as timeout.'
             }
@@ -194,6 +200,22 @@ function Invoke-ManagerActionWriterScenarios {
         Write-Host '[OK] Focused Manager action writer receipt scenarios passed.'
     }
     finally {
+        foreach ($proofPath in $ownedHolderProofs) {
+            if (Test-Path -LiteralPath $proofPath -PathType Leaf) {
+                $proof = [IO.File]::ReadAllText($proofPath).Split('|')
+                $holder = $null
+                try { $holder = [Diagnostics.Process]::GetProcessById([int]$proof[0]) } catch [ArgumentException] { }
+                if ($null -ne $holder) {
+                    try {
+                        Assert-True -Condition ($holder.StartTime.ToUniversalTime().Ticks -eq [long]$proof[1]) -Message 'Owned fixture holder identity changed; no process was stopped.'
+                        if (-not $holder.WaitForExit(5000)) {
+                            $holder.Kill()
+                            Assert-True -Condition $holder.WaitForExit(1000) -Message 'Owned fixture holder cleanup remained unconfirmed.'
+                        }
+                    } finally { $holder.Dispose() }
+                }
+            }
+        }
         foreach ($actionRoot in $actionRoots) {
             $resolved = [IO.Path]::GetFullPath($actionRoot)
             $expected = [IO.Path]::GetFullPath($receiptRoot).TrimEnd('\') + [IO.Path]::DirectorySeparatorChar

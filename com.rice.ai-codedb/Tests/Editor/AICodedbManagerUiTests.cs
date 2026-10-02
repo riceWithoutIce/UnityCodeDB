@@ -80,6 +80,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_RejectsOverlapAndRetainsResultAcrossWindowInstances()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -111,7 +112,46 @@ namespace Rice.AI.Codedb.Editor.Tests
             }
         }
 
+        [TestCase(false, false, false, false)]
+        [TestCase(true, false, false, true)]
+        [TestCase(false, true, false, true)]
+        [TestCase(false, false, true, true)]
+        [Category("S28PhaseC")]
+        public void ManagerCommandResult_RealFailureSurvivesUncertainEffects(
+            bool timeout, bool overflow, bool incomplete, bool retained)
+        {
+            var failure = new AICodedbCommandResult(7, "actual-output", "actual-error", timeout,
+                123, false, true, Guid.NewGuid().ToString("N"), true,
+                AICodedbManagerActionEvidenceKind.CommandTerminal, overflow, incomplete);
+            Assert.That(failure.ExitCode, Is.EqualTo(7));
+            Assert.That(failure.StandardOutput, Is.EqualTo("actual-output"));
+            Assert.That(failure.StandardError, Is.EqualTo("actual-error"));
+            Assert.That(failure.ElapsedMilliseconds, Is.EqualTo(123));
+            Assert.That(failure.HasAuthoritativeTerminalEvidence, Is.True);
+            Assert.That(AICodedbManagerActionSession.RequiresRetainedAdmission(failure), Is.EqualTo(retained));
+            Assert.That(failure.Succeeded, Is.False);
+            Assert.That(AICodedbManagerActionSession.CanRequestPostCommandReconcile(failure), Is.False);
+            var unknown = new AICodedbCommandResult(4, "", "admission unknown", false,
+                0, false, false, failure.ActionId, false, AICodedbManagerActionEvidenceKind.Indeterminate);
+            Assert.That(AICodedbManagerActionSession.SelectDisplayResult(unknown, failure), Is.SameAs(failure));
+        }
+
         [Test]
+        [Category("S28PhaseC")]
+        public void ManagerCommandResult_IncompleteSuccessIsNotNextChangePermission()
+        {
+            var result = new AICodedbCommandResult(0, "actual-output", "", false, 321,
+                false, true, Guid.NewGuid().ToString("N"), true,
+                AICodedbManagerActionEvidenceKind.CommandTerminal, false, true);
+            Assert.That(result.ExitCode, Is.Zero);
+            Assert.That(result.GetDisplayText(), Does.Contain("project effects remain unproved"));
+            Assert.That(AICodedbManagerActionSession.RequiresRetainedAdmission(result), Is.True);
+            Assert.That(AICodedbManagerActionSession.RequiresRetainedAdmission(null), Is.True);
+            Assert.That(AICodedbManagerActionSession.CanRequestPostCommandReconcile(result), Is.False);
+        }
+
+        [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_ReloadRestoresUnconfirmedOutcomeWithoutRetry()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -145,6 +185,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_OnlyMatchingAuthoritativeRecoveryReleasesAdmission()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -189,6 +230,182 @@ namespace Rice.AI.Codedb.Editor.Tests
             }
         }
 
+        [TestCase(AICodedbProductState.Ready)]
+        [TestCase(AICodedbProductState.NeedsAttention)]
+        [TestCase(AICodedbProductState.Uninstalled)]
+        [TestCase(AICodedbProductState.MissingPrerequisite)]
+        [Category("S28PhaseC")]
+        public void ManagerHistory_UnknownDoesNotOverrideCurrentProductStateOrAdmitMutation(
+            AICodedbProductState currentState)
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-history-project-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-history-package-" + tag), tag);
+            var actionId = Guid.NewGuid().ToString("N");
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            SessionState.SetString(key, actionId + "|Install CodeDB|" + context.PackageRoot);
+            AICodedbManagerActionSession.ClearCompleted();
+            try
+            {
+                var session = AICodedbManagerActionSession.CurrentFor(context);
+                var snapshot = AICodedbStatusSnapshot.CreateCachedState(tag, currentState);
+                session.Status.UpdateProductState(snapshot.ProductStatus.State);
+                var presentation = session.Status.BuildPresentation(1d);
+                Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(
+                    session.Status.Phase, presentation, session.Status.HasFreshProductState), Is.False);
+                Assert.That(snapshot.ProductStatus.State, Is.EqualTo(currentState));
+                Assert.That(presentation.StatusLabel, Is.EqualTo("Outcome unconfirmed"));
+                Assert.That(session.Result, Is.Null);
+                Assert.That(session.IsRecovering, Is.True);
+                var warning = AICodedbManagerWindow.BuildHistoricalActionWarning(session, string.Empty);
+                Assert.That(warning, Does.Contain(actionId).And.Contain(context.PackageRoot));
+                Assert.That(warning, Does.Contain("unknown command outcome"));
+                Assert.That(AICodedbManagerActionSession.TryStart(
+                    "Install CodeDB", context, 2d, out _), Is.False);
+                Assert.That(session.TryReleaseDurableIndex(new AICodedbCommandResult(
+                    4, string.Empty, "unknown", false, 0, false, false, actionId), out _), Is.False);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
+            }
+            finally
+            {
+                AICodedbManagerActionSession.ClearCompleted();
+                SessionState.SetString(key, string.Empty);
+            }
+        }
+
+        [Test]
+        [Category("S28PhaseC")]
+        public void ManagerStatusBoundary_RejectsStaleForeignAndIncompleteReadyEvidence()
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-observation-project-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-observation-package-" + tag), tag);
+            var foreign = new AICodedbEditorExecutionContext(context.Platform,
+                context.ProjectRoot, context.PackageRoot + "-replacement", tag);
+            var otherProject = new AICodedbEditorExecutionContext(context.Platform,
+                context.ProjectRoot + "-foreign", context.PackageRoot, tag);
+            var runtime = context.GetProjectPath("fixture-supervisor");
+            var hash = new string('a', 64);
+            var boundary = new AICodedbManagerStatusBoundary(context, "fixture-generation", hash, runtime);
+            var now = DateTimeOffset.UtcNow;
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                hash, true, now, now), Is.True);
+            Assert.That(boundary.CanDisplayReadyEvidence(foreign, runtime, "fixture-generation",
+                hash, true, now, now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(otherProject, runtime, "fixture-generation",
+                hash, true, now, now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                hash, true, now.AddSeconds(-31d), now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                hash, true, now.AddSeconds(1d), now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                hash, false, now, now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime + "-foreign", "fixture-generation",
+                hash, true, now, now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "other-generation",
+                hash, true, now, now), Is.False);
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                new string('b', 64), true, now, now), Is.False);
+            Assert.That(boundary.CanDisplay(context, AICodedbProductState.Ready, true, null, now), Is.False);
+            Assert.That(boundary.CanDisplay(context, AICodedbProductState.NeedsAttention, true, null, now), Is.True);
+        }
+
+        [Test]
+        [Category("S28PhaseC")]
+        public void ManagerReadyCache_IsProjectPackageAndTimeBoundWithoutRenewal()
+        {
+            var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var package = Path.Combine(root, "package");
+            var now = DateTime.UtcNow;
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package, now.AddSeconds(-1d), now), Is.True);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package + "-replacement", now, now), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root + "-foreign", package, now, now), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package, now.AddSeconds(-31d), now), Is.False);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package, now.AddSeconds(1d), now), Is.False);
+            var observedAt = now.AddSeconds(-1d);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package, observedAt, observedAt.AddSeconds(30d)), Is.True);
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(
+                root, package, root, package, observedAt, observedAt.AddSeconds(31d)), Is.False);
+        }
+
+        [TestCase(0d, true)]
+        [TestCase(30d, true)]
+        [TestCase(30.001d, false)]
+        [TestCase(31d, false)]
+        [TestCase(120d, false)]
+        [TestCase(-1d, false)]
+        [Category("S28PhaseC")]
+        public void ManagerReadyFreshness_SharedAcrossDisplayCacheAndExpiry(double ageSeconds, bool expectedFresh)
+        {
+            var tag = Guid.NewGuid().ToString("N");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-freshness-project-" + tag),
+                Path.Combine(Path.GetTempPath(), "codedb-freshness-package-" + tag), tag);
+            var runtime = context.GetProjectPath("fixture-supervisor");
+            var hash = new string('a', 64);
+            var boundary = new AICodedbManagerStatusBoundary(context, "fixture-generation", hash, runtime);
+            var now = DateTimeOffset.UtcNow;
+            var observedAt = now.AddSeconds(-ageSeconds);
+
+            Assert.That(AICodedbManagerStatusBoundary.IsReadyObservationFresh(observedAt, now),
+                Is.EqualTo(expectedFresh));
+            Assert.That(boundary.CanDisplayReadyEvidence(context, runtime, "fixture-generation",
+                hash, true, observedAt, now), Is.EqualTo(expectedFresh));
+            Assert.That(AICodedbManagerWindow.CanUseCachedReadyObservation(context.ProjectRoot, context.PackageRoot,
+                context.ProjectRoot, context.PackageRoot, observedAt.UtcDateTime, now.UtcDateTime),
+                Is.EqualTo(expectedFresh));
+            Assert.That(AICodedbManagerWindow.ShouldExpireDisplayedReady(AICodedbProductState.Ready,
+                observedAt, now), Is.EqualTo(!expectedFresh));
+            Assert.That(AICodedbManagerWindow.ShouldExpireDisplayedReady(AICodedbProductState.NeedsAttention,
+                observedAt, now), Is.False);
+        }
+
+        [Test]
+        [Category("S28PhaseC")]
+        public void ManagerReadyExpiry_PrecedesUnchangedLifecycleRevisionGate()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath, "Editor", "AICodedbManagerWindow.cs"));
+            var applyStart = source.IndexOf("private bool TryApplyCachedLifecycleStatus()", StringComparison.Ordinal);
+            Assert.That(applyStart, Is.GreaterThanOrEqualTo(0));
+            var applyEnd = source.IndexOf("private async void ApplyCachedLifecycleStatusAsync",
+                applyStart, StringComparison.Ordinal);
+            Assert.That(applyEnd, Is.GreaterThan(applyStart));
+            var applyBody = source.Substring(applyStart, applyEnd - applyStart);
+            var expiry = applyBody.IndexOf("ShouldExpireDisplayedReady(", StringComparison.Ordinal);
+            var revisionGate = applyBody.IndexOf("revision <= _cachedLifecycleStatusRevision", StringComparison.Ordinal);
+
+            Assert.That(expiry, Is.GreaterThanOrEqualTo(0));
+            Assert.That(revisionGate, Is.GreaterThan(expiry));
+            Assert.That(applyBody.Substring(expiry, revisionGate - expiry),
+                Does.Contain("ApplyStatusSnapshot(AICodedbStatusSnapshot.CreateStarting("));
+        }
+
+        [Test]
+        public void ManagerStatusOverride_PreservesRunningAndTerminalPresentation()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start("Install CodeDB", 0d);
+            Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(status.Phase,
+                status.BuildPresentation(1d), status.HasFreshProductState), Is.True);
+            status.Complete(new AICodedbCommandResult(0, string.Empty, string.Empty, false),
+                AICodedbProductState.NeedsAttention, true, 2d);
+            Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(status.Phase,
+                status.BuildPresentation(2d), status.HasFreshProductState), Is.True);
+            status.Complete(new AICodedbCommandResult(4, string.Empty, "failed", false),
+                AICodedbProductState.Starting, false, 3d);
+            Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(status.Phase,
+                status.BuildPresentation(3d), status.HasFreshProductState), Is.True);
+        }
+
         [Test]
         public void ManagerActionJournal_RestoresOriginalIdAfterFullExitAndPackageReplacement()
         {
@@ -215,6 +432,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var recovered = AICodedbManagerActionSession.CurrentFor(replacement);
                 Assert.That(recovered.ActionId, Is.EqualTo(actionId));
                 Assert.That(recovered.IsRecovering, Is.True);
+                Assert.That(AICodedbManagerWindow.BuildHistoricalActionWarning(recovered, read.HistoricalWarning),
+                    Does.Contain(actionId).And.Contain(original.PackageRoot));
+                Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(recovered.Status.Phase,
+                    recovered.Status.BuildPresentation(1d), recovered.Status.HasFreshProductState), Is.False);
                 Assert.That(AICodedbManagerActionSession.TryStart(
                     "Host Payload Verify", replacement, 2d, out _), Is.False);
                 var second = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"),
@@ -407,6 +628,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     + "\"package_root\":\"" + context.PackageRoot + "\","
                     + "\"command_identity_sha256\":\"" + commandIdentity + "\","
                     + "\"writer_sha256\":\"" + writerSha + "\"}");
+                var originalAdmissionBytes = File.ReadAllBytes(admissionPath);
                 var claim = "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
                     + "\"state\":\"claimed\",\"action_id\":\"" + actionId + "\","
                     + "\"stage_id\":\"" + stageId + "\",\"project_key\":\"" + projectKey + "\","
@@ -440,6 +662,12 @@ namespace Rice.AI.Codedb.Editor.Tests
                 File.WriteAllText(markerPath, marker);
                 Assert.That(AICodedbManagerActionJournal.Read(context).State,
                     Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                var history = AICodedbManagerActionJournal.Read(context);
+                Assert.That(history.HistoricalWarning, Does.Contain(actionId).And.Contain("unknown command outcome"));
+                Assert.That(AICodedbManagerWindow.BuildHistoricalActionWarning(null, history.HistoricalWarning),
+                    Is.EqualTo(history.HistoricalWarning));
+                Assert.That(File.ReadAllBytes(admissionPath), Is.EqualTo(originalAdmissionBytes));
+                Assert.That(File.ReadAllText(claimPath), Is.EqualTo(claim));
                 File.WriteAllText(Path.Combine(stageRoot, "terminal.json"), "{}");
                 Assert.That(AICodedbManagerActionJournal.Read(context).State,
                     Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
@@ -600,6 +828,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_WindowCloseWithCommandRetainsResultWithoutClaimingReady()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -633,6 +862,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_WindowCloseWithoutCommandKeepsRecoveryAdmissionBlocked()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -661,6 +891,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_MissingCommandResultCannotReleaseAdmission()
         {
             var context = new AICodedbEditorExecutionContext(
@@ -691,6 +922,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        [Category("S28PhaseC")]
         public void ManagerActionSession_UnconfirmedTransportFailureKeepsRecovery()
         {
             var context = new AICodedbEditorExecutionContext(

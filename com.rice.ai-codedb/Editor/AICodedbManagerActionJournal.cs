@@ -40,16 +40,19 @@ namespace Rice.AI.Codedb.Editor
         internal string Detail { get; }
         internal string ActionId { get; }
         internal bool IsLegacyReceipt { get; }
+        internal string HistoricalWarning { get; }
 
         internal AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState state,
             AICodedbManagerActionIndex index = null, string detail = null,
-            string actionId = null, bool isLegacyReceipt = false)
+            string actionId = null, bool isLegacyReceipt = false,
+            string historicalWarning = null)
         {
             State = state;
             Index = index;
             Detail = detail ?? string.Empty;
             ActionId = index?.ActionId ?? actionId ?? string.Empty;
             IsLegacyReceipt = isLegacyReceipt;
+            HistoricalWarning = historicalWarning ?? string.Empty;
         }
     }
 
@@ -151,8 +154,14 @@ namespace Rice.AI.Codedb.Editor
                         "The project-stable Manager action index has conflicting identity or action metadata.",
                         candidateId);
                 }
+                // Display history is independent of this current index. Reading it
+                // never changes the disposition or permits a second owner.
+                var history = ReadLegacyPending(context, directory, resolved);
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
-                    new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext));
+                    new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext),
+                    historicalWarning: history.State == AICodedbManagerActionIndexState.Conflict
+                        ? "Retained action history could not be verified: " + history.Detail
+                        : history.HistoricalWarning);
             }
             catch (Exception exception)
             {
@@ -268,6 +277,7 @@ namespace Rice.AI.Codedb.Editor
         {
             AICodedbManagerActionIndex pending = null;
             var matchedHistorical = new HashSet<string>(StringComparer.Ordinal);
+            var retainedUnknown = new List<string>();
             var packageDirectories = Directory.GetDirectories(directory);
             if (packageDirectories.Length > 64)
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
@@ -350,7 +360,13 @@ namespace Rice.AI.Codedb.Editor
                                 throw new InvalidOperationException(
                                     "A resolved action marker conflicts with its original receipt.");
                             if (marker.HistoricalUnknown)
+                            {
                                 matchedHistorical.Add(actionId);
+                                retainedUnknown.Add("Historical action " + actionId
+                                    + " (original Package " + original.PackageRoot
+                                    + ") still has an unknown command outcome. Its historical reconciliation"
+                                    + " is not a command terminal or authority for a new project change.");
+                            }
                             continue;
                         }
                         if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
@@ -377,10 +393,12 @@ namespace Rice.AI.Codedb.Editor
                     return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
                         null, "A historical unknown-action marker has no matching original receipt.",
                         closure.Key);
+            var historicalWarning = string.Join("\n", retainedUnknown);
             return pending == null
-                ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty)
+                ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
+                    historicalWarning: historicalWarning)
                 : new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
-                    pending, isLegacyReceipt: true);
+                    pending, isLegacyReceipt: true, historicalWarning: historicalWarning);
         }
 
         private static bool IsPhysicalKey(string value)
