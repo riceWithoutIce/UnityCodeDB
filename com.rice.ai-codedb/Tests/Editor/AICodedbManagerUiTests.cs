@@ -36,9 +36,13 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             internal ManagerActionSessionFixture()
             {
-                if (!UnityEditorInternal.InternalEditorUtility.CurrentThreadIsMainThread())
+                // Use the public BCL context boundary, not a version-specific
+                // InternalEditorUtility API. Unknown contexts fail before isolation.
+                var editorContext = SynchronizationContext.Current;
+                if (editorContext == null || !string.Equals(editorContext.GetType().FullName,
+                        "UnityEngine.UnitySynchronizationContext", StringComparison.Ordinal))
                     throw new InvalidOperationException("Session fixture requires a synchronous Editor-main-thread test.");
-                if (!Monitor.TryEnter(IsolationGate))
+                if (!Monitor.TryEnter(IsolationGate, 0))
                     throw new InvalidOperationException("Concurrent session fixture isolation is not permitted.");
                 var sessionGateHeld = false;
                 var detached = false;
@@ -54,7 +58,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                         || _currentField.FieldType != typeof(AICodedbManagerActionSession))
                         throw new InvalidOperationException("Reviewed session fixture boundary is unavailable.");
                     _sessionGate = gateField.GetValue(null);
-                    if (_sessionGate == null || !Monitor.TryEnter(_sessionGate))
+                    if (_sessionGate == null || !Monitor.TryEnter(_sessionGate, 0))
                         throw new InvalidOperationException("Production session gate is already owned by another thread.");
                     sessionGateHeld = true;
                     _savedSession = (AICodedbManagerActionSession)_currentField.GetValue(null);
@@ -183,7 +187,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_RejectsOverlapAndRetainsResultAcrossWindowInstances()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -252,7 +255,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_ReloadRestoresUnconfirmedOutcomeWithoutRetry()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -284,7 +286,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_OnlyMatchingAuthoritativeRecoveryReleasesAdmission()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -331,7 +332,6 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbProductState.Uninstalled)]
         [TestCase(AICodedbProductState.MissingPrerequisite)]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerHistory_UnknownDoesNotOverrideCurrentProductStateOrAdmitMutation(
             AICodedbProductState currentState)
         {
@@ -925,7 +925,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_WindowCloseWithCommandRetainsResultWithoutClaimingReady()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -957,7 +956,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_WindowCloseWithoutCommandKeepsRecoveryAdmissionBlocked()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -984,7 +982,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_MissingCommandResultCannotReleaseAdmission()
         {
             using var fixture = new ManagerActionSessionFixture();
@@ -1033,7 +1030,6 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
-        [NonParallelizable]
         public void ManagerActionSession_UnconfirmedTransportFailureKeepsRecovery()
         {
             using var fixture = new ManagerActionSessionFixture();
