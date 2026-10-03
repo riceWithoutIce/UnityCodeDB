@@ -15,6 +15,108 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        // Synchronous, test-owned isolation only. Hold the production Gate so
+        // other session callers cannot observe or replace the temporary owner.
+        private sealed class ManagerActionSessionFixture : IDisposable
+        {
+            private const string MissingValue = "S28_FIXTURE_KEY_ABSENT";
+            private static readonly object IsolationGate = new object();
+            private static ManagerActionSessionFixture _active;
+            private readonly object _sessionGate;
+            private readonly System.Reflection.FieldInfo _currentField;
+            private readonly AICodedbManagerActionSession _savedSession;
+            private readonly int _ownerThread;
+            private bool _disposed;
+
+            internal string Token { get; }
+            internal AICodedbEditorExecutionContext Context { get; }
+            internal string PendingKey { get; }
+            internal bool OriginalRestored { get; private set; }
+            internal bool OwnedKeyRemoved { get; private set; }
+
+            internal ManagerActionSessionFixture()
+            {
+                if (!UnityEditorInternal.InternalEditorUtility.CurrentThreadIsMainThread())
+                    throw new InvalidOperationException("Session fixture requires a synchronous Editor-main-thread test.");
+                if (!Monitor.TryEnter(IsolationGate))
+                    throw new InvalidOperationException("Concurrent session fixture isolation is not permitted.");
+                var sessionGateHeld = false;
+                var detached = false;
+                try
+                {
+                    if (_active != null)
+                        throw new InvalidOperationException("Nested session fixture isolation is not permitted.");
+                    _ownerThread = Thread.CurrentThread.ManagedThreadId;
+                    var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+                    var gateField = typeof(AICodedbManagerActionSession).GetField("Gate", flags);
+                    _currentField = typeof(AICodedbManagerActionSession).GetField("_current", flags);
+                    if (gateField == null || _currentField == null
+                        || _currentField.FieldType != typeof(AICodedbManagerActionSession))
+                        throw new InvalidOperationException("Reviewed session fixture boundary is unavailable.");
+                    _sessionGate = gateField.GetValue(null);
+                    if (_sessionGate == null || !Monitor.TryEnter(_sessionGate))
+                        throw new InvalidOperationException("Production session gate is already owned by another thread.");
+                    sessionGateHeld = true;
+                    _savedSession = (AICodedbManagerActionSession)_currentField.GetValue(null);
+                    Token = Guid.NewGuid().ToString("N");
+                    var root = Path.Combine(Path.GetTempPath(), "codedb-s28-session-" + Token);
+                    Context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                        Path.Combine(root, "project"), Path.Combine(root, "package"), Token);
+                    PendingKey = "Rice.AI.Codedb.Manager.PendingAction." + Context.ProjectRoot;
+                    if (SessionState.GetString(PendingKey, MissingValue) != MissingValue)
+                        throw new InvalidOperationException("Session fixture key is not exclusively absent.");
+                    _currentField.SetValue(null, null);
+                    detached = true;
+                    _active = this;
+                }
+                catch
+                {
+                    try
+                    {
+                        if (detached)
+                            _currentField.SetValue(null, _savedSession);
+                    }
+                    finally
+                    {
+                        if (sessionGateHeld)
+                            Monitor.Exit(_sessionGate);
+                        Monitor.Exit(IsolationGate);
+                    }
+                    throw;
+                }
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                    return;
+                if (Thread.CurrentThread.ManagedThreadId != _ownerThread || !ReferenceEquals(_active, this))
+                    throw new InvalidOperationException("Only the active fixture's owning thread may restore it.");
+                try
+                {
+                    // This GUID-derived key was absent at entry. Never inspect,
+                    // erase or complete the saved session's pending state.
+                    SessionState.EraseString(PendingKey);
+                    OwnedKeyRemoved = SessionState.GetString(PendingKey, MissingValue) == MissingValue;
+                }
+                finally
+                {
+                    try
+                    {
+                        _currentField.SetValue(null, _savedSession);
+                        OriginalRestored = ReferenceEquals(_currentField.GetValue(null), _savedSession);
+                    }
+                    finally
+                    {
+                        _disposed = true;
+                        _active = null;
+                        Monitor.Exit(_sessionGate);
+                        Monitor.Exit(IsolationGate);
+                    }
+                }
+            }
+        }
+
         [TestCase("Host Payload DryRun", "Observation", "PackageMaterializer")]
         [TestCase("Host Payload Verify", "Observation", "PackageMaterializer")]
         [TestCase("Host Payload Upgrade", "LifecycleMutation", "MaterializerAndInstanceAuthority")]
@@ -81,13 +183,11 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_RejectsOverlapAndRetainsResultAcrossWindowInstances()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-session-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-session-package"),
-                "codedb-session-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             AICodedbManagerActionSession.ClearCompleted();
             try
             {
@@ -152,13 +252,11 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_ReloadRestoresUnconfirmedOutcomeWithoutRetry()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-reload-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-reload-package"),
-                "codedb-reload-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             SessionState.SetString(key,
                 Guid.NewGuid().ToString("N") + "|Host Payload Sync|" + context.PackageRoot);
@@ -186,13 +284,11 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_OnlyMatchingAuthoritativeRecoveryReleasesAdmission()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-recovery-terminal-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-recovery-terminal-package"),
-                "codedb-recovery-terminal-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             var actionId = Guid.NewGuid().ToString("N");
             SessionState.SetString(key,
@@ -235,13 +331,13 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbProductState.Uninstalled)]
         [TestCase(AICodedbProductState.MissingPrerequisite)]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerHistory_UnknownDoesNotOverrideCurrentProductStateOrAdmitMutation(
             AICodedbProductState currentState)
         {
-            var tag = Guid.NewGuid().ToString("N");
-            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-history-project-" + tag),
-                Path.Combine(Path.GetTempPath(), "codedb-history-package-" + tag), tag);
+            using var fixture = new ManagerActionSessionFixture();
+            var tag = fixture.Token;
+            var context = fixture.Context;
             var actionId = Guid.NewGuid().ToString("N");
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             SessionState.SetString(key, actionId + "|Install CodeDB|" + context.PackageRoot);
@@ -829,13 +925,11 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_WindowCloseWithCommandRetainsResultWithoutClaimingReady()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-close-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-close-package"),
-                "codedb-close-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             try
             {
@@ -863,13 +957,11 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_WindowCloseWithoutCommandKeepsRecoveryAdmissionBlocked()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-close-unknown-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-close-unknown-package"),
-                "codedb-close-unknown-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             try
             {
@@ -892,14 +984,16 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_MissingCommandResultCannotReleaseAdmission()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-missing-result-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-missing-result-package"),
-                "codedb-missing-result-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                using var nested = new ManagerActionSessionFixture();
+            });
             try
             {
                 Assert.That(AICodedbManagerActionSession.TryStart(
@@ -919,17 +1013,31 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbManagerActionSession.ClearCompleted();
                 SessionState.SetString(key, string.Empty);
             }
+
+            fixture.Dispose();
+            Assert.That(fixture.OriginalRestored, Is.True);
+            Assert.That(fixture.OwnedKeyRemoved, Is.True);
+            ManagerActionSessionFixture faultFixture = null;
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                using (faultFixture = new ManagerActionSessionFixture())
+                {
+                    Assert.That(AICodedbManagerActionSession.TryStart(
+                        "Host Payload Verify", faultFixture.Context, 4d, out _), Is.True);
+                    throw new InvalidOperationException("Owned fixture exception-path check.");
+                }
+            });
+            Assert.That(faultFixture.OriginalRestored, Is.True);
+            Assert.That(faultFixture.OwnedKeyRemoved, Is.True);
         }
 
         [Test]
         [Category("S28PhaseC")]
+        [NonParallelizable]
         public void ManagerActionSession_UnconfirmedTransportFailureKeepsRecovery()
         {
-            var context = new AICodedbEditorExecutionContext(
-                RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-unconfirmed-project"),
-                Path.Combine(Path.GetTempPath(), "codedb-unconfirmed-package"),
-                "codedb-unconfirmed-project");
+            using var fixture = new ManagerActionSessionFixture();
+            var context = fixture.Context;
             var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
             try
             {
