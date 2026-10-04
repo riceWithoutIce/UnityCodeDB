@@ -62,6 +62,10 @@ Unity with a NotElevated MCP client were explicitly deferred without being
 marked passed; they remain in the
 [v0.2.5 validation roadmap](v0.2.5-roadmap.md). Approved future work continues in the
 [v0.3.0 bounded Discover Read expansion](v0.3.0-roadmap.md).
+The [CodeDB Responsibility Contract](v0.3.0-p0-codedb-responsibility-contract.md)
+defines product scope, resource ownership, and the separation of command
+outcome, current status, and new-change admission. Its 2026-10-02 approval is
+documentation/design alignment, not runtime or release acceptance.
 The active project-tool availability blocker is frozen in the
 [v0.3.0 P0 project-local Codex MCP discovery task](v0.3.0-p0-codex-client-discovery.md).
 The first active runtime-isolation slice is documented in the
