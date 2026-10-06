@@ -424,7 +424,8 @@ namespace Rice.AI.Codedb.Editor
         Ready,
         NeedsAttention,
         Uninstalled,
-        MissingPrerequisite
+        MissingPrerequisite,
+        NotIntegrated
     }
 
     internal enum AICodedbProductAttentionReason
@@ -670,6 +671,10 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProjectIntegrationStatus integrationStatus,
             AICodedbCommandResult result)
         {
+            if (integrationStatus.IsNotIntegrated)
+                return new AICodedbProductStatus(AICodedbProductState.NotIntegrated,
+                    AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Unknown,
+                    AICodedbProductLayerState.Unknown, integrationStatus.Detail);
             if (integrationStatus.IsUninstalled)
             {
                 return new AICodedbProductStatus(

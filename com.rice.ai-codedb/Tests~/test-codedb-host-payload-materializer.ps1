@@ -38,18 +38,21 @@ param(
 
     [switch]$NextChangeAdmissionIntegrationOnly,
 
+    [switch]$FirstInstallAttributionOnly,
+
     [switch]$TransactionOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
 }
 
 
 function Invoke-NextChangeAdmissionIntegrationScenarios {
+    param([switch]$FirstInstallAttribution)
     # Records are fixture-owned; every production function body is imported
     # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
     $familyClock = [Diagnostics.Stopwatch]::StartNew()
@@ -58,6 +61,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     $fixtureRoot = Join-Path $fixtureContainer 'installed'
     $integrationPackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $definitionBodies = @{}
+    $definitionPreamble = New-Object System.Collections.Generic.List[string]
     $caseCount = 0
     function Import-PhaseCDefinitions {
         param([string]$Path)
@@ -76,6 +80,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
                 (($statement -is [Management.Automation.Language.AssignmentStatementAst] -and $statement.Left.Extent.Text.StartsWith('$script:', [StringComparison]::Ordinal)) -or
                  ($statement -is [Management.Automation.Language.ForEachStatementAst]))) {
                 # Exact pre-function constants/allowlists only, never main entry.
+                $definitionPreamble.Add($statement.Extent.Text)
                 . ([scriptblock]::Create($statement.Extent.Text))
             }
         }
@@ -194,6 +199,27 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\materialize-codedb-host-payload.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\codedb-instance-engine.ps1')
         $script:PhaseCCaseCount = 0
+        if ($FirstInstallAttribution) {
+            # Full convergence uses GetNewClosure callbacks. Bind the unchanged
+            # production definitions to one shared script module, like the real
+            # materializer, rather than letting global AST functions inherit a
+            # callback module with empty $script: path constants.
+            $moduleParts = New-Object System.Collections.Generic.List[string]
+            $moduleParts.Add('param($fixtureContainer, $integrationPackageRoot, $definitionBodies)')
+            foreach ($statementText in $definitionPreamble) { $moduleParts.Add($statementText) }
+            foreach ($name in $definitionBodies.Keys) { $moduleParts.Add('function ' + $name + ' {' + $definitionBodies[$name] + '}') }
+            foreach ($name in @('Write-PhaseCRecord', 'Assert-PhaseC', 'Assert-PhaseCRejected', 'Invoke-PhaseCRecordFault', 'Copy-PhaseCCanonicalClosure', 'Write-PhaseCDesired', 'Invoke-FirstInstallAttributionCases')) {
+                $moduleParts.Add('function ' + $name + ' {' + (Get-Command $name).ScriptBlock.ToString() + '}')
+            }
+            $fixtureModule = New-Module -Name ('S29FirstInstall_' + $tag) -ScriptBlock ([scriptblock]::Create(($moduleParts -join "`n"))) -ArgumentList $fixtureContainer, $integrationPackageRoot, $definitionBodies
+            $script:PhaseCCaseCount = & $fixtureModule {
+                $script:PhaseCCaseCount = 0
+                Invoke-FirstInstallAttributionCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies
+                return $script:PhaseCCaseCount
+            }
+            Write-Host ("[PASS] FirstInstallAttributionOnly; cases=" + $script:PhaseCCaseCount + "; native_children=0; elapsed_ms=" + $familyClock.ElapsedMilliseconds)
+            return
+        }
         foreach ($name in @('Get-ValidatedCurrentInstance', 'Get-ValidatedInstanceRetirementControls', 'Get-InstanceActivationContractState', 'Assert-InstanceNextChangeAdmission', 'Enter-MaterializerLock', 'Publish-InstanceOperation', 'Read-InstanceOperationJournal', 'Invoke-InstanceOperationRecovery')) {
             Assert-PhaseC -Condition ((Get-Command $name).ScriptBlock.ToString() -ceq $definitionBodies[$name]) -Label ('exact-production-body-' + $name)
         }
@@ -323,8 +349,111 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     }
 }
 
-if ($NextChangeAdmissionIntegrationOnly) {
-    Invoke-NextChangeAdmissionIntegrationScenarios
+function Invoke-FirstInstallAttributionCases {
+    param([string]$Container, [string]$PackageRoot, $Definitions)
+    foreach ($name in @('Test-InstanceFirstInstall', 'Test-InstanceSupervisorOnlyControl', 'New-VerifiedInstanceCandidate',
+        'Invoke-InstanceConvergence', 'Assert-InstanceNextChangeAdmission', 'Get-InstanceCandidateCleanupState', 'Publish-InstanceActivationTransaction')) {
+        Assert-PhaseC -Condition ((Get-Command $name).ScriptBlock.ToString() -ceq $Definitions[$name]) -Label ('exact-production-body-' + $name)
+    }
+    # Only the external machine-prerequisite probe and native process collector
+    # are replaced. All identity, admission, candidate and activation writers
+    # remain unchanged production definitions; no main entry or Provider runs.
+    function script:Get-MaterializerMachinePrerequisiteStatus {
+        param($Manifest)
+        return [pscustomobject]@{ Current = $true; State = 'CURRENT'; ReasonCode = 'FIXTURE_CURRENT'; Detail = 'Isolated prerequisite boundary'; NextAction = ''; NodePath = ''; NodeVersion = 'fixture'; ProviderVersion = 'fixture'; ProviderRoot = ''; ProviderManifestPath = ''; ProviderExecutablePath = '' }
+    }
+    function script:Invoke-BoundedNativeProcessWithFileOutput {
+        param($FilePath, $Arguments, $OutputRoot, $TimeoutMilliseconds, $Environment, $WhileRunning)
+        Assert-PathInside -Path $OutputRoot -Root $script:FirstInstallContainer -Label 'isolated native boundary'
+        $script:FirstNativeCalls++
+        return $script:FirstNativeResult
+    }
+    function script:Get-MaterializerProcessIdentity {
+        param([int]$ProcessId)
+        if ($ProcessId -ne $PID) { throw 'Fixture refused any process identity outside its own runner.' }
+        return [pscustomobject]@{ Alive = $true; StartTicks = '1' }
+    }
+    $script:FirstInstallContainer = $Container
+    $script:FirstNativeCalls = 0
+    foreach ($name in @('PocFixture', 'TestFailInstanceCandidate', 'TestFailWatcherHandoff', 'TestCrashBeforeWatcherHandoff', 'TestCrashAfterRemovalMarkerDeletion', 'TestFailRepairMcpRegistration')) { Set-Variable -Scope Global -Name $name -Value $false }
+    foreach ($name in @('TestFailAfterMutation', 'TestCrashAfterMutation', 'EditorProcessId')) { Set-Variable -Scope Global -Name $name -Value 0 }
+    foreach ($name in @('EditorSessionId', 'EditorProcessStartTicks', 'TestInstallRepairCompletedEventName', 'TestInstallContinueEventName', 'TestAutomaticCleanupStateCapturedEventName')) { Set-Variable -Scope Global -Name $name -Value '' }
+    Set-Variable -Scope Global -Name OriginatingActionId -Value ([guid]::NewGuid().ToString('N'))
+    Set-Variable -Scope Global -Name OriginatingOperationId -Value ([guid]::NewGuid().ToString('N'))
+    Set-Variable -Scope Global -Name Action -Value 'Install'
+    function New-FirstRoot {
+        param([string]$Name)
+        $root = Join-Path $Container $Name
+        Assert-PathInside -Path $root -Root $Container -Label 'first Install fixture'
+        foreach ($marker in @('Assets', 'Packages', 'ProjectSettings')) { New-Item -ItemType Directory -Force -Path (Join-Path $root $marker) | Out-Null }
+        return $root
+    }
+    function Reset-FirstCommand {
+        $script:RequestedExitCode = 0; $script:CommandResultWritten = $false
+        $script:CommandPhase = 'PREFLIGHT'; $script:CommandOutcome = ''; $script:CommandReasonCode = ''
+        $script:CommandCleanupState = ''; $script:CommandNextAction = ''; $script:CommandMutatedScopes.Clear()
+    }
+    $root = New-FirstRoot 'fresh'
+    $manifest = Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
+    Assert-PhaseC -Condition (Test-InstanceFirstInstall -Manifest $manifest -ProjectRoot $root) -Label 'clean-first-Install-without-removal-history'
+    Assert-PhaseC -Condition (-not (Get-InstanceDesiredState -ProjectRoot $root).Present) -Label 'no-fabricated-uninstall-state'
+    $contractRoot = Get-InstanceActivationContractRoot -Manifest $manifest -ProjectRoot $root
+    New-Item -ItemType Directory -Force -Path (Join-Path $contractRoot 'supervisor') | Out-Null
+    Assert-PhaseC -Condition (Test-InstanceFirstInstall -Manifest $manifest -ProjectRoot $root) -Label 'canonical-Supervisor-only-first-Install'
+    New-Item -ItemType File -Path (Join-Path $contractRoot 'unowned') | Out-Null
+    Assert-PhaseC -Condition (-not (Test-InstanceFirstInstall -Manifest $manifest -ProjectRoot $root)) -Label 'unknown-control-entry-refuses-first-Install'
+    Remove-Item -LiteralPath (Join-Path $contractRoot 'unowned')
+    Set-Variable -Scope Global -Name PocFixture -Value $true
+    Reset-FirstCommand
+    Invoke-InstanceConvergence -Manifest $manifest -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+    $current = Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $root
+    Assert-PhaseC -Condition ($script:CommandOutcome -ceq 'INSTALLED' -and $current.Manifest.state -ceq 'READY' -and $null -ne (Get-ValidatedInstanceAvailabilityEvidence -ProjectRoot $root -Instance $current)) -Label 'verified-before-first-selection'
+    Assert-PhaseC -Condition ($current.Manifest.originating_action.action_id -ceq $global:OriginatingActionId -and $current.Manifest.originating_action.operation_id -ceq $global:OriginatingOperationId) -Label 'durable-original-action-operation-attribution'
+    Assert-PhaseC -Condition (-not (Test-InstanceFirstInstall -Manifest $manifest -ProjectRoot $root)) -Label 'installed-not-another-first-Install'
+    $reinstallRoot = New-FirstRoot 'authenticated-reinstall'
+    $reinstallManifest = Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $reinstallRoot
+    Write-PhaseCDesired -Root $reinstallRoot -State UNINSTALLED -Cleanup COMPLETE -StateId ([guid]::NewGuid().ToString('N'))
+    Assert-PhaseC -Condition (-not (Test-InstanceFirstInstall -Manifest $reinstallManifest -ProjectRoot $reinstallRoot)) -Label 'authenticated-uninstalled-is-not-first-Install'
+    Reset-FirstCommand
+    Invoke-InstanceConvergence -Manifest $reinstallManifest -ProjectRoot $reinstallRoot -MarkerPath (Join-Path $reinstallRoot $script:MarkerRelativePath) -ActionName Install
+    Assert-PhaseC -Condition ((Get-InstanceDesiredState -ProjectRoot $reinstallRoot).DesiredState -ceq 'INSTALLED') -Label 'authenticated-reinstall-still-supported'
+    $failureRoot = New-FirstRoot 'retained-before-return'
+    $failureManifest = Copy-PhaseCCanonicalClosure -Root $failureRoot
+    $stage = Join-Path $failureRoot ($script:RuntimeRelativePath + '/fixture-candidate-stage')
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    $generation = Join-Path $failureRoot $script:GenerationTargetPrefix
+    $origin = [pscustomobject]@{ action = 'INSTALL'; action_id = $global:OriginatingActionId; operation_id = $global:OriginatingOperationId }
+    Set-Variable -Scope Global -Name PocFixture -Value $false
+    $script:FirstNativeResult = [pscustomobject]@{ ExitCode = 23; StandardError = 'fixture-original-prepare-error'; StandardOutput = ''; TimedOut = $false; TerminationConfirmed = $false; OutputDrainIncomplete = $false }
+    $attempt = $null; $failure = $null; $candidate = $null
+    try { $candidate = New-VerifiedInstanceCandidate -Manifest $failureManifest -ProjectRoot $failureRoot -GenerationRoot $generation -PreviousInstance $null -OriginatingAction $origin -StageRoot $stage -CandidateAttempt ([ref]$attempt) } catch { $failure = $_.Exception }
+    Assert-PhaseC -Condition ($null -eq $candidate -and $null -ne $attempt -and $failure.Data['InstanceExecutionObservationIncomplete'] -and $failure.Message.Contains('fixture-original-prepare-error') -and $failure.Data['InstanceNativeResult'].ExitCode -eq 23) -Label 'original-command-failure-and-unknown-effects-distinct'
+    $retained = (Read-BoundedJsonDocument -Path (Join-Path $attempt.InstanceRoot 'instance.json') -Label 'fixture retained manifest' -MaximumBytes 131072).Document
+    Assert-PhaseC -Condition ($retained.state -ceq 'PROVISIONING' -and $retained.originating_action.operation_id -ceq $origin.operation_id -and -not (Test-Path -LiteralPath $attempt.StagingRoot)) -Label 'atomic-manifest-association-before-candidate-effects'
+    Assert-PhaseC -Condition ((Get-InstanceCandidateCleanupState -Attempt $attempt -Error $failure) -ceq 'PENDING') -Label 'null-return-does-not-imply-cleanup-complete'
+    Assert-PhaseCRejected -Body { Assert-InstanceNextChangeAdmission -Manifest $failureManifest -ProjectRoot $failureRoot } -Expected 'unbound or ambiguous' -Label 'attribution-does-not-grant-activation-or-next-change'
+    Assert-PhaseC -Condition (-not (Get-InstanceDesiredState -ProjectRoot $failureRoot).Present -and $null -eq (Get-ValidatedCurrentInstance -Manifest $failureManifest -ProjectRoot $failureRoot -AllowMissing)) -Label 'status-independent-of-failed-action-history'
+    $retained.originating_action.operation_id = 'not-an-operation'
+    Assert-PhaseCRejected -Body { Assert-InstanceManifestOrigin -Document $retained } -Expected 'identity is invalid' -Label 'malformed-additive-origin-refused'
+    Invoke-PhaseCRecordFault -Path (Join-Path $root $script:InstanceCurrentRelativePath) -Change { param($d) $d.project_identity = '0' * 64 } -Read { Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root } -Expected 'identity' -Label 'foreign-project-refused'
+    $beforeRoot = New-FirstRoot 'before-manifest'
+    $beforeManifest = Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $beforeRoot
+    $blockedStage = Join-Path $beforeRoot ($script:RuntimeRelativePath + '/blocked-stage')
+    New-Item -ItemType Directory -Force -Path (Split-Path $blockedStage -Parent) | Out-Null
+    New-Item -ItemType File -Path $blockedStage | Out-Null
+    $beforeAttempt = $null; $beforeError = $null
+    try { $null = New-VerifiedInstanceCandidate -Manifest $beforeManifest -ProjectRoot $beforeRoot -GenerationRoot $generation -PreviousInstance $null -OriginatingAction $origin -StageRoot $blockedStage -CandidateAttempt ([ref]$beforeAttempt) } catch { $beforeError = $_.Exception }
+    Assert-PhaseC -Condition ($null -ne $beforeError -and $null -ne $beforeAttempt -and -not (Test-Path -LiteralPath $beforeAttempt.InstanceRoot) -and $beforeError.Data['InstanceCandidateOrigin'].action_id -ceq $origin.action_id) -Label 'before-manifest-failure-no-public-candidate-effects'
+    $script:FirstNativeResult.TerminationConfirmed = $true
+    $observed = $null
+    try { $null = Invoke-InstancePowerShellScript -ScriptPath (Join-Path $generation 'scripts/prepare-codedb-project-runtime.ps1') -ProjectRoot $failureRoot -InstanceRoot $attempt.InstanceRoot } catch { $observed = $_.Exception }
+    Assert-PhaseC -Condition ($observed.Message.Contains('fixture-original-prepare-error') -and $observed.Data['InstanceNativeResult'].ExitCode -eq 23 -and -not $observed.Data['InstanceExecutionObservationIncomplete']) -Label 'fully-observed-native-failure-not-unknown-effects'
+    Set-Variable -Scope Global -Name PocFixture -Value $true
+    Assert-PhaseC -Condition ($script:FirstNativeCalls -eq 2) -Label 'two-isolated-native-boundary-observations-no-process-launch'
+}
+
+if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly) {
+    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly
     return
 }
 

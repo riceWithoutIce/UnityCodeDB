@@ -26,6 +26,12 @@ param(
     [ValidatePattern('^[0-9a-f]{32}$')]
     [string]$HistoricalActionId,
 
+    [ValidatePattern('^[0-9a-f]{32}$')]
+    [string]$OriginatingActionId,
+
+    [ValidatePattern('^[0-9a-f]{32}$')]
+    [string]$OriginatingOperationId,
+
     [ValidateRange(0, 1000)]
     [int]$TestFailAfterMutation = 0,
 
@@ -11965,7 +11971,9 @@ try {
     }
 
     if ($Action -eq "Install") {
-        Throw-MaterializerError -Message "Install CodeDB is available only while project integration is UNINSTALLED." -ExitCode 4
+        Invoke-InstanceConvergence -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -ActionName "Install"
+        Write-MaterializerCommandResult -ExitCode 0
+        exit 0
     }
 
     if ($Action -eq "DryRun") {

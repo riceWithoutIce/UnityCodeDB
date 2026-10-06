@@ -15,6 +15,7 @@ namespace Rice.AI.Codedb.Editor
         internal AICodedbProductStatus ProductStatus { get; }
         internal AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure TerminalConvergenceFailureEvidence { get; }
         internal bool IsProjectUninstalled => ProjectIntegrationStatus.IsUninstalled;
+        internal bool IsProjectNotIntegrated => ProjectIntegrationStatus.IsNotIntegrated;
         internal AICodedbCurrentInstanceStatus CurrentInstanceStatus { get; }
         internal AICodedbStatusItem CurrentInstance { get; }
         internal AICodedbStatusItem CoordinatorFailure { get; }
@@ -60,7 +61,8 @@ namespace Rice.AI.Codedb.Editor
             _context = context;
             var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
             RuntimeContractTargetGenerationId = runtimeContract.Target.GenerationId;
-            ProjectIntegrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            ProjectIntegrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot,
+                AICodedbControlContractMigrationStore.Read(context.ProjectRoot, context.PackageRoot));
             CurrentInstanceStatus = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
             RuntimeRootRelativePath = CurrentInstanceStatus.IsCurrent
                 ? CurrentInstanceStatus.InstanceRelativePath
@@ -181,6 +183,7 @@ namespace Rice.AI.Codedb.Editor
             var cachedReady = productState == AICodedbProductState.Ready;
             var cachedMissingPrerequisite = productState == AICodedbProductState.MissingPrerequisite;
             var cachedUninstalled = productState == AICodedbProductState.Uninstalled;
+            var cachedNotIntegrated = productState == AICodedbProductState.NotIntegrated;
             var cachedNeedsAttention = productState == AICodedbProductState.NeedsAttention;
             var showChecking = statusRefreshInFlight
                                && productState == AICodedbProductState.Starting;
@@ -188,7 +191,7 @@ namespace Rice.AI.Codedb.Editor
                 ? AICodedbProductLayerState.Current
                 : cachedMissingPrerequisite
                     ? AICodedbProductLayerState.Missing
-                    : cachedUninstalled
+                    : cachedUninstalled || cachedNotIntegrated
                         ? AICodedbProductLayerState.Unknown
                         : cachedNeedsAttention
                             ? AICodedbProductLayerState.Blocked
@@ -197,7 +200,7 @@ namespace Rice.AI.Codedb.Editor
                 ? AICodedbProductLayerState.Current
                 : cachedMissingPrerequisite
                     ? AICodedbProductLayerState.Unknown
-                    : cachedUninstalled
+                    : cachedUninstalled || cachedNotIntegrated
                         ? AICodedbProductLayerState.Unknown
                         : cachedNeedsAttention
                             ? AICodedbProductLayerState.Blocked
@@ -208,6 +211,8 @@ namespace Rice.AI.Codedb.Editor
                     ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
                 : cachedUninstalled
                     ? "CodeDB is uninstalled from this project; live checks resume after installation."
+                : cachedNotIntegrated
+                    ? "This project has no CodeDB integration; use Install CodeDB to begin."
                 : cachedNeedsAttention
                     ? "The last CodeDB check needs attention; detailed live checks were not evaluated in this cached result."
                 : showChecking
@@ -223,7 +228,7 @@ namespace Rice.AI.Codedb.Editor
             ProjectIntegrationStatus = new AICodedbProjectIntegrationStatus(
                 cachedUninstalled
                     ? AICodedbProjectIntegrationState.Uninstalled
-                    : AICodedbProjectIntegrationState.Installed,
+                    : cachedNotIntegrated ? AICodedbProjectIntegrationState.NotIntegrated : AICodedbProjectIntegrationState.Installed,
                 cachedUninstalled
                     ? AICodedbProjectCleanupState.Complete
                     : AICodedbProjectCleanupState.None,
@@ -384,7 +389,7 @@ namespace Rice.AI.Codedb.Editor
             ToolProfile = AICodedbStatusItem.Ok("Default profile", AICodedbProjectSettings.DefaultToolProfile, "Read-only discovery and source lookup.");
             OverallState = cachedReady
                 ? AICodedbStatusState.Ok
-                : cachedUninstalled
+                : cachedUninstalled || cachedNotIntegrated
                     ? AICodedbStatusState.Inactive
                 : cachedMissingPrerequisite
                     ? AICodedbStatusState.Error
@@ -676,6 +681,7 @@ namespace Rice.AI.Codedb.Editor
                 case AICodedbProductState.Ready:
                     return AICodedbStatusState.Ok;
                 case AICodedbProductState.Uninstalled:
+                case AICodedbProductState.NotIntegrated:
                     return AICodedbStatusState.Inactive;
                 case AICodedbProductState.Starting:
                     return AICodedbStatusState.Warning;
@@ -703,6 +709,8 @@ namespace Rice.AI.Codedb.Editor
                     return projectName + " · Starting";
                 case AICodedbProductState.Uninstalled:
                     return projectName + " · Uninstalled";
+                case AICodedbProductState.NotIntegrated:
+                    return projectName + " · Not installed";
                 case AICodedbProductState.MissingPrerequisite:
                     return projectName + " · Missing prerequisite";
                 default:

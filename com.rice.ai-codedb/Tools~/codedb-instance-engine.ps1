@@ -842,7 +842,7 @@ function Publish-InstanceActivationFileIfAbsentOrIdentical {
 }
 
 function Assert-FreshInstanceActivationNamespace {
-    param([Parameter(Mandatory = $true)]$Context)
+    param([Parameter(Mandatory = $true)]$Context, [switch]$PreserveCurrentSupervisorNamespace)
 
     $contractRoot = [string]$Context.Paths.ContractRoot
     if (-not (Test-Path -LiteralPath $contractRoot)) { return }
@@ -852,6 +852,10 @@ function Assert-FreshInstanceActivationNamespace {
     Assert-NoReparsePoint -Path $contractRoot -Root $Context.ProjectRoot -Label "activation contract namespace"
     foreach ($entry in @(Get-ChildItem -LiteralPath $contractRoot -Force)) {
         Assert-NoReparsePoint -Path $entry.FullName -Root $Context.ProjectRoot -Label "activation contract namespace entry"
+        if ($PreserveCurrentSupervisorNamespace -and $entry.Name -ceq 'supervisor') {
+            if (-not $entry.PSIsContainer) { throw 'Current Supervisor namespace is not a directory.' }
+            continue
+        }
         if ($entry.Name -ceq "activation.json" -or $entry.Name -ceq "operation.json") {
             if ($entry.PSIsContainer) { throw "Activation contract namespace record is not a regular file: $($entry.Name)" }
             continue
@@ -907,7 +911,8 @@ function Initialize-FreshInstanceActivationContract {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)]$ActivationDocument,
-        [Parameter(Mandatory = $true)]$OperationDocument
+        [Parameter(Mandatory = $true)]$OperationDocument,
+        [switch]$PreserveCurrentSupervisorNamespace
     )
 
     $activation = Assert-InstanceActivationRecordDocument -Document $ActivationDocument -Context $Context
@@ -925,7 +930,7 @@ function Initialize-FreshInstanceActivationContract {
     foreach ($path in @($Context.Paths.ContractRoot, $Context.Paths.OperationRoot)) {
         Assert-NoReparsePoint -Path $path -Root $Context.ProjectRoot -Label "activation contract directory"
     }
-    Assert-FreshInstanceActivationNamespace -Context $Context
+    Assert-FreshInstanceActivationNamespace -Context $Context -PreserveCurrentSupervisorNamespace:$PreserveCurrentSupervisorNamespace
     if (Test-Path -LiteralPath $Context.Paths.ActivationPath) {
         $existingActivation = Read-InstanceActivationRecord -Context $Context
         if (-not [string]::Equals($existingActivation.Text, $activationText, [StringComparison]::Ordinal)) {
@@ -942,7 +947,7 @@ function Initialize-FreshInstanceActivationContract {
     Assert-NoReparsePoint -Path $Context.Paths.ContractRoot -Root $Context.ProjectRoot -Label "activation contract root"
     New-Item -ItemType Directory -Force -Path $Context.Paths.OperationRoot | Out-Null
     Assert-NoReparsePoint -Path $Context.Paths.OperationRoot -Root $Context.ProjectRoot -Label "activation operation root"
-    Assert-FreshInstanceActivationNamespace -Context $Context
+    Assert-FreshInstanceActivationNamespace -Context $Context -PreserveCurrentSupervisorNamespace:$PreserveCurrentSupervisorNamespace
     $operationCreated = Publish-InstanceActivationFileIfAbsentOrIdentical `
         -Path $Context.Paths.OperationPath `
         -Content $operationText `
@@ -958,7 +963,7 @@ function Initialize-FreshInstanceActivationContract {
     $publishedActivation = Read-InstanceActivationRecord -Context $Context
     $publishedOperation = Read-InstanceActivationOperation -Context $Context
     Assert-InstanceActivationDocumentsMatch -Activation $publishedActivation -Operation $publishedOperation
-    Assert-FreshInstanceActivationNamespace -Context $Context
+    Assert-FreshInstanceActivationNamespace -Context $Context -PreserveCurrentSupervisorNamespace:$PreserveCurrentSupervisorNamespace
     return [pscustomobject]@{
         Created = $activationCreated -or $operationCreated
         Activation = $publishedActivation
@@ -1572,7 +1577,8 @@ function Publish-InstanceActivationTransaction {
     Initialize-FreshInstanceActivationContract `
         -Context $context `
         -ActivationDocument $preparedActivation `
-        -OperationDocument $preparedOperation | Out-Null
+        -OperationDocument $preparedOperation `
+        -PreserveCurrentSupervisorNamespace | Out-Null
 
     try {
         if ($null -ne $VerifyBeforeMutation) { & $VerifyBeforeMutation }
@@ -2010,6 +2016,7 @@ function Get-ValidatedCurrentInstance {
     $instanceManifestPath = Join-Path $instanceRoot "instance.json"
     Assert-NoReparsePoint -Path $instanceManifestPath -Root $ProjectRoot -Label "current instance manifest"
     $instanceJson = Read-BoundedJsonDocument -Path $instanceManifestPath -Label "current instance manifest" -MaximumBytes (128 * 1024)
+    Assert-InstanceManifestOrigin -Document $instanceJson.Document
     $expectedManifestHash = Get-RequiredJsonString -Object $selection -Name "instance_manifest_sha256" -Label "current instance selection"
     if ($expectedManifestHash -cnotmatch '^[0-9a-f]{64}$' -or
         -not [string]::Equals((Get-FileSha256 -Path $instanceManifestPath), $expectedManifestHash, [StringComparison]::OrdinalIgnoreCase)) {
@@ -2047,13 +2054,45 @@ function Get-ValidatedCurrentInstance {
     }
 }
 
+function Assert-InstanceOriginatingAction {
+    param([AllowNull()]$Origin)
+    if ($null -eq $Origin) { return }
+    $value = if ($Origin -is [Collections.IDictionary]) { [pscustomobject]$Origin } else { $Origin }
+    $object = Assert-JsonObject -Value $value -Label 'candidate originating action'
+    Assert-InstanceJsonFieldAllowlist -Object $object -Fields @('action', 'action_id', 'operation_id') -Label 'candidate originating action'
+    if ((Get-RequiredJsonString -Object $object -Name 'action' -Label 'candidate originating action') -cnotin @('INSTALL', 'UPGRADE', 'REINSTALL') -or
+        (Get-RequiredJsonString -Object $object -Name 'action_id' -Label 'candidate originating action') -cnotmatch '^[0-9a-f]{32}$' -or
+        (Get-RequiredJsonString -Object $object -Name 'operation_id' -Label 'candidate originating action') -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'Candidate originating action identity is invalid.'
+    }
+}
+
+function Assert-InstanceManifestOrigin {
+    param([Parameter(Mandatory = $true)]$Document)
+    $property = Get-ExactJsonProperty -Object $Document -Name 'originating_action' -Label 'instance manifest'
+    if ($null -ne $property) { Assert-InstanceOriginatingAction -Origin $property.Value }
+}
+
+function Get-InstanceCandidateCleanupState {
+    param([AllowNull()]$Attempt, [Parameter(Mandatory = $true)]$Error)
+    if ($Error.Data['InstanceExecutionObservationIncomplete']) { return 'PENDING' }
+    if ($null -eq $Attempt) { return 'COMPLETE' }
+    try {
+        foreach ($path in @($Attempt.InstanceRoot, $Attempt.StagingRoot)) {
+            if (-not [string]::IsNullOrEmpty($path) -and (Test-Path -LiteralPath $path)) { return 'PENDING' }
+        }
+    } catch { return 'PENDING' }
+    return 'COMPLETE'
+}
+
 function New-InstanceManifestDocument {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$InstanceId,
         [Parameter(Mandatory = $true)][ValidateSet("PROVISIONING", "READY", "RETIRED")][string]$State,
-        [Parameter(Mandatory = $true)][string]$CreatedAtUtc
+        [Parameter(Mandatory = $true)][string]$CreatedAtUtc,
+        [AllowNull()]$OriginatingAction
     )
 
     $generationManifestTarget = $script:GenerationTargetPrefix + "generation-manifest.json"
@@ -2061,7 +2100,8 @@ function New-InstanceManifestDocument {
     if (-not $Manifest.TargetMap.ContainsKey($generationManifestTarget) -or -not $Manifest.TargetMap.ContainsKey($workerTarget)) {
         throw "Package payload is missing the $($Manifest.GenerationId) generation manifest or instance worker."
     }
-    return [ordered]@{
+    Assert-InstanceOriginatingAction -Origin $OriginatingAction
+    $document = [ordered]@{
         schema_version = $script:InstanceSchemaVersion
         managed_by = $script:ManagedBy
         project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
@@ -2080,6 +2120,8 @@ function New-InstanceManifestDocument {
         created_at_utc = $CreatedAtUtc
         verified_at_utc = if ($State -eq "READY") { [DateTime]::UtcNow.ToString("o") } else { "" }
     }
+    if ($null -ne $OriginatingAction) { $document.originating_action = $OriginatingAction }
+    return $document
 }
 
 function Write-InstanceManifest {
@@ -2184,13 +2226,16 @@ function Invoke-InstancePowerShellScript {
         } `
         -WhileRunning $WhileRunning
     if ($result.TimedOut -or -not $result.TerminationConfirmed -or $result.OutputDrainIncomplete) {
-        $incomplete = [InvalidOperationException]::new('Instance execution observation is incomplete; candidate effects remain unknown.')
+        $incomplete = [InvalidOperationException]::new("Instance execution observation is incomplete; candidate effects remain unknown. Observed exit: $($result.ExitCode). $($result.StandardError) $($result.StandardOutput)")
         $incomplete.Data['InstanceExecutionObservationIncomplete'] = $true
+        $incomplete.Data['InstanceNativeResult'] = $result
         throw $incomplete
     }
     if ($result.ExitCode -ne 0) {
         $detail = @($result.StandardError, $result.StandardOutput) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        throw "Package-owned instance script failed ($([System.IO.Path]::GetFileName($ScriptPath)), exit $($result.ExitCode)): $($detail -join ' ')"
+        $failure = [InvalidOperationException]::new("Package-owned instance script failed ($([System.IO.Path]::GetFileName($ScriptPath)), exit $($result.ExitCode)): $($detail -join ' ')")
+        $failure.Data['InstanceNativeResult'] = $result
+        throw $failure
     }
     return $result
 }
@@ -2337,23 +2382,41 @@ function New-VerifiedInstanceCandidate {
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$GenerationRoot,
-        [AllowNull()]$PreviousInstance
+        [AllowNull()]$PreviousInstance,
+        [Parameter(Mandatory = $true)]$OriginatingAction,
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [AllowNull()][ref]$CandidateAttempt
     )
 
     $instanceId = [guid]::NewGuid().ToString("N")
     $relativePath = "$($script:InstancesRelativePath)/$instanceId"
     $instanceRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relativePath -Label "candidate instance root"
     if (Test-Path -LiteralPath $instanceRoot) { throw "Candidate instance identity collided with an existing path." }
-    New-Item -ItemType Directory -Path $instanceRoot | Out-Null
-    foreach ($directory in @("config", "index", "adapter", "watch", "leases", "logs", "tmp")) {
-        New-Item -ItemType Directory -Path (Join-Path $instanceRoot $directory) | Out-Null
-    }
     $createdAt = [DateTime]::UtcNow.ToString("o")
-    $document = New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceId $instanceId -State "PROVISIONING" -CreatedAtUtc $createdAt
-    $manifestPath = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $document
+    $document = New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceId $instanceId -State "PROVISIONING" -CreatedAtUtc $createdAt -OriginatingAction $OriginatingAction
+    $materializerRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:RuntimeRelativePath -Label 'candidate staging authority'
+    Assert-PathInside -Path $StageRoot -Root $materializerRoot -Label 'candidate staging authority'
+    Assert-NoReparsePoint -Path $StageRoot -Root $ProjectRoot -Label 'candidate staging authority'
+    $stagingRoot = Join-Path $StageRoot ('candidate-' + $instanceId)
+    if (Test-Path -LiteralPath $stagingRoot) { throw 'Candidate staging identity collided.' }
+    if ($null -ne $CandidateAttempt) {
+        $CandidateAttempt.Value = [pscustomobject]@{ InstanceId = $instanceId; InstanceRoot = $instanceRoot; StagingRoot = $stagingRoot; OriginatingAction = $OriginatingAction }
+    }
     $lease = $null
     $lifecycleId = "candidate-$instanceId"
     try {
+        # The existing materializer staging writer durably publishes the full
+        # instance/action association before the candidate namespace appears.
+        New-Item -ItemType Directory -Path $stagingRoot | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $stagingRoot 'tmp') | Out-Null
+        $null = Write-InstanceManifest -InstanceRoot $stagingRoot -Document $document
+        New-Item -ItemType Directory -Force -Path (Split-Path $instanceRoot -Parent) | Out-Null
+        Add-MaterializerMutationScope -Scope 'instance_candidate'
+        [IO.Directory]::Move($stagingRoot, $instanceRoot)
+        $manifestPath = Join-Path $instanceRoot 'instance.json'
+        foreach ($directory in $script:InstanceAllowedDirectories) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $instanceRoot $directory) | Out-Null
+        }
         if ($PocFixture) {
             New-Item -ItemType Directory -Force -Path (Join-Path $instanceRoot "watch\lifecycle") | Out-Null
             New-Item -ItemType File -Force -Path (Join-Path $instanceRoot "index\fixture-ready") | Out-Null
@@ -2378,7 +2441,7 @@ function New-VerifiedInstanceCandidate {
                 -Arguments @("-Action", "Ensure", "-LifecycleId", $lifecycleId, "-RequireNewOwner", "-ExclusiveOwner") `
                 -WhileRunning $leaseHeartbeat
         }
-        $readyDocument = New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceId $instanceId -State "READY" -CreatedAtUtc $createdAt
+        $readyDocument = New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceId $instanceId -State "READY" -CreatedAtUtc $createdAt -OriginatingAction $OriginatingAction
         $manifestPath = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $readyDocument
         $probe = Invoke-InstanceCandidateProbe `
             -Manifest $Manifest `
@@ -2399,9 +2462,11 @@ function New-VerifiedInstanceCandidate {
             ExecutionObservationComplete = $true
         }
     } catch {
+        $originalFailure = $_.Exception
+        $originalFailure.Data['InstanceCandidateOrigin'] = $OriginatingAction
         if ($_.Exception.Data['InstanceExecutionObservationIncomplete']) {
             Write-Warning 'Candidate retained without cleanup because its execution effects are unproved.'
-            throw
+            throw $originalFailure
         }
         if (Test-Path -LiteralPath $instanceRoot -PathType Container) {
             $candidateEvidence = $null
@@ -2428,7 +2493,7 @@ function New-VerifiedInstanceCandidate {
                 Write-Warning "Candidate instance was retained for safe retirement: $($_.Exception.Message)"
             }
         }
-        throw
+        throw $originalFailure
     }
 }
 
@@ -3038,7 +3103,7 @@ function Get-InstanceActivationEntries {
     }
 
     $mcpPlanParameters = @{ ProjectRoot = $ProjectRoot }
-    if ($ActionName -eq "Install") {
+    if ($ActionName -eq "Install" -and -not [string]::IsNullOrWhiteSpace($UninstallStateId)) {
         $null = Assert-ProjectIntegrationStateId -StateId $UninstallStateId
         $mcpPlanParameters.RestoreUninstalledNamespace = $true
         $mcpPlanParameters.UninstallStateId = $UninstallStateId
@@ -3340,6 +3405,7 @@ function Get-ValidatedRetiredInstance {
     $manifestPath = Join-Path $InstanceRoot "instance.json"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Retired instance manifest is missing." }
     $document = (Read-BoundedJsonDocument -Path $manifestPath -Label "retired instance manifest" -MaximumBytes (128 * 1024)).Document
+    Assert-InstanceManifestOrigin -Document $document
     $state = Get-RequiredJsonString -Object $document -Name "state" -Label "retired instance manifest"
     $expectedStates = @("READY", "RETIRED")
     if ($AllowProvisioning) { $expectedStates += "PROVISIONING" }
@@ -4263,6 +4329,57 @@ function Get-InstanceCurrentReadiness {
     }
 }
 
+function Test-InstanceSupervisorOnlyControl {
+    param([Parameter(Mandatory = $true)]$Manifest, [Parameter(Mandatory = $true)][string]$ProjectRoot)
+    $controlRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceControlRelativePath -Label 'first Install control evidence'
+    if (-not (Test-Path -LiteralPath $controlRoot)) { return $true }
+    $contractRoot = Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $levels = @('contracts', [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($contractRoot)), [IO.Path]::GetFileName($contractRoot), 'supervisor')
+    $path = $controlRoot
+    foreach ($name in $levels) {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) { return $false }
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'first Install control evidence'
+        $entries = @(Get-ChildItem -LiteralPath $path -Force)
+        if ($entries.Count -ne 1 -or -not $entries[0].PSIsContainer -or $entries[0].Name -cne $name) { return $false }
+        $path = $entries[0].FullName
+    }
+    Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'first Install Supervisor evidence'
+    return $true
+}
+
+function Test-InstanceFirstInstall {
+    param([Parameter(Mandatory = $true)]$Manifest, [Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    if ((Get-InstanceDesiredState -ProjectRoot $ProjectRoot).Present) { return $false }
+    if (-not (Test-InstanceSupervisorOnlyControl -Manifest $Manifest -ProjectRoot $ProjectRoot)) { return $false }
+    $runtimeRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath 'AIWork/.runtime/codedb' -Label 'first Install runtime evidence'
+    if (Test-Path -LiteralPath $runtimeRoot) {
+        if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { return $false }
+        $entries = @(Get-ChildItem -LiteralPath $runtimeRoot -Force | Select-Object -First 3)
+        if ($entries.Count -gt 2) { return $false }
+        foreach ($entry in $entries) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'first Install runtime evidence'
+            if (-not $entry.PSIsContainer -or $entry.Name -cnotin @('control', 'payload-materializer')) { return $false }
+        }
+    }
+    foreach ($relative in @('AIWork/codedb', 'AIWork/.runtime/codedb/host', $script:InstancesRelativePath,
+        $script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath,
+        $script:InstanceOperationRelativePath, $script:InstanceOperationsRelativePath,
+        $script:InstanceRetiredRelativePath, $script:InstanceRemovalIntentsRelativePath)) {
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'first Install evidence'
+        if (Test-Path -LiteralPath $path) { return $false }
+    }
+    # A Supervisor may already own the canonical namespace. It does not prove
+    # integration; existing activation/operation authority does.
+    if ($null -ne (Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot)) { return $false }
+    $config = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath '.codex/config.toml' -Label 'first Install registration'
+    if (Test-Path -LiteralPath $config) {
+        if (-not (Test-Path -LiteralPath $config -PathType Leaf) -or (Get-Item -LiteralPath $config).Length -gt 131072) { return $false }
+        if ([IO.File]::ReadAllText($config) -match '(?im)^\s*(?:#\s*)?\[mcp_servers\.codedb-project(?:\.[^\]]+)?\]') { return $false }
+    }
+    return $true
+}
+
 function Invoke-InstanceConvergence {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -4272,8 +4389,9 @@ function Invoke-InstanceConvergence {
     )
 
     $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-    if ($ActionName -eq "Install" -and $desiredBefore.DesiredState -ne "UNINSTALLED") {
-        Throw-MaterializerError -Message "Install CodeDB is available only while the project is explicitly UNINSTALLED." -ExitCode 4
+    $firstInstall = $ActionName -eq 'Install' -and (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot)
+    if ($ActionName -eq "Install" -and $desiredBefore.DesiredState -ne "UNINSTALLED" -and -not $firstInstall) {
+        Throw-MaterializerError -Message "Install CodeDB requires a target-bound first Install or a project that is explicitly UNINSTALLED." -ExitCode 4
     }
     if ($ActionName -ne "Install" -and $desiredBefore.DesiredState -eq "UNINSTALLED") {
         Throw-MaterializerError -Message "$ActionName cannot override the project's explicit UNINSTALLED desired state." -ExitCode 4
@@ -4281,6 +4399,17 @@ function Invoke-InstanceConvergence {
     $null = Assert-MachinePrerequisiteForAction -Manifest $Manifest -ActionName $ActionName
     $lock = $null
     $candidate = $null
+    $candidateAttempt = $null
+    $originOperation = [string](Get-Variable -Name OriginatingOperationId -ValueOnly -ErrorAction SilentlyContinue)
+    if ([string]::IsNullOrEmpty($originOperation)) { $originOperation = [guid]::NewGuid().ToString('N') }
+    $originAction = [string](Get-Variable -Name OriginatingActionId -ValueOnly -ErrorAction SilentlyContinue)
+    if ([string]::IsNullOrEmpty($originAction)) { $originAction = $originOperation }
+    if ($originAction -cnotmatch '^[0-9a-f]{32}$' -or $originOperation -cnotmatch '^[0-9a-f]{32}$') { throw 'Originating action identity is invalid.' }
+    $origin = [ordered]@{
+        action = $ActionName.ToUpperInvariant()
+        action_id = $originAction
+        operation_id = $originOperation
+    }
     $generationTransactionRoot = $null
     Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     try {
@@ -4322,7 +4451,10 @@ function Invoke-InstanceConvergence {
             $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desiredLocked.StateId
         }
         $expectedInstallCleanupState = if ($null -ne $removalIntent) { "PENDING" } else { "COMPLETE" }
-        if ($ActionName -eq "Install" -and
+        if ($firstInstall -and ($desiredLocked.Present -or -not (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot))) {
+            throw 'First Install evidence changed while waiting for the project operation lock.'
+        }
+        if ($ActionName -eq "Install" -and -not $firstInstall -and
             ($desiredLocked.DesiredState -ne "UNINSTALLED" -or
              -not $desiredLocked.Present -or
              $desiredLocked.Legacy -or
@@ -4403,7 +4535,7 @@ function Invoke-InstanceConvergence {
             -MutationOccurred ([ref]$generationMutated)
 
         Set-MaterializerCommandPhase -Phase "CANDIDATE"
-        $candidate = New-VerifiedInstanceCandidate -Manifest $Manifest -ProjectRoot $ProjectRoot -GenerationRoot $generationRoot -PreviousInstance $previous
+        $candidate = New-VerifiedInstanceCandidate -Manifest $Manifest -ProjectRoot $ProjectRoot -GenerationRoot $generationRoot -PreviousInstance $previous -OriginatingAction $origin -StageRoot $generationTransactionRoot -CandidateAttempt ([ref]$candidateAttempt)
         $previousLastKnownGood = Get-ValidatedCurrentInstance `
             -Manifest $Manifest `
             -ProjectRoot $ProjectRoot `
@@ -4569,13 +4701,12 @@ function Invoke-InstanceConvergence {
                 }
             }
         }
-        if ($script:RequestedExitCode -ne 0) {
-            throw $originalError
-        }
         $rollbackUnproven = $originalError.Message.IndexOf(
             "rollback was not proven",
             [StringComparison]::OrdinalIgnoreCase) -ge 0
-        $reasonCode = if ($rollbackUnproven) {
+        $reasonCode = if ($originalError.Data['InstanceExecutionObservationIncomplete']) {
+            'INSTANCE_EXECUTION_OBSERVATION_INCOMPLETE'
+        } elseif ($rollbackUnproven) {
             "INSTANCE_ROLLBACK_UNPROVEN"
         } elseif ($script:CommandPhase -eq "CANDIDATE") {
             "INSTANCE_CANDIDATE_FAILED"
@@ -4584,16 +4715,13 @@ function Invoke-InstanceConvergence {
         } else {
             "INSTANCE_CONVERGENCE_FAILED"
         }
-        $cleanupState = if ($null -ne $candidate -and (Test-Path -LiteralPath $candidate.InstanceRoot)) {
-            "PENDING"
-        } else {
-            "COMPLETE"
-        }
+        $cleanupState = Get-InstanceCandidateCleanupState -Attempt $candidateAttempt -Error $originalError
         Set-MaterializerCommandOutcome `
             -Outcome "BLOCKED" `
             -ReasonCode $reasonCode `
             -CleanupState $cleanupState `
-            -NextAction "CodeDB will retry automatic convergence after the underlying failure is corrected."
+            -NextAction "Review the original failure and retained or unknown candidate effects before another confirmed project change; no automatic replay is authorized."
+        if ($script:RequestedExitCode -ne 0) { throw $originalError }
         Throw-MaterializerError `
             -Message "Instance $ActionName failed without selecting an unverified candidate. $($originalError.Message)" `
             -ExitCode $(if ($rollbackUnproven) { 7 } else { 6 })

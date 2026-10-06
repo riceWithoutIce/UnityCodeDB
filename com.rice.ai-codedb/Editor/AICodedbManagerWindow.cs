@@ -417,6 +417,8 @@ namespace Rice.AI.Codedb.Editor
                 return;
             if (_statusSnapshot.IsProjectUninstalled)
                 return;
+            if (_statusSnapshot.IsProjectNotIntegrated)
+                return;
             if (EditorApplication.isCompiling
                 || EditorApplication.isUpdating
                 || IsPlayModeDisplaySuspended())
@@ -1509,6 +1511,10 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawSetupTab()
         {
+            if (_statusSnapshot.IsProjectNotIntegrated)
+                AICodedbSectionView.DrawBanner("CodeDB is not installed in this project",
+                    _statusSnapshot.ProductStatus.Detail, AICodedbStatusState.Inactive,
+                    "Install CodeDB", _userActionInFlight ? null : (Action)RunInstallCodeDBWithConfirmation);
             AICodedbSectionView.DrawPageHeader(
                 "Setup",
                 "Provider、配置与项目本地运行时",
@@ -2136,6 +2142,7 @@ namespace Rice.AI.Codedb.Editor
             switch (_statusSnapshot.ProductStatus.State)
             {
                 case AICodedbProductState.Uninstalled:
+                case AICodedbProductState.NotIntegrated:
                     return "Install CodeDB";
                 case AICodedbProductState.NeedsAttention:
                 {
@@ -2169,7 +2176,7 @@ namespace Rice.AI.Codedb.Editor
                 return;
             }
 
-            if (_statusSnapshot != null && _statusSnapshot.IsProjectUninstalled)
+            if (_statusSnapshot != null && (_statusSnapshot.IsProjectUninstalled || _statusSnapshot.IsProjectNotIntegrated))
                 RunInstallCodeDBWithConfirmation();
             else if (_statusSnapshot != null &&
                      IsRemoveIntegrationMenuAvailable(GetRemovalPresentationStatus()))
@@ -2322,7 +2329,7 @@ namespace Rice.AI.Codedb.Editor
         {
             if (actionInFlight)
                 return false;
-            if (productStatus.State == AICodedbProductState.Uninstalled)
+            if (productStatus.State == AICodedbProductState.Uninstalled || productStatus.State == AICodedbProductState.NotIntegrated)
                 return true;
             if (!recoveryAvailable || productStatus.State != AICodedbProductState.NeedsAttention)
                 return false;
@@ -3196,6 +3203,8 @@ namespace Rice.AI.Codedb.Editor
                     return "CodeDB is starting";
                 case AICodedbProductState.Uninstalled:
                     return "CodeDB is uninstalled";
+                case AICodedbProductState.NotIntegrated:
+                    return "CodeDB is not installed in this project";
                 case AICodedbProductState.MissingPrerequisite:
                     return "CodeDB needs a prerequisite";
                 default:

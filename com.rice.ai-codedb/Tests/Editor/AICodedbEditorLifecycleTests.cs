@@ -50,14 +50,152 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void ProjectIntegrationState_AbsentKeepsLifecycleInstalled()
+        public void ProjectIntegrationState_NoIntegrationOffersFirstInstallWithoutUninstallHistory()
         {
             var status = AICodedbProjectIntegrationStateStore.Read(_projectRoot);
 
-            Assert.That(status.State, Is.EqualTo(AICodedbProjectIntegrationState.Installed));
+            Assert.That(status.State, Is.EqualTo(AICodedbProjectIntegrationState.NotIntegrated));
             Assert.That(status.CleanupState, Is.EqualTo(AICodedbProjectCleanupState.None));
-            Assert.That(AICodedbEditorLifecycle.ShouldPublishEditorLease(status), Is.True);
+            Assert.That(status.StateId, Is.Empty);
+            Assert.That(status.IsUninstalled, Is.False);
+            Assert.That(status.CanInstall, Is.True);
+            Assert.That(AICodedbProductStatusBuilder.Build(status, null).State, Is.EqualTo(AICodedbProductState.NotIntegrated));
+            Assert.That(AICodedbEditorLifecycle.ShouldPublishEditorLease(status), Is.False);
             Assert.That(AICodedbEditorLifecycle.ShouldRunAutomaticUninstallCleanup(status), Is.False);
+        }
+
+        [TestCase("AIWork/codedb")]
+        [TestCase("AIWork/.runtime/codedb/instances")]
+        [TestCase("AIWork/.runtime/codedb/control")]
+        public void ProjectIntegrationState_MissingDesiredStateAloneDoesNotProveFirstInstall(string evidence)
+        {
+            Directory.CreateDirectory(Path.Combine(_projectRoot, evidence));
+            Assert.That(AICodedbProjectIntegrationStateStore.Read(_projectRoot).IsNotIntegrated, Is.False);
+        }
+
+        [Test]
+        public void ProjectIntegrationState_CurrentSupervisorOnlyNamespaceOffersFirstInstall()
+        {
+            var migration = CreateMigrationStatus(AICodedbControlContractMigrationState.Current);
+            var supervisorPath = AICodedbControlContract.GetSupervisorRuntimePath(_projectRoot, migration.Contract);
+            Directory.CreateDirectory(supervisorPath);
+            var observationPath = Path.Combine(supervisorPath, "fixture-observation.json");
+            File.WriteAllText(observationPath, "{\"fixture\":true}");
+
+            var status = AICodedbProjectIntegrationStateStore.Read(_projectRoot, migration);
+
+            Assert.That(status.IsNotIntegrated, Is.True);
+            Assert.That(status.CanInstall, Is.True);
+            Assert.That(status.IsUninstalled, Is.False);
+            Assert.That(status.StateId, Is.Empty);
+            Assert.That(AICodedbEditorLifecycle.ShouldPublishEditorLease(status), Is.False);
+            Assert.That(File.ReadAllText(observationPath), Is.EqualTo("{\"fixture\":true}"));
+        }
+
+        [TestCase(AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
+        [TestCase(AICodedbControlContractMigrationState.InvalidOrAmbiguous)]
+        public void ProjectIntegrationState_BlockedMigrationCannotBecomeFirstInstall(
+            AICodedbControlContractMigrationState state)
+        {
+            var migration = CreateMigrationStatus(state);
+            Directory.CreateDirectory(AICodedbControlContract.GetSupervisorRuntimePath(_projectRoot, migration.Contract));
+
+            Assert.That(AICodedbProjectIntegrationStateStore.Read(_projectRoot, migration).IsNotIntegrated, Is.False);
+        }
+
+        [Test]
+        public void ProjectIntegrationState_InvalidCurrentContractCannotBecomeFirstInstall()
+        {
+            var current = CreateMigrationStatus(AICodedbControlContractMigrationState.Current);
+            Directory.CreateDirectory(AICodedbControlContract.GetSupervisorRuntimePath(_projectRoot, current.Contract));
+            var invalid = new AICodedbControlContractMigrationStatus(
+                AICodedbControlContractMigrationState.Current,
+                new AICodedbControlContractIdentity(current.Contract.Id, current.Contract.Version,
+                    current.Contract.SchemaVersion, new string('0', 64)),
+                current.CurrentNamespacePath, current.LegacyNamespacePath, string.Empty, string.Empty);
+
+            Assert.That(AICodedbProjectIntegrationStateStore.Read(_projectRoot, invalid).IsNotIntegrated, Is.False);
+        }
+
+        [TestCase("legacy-supervisor")]
+        [TestCase("foreign-contract")]
+        [TestCase("activation-record")]
+        [TestCase("unknown-runtime")]
+        public void ProjectIntegrationState_SupervisorOnlyClassificationRejectsAdditionalEvidence(string evidence)
+        {
+            var migration = CreateMigrationStatus(AICodedbControlContractMigrationState.Current);
+            var supervisorPath = AICodedbControlContract.GetSupervisorRuntimePath(_projectRoot, migration.Contract);
+            Directory.CreateDirectory(supervisorPath);
+            switch (evidence)
+            {
+                case "legacy-supervisor":
+                    Directory.CreateDirectory(Path.Combine(_projectRoot, AICodedbControlContract.LegacySupervisorRelativePath));
+                    break;
+                case "foreign-contract":
+                    Directory.CreateDirectory(Path.Combine(_projectRoot,
+                        AICodedbControlContract.NamespaceRootRelativePath, "foreign-contract/v2/supervisor"));
+                    break;
+                case "activation-record":
+                    File.WriteAllText(Path.Combine(Path.GetDirectoryName(supervisorPath), "activation.json"), "{}");
+                    break;
+                case "unknown-runtime":
+                    Directory.CreateDirectory(Path.Combine(_projectRoot, "AIWork/.runtime/codedb/unknown"));
+                    break;
+            }
+
+            Assert.That(AICodedbProjectIntegrationStateStore.Read(_projectRoot, migration).IsNotIntegrated, Is.False);
+        }
+
+        [Test]
+        public void InstanceOrigin_LegacyAbsenceAndNullRemainReadable()
+        {
+            var manifest = new Dictionary<string, object>();
+            Assert.DoesNotThrow(() => AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest));
+            manifest["originating_action"] = null;
+            Assert.DoesNotThrow(() => AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest));
+        }
+
+        [TestCase("INSTALL")]
+        [TestCase("UPGRADE")]
+        [TestCase("REINSTALL")]
+        public void InstanceOrigin_ValidAdditiveAttributionRemainsReadable(string action)
+        {
+            var manifest = new Dictionary<string, object>
+            {
+                ["originating_action"] = new Dictionary<string, object>
+                {
+                    ["action"] = action,
+                    ["action_id"] = new string('a', 32),
+                    ["operation_id"] = new string('b', 32)
+                }
+            };
+            Assert.DoesNotThrow(() => AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest));
+        }
+
+        [TestCase("action")]
+        [TestCase("action_id")]
+        [TestCase("operation_id")]
+        [TestCase("extra")]
+        [TestCase("missing-operation")]
+        [TestCase("not-object")]
+        public void InstanceOrigin_InvalidAdditiveAttributionFailsClosed(string invalidField)
+        {
+            var origin = new Dictionary<string, object>
+            {
+                ["action"] = "INSTALL",
+                ["action_id"] = new string('a', 32),
+                ["operation_id"] = new string('b', 32)
+            };
+            if (invalidField == "action") origin[invalidField] = "PROBE";
+            else if (invalidField == "extra") origin[invalidField] = "untrusted";
+            else if (invalidField == "missing-operation") origin.Remove("operation_id");
+            else if (invalidField != "not-object") origin[invalidField] = new string('A', 32);
+            var manifest = new Dictionary<string, object>
+            {
+                ["originating_action"] = invalidField == "not-object" ? (object)"not-an-object" : origin
+            };
+
+            Assert.Throws<InvalidOperationException>(() => AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest));
         }
 
         [Test]

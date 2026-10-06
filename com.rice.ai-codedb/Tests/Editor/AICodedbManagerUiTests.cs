@@ -330,6 +330,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbProductState.Ready)]
         [TestCase(AICodedbProductState.NeedsAttention)]
         [TestCase(AICodedbProductState.Uninstalled)]
+        [TestCase(AICodedbProductState.NotIntegrated)]
         [TestCase(AICodedbProductState.MissingPrerequisite)]
         [Category("S28PhaseC")]
         public void ManagerHistory_UnknownDoesNotOverrideCurrentProductStateOrAdmitMutation(
@@ -1684,6 +1685,8 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.InstanceIdentityReinstallRequired, true, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous, true, false, ExpectedResult = false)]
         [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NotIntegrated, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NotIntegrated, AICodedbProductAttentionReason.None, false, true, ExpectedResult = false)]
         [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, true, true, ExpectedResult = false)]
         [TestCase(AICodedbProductState.MissingPrerequisite, AICodedbProductAttentionReason.ControlContractReinstallRequired, true, false, ExpectedResult = false)]
         public bool ResolvePrimaryAction_ExposesOnlyOneContextualUserAction(
@@ -2125,6 +2128,24 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(clearedFailure, Is.Null);
             Assert.That(snapshot.TerminalConvergenceFailureEvidence, Is.Null);
             Assert.That(snapshot.TerminalConvergenceFailure.Summary, Is.EqualTo("Not retained"));
+            Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(snapshot.ProductStatus), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(snapshot.ProductStatus, false, false), Is.True);
+        }
+
+        [Test]
+        public void CachedNotIntegratedSnapshot_OffersInstallWithoutCheckingOrUninstallHistory()
+        {
+            var snapshot = AICodedbStatusSnapshot.CreateCachedState(
+                "FixtureProject", AICodedbProductState.NotIntegrated, true);
+
+            Assert.That(snapshot.IsProjectNotIntegrated, Is.True);
+            Assert.That(snapshot.IsProjectUninstalled, Is.False);
+            Assert.That(snapshot.ProjectIntegrationStatus.CanInstall, Is.True);
+            Assert.That(snapshot.ProjectIntegrationStatus.StateId, Is.Empty);
+            Assert.That(snapshot.ProductStatus.State, Is.EqualTo(AICodedbProductState.NotIntegrated));
+            Assert.That(snapshot.OverallState, Is.EqualTo(AICodedbStatusState.Inactive));
+            Assert.That(snapshot.OverallTitle, Does.Contain("Not installed"));
+            Assert.That(snapshot.ProductStatus.Detail, Does.Contain("Install CodeDB"));
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(snapshot.ProductStatus), Is.False);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(snapshot.ProductStatus, false, false), Is.True);
         }

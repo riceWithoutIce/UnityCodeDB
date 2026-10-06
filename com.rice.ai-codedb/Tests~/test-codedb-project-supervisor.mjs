@@ -413,7 +413,9 @@ function rewriteContractForSyntheticTarget(fixture, target, source) {
 function writeSlowProbeMaterializer(fixture, counterPath) {
   const quote = (value) => String(value).replace(/'/g, "''");
   write(fixture.materializerScript, [
-    "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot)",
+    "param([string]$Action, [string]$ProjectRoot, [string]$PayloadRoot, [string]$OriginatingActionId, [string]$OriginatingOperationId)",
+    "$origin = [ordered]@{ action = $Action; action_id = $OriginatingActionId; operation_id = $OriginatingOperationId } | ConvertTo-Json -Compress",
+    `  [IO.File]::WriteAllText('${quote(counterPath + ".origin.json")}', $origin)`,
     "if ($Action -eq 'Probe') {",
     `  $counterPath = '${quote(counterPath)}'`,
     "  $count = if (Test-Path -LiteralPath $counterPath) { [int][IO.File]::ReadAllText($counterPath) } else { 0 }",
@@ -1083,6 +1085,11 @@ async function verifyManagerActionOperationCorrelation() {
     assert.equal(terminal.ok, true, terminal.error || "Manager action operation failed.");
     assert.equal(terminal.operation.manager_action_id, actionId);
     assert.equal(fs.readFileSync(counterPath, "utf8"), "1");
+    assert.deepEqual(JSON.parse(fs.readFileSync(counterPath + ".origin.json", "utf8")), {
+      action: "Probe",
+      action_id: actionId,
+      operation_id: terminal.operation_id
+    }, "The Supervisor must forward the original Manager action and operation identities to the child boundary.");
 
     const unrelated = await requestPipe(state.pipe_name, state.auth_token, {
       command: "materialize",

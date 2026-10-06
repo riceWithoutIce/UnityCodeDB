@@ -2018,6 +2018,10 @@ async function runMaterializer(
   operation = null,
   operationalReadiness = null) {
   const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript, "-Action", action, "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot];
+  if (operation) {
+    args.push("-OriginatingOperationId", operation.operation_id);
+    if (operation.manager_action_id) args.push("-OriginatingActionId", operation.manager_action_id);
+  }
   if (request.confirmed_project_mutation === true) args.push("-ConfirmedProjectMutation");
   if (request.editor_session_id) args.push("-EditorSessionId", String(request.editor_session_id));
   if (Number.isInteger(request.editor_process_id) && request.editor_process_id > 0) args.push("-EditorProcessId", String(request.editor_process_id));

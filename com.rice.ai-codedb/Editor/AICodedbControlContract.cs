@@ -229,6 +229,25 @@ namespace Rice.AI.Codedb.Editor
     /// </summary>
     internal static class AICodedbControlContractMigrationStore
     {
+        internal static bool HasOnlyCurrentSupervisorNamespace(string projectRoot, AICodedbControlContractIdentity contract)
+        {
+            var path = Path.Combine(projectRoot, AICodedbProjectSettings.InstanceControlRelativePath);
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, path);
+            if (!Directory.Exists(path)) return !File.Exists(path);
+            var supervisorPath = AICodedbControlContract.GetSupervisorRuntimePath(projectRoot, contract);
+            var contractPath = Path.GetDirectoryName(supervisorPath);
+            foreach (var name in new[] { "contracts", Path.GetFileName(Path.GetDirectoryName(contractPath)),
+                Path.GetFileName(contractPath), "supervisor" })
+            {
+                var entries = Directory.GetFileSystemEntries(path);
+                if (entries.Length != 1 || !Directory.Exists(entries[0])
+                    || !string.Equals(Path.GetFileName(entries[0]), name, StringComparison.Ordinal)) return false;
+                path = entries[0];
+                AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(projectRoot, path);
+            }
+            return true;
+        }
+
         private const long MaximumEvidenceBytes = 256 * 1024;
         private const string ManagedBy = "com.rice.ai-codedb";
         private const int LegacySupervisorStateSchemaVersion = 3;
@@ -602,6 +621,7 @@ namespace Rice.AI.Codedb.Editor
             var selectionPath = Path.Combine(projectRoot, "AIWork", ".runtime", "codedb", "control", "current-instance.json");
             var pointer = ReadEvidence(selectionPath, "Owner Identity v1 selection");
             var instance = ReadEvidence(Path.Combine(selection.InstanceRoot, "instance.json"), "Owner Identity v1 instance");
+            AICodedbCurrentInstanceStore.ValidateOriginatingAction(instance);
             var instanceHash = AICodedbStrictJson.GetRequiredString(pointer, "instance_manifest_sha256", "Owner Identity v1 selection");
             var generationHash = AICodedbStrictJson.GetRequiredString(instance, "generation_manifest_sha256", "Owner Identity v1 instance");
             var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(projectRoot);

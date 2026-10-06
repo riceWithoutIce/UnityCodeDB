@@ -11,7 +11,8 @@ namespace Rice.AI.Codedb.Editor
     {
         Installed,
         Uninstalled,
-        Invalid
+        Invalid,
+        NotIntegrated
     }
 
     internal enum AICodedbProjectCleanupState
@@ -29,6 +30,8 @@ namespace Rice.AI.Codedb.Editor
         internal string StateId { get; }
         internal string Detail { get; }
         internal bool IsUninstalled => State == AICodedbProjectIntegrationState.Uninstalled;
+        internal bool IsNotIntegrated => State == AICodedbProjectIntegrationState.NotIntegrated;
+        internal bool CanInstall => IsUninstalled || IsNotIntegrated;
         internal bool IsValid => State != AICodedbProjectIntegrationState.Invalid;
 
         internal AICodedbProjectIntegrationStatus(
@@ -50,6 +53,48 @@ namespace Rice.AI.Codedb.Editor
         private const string ManagedBy = "com.rice.ai-codedb";
         private const long MaximumBytes = 64 * 1024;
 
+        private static bool HasNoIntegrationEvidence(string projectRoot, AICodedbControlContractMigrationStatus? migrationStatus)
+        {
+            var runtimeRoot = Path.Combine(projectRoot, "AIWork/.runtime/codedb");
+            AssertNoReparsePoint(projectRoot, runtimeRoot);
+            if (File.Exists(runtimeRoot)) return false;
+            if (Directory.Exists(runtimeRoot))
+            {
+                var entries = Directory.EnumerateFileSystemEntries(runtimeRoot).Take(3).ToArray();
+                if (entries.Length > 2) return false;
+                foreach (var entry in entries)
+                {
+                    AssertNoReparsePoint(projectRoot, entry);
+                    var name = Path.GetFileName(entry);
+                    if (!Directory.Exists(entry) || (name != "control" && name != "payload-materializer")) return false;
+                }
+            }
+            foreach (var relative in new[] { "AIWork/codedb", "AIWork/.runtime/codedb/host",
+                "AIWork/.runtime/codedb/instances" })
+            {
+                var path = Path.Combine(projectRoot, relative);
+                AssertNoReparsePoint(projectRoot, path);
+                if (File.Exists(path) || Directory.Exists(path)) return false;
+            }
+            var controlPath = Path.Combine(projectRoot, AICodedbProjectSettings.InstanceControlRelativePath);
+            AssertNoReparsePoint(projectRoot, controlPath);
+            if (File.Exists(controlPath) || Directory.Exists(controlPath))
+            {
+                if (!migrationStatus.HasValue || migrationStatus.Value.BlocksAutomaticStart
+                    || !migrationStatus.Value.Contract.IsValid
+                    || !AICodedbControlContractMigrationStore.HasOnlyCurrentSupervisorNamespace(projectRoot, migrationStatus.Value.Contract))
+                    return false;
+            }
+            var configPath = Path.Combine(projectRoot, ".codex/config.toml");
+            AssertNoReparsePoint(projectRoot, configPath);
+            if (Directory.Exists(configPath)) throw new InvalidOperationException("Project MCP config is not a regular file.");
+            if (!File.Exists(configPath)) return true;
+            if (new FileInfo(configPath).Length > MaximumBytes)
+                throw new InvalidOperationException("Project MCP config exceeds its bounded first Install evidence limit.");
+            return !System.Text.RegularExpressions.Regex.IsMatch(File.ReadAllText(configPath),
+                @"(?im)^\s*(?:#\s*)?\[mcp_servers\.codedb-project(?:\.[^\]]+)?\]");
+        }
+
         internal static AICodedbProjectIntegrationStatus Read(string projectRoot)
         {
             var currentStatePath = Path.Combine(
@@ -64,7 +109,16 @@ namespace Rice.AI.Codedb.Editor
             return Read(projectRoot, statePath);
         }
 
-        internal static AICodedbProjectIntegrationStatus Read(string projectRoot, string statePath)
+        internal static AICodedbProjectIntegrationStatus Read(string projectRoot, AICodedbControlContractMigrationStatus migrationStatus)
+        {
+            var currentPath = Path.Combine(projectRoot, AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+            var statePath = File.Exists(currentPath) || Directory.Exists(currentPath) ? currentPath
+                : Path.Combine(projectRoot, AICodedbProjectSettings.ProjectIntegrationStateRelativePath);
+            return Read(projectRoot, statePath, migrationStatus);
+        }
+
+        internal static AICodedbProjectIntegrationStatus Read(string projectRoot, string statePath,
+            AICodedbControlContractMigrationStatus? migrationStatus = null)
         {
             try
             {
@@ -85,11 +139,13 @@ namespace Rice.AI.Codedb.Editor
                 {
                     if (Directory.Exists(actualPath))
                         throw new InvalidOperationException("Project integration desired state is not a regular file.");
+                    var noIntegration = HasNoIntegrationEvidence(expectedRoot, migrationStatus);
                     return new AICodedbProjectIntegrationStatus(
-                        AICodedbProjectIntegrationState.Installed,
+                        noIntegration ? AICodedbProjectIntegrationState.NotIntegrated : AICodedbProjectIntegrationState.Installed,
                         AICodedbProjectCleanupState.None,
                         string.Empty,
-                        "No UNINSTALLED project desired state is present.");
+                        noIntegration ? "This project has no CodeDB integration; Install CodeDB is available."
+                            : "No UNINSTALLED desired state is present; existing integration evidence remains.");
                 }
 
                 var document = AICodedbStrictJson.ReadObject(
@@ -271,6 +327,22 @@ namespace Rice.AI.Codedb.Editor
 
     internal static class AICodedbCurrentInstanceStore
     {
+        internal static void ValidateOriginatingAction(IDictionary<string, object> manifest)
+        {
+            object value;
+            if (!manifest.TryGetValue("originating_action", out value) || value == null) return;
+            var origin = value as IDictionary<string, object>;
+            const string label = "CodeDB instance originating action";
+            if (origin == null || origin.Count != 3
+                || !origin.ContainsKey("action") || !origin.ContainsKey("action_id") || !origin.ContainsKey("operation_id"))
+                throw new InvalidOperationException("CodeDB instance originating action fields are invalid.");
+            var action = AICodedbStrictJson.GetRequiredString(origin, "action", label);
+            if ((action != "INSTALL" && action != "UPGRADE" && action != "REINSTALL")
+                || !AICodedbSupervisorProtocol.IsManagerActionId(AICodedbStrictJson.GetRequiredString(origin, "action_id", label))
+                || !AICodedbSupervisorProtocol.IsManagerActionId(AICodedbStrictJson.GetRequiredString(origin, "operation_id", label)))
+                throw new InvalidOperationException("CodeDB instance originating action identity is invalid.");
+        }
+
         private const string ManagedBy = "com.rice.ai-codedb";
         private const long PointerMaximumBytes = 64 * 1024;
         private const long ManifestMaximumBytes = 128 * 1024;
@@ -392,6 +464,7 @@ namespace Rice.AI.Codedb.Editor
 
                 const string manifestLabel = "Current CodeDB instance manifest";
                 var manifest = AICodedbStrictJson.ReadObject(manifestPath, ManifestMaximumBytes, manifestLabel);
+                ValidateOriginatingAction(manifest);
                 var generationRelativePath = NormalizeRelativePath(
                     AICodedbStrictJson.GetRequiredString(manifest, "generation_relative_path", manifestLabel));
                 var generationManifestHash = AICodedbStrictJson.GetRequiredString(

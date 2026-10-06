@@ -937,10 +937,18 @@ namespace Rice.AI.Codedb.Editor
 
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FullStatus);
-            var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
             var migrationStatus = AICodedbControlContractMigrationStore.Read(
                 context.ProjectRoot,
                 context.PackageRoot);
+            var integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot, migrationStatus);
+            if (integrationStatus.IsNotIntegrated)
+            {
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                PublishLifecycleStatusCache(null, AICodedbProductStatusBuilder.Build(integrationStatus, null),
+                    true, default(AICodedbSupervisorSnapshot), default(AICodedbTerminalConvergenceFailure));
+                return LifecycleReconcileResult.WithState(AICodedbProductState.NotIntegrated);
+            }
             var currentInstance = AICodedbCurrentInstanceStore.Read(
                 context.ProjectRoot,
                 context.PackageRoot);
