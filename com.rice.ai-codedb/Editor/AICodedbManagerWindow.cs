@@ -2826,7 +2826,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 session.FinishAfterWindowClose(result, EditorApplication.timeSinceStartup);
                 if (requestReconcileAfterAction && !session.IsRecovering
-                    && AICodedbManagerActionSession.CanRequestPostCommandReconcile(result))
+                    && CanRequestActionReconcile(title, result))
                     AICodedbEditorLifecycle.RequestReconcile();
                 return;
             }
@@ -2864,7 +2864,7 @@ namespace Rice.AI.Codedb.Editor
             {
                 session.FinishAfterWindowClose(result, EditorApplication.timeSinceStartup);
                 if (requestReconcileAfterAction && !session.IsRecovering
-                    && AICodedbManagerActionSession.CanRequestPostCommandReconcile(result))
+                    && CanRequestActionReconcile(title, result))
                     AICodedbEditorLifecycle.RequestReconcile();
                 return;
             }
@@ -2872,9 +2872,16 @@ namespace Rice.AI.Codedb.Editor
             session.RecordStatusObservation(statusRefreshSucceeded);
             ShowUserActionNotification(actionStatus.BuildPresentation(EditorApplication.timeSinceStartup));
             if (requestReconcileAfterAction && !session.IsRecovering
-                && AICodedbManagerActionSession.CanRequestPostCommandReconcile(result))
+                && CanRequestActionReconcile(title, result))
                 AICodedbEditorLifecycle.RequestReconcile();
             Repaint();
+        }
+
+        internal static bool CanRequestActionReconcile(string title, AICodedbCommandResult result)
+        {
+            return title.StartsWith("Install CodeDB", StringComparison.Ordinal)
+                ? AICodedbActions.CanRequestInstallReconcile(result)
+                : AICodedbManagerActionSession.CanRequestPostCommandReconcile(result);
         }
 
         private void DrawActivityPanel(AICodedbManagerLayoutMetrics layout)

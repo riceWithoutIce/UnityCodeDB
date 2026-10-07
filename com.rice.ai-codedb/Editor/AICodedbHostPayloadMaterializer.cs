@@ -292,13 +292,24 @@ namespace Rice.AI.Codedb.Editor
                    || action == AICodedbHostPayloadAction.Reinstall;
         }
 
-        private static string[] BuildRuntimeScriptArguments(
+        internal static string[] BuildRuntimeScriptArguments(
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation,
             string projectRoot)
         {
             var arguments = new List<string>(
                 BuildScriptArguments(action, confirmedProjectMutation, projectRoot));
+            if (IsMutation(action))
+            {
+                // Resolve once, before ProcessRunner hashes admitted arguments.
+                // A pre-admission Supervisor fallback has no server operation.
+                var operationId = Guid.NewGuid().ToString("N");
+                var actionId = AICodedbPaths.CurrentActionId;
+                arguments.Add("-OriginatingActionId");
+                arguments.Add(string.IsNullOrEmpty(actionId) ? operationId : actionId);
+                arguments.Add("-OriginatingOperationId");
+                arguments.Add(operationId);
+            }
             if (RequiresCandidateLeaseHandoff(action)
                 && AICodedbEditorLifecycle.TryGetCurrentEditorLeaseIdentity(
                     out var sessionId,

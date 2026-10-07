@@ -14,6 +14,16 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbEditorLifecycleTests
     {
+        [TestCase(AICodedbCurrentInstanceState.Missing, true, true)]
+        [TestCase(AICodedbCurrentInstanceState.Missing, false, false)]
+        [TestCase(AICodedbCurrentInstanceState.Current, true, false)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, true, false)]
+        public void UnselectedRetainedInstance_BlocksAutomaticConvergence(
+            AICodedbCurrentInstanceState state, bool retained, bool expected)
+        {
+            Assert.That(AICodedbEditorLifecycle.ShouldBlockUnselectedInstanceConvergence(state, retained), Is.EqualTo(expected));
+        }
+
         private const string Poc33WrapperSourceRevision = "d1313efa540f5fc805d83a830951afdb8cd2b256";
         private const string Poc33WrapperSourcePath = "com.rice.ai-codedb/Payload~/AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
         private string _projectRoot;

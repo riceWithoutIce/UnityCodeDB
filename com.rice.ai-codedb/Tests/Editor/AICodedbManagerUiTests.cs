@@ -15,6 +15,51 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        [Test]
+        public void DirectInstallArguments_BindActualActionBeforeAdmission()
+        {
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-s29-identity"),
+                Path.Combine(Path.GetTempPath(), "codedb-s29-package"), "s29");
+            var actionId = Guid.NewGuid().ToString("N");
+            using (AICodedbPaths.UseActionContext(context, actionId))
+            {
+                var arguments = AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
+                    AICodedbHostPayloadAction.Install, true, context.ProjectRoot);
+                Assert.That(arguments[Array.IndexOf(arguments, "-OriginatingActionId") + 1], Is.EqualTo(actionId));
+                var operationId = arguments[Array.IndexOf(arguments, "-OriginatingOperationId") + 1];
+                Assert.That(operationId, Does.Match("^[0-9a-f]{32}$"));
+                Assert.That(operationId, Is.Not.EqualTo(actionId));
+                Assert.That(Array.FindAll(arguments, value => value == "-OriginatingOperationId").Length, Is.EqualTo(1));
+            }
+        }
+
+        [TestCase(1, "FAILED", "PENDING", true, false)]
+        [TestCase(0, "UNKNOWN", "PENDING", true, false)]
+        [TestCase(0, "INSTALLED", "PENDING", true, false)]
+        [TestCase(0, "INSTALLED", "COMPLETE", false, false)]
+        [TestCase(0, "INSTALLED", "COMPLETE", true, true)]
+        public void InstallEntryAndManager_RequireConfirmedCompleteSuccess(
+            int exitCode, string outcome, string cleanup, bool authoritative, bool expected)
+        {
+            var output = "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"action\":\"INSTALL\",\"outcome\":\"" + outcome + "\",\"phase\":\"COMPLETE\","
+                + "\"reason_code\":\"FIXTURE\",\"mutated_scopes\":[],\"cleanup_state\":\"" + cleanup
+                + "\",\"next_action\":\"Review result\",\"exit_code\":" + exitCode + ",\"detail\":\"fixture\"}";
+            var result = new AICodedbCommandResult(exitCode, output, string.Empty, false,
+                authoritativeTerminalEvidence: authoritative);
+            Assert.That(AICodedbActions.CanRequestInstallReconcile(result), Is.EqualTo(expected));
+            Assert.That(AICodedbManagerWindow.CanRequestActionReconcile("Install CodeDB", result), Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void InstallEntry_MissingOrMalformedResultDoesNotReconcile()
+        {
+            Assert.That(AICodedbActions.CanRequestInstallReconcile(null), Is.False);
+            Assert.That(AICodedbActions.CanRequestInstallReconcile(new AICodedbCommandResult(0, "", "", false)), Is.False);
+            Assert.That(AICodedbActions.CanRequestInstallReconcile(new AICodedbCommandResult(0, "[COMMAND_RESULT] {}", "", false)), Is.False);
+        }
+
         // Synchronous, test-owned isolation only. Hold the production Gate so
         // other session callers cannot observe or replace the temporary owner.
         private sealed class ManagerActionSessionFixture : IDisposable

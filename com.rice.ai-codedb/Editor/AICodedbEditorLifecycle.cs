@@ -953,6 +953,21 @@ namespace Rice.AI.Codedb.Editor
                 context.ProjectRoot,
                 context.PackageRoot);
             AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
+            var retainedInstanceRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
+            if (!integrationStatus.IsUninstalled && ShouldBlockUnselectedInstanceConvergence(
+                    currentInstance.State, Directory.Exists(retainedInstanceRoot) || File.Exists(retainedInstanceRoot)))
+            {
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                var retainedStatus = new AICodedbProductStatus(
+                    AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable,
+                    "An unselected CodeDB instance remains. Review the original Install result and remove the integration before an explicit fresh Install.");
+                retainedStatus = WithRemovalPreflight(context, retainedStatus, currentInstance, canContinue, cancellationToken, true);
+                RememberLifecycleProductStatus(retainedStatus, null);
+                return LifecycleReconcileResult.WithState(AICodedbProductState.NeedsAttention);
+            }
             if (migrationStatus.BlocksAutomaticStart)
                 Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
             if (cancellationToken.IsCancellationRequested || !canContinue())
@@ -2055,6 +2070,12 @@ namespace Rice.AI.Codedb.Editor
             return currentInstanceIsCurrent
                    && (productState != AICodedbProductState.Ready
                        || cleanupState == AICodedbProjectCleanupState.Pending);
+        }
+
+        internal static bool ShouldBlockUnselectedInstanceConvergence(
+            AICodedbCurrentInstanceState state, bool retainedInstanceRootPresent)
+        {
+            return state == AICodedbCurrentInstanceState.Missing && retainedInstanceRootPresent;
         }
 
         internal static AICodedbCurrentInstanceConvergencePlan ResolveCurrentInstanceConvergencePlan(

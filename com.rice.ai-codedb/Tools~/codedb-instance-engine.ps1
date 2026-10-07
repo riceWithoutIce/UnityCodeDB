@@ -1477,7 +1477,7 @@ function Invoke-InstanceActivationContractRecovery {
             }
             $removalIntentPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstanceRemovalIntentsRelativePath)/$FreshInstallUninstallStateId.json" -Label "fresh Install removal intent"
             if (Test-Path -LiteralPath $removalIntentPath) {
-                $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $FreshInstallUninstallStateId
+                $removalIntent = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $FreshInstallUninstallStateId
                 if ($desiredState.CleanupState -ne "PENDING" -or
                     $null -ne $state.RetirementIntent -or
                     [string]$removalIntent.Document.retained_instance_id -cne [string]$state.Operation.Candidate.instance_id -or
@@ -1826,17 +1826,256 @@ function Get-InstanceDesiredState {
     }
 }
 
+function Get-FailedPreparationEffects {
+    param([string]$ProjectRoot, [string]$InstanceId, [string]$GenerationId, [AllowNull()]$Manifest, [AllowNull()]$Generation)
+
+    # Walk only the candidate and its exact host/bootstrap roots, checking each
+    # directory before enumerating children. Never use recursive traversal here.
+    $instanceRelative = "$($script:InstancesRelativePath)/$InstanceId"
+    $generationRelative = "AIWork/.runtime/codedb/host/generations/$GenerationId"
+    $roots = @($instanceRelative, $generationRelative, 'AIWork/codedb')
+    $flatDirectories = @{}
+    if ($null -ne $Manifest) {
+        $flatPaths = @($Manifest.Files | Where-Object { $_.Target.StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) } | ForEach-Object { $_.Target })
+        $generationManifestPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath ($generationRelative + '/generation-manifest.json') -Label 'failed preparation bootstrap authority'
+        $generationDocument = (Read-BoundedJsonDocument -Path $generationManifestPath -Label 'failed preparation bootstrap authority' -MaximumBytes 1048576).Document
+        $flatPaths += @($generationDocument.files | ForEach-Object { 'AIWork/codedb/' + $_.path })
+        foreach ($flatPath in $flatPaths) {
+            while ($flatPath.Contains('/')) {
+                $flatPath = $flatPath.Substring(0, $flatPath.LastIndexOf('/'))
+                $flatDirectories[$flatPath] = $true
+            }
+        }
+    }
+    $entries = @{}
+    $queue = New-Object 'System.Collections.Generic.Queue[string]'
+    foreach ($root in $roots) { $queue.Enqueue($root) }
+    while ($queue.Count -gt 0) {
+        $relative = $queue.Dequeue()
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'failed preparation effect'
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed preparation effect'
+        if (-not (Test-Path -LiteralPath $path)) {
+            if ($relative -ceq 'AIWork/codedb') { continue }
+            throw 'Failed preparation retained effect is missing.'
+        }
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($entries.Count -ge 512) { throw 'Failed preparation effect inventory exceeds 512 entries.' }
+        $hash = ''
+        if (-not $item.PSIsContainer) {
+            $hash = Get-FileSha256 -Path $path
+            if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
+                $local = $relative.Substring($instanceRelative.Length + 1)
+                if ($local -cne 'instance.json' -and $local -cnotmatch '^watch/lifecycle/editor-leases/[0-9a-f]{32}\.json$') {
+                    throw 'Failed preparation contains unexpected mutable bytes.'
+                }
+            } elseif ($relative.StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) -and $null -ne $Manifest) {
+                $owned = $Manifest.TargetMap.ContainsKey($relative) -and $hash -ceq [string]$Manifest.TargetMap[$relative].Sha256
+                if (-not $owned -and $null -ne $Generation) {
+                    $local = $relative.Substring('AIWork/codedb/'.Length)
+                    $oldPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath ($generationRelative + '/' + $local) -Label 'old bootstrap source'
+                    $owned = (Test-Path -LiteralPath $oldPath -PathType Leaf) -and $hash -ceq (Get-FileSha256 -Path $oldPath)
+                    if ($local -ceq 'wrapper/codedb-project-wrapper.mjs') { $owned = $hash -ceq [string]$Generation.StableWrapperSha256 }
+                }
+                if (-not $owned) { throw 'Failed preparation bootstrap contains unowned or drifted bytes.' }
+            }
+        } else {
+            if ($null -ne $Manifest -and $relative.StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) -and -not $flatDirectories.ContainsKey($relative)) {
+                throw 'Failed preparation bootstrap contains an unexpected directory.'
+            }
+            if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
+                $local = $relative.Substring($instanceRelative.Length + 1)
+                if ($local -cnotin @($script:InstanceAllowedDirectories + @('watch/lifecycle', 'watch/lifecycle/editor-leases'))) {
+                    throw 'Failed preparation contains an unexpected mutable directory.'
+                }
+            }
+            foreach ($child in @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)) {
+                if ($queue.Count + $entries.Count -ge 512) { throw 'Failed preparation effect inventory exceeds 512 entries.' }
+                $queue.Enqueue($relative + '/' + $child.Name)
+            }
+        }
+        # The stable launcher is shared activation state. Its original observation
+        # is recorded separately; all other retained effects remain immutable.
+        if (-not $item.PSIsContainer -and $relative -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs') { continue }
+        $entries[$relative] = [ordered]@{ relative_path = $relative; kind = $(if ($item.PSIsContainer) { 'DIRECTORY' } else { 'FILE' }); sha256 = $hash }
+    }
+    # Bind all ancestors without traversing their unrelated siblings.
+    foreach ($root in $roots) {
+        $ancestor = $root
+        while ($ancestor.Contains('/')) {
+            $ancestor = $ancestor.Substring(0, $ancestor.LastIndexOf('/'))
+            if (-not $entries.ContainsKey($ancestor)) {
+                $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $ancestor -Label 'failed preparation ancestor'
+                if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw 'Failed preparation ancestor is missing.' }
+                $entries[$ancestor] = [ordered]@{ relative_path = $ancestor; kind = 'DIRECTORY'; sha256 = '' }
+            }
+        }
+    }
+    if ($entries.Count -gt 512) { throw 'Failed preparation effect inventory exceeds 512 entries.' }
+    $paths = [string[]]@($entries.Keys)
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+    foreach ($path in $paths) { $entries[$path] }
+}
+
+function Get-FailedPreparationFingerprint {
+    param($Document)
+    $canonical = [ordered]@{}
+    foreach ($name in @('schema_version', 'managed_by', 'project_root', 'project_identity', 'state_id', 'operation_id', 'authority_kind', 'retained_instance_id', 'retained_instance_manifest_sha256', 'retained_generation_id', 'retained_generation_manifest_sha256', 'retained_wrapper_sha256')) {
+        $canonical[$name] = $Document.$name
+    }
+    $canonical.retained_effects = @($Document.retained_effects | ForEach-Object {
+        [ordered]@{ relative_path = $_.relative_path; kind = $_.kind; sha256 = $_.sha256 }
+    })
+    return Get-TextSha256 -Text (ConvertTo-InstanceJsonText -Value $canonical)
+}
+
+function Assert-FailedPreparationWrapper {
+    param([string]$ProjectRoot, $Document, [AllowNull()]$Manifest, [switch]$AllowActivationHandoff)
+    $target = 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs'
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $target -Label 'retained shared wrapper'
+    $actual = ''
+    if (Test-Path -LiteralPath $path) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Retained shared wrapper is not a regular file.' }
+        $actual = Get-FileSha256 -Path $path
+    }
+    $original = [string]$Document.retained_wrapper_sha256
+    if ($actual -ceq $original) { return 'ORIGINAL' }
+    if (-not $AllowActivationHandoff -or $null -eq $Manifest) { throw 'Retained shared wrapper changed outside an Install handoff.' }
+    $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $state) { throw 'Retained shared wrapper has no activation handoff authority.' }
+    if ($state.Operation.Phase -ceq 'COMMITTED') {
+        $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $selectionEvidence = New-InstanceActivationSelectionEvidence -Instance $selected -Context $state.Context
+        if ($selected.InstanceId -ceq $Document.retained_instance_id -or $selected.Manifest.state -cne 'READY' -or
+            -not (Test-InstanceActivationEvidenceEqual -Left $selectionEvidence -Right $state.Operation.Candidate) -or
+            -not (Test-InstanceActivationEvidenceEqual -Left $selectionEvidence -Right $state.Activation.Current) -or
+            $actual -cne [string]$selected.Generation.StableWrapperSha256) { throw 'Retained shared wrapper committed authority is invalid.' }
+        return 'COMMITTED'
+    }
+    $canonical = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target $target
+    $mutations = @($state.Operation.Mutations | Where-Object { $_.target -ceq $target })
+    if ($state.Operation.Phase -cne 'ACTIVATING' -or $state.Operation.Action -cne 'INSTALL' -or
+        $state.Operation.Candidate.instance_id -ceq $Document.retained_instance_id -or $mutations.Count -ne 1 -or
+        $mutations[0].mutation -cne 'write' -or $mutations[0].desired_sha256 -cne $canonical -or $actual -cne $canonical -or
+        [bool]$mutations[0].existed_before -ne (-not [string]::IsNullOrEmpty($original)) -or
+        [string]$mutations[0].pre_image_sha256 -cne $original) { throw 'Retained shared wrapper Install journal binding is invalid.' }
+    $candidateRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath ($script:InstancesRelativePath + '/' + $state.Operation.Candidate.instance_id) -Label 'wrapper handoff candidate'
+    $candidate = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $candidateRoot
+    if ($candidate.Manifest.state -cne 'READY' -or (Get-FileSha256 -Path $candidate.ManifestPath) -cne $state.Operation.Candidate.instance_manifest_sha256 -or
+        $null -eq (Get-ValidatedInstanceAvailabilityEvidence -ProjectRoot $ProjectRoot -Instance $candidate)) { throw 'Retained shared wrapper handoff candidate is not verified.' }
+    return 'INSTALLING'
+}
+
+function Assert-FailedPreparationEffects {
+    param([string]$ProjectRoot, $Document)
+    $effects = Get-RequiredJsonArray -Object $Document -Name 'retained_effects' -Label 'failed preparation intent'
+    if ($effects.Count -eq 0 -or $effects.Count -gt 512) { throw 'Failed preparation effect count is invalid.' }
+    $seen = @{}; $previous = ''
+    foreach ($effect in $effects) {
+        Assert-RemoveIntegrationJsonFields -Object $effect -Label 'failed preparation effect' -Required @('relative_path', 'kind', 'sha256')
+        $relative = Get-RequiredJsonString -Object $effect -Name 'relative_path' -Label 'failed preparation effect'
+        if ($relative -cne (ConvertTo-SafeRelativePath -Path $relative -Label 'failed preparation effect') -or
+            $seen.ContainsKey($relative) -or [StringComparer]::Ordinal.Compare($previous, $relative) -ge 0) { throw 'Failed preparation effect paths are invalid or duplicated.' }
+        $seen[$relative] = $true; $previous = $relative
+        if (($effect.kind -ceq 'FILE' -and $effect.sha256 -cnotmatch '^[0-9a-f]{64}$') -or
+            ($effect.kind -ceq 'DIRECTORY' -and $effect.sha256 -cne '') -or $effect.kind -cnotin @('FILE', 'DIRECTORY')) { throw 'Failed preparation effect type or hash is invalid.' }
+    }
+    if ((Get-FailedPreparationFingerprint -Document $Document) -cne $Document.authority_fingerprint) { throw 'Failed preparation authority fingerprint changed.' }
+    $actual = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $Document.retained_instance_id -GenerationId $Document.retained_generation_id)
+    # Only fixed launcher ancestors may be created by the shared handoff.
+    $actual = @($actual | Where-Object {
+        if ($seen.ContainsKey($_.relative_path)) { return $true }
+        if ($_.kind -ceq 'DIRECTORY' -and $_.relative_path -cin @('AIWork/codedb', 'AIWork/codedb/wrapper')) { return $false }
+        return $true
+    })
+    if ((ConvertTo-InstanceJsonText -Value $actual) -cne (ConvertTo-InstanceJsonText -Value @($effects | ForEach-Object { [ordered]@{ relative_path = $_.relative_path; kind = $_.kind; sha256 = $_.sha256 } }))) {
+        throw 'Failed preparation retained effect snapshot changed.'
+    }
+    $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($Document.retained_instance_id)" -Label 'failed preparation instance'
+    $evidence = [pscustomobject]@{ InstanceRoot = $root; EditorLeaseRoot = Join-Path $root 'watch/lifecycle/editor-leases' }
+    $holders = Get-InstanceEditorLeaseEvidence -Evidence $evidence -ProjectRoot $ProjectRoot
+    if ($holders.Live.Count -gt 0 -or $holders.Invalid.Count -gt 0) { throw 'Failed preparation holder is live or ambiguous.' }
+}
+
+function Get-FailedPreparationRemovalAuthority {
+    param($Manifest, [string]$ProjectRoot)
+    $controlRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceControlRelativePath -Label 'failed preparation control'
+    if (Test-Path -LiteralPath $controlRoot) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $controlRoot -Force)) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'failed preparation control entry'
+            if ($entry.Name -cnotin @('operation.json', 'operations', 'desired-state.json', 'removal-intents')) { throw 'Failed preparation conflicts with unknown control authority.' }
+        }
+    }
+    $hostRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath 'AIWork/.runtime/codedb/host' -Label 'failed preparation host'
+    if (Test-Path -LiteralPath $hostRoot) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $hostRoot -Force)) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'failed preparation host entry'
+            if ($entry.Name -cne 'generations' -or -not $entry.PSIsContainer) { throw 'Failed preparation conflicts with active or unknown host authority.' }
+        }
+    }
+    foreach ($relative in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath, $script:CurrentPointerRelativePath, $script:LastKnownGoodPointerRelativePath,
+        "$($script:InstanceControlRelativePath)/contracts", "$($script:InstanceControlRelativePath)/supervisor", $script:InstanceRetiredRelativePath)) {
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'failed preparation conflicting authority'
+        if (Test-Path -LiteralPath $path) { throw 'Failed preparation conflicts with selected, active or Supervisor authority.' }
+    }
+    $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'failed preparation instances'
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'Failed preparation requires one exactly bound instance.' }
+    $instances = @(Get-ChildItem -LiteralPath $root -Force)
+    if ($instances.Count -ne 1 -or -not $instances[0].PSIsContainer -or $instances[0].Name -cnotmatch '^[0-9a-f]{32}$') { throw 'Failed preparation requires one exactly bound instance.' }
+    # Bound mutable traversal before the existing full manifest/generation reader.
+    $instancePath = Join-Path $instances[0].FullName 'instance.json'
+    Assert-NoReparsePoint -Path $instancePath -Root $ProjectRoot -Label 'failed preparation manifest'
+    $document = (Read-BoundedJsonDocument -Path $instancePath -Label 'failed preparation manifest' -MaximumBytes 131072).Document
+    Assert-InstanceManifestOrigin -Document $document
+    if ($document.state -cne 'PROVISIONING' -or $document.verified_at_utc -cne '' -or
+        $null -eq $document.PSObject.Properties['originating_action'] -or $document.originating_action.action -cne 'INSTALL') { throw 'Failed preparation requires an unverified original INSTALL manifest.' }
+    $generationRoots = @(Get-ChildItem -LiteralPath (Join-Path $hostRoot 'generations') -Force -ErrorAction Stop)
+    if ($generationRoots.Count -ne 1 -or $generationRoots[0].Name -cne $document.generation_id -or -not $generationRoots[0].PSIsContainer) { throw 'Failed preparation host generation is ambiguous.' }
+    $null = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $instances[0].Name -GenerationId $document.generation_id)
+    $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instances[0].FullName -AllowProvisioning -FailedPreparation
+    $effects = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $evidence.InstanceId -GenerationId $document.generation_id -Manifest $Manifest -Generation $evidence.Generation)
+    $holders = Get-InstanceRetirementHolderEvidence -Evidence $evidence -ProjectRoot $ProjectRoot
+    if (-not $holders.Clear) { throw 'Failed preparation holder is live or ambiguous.' }
+    $null = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+    $wrapperPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' -Label 'failed preparation shared wrapper'
+    $wrapperHash = if (Test-Path -LiteralPath $wrapperPath -PathType Leaf) { Get-FileSha256 -Path $wrapperPath } else { '' }
+    return [pscustomobject]@{ Kind = 'FAILED_PREPARATION'; Selection = $null; Evidence = $evidence; Effects = $effects; WrapperSha256 = $wrapperHash; Fingerprint = Get-TextSha256 -Text ((ConvertTo-InstanceJsonText -Value $effects) + 'wrapper=' + $wrapperHash) }
+}
+
+function New-FailedPreparationRemovalIntentDocument {
+    param([string]$ProjectRoot, [string]$StateId, $Authority)
+    $evidence = $Authority.Evidence
+    $document = [ordered]@{
+        schema_version = 2; managed_by = $script:ManagedBy
+        project_root = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+        project_identity = Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot
+        state_id = $StateId; operation_id = $StateId; authority_kind = 'FAILED_PREPARATION'
+        authority_fingerprint = ''
+        retained_instance_id = $evidence.InstanceId
+        retained_instance_manifest_sha256 = Get-FileSha256 -Path $evidence.ManifestPath
+        retained_generation_id = [string]$evidence.Manifest.generation_id
+        retained_generation_manifest_sha256 = [string]$evidence.Manifest.generation_manifest_sha256
+        retained_wrapper_sha256 = [string]$Authority.WrapperSha256
+        retained_effects = @($Authority.Effects)
+    }
+    $document.authority_fingerprint = Get-FailedPreparationFingerprint -Document $document
+    if ([Text.Encoding]::UTF8.GetByteCount((ConvertTo-InstanceJsonText -Value $document)) -gt 131072) { throw 'Failed preparation intent exceeds 128 KiB.' }
+    return $document
+}
+
 function Get-InstanceRemovalIntent {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$StateId
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [AllowNull()]$Manifest
     )
 
     if ($StateId -cnotmatch '^[0-9a-f]{32}$') { throw "Removal intent state identity is invalid." }
     $relativePath = "$($script:InstanceRemovalIntentsRelativePath)/$StateId.json"
     $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relativePath -Label "project removal intent"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Project removal intent is missing." }
-    $document = (Read-BoundedJsonDocument -Path $path -Label "project removal intent" -MaximumBytes (64 * 1024)).Document
+    $document = (Read-BoundedJsonDocument -Path $path -Label "project removal intent" -MaximumBytes (128 * 1024)).Document
+    $schema = Get-RequiredJsonInt32 -Object $document -Name 'schema_version' -Label 'project removal intent'
+    $failedPreparation = $schema -eq 2
     $required = @(
         "schema_version", "managed_by", "project_root", "project_identity", "state_id",
         "operation_id", "authority_fingerprint", "selection_sha256", "activation_sha256",
@@ -1844,22 +2083,25 @@ function Get-InstanceRemovalIntent {
         "retained_generation_id", "retained_generation_manifest_sha256", "retained_wrapper_sha256"
     )
     $actual = @($document.PSObject.Properties.Name)
+    if ($failedPreparation) {
+        $required = @($required | Where-Object { $_ -cnotin @('selection_sha256', 'activation_sha256', 'activation_operation_sha256') }) + @('authority_kind', 'retained_effects')
+    }
     if ($actual.Count -ne $required.Count -or @($actual | Where-Object { $_ -cnotin $required }).Count -ne 0) {
         throw "Project removal intent fields are invalid."
     }
     $instanceId = Get-RequiredJsonString -Object $document -Name "retained_instance_id" -Label "project removal intent"
     $instanceHash = Get-RequiredJsonString -Object $document -Name "retained_instance_manifest_sha256" -Label "project removal intent"
     $generationHash = Get-RequiredJsonString -Object $document -Name "retained_generation_manifest_sha256" -Label "project removal intent"
-    $activationHash = [string]$document.activation_sha256
-    $operationHash = [string]$document.activation_operation_sha256
-    if ((Get-RequiredJsonInt32 -Object $document -Name "schema_version" -Label "project removal intent") -ne 1 -or
+    $activationHash = if ($failedPreparation) { '' } else { [string]$document.activation_sha256 }
+    $operationHash = if ($failedPreparation) { '' } else { [string]$document.activation_operation_sha256 }
+    if ($schema -notin @(1, 2) -or
         -not [string]::Equals([string]$document.managed_by, $script:ManagedBy, [StringComparison]::Ordinal) -or
         -not [string]::Equals([string]$document.project_identity, (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
         -not [string]::Equals([IO.Path]::GetFullPath([string]$document.project_root), [IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase) -or
         [string]$document.state_id -cne $StateId -or
         [string]$document.operation_id -cne $StateId -or
         [string]$document.authority_fingerprint -cnotmatch '^[0-9a-f]{64}$' -or
-        [string]$document.selection_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        (-not $failedPreparation -and [string]$document.selection_sha256 -cnotmatch '^[0-9a-f]{64}$') -or
         $activationHash -cnotmatch '^(?:[0-9a-f]{64})?$' -or
         $operationHash -cnotmatch '^(?:[0-9a-f]{64})?$' -or
         (($activationHash.Length -eq 0) -ne ($operationHash.Length -eq 0)) -or
@@ -1869,7 +2111,8 @@ function Get-InstanceRemovalIntent {
         $generationHash -cnotmatch '^[0-9a-f]{64}$') {
         throw "Project removal intent identity or schema is invalid."
     }
-    if ([string]$document.retained_wrapper_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+    $wrapperPattern = if ($failedPreparation) { '^(?:[0-9a-f]{64})?$' } else { '^[0-9a-f]{64}$' }
+    if ([string]$document.retained_wrapper_sha256 -cnotmatch $wrapperPattern) {
         throw "Project removal intent wrapper identity is invalid."
     }
     $instanceRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$instanceId" -Label "retained removal instance"
@@ -1880,15 +2123,26 @@ function Get-InstanceRemovalIntent {
         -not [string]::Equals((Get-FileSha256 -Path $manifestPath), $instanceHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Retained removal instance manifest changed."
     }
-    $manifest = (Read-BoundedJsonDocument -Path $manifestPath -Label "retained removal instance manifest" -MaximumBytes (128 * 1024)).Document
-    if ([string]$manifest.managed_by -cne $script:ManagedBy -or
-        [string]$manifest.project_identity -cne [string]$document.project_identity -or
-        [string]$manifest.instance_id -cne $instanceId -or
-        [string]$manifest.generation_id -cne [string]$document.retained_generation_id -or
-        [string]$manifest.generation_manifest_sha256 -cne $generationHash) {
+    $retainedManifest = (Read-BoundedJsonDocument -Path $manifestPath -Label "retained removal instance manifest" -MaximumBytes (128 * 1024)).Document
+    if ($failedPreparation) {
+        Assert-InstanceManifestOrigin -Document $retainedManifest
+        if ($document.authority_kind -cne 'FAILED_PREPARATION' -or $retainedManifest.state -cne 'PROVISIONING' -or
+            $retainedManifest.verified_at_utc -cne '' -or $null -eq $retainedManifest.PSObject.Properties['originating_action'] -or $retainedManifest.originating_action.action -cne 'INSTALL') {
+            throw 'Failed preparation removal identity is invalid.'
+        }
+        Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $document
+        if ($null -eq $Manifest) { throw 'Failed preparation intent requires current Package authority.' }
+        $null = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instanceRoot -AllowProvisioning -FailedPreparation
+        $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $document -Manifest $Manifest -AllowActivationHandoff
+    }
+    if ([string]$retainedManifest.managed_by -cne $script:ManagedBy -or
+        [string]$retainedManifest.project_identity -cne [string]$document.project_identity -or
+        [string]$retainedManifest.instance_id -cne $instanceId -or
+        [string]$retainedManifest.generation_id -cne [string]$document.retained_generation_id -or
+        [string]$retainedManifest.generation_manifest_sha256 -cne $generationHash) {
         throw "Retained removal instance identity changed."
     }
-    $generationRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $manifest -Name "generation_relative_path" -Label "retained removal instance manifest") -Label "retained removal generation path"
+    $generationRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $retainedManifest -Name "generation_relative_path" -Label "retained removal instance manifest") -Label "retained removal generation path"
     if ($generationRelativePath -cne "AIWork/.runtime/codedb/host/generations/$($document.retained_generation_id)") {
         throw "Retained removal generation path changed."
     }
@@ -1938,7 +2192,7 @@ function New-InstanceRemovalIntentDocument {
 }
 
 function Get-InstanceRemovalIntents {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot, [AllowNull()]$Manifest)
 
     $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceRemovalIntentsRelativePath -Label "project removal intents"
     if (-not (Test-Path -LiteralPath $root)) { return }
@@ -1948,7 +2202,7 @@ function Get-InstanceRemovalIntents {
         if ($entry.PSIsContainer -or $entry.Name -cnotmatch '^([0-9a-f]{32})\.json$') {
             throw "Project removal intents root contains an unknown entry."
         }
-        Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $Matches[1]
+        Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $Matches[1] -Manifest $Manifest
     }
 }
 
@@ -2779,6 +3033,7 @@ function Publish-InstanceOperation {
         [Parameter(Mandatory = $true)][string]$OperationRoot,
         [AllowNull()][scriptblock]$VerifyBeforeMutation,
         [AllowNull()][scriptblock]$VerifyBeforeCommit,
+        [AllowNull()][scriptblock]$VerifyEffectBoundary,
         [AllowNull()][string]$OperationId
     )
 
@@ -2790,6 +3045,7 @@ function Publish-InstanceOperation {
     try {
         if ($null -ne $VerifyBeforeMutation) { & $VerifyBeforeMutation }
         foreach ($entry in @($Entries)) {
+            if ($null -ne $VerifyEffectBoundary) { & $VerifyEffectBoundary }
             Assert-NoReparsePoint -Path $entry.TargetPath -Root $ProjectRoot -Label "instance activation target"
             if ($entry.ExistedBefore) {
                 if (-not (Test-Path -LiteralPath $entry.TargetPath -PathType Leaf) -or
@@ -2874,12 +3130,15 @@ function Add-ProjectRemovalDeactivationEntries {
         [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$Entries,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$OperationRoot,
-        [Parameter(Mandatory = $true)][string]$StateId
+        [Parameter(Mandatory = $true)][string]$StateId,
+        [switch]$PublishDesiredLast
     )
 
     $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "UNINSTALLED" -StateId $StateId -CleanupState "PENDING"
     $desiredBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
-    Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
+    if (-not $PublishDesiredLast) {
+        Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
+    }
     $mcpPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId $StateId
     if (-not $mcpPlan.Current) {
         Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:McpConfigRelativePath -Mutation "Write" -DesiredBytes $mcpPlan.DesiredBytes
@@ -2890,6 +3149,9 @@ function Add-ProjectRemovalDeactivationEntries {
     }
     foreach ($target in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath)) {
         Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $target -Mutation "Delete" -DesiredBytes $null
+    }
+    if ($PublishDesiredLast) {
+        Add-InstanceTransactionEntryIfNeeded -Entries $Entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
     }
 }
 
@@ -2939,6 +3201,7 @@ function Assert-InstanceNextChangeAdmission {
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [AllowNull()]$Candidate,
+        [AllowNull()]$FailedPreparationAuthority,
         [AllowNull()][string]$ExpectedFingerprint
     )
 
@@ -2946,6 +3209,17 @@ function Assert-InstanceNextChangeAdmission {
     $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
     $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
     $bound = @{}
+    $failed = @{}
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        $bound[$intent.InstanceId] = [string]$intent.Document.retained_instance_manifest_sha256
+        if ($intent.Document.schema_version -eq 2) { $failed[$intent.InstanceId] = $true }
+    }
+    if ($null -ne $FailedPreparationAuthority) {
+        $freshAuthority = Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if ($freshAuthority.Fingerprint -cne $FailedPreparationAuthority.Fingerprint) { throw 'Failed preparation effect snapshot changed after preflight.' }
+        $bound[$freshAuthority.Evidence.InstanceId] = Get-FileSha256 -Path $freshAuthority.Evidence.ManifestPath
+        $failed[$freshAuthority.Evidence.InstanceId] = $true
+    }
     foreach ($selected in @($current, $lkg)) {
         if ($null -ne $selected) { $bound[$selected.InstanceId] = $selected.ManifestSha256 }
     }
@@ -2953,7 +3227,7 @@ function Assert-InstanceNextChangeAdmission {
         $bound[$retired.InstanceId] = $retired.ManifestSha256
     }
     if ($desired.Present -and -not $desired.Legacy -and $desired.CleanupState -eq 'PENDING' -and $desired.DesiredState -eq 'UNINSTALLED') {
-        $intent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desired.StateId
+        $intent = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $desired.StateId
         if ($null -ne $intent) { $bound[[string]$intent.Document.retained_instance_id] = [string]$intent.Document.retained_instance_manifest_sha256 }
     }
     try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
@@ -2973,7 +3247,7 @@ function Assert-InstanceNextChangeAdmission {
             if (-not $item.PSIsContainer -or $item.Name -cnotmatch '^[0-9a-f]{32}$' -or -not $bound.ContainsKey($item.Name)) {
                 throw 'Next project change refused: relevant candidate execution is unbound or ambiguous.'
             }
-            $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $item.FullName
+            $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $item.FullName -AllowProvisioning:($failed.ContainsKey($item.Name)) -FailedPreparation:($failed.ContainsKey($item.Name))
             if (-not [string]::Equals((Get-FileSha256 -Path $evidence.ManifestPath), [string]$bound[$item.Name], [StringComparison]::Ordinal)) {
                 throw 'Next project change refused: instance evidence drifted.'
             }
@@ -3106,7 +3380,7 @@ function Get-InstanceActivationEntries {
     }
 
     $stateId = [guid]::NewGuid().ToString("N")
-    $cleanupState = if ($RetainPreviousInstance -and $null -ne $PreviousInstance) { "PENDING" } else { "COMPLETE" }
+    $cleanupState = if (($RetainPreviousInstance -and $null -ne $PreviousInstance) -or @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot).Count -gt 0) { "PENDING" } else { "COMPLETE" }
     $desired = New-InstanceDesiredStateDocument -ProjectRoot $ProjectRoot -DesiredState "INSTALLED" -StateId $stateId -CleanupState $cleanupState
     $desiredBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $desired))
     Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceDesiredStateRelativePath -Mutation "Write" -DesiredBytes $desiredBytes
@@ -3173,8 +3447,17 @@ function Assert-InstanceStableWrapper {
 function Get-InstanceGenerationPackageIdentity {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)]$InstanceManifest
+        [Parameter(Mandatory = $true)]$InstanceManifest,
+        [switch]$FailedPreparation
     )
+
+    if ($FailedPreparation) {
+        Assert-InstanceManifestOrigin -Document $InstanceManifest
+        if ($InstanceManifest.state -cne 'PROVISIONING' -or $InstanceManifest.verified_at_utc -cne '' -or
+            $null -eq $InstanceManifest.PSObject.Properties['originating_action'] -or $InstanceManifest.originating_action.action -cne 'INSTALL') {
+            throw 'Failed preparation generation authority requires unverified original INSTALL.'
+        }
+    }
 
     $packageVersion = Get-RequiredJsonString -Object $InstanceManifest -Name "package_version" -Label "retired instance manifest"
     $payloadVersion = Get-RequiredJsonString -Object $InstanceManifest -Name "payload_version" -Label "retired instance manifest"
@@ -3225,9 +3508,9 @@ function Get-InstanceGenerationPackageIdentity {
     $generationTargetPrefix = "AIWork/.runtime/codedb/host/generations/$generationId/"
     $generationManifestTarget = $generationTargetPrefix + "generation-manifest.json"
     $workerTarget = $generationTargetPrefix + $workerRelativePath
-    if ($null -eq $Manifest.RetiredTargetMap -or
+    if (-not $FailedPreparation -and ($null -eq $Manifest.RetiredTargetMap -or
         -not $Manifest.RetiredTargetMap.ContainsKey($generationManifestTarget) -or
-        -not $Manifest.RetiredTargetMap.ContainsKey($workerTarget)) {
+        -not $Manifest.RetiredTargetMap.ContainsKey($workerTarget))) {
         throw "Package payload does not retain the declared previous generation identity."
     }
 
@@ -3280,10 +3563,11 @@ function Assert-InstanceGenerationClosure {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)]$InstanceManifest
+        [Parameter(Mandatory = $true)]$InstanceManifest,
+        [switch]$FailedPreparation
     )
 
-    $packageIdentity = Get-InstanceGenerationPackageIdentity -Manifest $Manifest -InstanceManifest $InstanceManifest
+    $packageIdentity = Get-InstanceGenerationPackageIdentity -Manifest $Manifest -InstanceManifest $InstanceManifest -FailedPreparation:$FailedPreparation
     $generationId = [string]$packageIdentity.GenerationId
     $generationRelativePath = ConvertTo-SafeRelativePath -Path (Get-RequiredJsonString -Object $InstanceManifest -Name "generation_relative_path" -Label "retired instance manifest") -Label "retired instance generation path"
     $expectedGenerationRelativePath = "AIWork/.runtime/codedb/host/generations/$generationId"
@@ -3326,6 +3610,14 @@ function Assert-InstanceGenerationClosure {
         }
         $seen[$relativePath] = $true
         $filePath = ConvertTo-AbsoluteChildPath -Root $generationRoot -RelativePath $relativePath -Label "retired instance generation file"
+        if ($FailedPreparation) {
+            $packageGenerationRoot = ConvertTo-AbsoluteChildPath -Root $Manifest.Root -RelativePath ("Generations/" + $generationId) -Label 'failed preparation Package generation'
+            $packageFile = ConvertTo-AbsoluteChildPath -Root $packageGenerationRoot -RelativePath $relativePath -Label 'failed preparation Package file'
+            Assert-NoReparsePoint -Path $packageFile -Root $Manifest.Root -Label 'failed preparation Package file'
+            if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf) -or (Get-FileSha256 -Path $packageFile) -cne $hash) {
+                throw 'Failed preparation Package generation closure is missing or drifted.'
+            }
+        }
         Assert-NoReparsePoint -Path $filePath -Root $generationRoot -Label "retired instance generation file"
         if (-not (Test-Path -LiteralPath $filePath -PathType Leaf) -or
             -not [string]::Equals((Get-FileSha256 -Path $filePath), $hash, [StringComparison]::OrdinalIgnoreCase)) {
@@ -3358,7 +3650,8 @@ function Get-ValidatedRetiredInstance {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$InstanceRoot,
-        [switch]$AllowProvisioning
+        [switch]$AllowProvisioning,
+        [switch]$FailedPreparation
     )
 
     Assert-NoReparsePoint -Path $InstanceRoot -Root $ProjectRoot -Label "retired instance"
@@ -3418,7 +3711,7 @@ function Get-ValidatedRetiredInstance {
             throw "Retired instance marker identity is invalid."
         }
     }
-    $generation = Assert-InstanceGenerationClosure -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceManifest $document
+    $generation = Assert-InstanceGenerationClosure -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceManifest $document -FailedPreparation:$FailedPreparation
     return [pscustomobject]@{
         InstanceId = $instanceId
         InstanceRoot = $InstanceRoot
@@ -3903,7 +4196,7 @@ function Get-InstanceCleanupState {
     $pending = $false
     try {
         $retainedRemovalInstances = @{}
-        foreach ($intent in @(Get-InstanceRemovalIntents -ProjectRoot $ProjectRoot)) {
+        foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
             $retainedRemovalInstances[$intent.InstanceId] = $true
         }
         $instancesRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label "instance root"
@@ -3963,7 +4256,7 @@ function Get-InstanceUninstallCleanupState {
     if ($desired.DesiredState -ne "UNINSTALLED" -or $desired.CleanupState -ne "PENDING") {
         throw "Uninstall cleanup requires the authenticated UNINSTALLED / PENDING state."
     }
-    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desired.StateId
+    $null = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $desired.StateId
     $instanceState = Get-InstanceCleanupState `
         -ProjectRoot $ProjectRoot `
         -Manifest $Manifest `
@@ -4440,7 +4733,7 @@ function Invoke-InstanceConvergence {
             if (-not (Test-Path -LiteralPath $removalIntentPath)) {
                 throw "Pending fresh Install has no authenticated removal intent."
             }
-            $removalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $desiredLocked.StateId
+            $removalIntent = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $desiredLocked.StateId
         }
         $expectedInstallCleanupState = if ($null -ne $removalIntent) { "PENDING" } else { "COMPLETE" }
         if ($firstInstall -and ($desiredLocked.Present -or -not (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot))) {
@@ -4559,7 +4852,7 @@ function Invoke-InstanceConvergence {
                 throw "Pending fresh Install selection changed before activation."
             }
             if ($null -ne $removalIntent) {
-                $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $freshInstallUninstallStateId
+                $null = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $freshInstallUninstallStateId
                 if ([string]$removalIntent.Document.retained_instance_id -cne [string]$contractBeforeActivation.Operation.Candidate.instance_id -or
                     [string]$removalIntent.Document.activation_sha256 -cne [string]$contractBeforeActivation.Activation.Sha256 -or
                     [string]$removalIntent.Document.activation_operation_sha256 -cne [string]$contractBeforeActivation.Operation.Sha256) {
@@ -4735,7 +5028,7 @@ function Get-CurrentProjectRemovalAuthority {
     }
     $selected = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
     if ($null -eq $selected) {
-        throw "Uninstall requires an authenticated selected instance; missing selection is not removal authority."
+        return Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
     }
     $activation = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
     $selectedEvidence = if ($null -eq $activation) { $null } else {
@@ -4749,7 +5042,7 @@ function Get-CurrentProjectRemovalAuthority {
         throw "Uninstall requires committed activation authority for the selected instance."
     }
     $null = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString("N"))
-    return [pscustomobject]@{ Selection = $selected; ActivationState = $activation }
+    return [pscustomobject]@{ Kind = 'INSTALLED'; Selection = $selected; ActivationState = $activation }
 }
 
 function Invoke-InstanceUninstall {
@@ -4776,14 +5069,18 @@ function Invoke-InstanceUninstall {
             Invoke-TestAutomaticCleanupStateCapturedSignal
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
-        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $initialDesired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        $initialAuthority = if ($initialDesired.DesiredState -eq 'INSTALLED') { Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot } else { $null }
+        $failedAuthority = if ($null -ne $initialAuthority -and $initialAuthority.Kind -ceq 'FAILED_PREPARATION') { $initialAuthority } else { $null }
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -FailedPreparationAuthority $failedAuthority
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED") {
             Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
         } else { $null }
         $previous = if ($null -eq $currentRemovalAuthority) { $null } else { $currentRemovalAuthority.Selection }
-        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $failedAuthority = if ($null -ne $currentRemovalAuthority -and $currentRemovalAuthority.Kind -ceq 'FAILED_PREPARATION') { $currentRemovalAuthority } else { $null }
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -FailedPreparationAuthority $failedAuthority
         if ($AutomaticCleanup -and
             ($desiredBefore.DesiredState -ne "UNINSTALLED" -or
              $desiredBefore.CleanupState -ne "PENDING" -or
@@ -4825,6 +5122,12 @@ function Invoke-InstanceUninstall {
         New-Item -ItemType Directory -Force -Path $operationRoot | Out-Null
         $entries = New-Object System.Collections.Generic.List[object]
         $stateId = if ($desiredBefore.StateId -match '^[0-9a-f]{32}$') { $desiredBefore.StateId } else { [guid]::NewGuid().ToString("N") }
+        if ($null -ne $failedAuthority) {
+            $stateId = $operationId
+            $removalIntent = New-FailedPreparationRemovalIntentDocument -ProjectRoot $ProjectRoot -StateId $stateId -Authority $failedAuthority
+            $intentBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $removalIntent))
+            Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target "$($script:InstanceRemovalIntentsRelativePath)/$stateId.json" -Mutation 'Write' -DesiredBytes $intentBytes
+        }
         if ($null -ne $previous) {
             $activation = $currentRemovalAuthority.ActivationState
             $removalIntent = New-InstanceRemovalIntentDocument `
@@ -4842,7 +5145,7 @@ function Invoke-InstanceUninstall {
             $intentBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-InstanceJsonText -Value $removalIntent))
             Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -Target "$($script:InstanceRemovalIntentsRelativePath)/$stateId.json" -Mutation "Write" -DesiredBytes $intentBytes
         }
-        Add-ProjectRemovalDeactivationEntries -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -StateId $stateId
+        Add-ProjectRemovalDeactivationEntries -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $operationRoot -StateId $stateId -PublishDesiredLast:($null -ne $failedAuthority)
         Set-MaterializerCommandPhase -Phase "ACTIVATION"
         $currentSelectionPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label "current instance selection"
         $verification = {
@@ -4856,9 +5159,18 @@ function Invoke-InstanceUninstall {
             if ($stateVerification.DesiredState -ne "UNINSTALLED") { throw "Logical Uninstall did not publish UNINSTALLED desired state." }
         }.GetNewClosure()
         $verifyBeforeMutation = {
-            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint
+            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint -FailedPreparationAuthority $failedAuthority
         }.GetNewClosure()
-        Publish-InstanceOperation -ProjectRoot $ProjectRoot -ActionName "Uninstall" -CandidateInstanceId $operationId -Entries $entries.ToArray() -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeMutation $verifyBeforeMutation -VerifyBeforeCommit $verification -OperationId $operationId
+        $effectBoundary = if ($null -ne $failedAuthority) {
+            # The same snapshot and holder proof guard every publication, including
+            # the last desired-state write; no readiness/worker script is called.
+            $parsedIntent = ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText -Value $removalIntent) -Label 'emitted failed preparation intent'
+            {
+                Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $parsedIntent
+                $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $parsedIntent
+            }.GetNewClosure()
+        } else { $null }
+        Publish-InstanceOperation -ProjectRoot $ProjectRoot -ActionName "Uninstall" -CandidateInstanceId $operationId -Entries $entries.ToArray() -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeMutation $verifyBeforeMutation -VerifyBeforeCommit $verification -VerifyEffectBoundary $effectBoundary -OperationId $operationId
         Invoke-TestUninstallAfterMcpHandshake
         $cleanupState = Get-InstanceUninstallCleanupState `
             -ProjectRoot $ProjectRoot `

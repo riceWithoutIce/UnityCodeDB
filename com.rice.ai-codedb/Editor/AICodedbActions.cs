@@ -191,7 +191,7 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbCommandResult RunInstallCodeDB()
         {
             var result = AICodedbHostPayloadMaterializer.RunInstall();
-            AICodedbEditorLifecycle.RequestReconcile();
+            RequestInstallReconcile(result);
             return result;
         }
 
@@ -201,8 +201,24 @@ namespace Rice.AI.Codedb.Editor
                 "Install",
                 true,
                 () => AICodedbHostPayloadMaterializer.RunInstallAsync());
-            AICodedbEditorLifecycle.RequestReconcile();
+            RequestInstallReconcile(result);
             return result;
+        }
+
+        internal static bool CanRequestInstallReconcile(AICodedbCommandResult result)
+        {
+            if (!AICodedbManagerActionSession.CanRequestPostCommandReconcile(result))
+                return false;
+            var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+            return command.Present && command.IsValid
+                && command.Action == "INSTALL" && command.Outcome == "INSTALLED"
+                && command.CleanupState == "COMPLETE";
+        }
+
+        internal static void RequestInstallReconcile(AICodedbCommandResult result)
+        {
+            if (CanRequestInstallReconcile(result))
+                AICodedbEditorLifecycle.RequestReconcile();
         }
 
         internal static bool IsExplicitRemoveIntegrationAdmissionAllowed(

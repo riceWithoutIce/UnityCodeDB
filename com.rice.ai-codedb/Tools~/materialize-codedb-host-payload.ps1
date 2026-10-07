@@ -10547,6 +10547,13 @@ function Get-RemoveIntegrationAuthority {
         [switch]$IgnoreInstanceOperationJournal
     )
 
+    $selectionPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label 'removal selection'
+    $instancesPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'removal instances'
+    if (-not (Test-Path -LiteralPath $selectionPath) -and (Test-Path -LiteralPath $instancesPath -PathType Container) -and
+        (Get-InstanceDesiredState -ProjectRoot $ProjectRoot).DesiredState -ceq 'INSTALLED') {
+        return Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+    }
+
     Assert-RemoveIntegrationContractHierarchy -ProjectRoot $ProjectRoot
     $topLevelOperation = ConvertTo-AbsoluteChildPath `
         -Root $ProjectRoot `
@@ -10887,6 +10894,7 @@ function Assert-RemoveIntegrationTerminalState {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$DesiredState,
+        [AllowNull()]$Manifest,
         [switch]$AllowEmptyCleanupDirectories
     )
 
@@ -10896,7 +10904,7 @@ function Assert-RemoveIntegrationTerminalState {
         $DesiredState.StateId -cnotmatch '^[0-9a-f]{32}$') {
         throw "Integration removal requires the exact authenticated UNINSTALLED / PENDING desired state."
     }
-    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $DesiredState.StateId
+    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $DesiredState.StateId -Manifest $Manifest
     foreach ($relativePath in @(
             $script:InstanceCurrentRelativePath,
             $script:InstanceLastKnownGoodRelativePath,
@@ -11190,6 +11198,15 @@ function Invoke-RemoveIntegration {
         [Parameter(Mandatory = $true)][string]$ProjectRoot
     )
 
+    $selectionPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label 'removal selection'
+    if (-not (Test-Path -LiteralPath $selectionPath) -and (Get-InstanceDesiredState -ProjectRoot $ProjectRoot).DesiredState -ceq 'INSTALLED') {
+        $authority = Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+        if ($authority.Kind -ceq 'FAILED_PREPARATION') {
+            Invoke-InstanceUninstall -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath (Join-Path $ProjectRoot $script:MarkerRelativePath)
+            return
+        }
+    }
+
     $lock = $null
     Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     try {
@@ -11204,7 +11221,7 @@ function Invoke-RemoveIntegration {
         }
         $authority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
         if ($null -eq $authority) {
-            Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $desiredBefore
+            Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $desiredBefore -Manifest $Manifest
             Write-Host "[RESULT] UNINSTALLED"
             Write-Host "[CLEANUP_STATE] PENDING"
             Write-Host "[NEXT] Use Install CodeDB to create a fresh project integration."
@@ -11294,7 +11311,7 @@ function Invoke-RemoveIntegration {
             -OperationId $operationId
         Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $authority
         $finalState = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $finalState
+        Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $finalState -Manifest $Manifest
         Write-Host "[RESULT] UNINSTALLED"
         Write-Host "[CLEANUP_STATE] PENDING"
         Write-Host "[NEXT] Use Install CodeDB to create a fresh project integration."

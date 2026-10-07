@@ -1,0 +1,115 @@
+S29 FAILED INSTALL REPAIR - PARTIAL CODER IDENTITY
+Status: PARTIAL / OUTPUT_BUDGET_EXCEEDED / NO_PRODUCT_MUTATION
+Base HEAD: 13bf5fd16c15c42e1379ce35a06e49c20753195f
+Final HEAD: 13bf5fd16c15c42e1379ce35a06e49c20753195f
+Initial index SHA256: f97b6bcf28b896b789d9de85fe24212b51bcd327e01531a432294099b22acbed
+Final index SHA256: f97b6bcf28b896b789d9de85fe24212b51bcd327e01531a432294099b22acbed
+Allowlist product files unchanged: true
+Tracked generation files hashed: 358
+Tracked generation bytes unchanged: true
+Generation digest method: SHA256 of UTF8 concatenation of lowercase raw file SHA256 values in git ls-files order.
+Generation digest scope: com.rice.ai-codedb/Generations/* and com.rice.ai-codedb/Payload~/Generations/*
+Generation digest SHA256: 6014a59cde8ed85d47338b97a11adb272823fbe22cafcef3c99ca7c3b2ca8d94
+Product binary patch: empty (all 10 allowlisted product/test files were initially clean and remain byte-identical).
+Empty product binary patch SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Initial capture UTC: 2026-10-07T13:17:00.9776905Z
+Final metadata check UTC: 2026-10-07T13:18:43.2788246Z
+Changed paths owned by this Coder: FAILED-INSTALL-REPAIR-RESULT.md; FAILED-INSTALL-REPAIR-IDENTITY.txt
+Unrelated state: no Coder writes; protected real-project bytes not inspected or hashed.
+Parent-owned contract amendment excluded from preservation claim.
+Transient tool store keys: baseline (raw JSON), baselineParsed, finalMetadata; not portable handoff artifacts.
+
+Ordered allowlisted raw SHA256 values (initial = final):
+7bb64cc32a6e9be4282b6ae023cdacc140379694400e3b73a8af723f302120da  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+2a25e7798e38c19fda2849619072a0ce94cbaa372be0eb70566281a6ff69b1ec  com.rice.ai-codedb/Editor/AICodedbActions.cs
+96d0213cc8dffe5d83df757117d5a89b62a2ffbaf0196524e1d338089ff84265  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+feb7617009554cd5e2da58bf624b092bac5ca5521b2e756a9105c10fabac4ce5  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+29e50731cd9da36b61ef58fdb3ce825160813b0875555f73964914b1bd2522d3  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+25fb6da92f342029a0721d9383832cdfc00c1ca9635fe55a6fb0dd940e0ba9b7  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+961a612bc0521660c7e60551f8a256d638b1544cf9690d41d849f6c54c1da6d7  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+a30a2fcbc014e36abde976c22696feba86f5577f404113ecdeae49c89262618c  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+9c9f12c2884ac4dc963a330178581379e75c061a0fbcd6cff3fcd4c2adf4afad  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+35458e167bc3664b7f87ec1b88c24314e4061de37731adf7d31ddae4cf8e8d18  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+
+CONTINUATION 01 - STABLE PARTIAL IMPLEMENTATION
+Status: PARTIAL / FRESH_INSTALL_NOT_PROVEN / TEST_CORRECTION_BUDGET_EXHAUSTED
+Stable UTC: 2026-10-07T13:49:23.8961607Z
+Base/final HEAD: 13bf5fd16c15c42e1379ce35a06e49c20753195f
+Final index SHA256: f97b6bcf28b896b789d9de85fe24212b51bcd327e01531a432294099b22acbed
+Generation files: 358; all hashes match initial baseline
+Generation hash-list SHA256: 6014a59cde8ed85d47338b97a11adb272823fbe22cafcef3c99ca7c3b2ca8d94
+Binary patch: git diff --binary -- <ten allowlisted paths in the order below>
+Binary patch raw stdout bytes: 87914
+Binary patch SHA256: fc7fa2a594201bc76b3be433333ea032dbaa48cf82588a6f21bc021c79d5044c
+Final git diff --check exit: 0
+Changed product/test paths: 9
+CHANGED com.rice.ai-codedb/Editor/AICodedbActions.cs
+CHANGED com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+CHANGED com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+CHANGED com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+CHANGED com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+CHANGED com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+CHANGED com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+CHANGED com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+CHANGED com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+Ordered current raw SHA256 of all ten allowlisted paths:
+e76d566eeb7a54caa56f77b246cb26f7b896a899ccda9826612727c157c6c200  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+27eee0278233e1a89fa3cf29363d4d941548d5ce692617ef3dd7fae542f6c529  com.rice.ai-codedb/Editor/AICodedbActions.cs
+96d0213cc8dffe5d83df757117d5a89b62a2ffbaf0196524e1d338089ff84265  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+b53f80837c79ccfe9d03b45edce43b52d2678cebd78dbc9c3deafeb8ad50043d  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+733ed2ab97edbff21d52ac3d5ce236a31b803248843332cad5f138e3dc8f9120  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+9f9cb526ffb6f7777c37d521c2d91599e5a3c111e559623af29842f6647c4a20  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+39e7872ab387457c477da318a271776ae4c9fc565e12af0f26ba2c8d072cc16a  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+98dbc7adc4d09895eb555785a2c512e34a882d2629cc405c2e0ccc9585a8ad70  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+0c0e21b57232f12a96b41c1bdd9dfd7403fc433844552b8e5a40701266f73208  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+e646a2450dfb8021d8eee866690c6c3e72bed62c22ffad72e9f168f05457288e  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+Earlier PARTIAL snapshot preserved. Parent-owned packet/contract excluded.
+Additional transient tool store key: continuationFinalMetadata.
+
+CONTINUATION 02 - SHARED WRAPPER STABLE PARTIAL
+Status: PARTIAL / FOCUSED_FAMILY_INCOMPLETE / FIXTURE_LOCK_DIGEST_FAILURE
+Stable UTC: 2026-10-07T14:23:16.2951256Z
+Base/final HEAD: 13bf5fd16c15c42e1379ce35a06e49c20753195f
+Index SHA256: f97b6bcf28b896b789d9de85fe24212b51bcd327e01531a432294099b22acbed
+Tracked generation count: 358; unchanged from initial baseline
+Generation hash-list SHA256: 6014a59cde8ed85d47338b97a11adb272823fbe22cafcef3c99ca7c3b2ca8d94
+Product binary patch bytes: 104036
+Product binary patch SHA256: 369fd10eb27648527392eb7bc300f6d328fea20eadaecab395f7417791605f81
+Ordered current raw SHA256 (same ten-path order):
+e76d566eeb7a54caa56f77b246cb26f7b896a899ccda9826612727c157c6c200  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+27eee0278233e1a89fa3cf29363d4d941548d5ce692617ef3dd7fae542f6c529  com.rice.ai-codedb/Editor/AICodedbActions.cs
+96d0213cc8dffe5d83df757117d5a89b62a2ffbaf0196524e1d338089ff84265  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+b53f80837c79ccfe9d03b45edce43b52d2678cebd78dbc9c3deafeb8ad50043d  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+733ed2ab97edbff21d52ac3d5ce236a31b803248843332cad5f138e3dc8f9120  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+f6b791ecef89c4a2ec7c9e8bd901701359ca79fc20f3860334a0d81f013ed5e5  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+39e7872ab387457c477da318a271776ae4c9fc565e12af0f26ba2c8d072cc16a  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+98dbc7adc4d09895eb555785a2c512e34a882d2629cc405c2e0ccc9585a8ad70  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+0c0e21b57232f12a96b41c1bdd9dfd7403fc433844552b8e5a40701266f73208  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+10c74559759a80e020c405cf6907632d5c117e55e37978d535c603ad58df5cd8  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+Historical snapshots above preserved; no subsequent source/test edits.
+Additional transient tool store key: continuation02FinalMetadata.
+
+CONTINUATION 03 - INTERRUPTION FIXTURE STABLE COMPLETION
+Status: SCOPED_FIXTURE_PASS / READY_FOR_INDEPENDENT_VERIFIER
+Stable source UTC: 2026-10-07T14:35:53.9900893Z
+Base/final HEAD: 13bf5fd16c15c42e1379ce35a06e49c20753195f
+Index SHA256: f97b6bcf28b896b789d9de85fe24212b51bcd327e01531a432294099b22acbed
+Nine non-harness files: raw SHA256 unchanged from Continuation 02 (9/9).
+Generation files: no writes; Continuation 02 evidence reused, no broader re-audit.
+Focused selector: -FailedPreparationInterruptionOnly
+Run: 51 assertions PASS; native_children=0; exit=0; 43514 ms; stderr=0 bytes.
+Run UTC: 2026-10-07T14:34:37.6735405Z to 2026-10-07T14:35:21.1965181Z.
+One preceding launcher failure: no process/fixture started; retained in RESULT.
+Final harness parse and scoped git diff --check: PASS.
+Ordered current raw SHA256 (same ten-path order):
+e76d566eeb7a54caa56f77b246cb26f7b896a899ccda9826612727c157c6c200  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+27eee0278233e1a89fa3cf29363d4d941548d5ce692617ef3dd7fae542f6c529  com.rice.ai-codedb/Editor/AICodedbActions.cs
+96d0213cc8dffe5d83df757117d5a89b62a2ffbaf0196524e1d338089ff84265  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+b53f80837c79ccfe9d03b45edce43b52d2678cebd78dbc9c3deafeb8ad50043d  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+733ed2ab97edbff21d52ac3d5ce236a31b803248843332cad5f138e3dc8f9120  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+f6b791ecef89c4a2ec7c9e8bd901701359ca79fc20f3860334a0d81f013ed5e5  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+39e7872ab387457c477da318a271776ae4c9fc565e12af0f26ba2c8d072cc16a  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+98dbc7adc4d09895eb555785a2c512e34a882d2629cc405c2e0ccc9585a8ad70  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+0c0e21b57232f12a96b41c1bdd9dfd7403fc433844552b8e5a40701266f73208  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+c451454a5863c28803bab54b08151e66a1cf71ff8efff4288ef33354a5073eba  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+Historical snapshots/failures above preserved. Coder stopped for Verifier.
