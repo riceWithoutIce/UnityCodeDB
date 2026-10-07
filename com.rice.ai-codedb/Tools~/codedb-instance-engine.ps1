@@ -2056,15 +2056,7 @@ function Get-ValidatedCurrentInstance {
 
 function Assert-InstanceOriginatingAction {
     param([AllowNull()]$Origin)
-    if ($null -eq $Origin) { return }
-    $value = if ($Origin -is [Collections.IDictionary]) { [pscustomobject]$Origin } else { $Origin }
-    $object = Assert-JsonObject -Value $value -Label 'candidate originating action'
-    Assert-InstanceJsonFieldAllowlist -Object $object -Fields @('action', 'action_id', 'operation_id') -Label 'candidate originating action'
-    if ((Get-RequiredJsonString -Object $object -Name 'action' -Label 'candidate originating action') -cnotin @('INSTALL', 'UPGRADE', 'REINSTALL') -or
-        (Get-RequiredJsonString -Object $object -Name 'action_id' -Label 'candidate originating action') -cnotmatch '^[0-9a-f]{32}$' -or
-        (Get-RequiredJsonString -Object $object -Name 'operation_id' -Label 'candidate originating action') -cnotmatch '^[0-9a-f]{32}$') {
-        throw 'Candidate originating action identity is invalid.'
-    }
+    Assert-CodedbInstanceOriginatingAction -Origin $Origin -Label 'candidate originating action'
 }
 
 function Assert-InstanceManifestOrigin {

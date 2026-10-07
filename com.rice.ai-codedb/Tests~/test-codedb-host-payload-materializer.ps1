@@ -40,19 +40,21 @@ param(
 
     [switch]$FirstInstallAttributionOnly,
 
+    [switch]$InstanceManifestContractOnly,
+
     [switch]$TransactionOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
 }
 
 
 function Invoke-NextChangeAdmissionIntegrationScenarios {
-    param([switch]$FirstInstallAttribution)
+    param([switch]$FirstInstallAttribution, [switch]$InstanceManifestContract)
     # Records are fixture-owned; every production function body is imported
     # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
     $familyClock = [Diagnostics.Stopwatch]::StartNew()
@@ -134,7 +136,8 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
         New-Item -ItemType Directory -Force -Path $Root | Out-Null
         $manifest = Read-PayloadManifest -Root (Join-Path $integrationPackageRoot 'Payload~') -ProjectRoot $Root
         foreach ($file in $manifest.Files) {
-            if ($file.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::Ordinal) -or $file.Target -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs') {
+            if ($file.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::Ordinal) -or $file.Target -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' -or
+                $file.Target.StartsWith('AIWork/codedb/shared/', [StringComparison]::Ordinal)) {
                 Assert-PathInside -Path $file.TargetPath -Root $Root -Label 'Phase C canonical fixture copy'
                 New-Item -ItemType Directory -Force -Path (Split-Path $file.TargetPath -Parent) | Out-Null
                 Copy-Item -LiteralPath $file.SourcePath -Destination $file.TargetPath
@@ -196,9 +199,16 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
 
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     try {
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-strict-json.ps1')
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\materialize-codedb-host-payload.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\codedb-instance-engine.ps1')
         $script:PhaseCCaseCount = 0
+        if ($InstanceManifestContract) {
+            Invoke-InstanceManifestContractCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies
+            Write-Host ("[PASS] InstanceManifestContractOnly; ps_cases=" + $script:PhaseCCaseCount + "; service_children=0; node_fixture_children=1; elapsed_ms=" + $familyClock.ElapsedMilliseconds)
+            return
+        }
         if ($FirstInstallAttribution) {
             # Full convergence uses GetNewClosure callbacks. Bind the unchanged
             # production definitions to one shared script module, like the real
@@ -452,8 +462,119 @@ function Invoke-FirstInstallAttributionCases {
     Assert-PhaseC -Condition ($script:FirstNativeCalls -eq 2) -Label 'two-isolated-native-boundary-observations-no-process-launch'
 }
 
-if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly) {
-    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly
+function Invoke-InstanceManifestContractCases {
+    param([string]$Container, [string]$PackageRoot, $Definitions)
+    foreach ($name in @('New-InstanceManifestDocument', 'Write-InstanceManifest', 'ConvertTo-InstanceJsonText', 'ConvertFrom-StrictJsonText', 'Assert-InstanceOriginatingAction')) {
+        Assert-PhaseC -Condition ((Get-Command $name).ScriptBlock.ToString() -ceq $Definitions[$name]) -Label ('exact-production-body-' + $name)
+    }
+    $root = Join-Path $Container 'imc'
+    $manifest = Copy-PhaseCCanonicalClosure -Root $root
+    $generationRoot = Join-Path $root $script:GenerationTargetPrefix
+    $commonPath = Join-Path $generationRoot 'scripts\codedb-project-common.ps1'
+    . $commonPath
+    foreach ($name in @('ConvertFrom-StrictJsonText', 'ConvertFrom-CodedbInstanceManifestJson', 'Assert-CodedbInstanceManifestFields')) {
+        Assert-PhaseC -Condition ((Get-Command $name).ScriptBlock.ToString() -ceq $Definitions[$name]) -Label ('actual-generation-shared-body-' + $name)
+    }
+    $id = [guid]::NewGuid().ToString('N')
+    $instanceRoot = Join-Path $root ($script:InstancesRelativePath + '/' + $id)
+    New-Item -ItemType Directory -Path $instanceRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $instanceRoot 'tmp') | Out-Null
+    $context = [pscustomobject]@{
+        UnityRoot = $root; RuntimeRoot = Join-Path $root 'AIWork\.runtime\codedb'
+        InstanceRoot = $instanceRoot; InstanceId = $id; GenerationId = $manifest.GenerationId; CodedbRoot = $generationRoot
+    }
+    $caseRoot = Join-Path $Container 'node-contract-cases'
+    New-Item -ItemType Directory -Path $caseRoot | Out-Null
+    $nodeCases = [Collections.Generic.List[object]]::new()
+    $origin = [pscustomobject]@{ action = 'INSTALL'; action_id = [guid]::NewGuid().ToString('N'); operation_id = [guid]::NewGuid().ToString('N') }
+    function Save-ContractCase {
+        param([string]$Name, [bool]$Accepted)
+        $path = Join-Path $caseRoot ($Name + '.json')
+        Assert-PathInside -Path $path -Root $Container -Label 'instance contract case bytes'
+        Copy-Item -LiteralPath (Join-Path $instanceRoot 'instance.json') -Destination $path
+        $nodeCases.Add([ordered]@{ name = $Name; path = $path; accepted = $Accepted })
+    }
+    foreach ($action in @('INSTALL', 'UPGRADE', 'REINSTALL')) {
+        foreach ($state in @('PROVISIONING', 'READY')) {
+            $origin.action = $action
+            $document = New-InstanceManifestDocument -Manifest $manifest -ProjectRoot $root -InstanceId $id -State $state -CreatedAtUtc ([DateTime]::UtcNow.ToString('o')) -OriginatingAction $origin
+            $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $document
+            $decoded = Read-CodedbInstanceManifest -Path $path -Label 'production emitted instance'
+            Assert-CodedbInstanceContext -Context $context
+            Assert-PhaseC -Condition ($decoded['originating_action'].action -ceq $action -and $decoded['originating_action'].action_id -ceq $origin.action_id -and $decoded['originating_action'].operation_id -ceq $origin.operation_id -and $decoded['state'] -ceq $state) -Label ('writer-actual-Host-' + $action + '-' + $state)
+            Save-ContractCase -Name ($action + '-' + $state) -Accepted $true
+        }
+    }
+    foreach ($shape in @('absent', 'null')) {
+        $document = New-InstanceManifestDocument -Manifest $manifest -ProjectRoot $root -InstanceId $id -State PROVISIONING -CreatedAtUtc ([DateTime]::UtcNow.ToString('o'))
+        if ($shape -ceq 'null') { $document.originating_action = $null }
+        $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $document
+        $decoded = Read-CodedbInstanceManifest -Path $path -Label 'production emitted optional origin'
+        Assert-CodedbInstanceContext -Context $context
+        Assert-PhaseC -Condition (($shape -ceq 'absent' -and -not $decoded.ContainsKey('originating_action')) -or ($shape -ceq 'null' -and $decoded.ContainsKey('originating_action') -and $null -eq $decoded['originating_action'])) -Label ('writer-actual-Host-origin-' + $shape)
+        Save-ContractCase -Name $shape -Accepted $true
+    }
+    $origin.action = 'INSTALL'
+    $valid = New-InstanceManifestDocument -Manifest $manifest -ProjectRoot $root -InstanceId $id -State PROVISIONING -CreatedAtUtc ([DateTime]::UtcNow.ToString('o')) -OriginatingAction $origin
+    $validText = ConvertTo-InstanceJsonText -Value $valid
+    $faults = @(
+        [pscustomobject]@{ Name = 'origin-string'; Value = 'stringified'; Expected = 'object' },
+        [pscustomobject]@{ Name = 'origin-array'; Value = @($origin); Expected = 'object' },
+        [pscustomobject]@{ Name = 'origin-missing-field'; Value = [pscustomobject]@{ action = 'INSTALL'; action_id = $origin.action_id }; Expected = 'properties' },
+        [pscustomobject]@{ Name = 'origin-extra-field'; Value = [pscustomobject]@{ action = 'INSTALL'; action_id = $origin.action_id; operation_id = $origin.operation_id; extra = 'x' }; Expected = 'properties' },
+        [pscustomobject]@{ Name = 'origin-action-case'; Value = [pscustomobject]@{ action = 'install'; action_id = $origin.action_id; operation_id = $origin.operation_id }; Expected = 'identity' },
+        [pscustomobject]@{ Name = 'origin-action-type'; Value = [pscustomobject]@{ action = 1; action_id = $origin.action_id; operation_id = $origin.operation_id }; Expected = 'identity' },
+        [pscustomobject]@{ Name = 'origin-action-id-uppercase'; Value = [pscustomobject]@{ action = 'INSTALL'; action_id = 'A' * 32; operation_id = $origin.operation_id }; Expected = 'identity' },
+        [pscustomobject]@{ Name = 'origin-operation-id-width'; Value = [pscustomobject]@{ action = 'INSTALL'; action_id = $origin.action_id; operation_id = 'b' * 31 }; Expected = 'identity' }
+    )
+    foreach ($fault in $faults) {
+        Assert-PhaseCRejected -Body { New-InstanceManifestDocument -Manifest $manifest -ProjectRoot $root -InstanceId $id -State PROVISIONING -CreatedAtUtc ([DateTime]::UtcNow.ToString('o')) -OriginatingAction $fault.Value } -Expected $fault.Expected -Label ('writer-' + $fault.Name)
+        $document = ConvertFrom-StrictJsonText -Text $validText -Label 'producer bytes before origin fault'
+        $document.originating_action = $fault.Value
+        $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $document
+        Assert-PhaseCRejected -Body { Read-CodedbInstanceManifest -Path $path -Label 'invalid instance origin' } -Expected $fault.Expected -Label ('actual-Host-' + $fault.Name)
+        Save-ContractCase -Name $fault.Name -Accepted $false
+    }
+    $withoutFinalBrace = $validText.TrimEnd().Substring(0, $validText.TrimEnd().Length - 1)
+    $missingRequired = ConvertFrom-StrictJsonText -Text $validText -Label 'producer bytes before required-field fault'
+    $missingRequired.PSObject.Properties.Remove('verified_at_utc')
+    $jsonFaults = @(
+        [pscustomobject]@{ Name = 'origin-duplicate'; Text = $validText.Replace('"action":', '"action":"INSTALL","action":'); Expected = 'duplicate' },
+        [pscustomobject]@{ Name = 'origin-case-ambiguous'; Text = $validText.Replace('"action":', '"Action":"INSTALL","action":'); Expected = 'case-ambiguous' },
+        [pscustomobject]@{ Name = 'origin-root-duplicate'; Text = $withoutFinalBrace + ',"originating_action":null}'; Expected = 'duplicate' },
+        [pscustomobject]@{ Name = 'origin-root-extra'; Text = $withoutFinalBrace + ',"unexpected_origin":"x"}'; Expected = 'properties' },
+        [pscustomobject]@{ Name = 'origin-root-missing-required'; Text = ConvertTo-InstanceJsonText -Value $missingRequired; Expected = 'string' },
+        [pscustomobject]@{ Name = 'origin-root-integer-type'; Text = [regex]::Replace($validText, '"payload_sequence"\s*:\s*[0-9]+', ('"payload_sequence":"' + $manifest.PayloadSequence + '"')); Expected = 'integer' },
+        [pscustomobject]@{ Name = 'origin-trailing-content'; Text = $validText + '{}'; Expected = 'trailing' },
+        [pscustomobject]@{ Name = 'origin-size-bound'; Text = $validText + (' ' * 131072); Expected = 'size' },
+        [pscustomobject]@{ Name = 'origin-bom'; Text = ([char]0xFEFF).ToString() + $validText; Expected = 'byte-order' }
+    )
+    $path = Join-Path $instanceRoot 'instance.json'
+    foreach ($fault in $jsonFaults) {
+        [IO.File]::WriteAllText($path, $fault.Text, [Text.UTF8Encoding]::new($false))
+        Assert-PhaseCRejected -Body { Read-CodedbInstanceManifest -Path $path -Label 'origin JSON boundary' } -Expected $fault.Expected -Label ('actual-Host-' + $fault.Name)
+        Save-ContractCase -Name $fault.Name -Accepted $false
+    }
+    [IO.File]::WriteAllBytes($path, [byte[]]@(0x7B, 0xFF, 0x7D))
+    Assert-PhaseCRejected -Body { Read-CodedbInstanceManifest -Path $path -Label 'origin strict UTF8 boundary' } -Expected 'UTF-8' -Label 'actual-Host-origin-invalid-utf8'
+    Save-ContractCase -Name 'origin-invalid-utf8' -Accepted $false
+    $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $valid
+    $valid.state = 'RETIRED'
+    $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $valid
+    Assert-PhaseCRejected -Body { Assert-CodedbInstanceContext -Context $context } -Expected 'state' -Label 'actual-context-retired-origin-cannot-grant-readiness'
+    $valid.state = 'PROVISIONING'; $valid.generation_manifest_sha256 = '0' * 64
+    $path = Write-InstanceManifest -InstanceRoot $instanceRoot -Document $valid
+    Assert-PhaseCRejected -Body { Assert-CodedbInstanceContext -Context $context } -Expected 'closure' -Label 'actual-context-origin-cannot-bypass-generation-hash'
+    $casesPath = Join-Path $caseRoot 'cases.json'
+    [IO.File]::WriteAllText($casesPath, ($nodeCases.ToArray() | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+    $nodePath = @(Get-Command node -CommandType Application -ErrorAction Stop)[0].Source
+    & $nodePath (Join-Path $PackageRoot 'Tests~\test-codedb-instance-manifest-contract.mjs') $casesPath (Join-Path $PackageRoot 'Payload~\AIWork\codedb\wrapper\codedb-project-wrapper.mjs') (Join-Path $generationRoot 'wrapper\codedb-project-instance-worker.mjs') (Join-Path $PackageRoot 'Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.mjs') (Join-Path $generationRoot 'shared\codedb-instance-manifest-contract.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Shared Node instance decoder fixture failed.' }
+    Assert-PhaseC -Condition ($nodeCases.Count -eq 26) -Label 'exact-production-serializer-node-case-count'
+}
+
+if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly) {
+    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly
     return
 }
 

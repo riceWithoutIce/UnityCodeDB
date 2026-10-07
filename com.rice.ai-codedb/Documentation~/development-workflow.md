@@ -764,6 +764,47 @@ fixtures, or generated files.
   authority gate passes on the exact commit-derived artifact. Unity evidence
   cannot compensate for a failed Package identity closure.
 
+### Record Contract Consumer Closure Gate
+
+A change to a serialized field's shape, type, presence, validation or meaning
+must close its producer-to-consumer boundary, even when the schema/version
+number is unchanged or the field is described as additive. Identity/hash
+closure alone does not prove that a runtime consumer can read the record.
+
+- Name the authoritative record contract/schema route once. Each language
+  projects that contract; a domain-specific parser for another record is not
+  an independent authority or a generic JSON reader. For instance manifests,
+  use the [project-integration contract](v0.3.0-p0-project-integration-reinstall-contract.md#instance-manifest-contract-and-consumer-closure---2026-10-07).
+- Put one compact map in the existing task: changed field and expected shape;
+  production writer; real decoding entry points, including failure/cleanup
+  paths; owning Package/generation; and focused evidence. Discover consumers
+  from the actual call chain, not just filenames, the write allowlist or
+  language-local tests. Shared decoding entry points may be grouped once when
+  their caller bindings are demonstrated.
+- Planner freezes that map and a coherent write/evidence scope. Coder closes
+  the affected writers/readers and reports their bindings. Verifier checks the
+  frozen map and attributable evidence, not a new whole-product audit. A
+  consumer outside the current allowlist requires scope reassessment, not
+  silent omission, widening, field removal or validation bypass.
+- Use bytes emitted by the production writer with the real production reader
+  for the target Package/generation in the existing focused harness. Cover
+  the valid changed shape and directly coupled rejection cases. Inputs and
+  temporary roots remain test-owned; pure decoding evidence does not require
+  Unity, Provider, MCP or a real project. A synthetic downstream process may
+  remain a seam, but it must not replace the decoding boundary being proved.
+- If an affected reader belongs to a frozen/observed immutable generation,
+  close the change through the existing successor-generation authority route
+  before freezing delivery. Do not declare generation transition NONE merely
+  because only Package-side source was initially allowlisted.
+- Reuse the same focused evidence plan for the exact extracted delivery
+  artifact, invoking its affected writer/reader route rather than worktree
+  substitutes. Label byte closure and contract-consumer closure separately.
+  Missing/failed evidence for a normal user path blocks that delivery gate;
+  C# compile, fixture availability or a hash PASS cannot substitute for it.
+- This map and evidence belong to the existing task/batch/review. They do not
+  authorize full regression, unrelated schema hardening, a new schema platform,
+  repeated unchanged tests, real runtime recovery or extra Unity sessions.
+
 ### Package Release Closure Gate
 
 Any task that exports, installs, or publishes a Package must prove the bytes

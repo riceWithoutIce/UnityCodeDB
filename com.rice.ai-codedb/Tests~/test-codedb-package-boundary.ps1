@@ -287,7 +287,22 @@ function Assert-SafeRelativePath {
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 if ($PathProvenanceOnly) {
     Assert-PackagePathProvenance -Root $packageRoot -Files @(Get-PackageTextFiles -Root $packageRoot)
+    $payloadRoot = Join-Path $packageRoot 'Payload~'
+    $identity = Get-Content -LiteralPath (Join-Path $payloadRoot 'host-current.json') -Raw | ConvertFrom-Json
+    $generationRoot = Join-Path $payloadRoot ('Generations\' + [string]$identity.generation_id)
+    foreach ($helper in @('codedb-strict-json.ps1', 'codedb-instance-manifest-contract.ps1', 'codedb-instance-manifest-contract.mjs')) {
+        $canonical = Join-Path $payloadRoot ('AIWork\codedb\shared\' + $helper)
+        $projection = Join-Path $generationRoot ('shared\' + $helper)
+        Assert-Equal -Actual (Get-FileHash -LiteralPath $projection -Algorithm SHA256).Hash -Expected (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash -Label ('Canonical instance helper projection ' + $helper)
+    }
+    $common = [IO.File]::ReadAllText((Join-Path $generationRoot 'scripts\codedb-project-common.ps1'))
+    Assert-True -Condition ($common.Contains('return ConvertFrom-CodedbInstanceManifestJson -Text $text -Label $Label') -and $common.Contains('Assert-CodedbInstanceManifestFields -Properties $manifest')) -Message 'Actual generation decoder and field admission must both use the instance contract.'
+    foreach ($caller in @((Join-Path $payloadRoot 'AIWork\codedb\wrapper\codedb-project-wrapper.mjs'), (Join-Path $generationRoot 'wrapper\codedb-project-instance-worker.mjs'))) {
+        $body = [IO.File]::ReadAllText($caller)
+        Assert-True -Condition ($body.Contains('import { parseCodedbInstanceManifest } from "../shared/codedb-instance-manifest-contract.mjs";') -and $body.Contains('const instance = parseCodedbInstanceManifest(') -and -not $body.Contains('const instance = parseStrictFlatJson(')) -Message 'Actual Node instance caller must unconditionally bind the shared decoder.'
+    }
     Write-Host '[PASS] Package path provenance.'
+    Write-Host '[PASS] Instance manifest helper projections=3; PS decoding/admission bindings=2; Node caller bindings=2.'
     return
 }
 $packageManifestPath = Join-Path $packageRoot "package.json"
@@ -295,7 +310,8 @@ $payloadRoot = Join-Path $packageRoot "Payload~"
 $payloadManifestPath = Join-Path $payloadRoot "payload-manifest.json"
 $expectedUpmPackageVersion = "0.3.0-preview.5"
 $expectedHostCompatibilityPackageVersion = $expectedUpmPackageVersion
-$expectedGenerationId = "poc.39"
+$expectedGenerationId = [string](Get-Content -LiteralPath (Join-Path $payloadRoot 'host-current.json') -Raw | ConvertFrom-Json).generation_id
+Assert-True -Condition ($expectedGenerationId -cmatch '^poc\.[0-9]+$') -Message 'Canonical generation identity is invalid.'
 
 # v0.3 P1-B moves command ownership to the project-local Supervisor. Keep
 # these paths in the package boundary so a package cannot silently fall back to
@@ -588,13 +604,13 @@ Assert-Equal `
     -Expected $expectedHostCompatibilityPackageVersion `
     -Label "Payload Host compatibility package version"
 Assert-Equal -Actual $payloadManifest.payload_version -Expected $expectedGenerationId -Label "Payload version"
-Assert-Equal -Actual $payloadManifest.payload_sequence -Expected 39 -Label "Payload sequence"
+Assert-Equal -Actual $payloadManifest.payload_sequence -Expected ([int]$expectedGenerationId.Substring(4)) -Label "Payload sequence"
 Assert-Equal -Actual $payloadManifest.generation_id -Expected $expectedGenerationId -Label "Payload generation"
 Assert-Equal -Actual $payloadManifest.bootstrap_protocol -Expected 1 -Label "Payload bootstrap protocol"
 Assert-Equal -Actual $payloadManifest.current_pointer_target -Expected "AIWork/.runtime/codedb/host/current.json" -Label "Payload current pointer target"
-Assert-Equal -Actual @($payloadManifest.files).Count -Expected 46 -Label "Payload target count"
+Assert-Equal -Actual @($payloadManifest.files).Count -Expected 52 -Label "Payload target count"
 $bootstrapTransitions = @($payloadManifest.bootstrap_transitions)
-Assert-Equal -Actual $bootstrapTransitions.Count -Expected 8 -Label "Reviewed bootstrap transition count"
+Assert-Equal -Actual $bootstrapTransitions.Count -Expected 9 -Label "Reviewed bootstrap transition count"
 $v024Transition = $bootstrapTransitions[0]
 Assert-Equal -Actual ([string]$v024Transition.source_tag) -Expected "v0.2.4" -Label "Reviewed bootstrap transition tag"
 Assert-Equal -Actual ([string]$v024Transition.source_package_version) -Expected "0.2.4" -Label "Reviewed bootstrap transition Package"
@@ -736,8 +752,8 @@ foreach ($entry in $payloadManifest.files) {
     $manifestSources += $source
 }
 
-Assert-Equal -Actual $flatSources.Count -Expected 22 -Label "Flat payload target count"
-Assert-Equal -Actual $generationSources.Count -Expected 23 -Label "Generation payload target count"
+Assert-Equal -Actual $flatSources.Count -Expected 25 -Label "Flat payload target count"
+Assert-Equal -Actual $generationSources.Count -Expected 26 -Label "Generation payload target count"
 Assert-Equal -Actual $currentPointerSources.Count -Expected 1 -Label "Current pointer target count"
 
 $legacyRetiredGenerationSourceRoot = Join-Path $payloadRoot "Generations\poc.30"
@@ -846,7 +862,7 @@ Assert-Equal -Actual $generationManifest.package_version -Expected $payloadManif
 Assert-Equal -Actual $generationManifest.payload_version -Expected $payloadManifest.payload_version -Label "Generation manifest payload version"
 Assert-Equal -Actual $generationManifest.payload_sequence -Expected $payloadManifest.payload_sequence -Label "Generation manifest payload sequence"
 Assert-Equal -Actual $generationManifest.bootstrap_protocol -Expected $payloadManifest.bootstrap_protocol -Label "Generation manifest bootstrap protocol"
-Assert-Equal -Actual @($generationManifest.files).Count -Expected 22 -Label "Generation manifest file count"
+Assert-Equal -Actual @($generationManifest.files).Count -Expected 25 -Label "Generation manifest file count"
 $generationHostUseGatePath = Join-Path $generationSourceRoot "shared\codedb-host-use-gate.mjs"
 $generationHostUseGate = Get-Content -LiteralPath $generationHostUseGatePath -Raw
 Assert-True `

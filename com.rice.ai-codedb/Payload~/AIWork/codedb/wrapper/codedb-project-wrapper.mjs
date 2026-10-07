@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import { parseCodedbInstanceManifest } from "../shared/codedb-instance-manifest-contract.mjs";
 
 const MANAGED_BY = "com.rice.ai-codedb";
 const EXPECTED_WORKER_RELATIVE_PATH = "wrapper/codedb-project-instance-worker.mjs";
@@ -112,7 +113,7 @@ function resolveSelectedInstance(unityRoot) {
   if (sha256(instanceBytes) !== requiredHash(selection, "instance_manifest_sha256", "current instance selection")) {
     throw new Error("[CHECK_FAILED] Selected CodeDB instance manifest hash does not match current-instance.json.");
   }
-  const instance = parseStrictFlatJson(decodeStrictUtf8(instanceBytes, "selected CodeDB instance manifest"), "selected CodeDB instance manifest");
+  const instance = parseCodedbInstanceManifest(decodeStrictUtf8(instanceBytes, "selected CodeDB instance manifest"), "selected CodeDB instance manifest");
   const generationId = requiredString(instance, "generation_id", "selected CodeDB instance manifest");
   const generationRelativePath = normalizeRelativePath(requiredString(instance, "generation_relative_path", "selected CodeDB instance manifest"));
   const expectedGenerationRelativePath = `AIWork/.runtime/codedb/host/generations/${generationId}`;
