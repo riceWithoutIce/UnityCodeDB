@@ -199,6 +199,45 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void InstanceOrigin_InterfaceDictionaryUsesRequiredStringBoundary()
+        {
+            IDictionary<string, object> origin = new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["action"] = "INSTALL",
+                ["action_id"] = new string('a', 32),
+                ["operation_id"] = new string('b', 32)
+            };
+            var manifest = new Dictionary<string, object> { ["originating_action"] = origin };
+
+            Assert.DoesNotThrow(() => AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest));
+            Assert.That(AICodedbStrictJson.GetRequiredString(origin, "action", "interface origin"), Is.EqualTo("INSTALL"));
+
+            var parsed = AICodedbStrictJson.ParseObject("{\"action\":\"INSTALL\"}", "parsed origin");
+            Assert.That(AICodedbStrictJson.GetRequiredString(parsed, "action", "parsed origin"), Is.EqualTo("INSTALL"));
+        }
+
+        [TestCase("missing")]
+        [TestCase("null")]
+        [TestCase("wrong-type")]
+        [TestCase("null-object")]
+        public void StrictJson_RequiredStringRejectsInvalidInterfaceValue(string invalidValue)
+        {
+            IDictionary<string, object> value = new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["required"] = "valid"
+            };
+            switch (invalidValue)
+            {
+                case "missing": value.Remove("required"); break;
+                case "null": value["required"] = null; break;
+                case "wrong-type": value["required"] = 1L; break;
+                case "null-object": value = null; break;
+            }
+
+            Assert.Throws<InvalidOperationException>(() => AICodedbStrictJson.GetRequiredString(value, "required", "interface value"));
+        }
+
+        [Test]
         public void EditorLeaseHeartbeatContinuesDuringReconcileAndPlaySuspension()
         {
             Assert.That(

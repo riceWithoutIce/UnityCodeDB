@@ -71,7 +71,7 @@ namespace Rice.AI.Codedb.Editor
             return result;
         }
 
-        internal static string GetRequiredString(Dictionary<string, object> value, string name, string label)
+        internal static string GetRequiredString(IDictionary<string, object> value, string name, string label)
         {
             var property = GetRequiredProperty(value, name, label);
             var result = property as string;
@@ -195,7 +195,7 @@ namespace Rice.AI.Codedb.Editor
             return (bool)property;
         }
 
-        private static object GetRequiredProperty(Dictionary<string, object> value, string name, string label)
+        private static object GetRequiredProperty(IDictionary<string, object> value, string name, string label)
         {
             object property;
             if (value == null || !value.TryGetValue(name, out property))
