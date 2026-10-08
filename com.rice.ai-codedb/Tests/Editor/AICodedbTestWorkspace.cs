@@ -10,6 +10,12 @@ using UnityEngine;
 
 namespace Rice.AI.Codedb.Editor.Tests
 {
+    internal enum AICodedbTestPathProfile
+    {
+        Compact,
+        CompactAndLegacy
+    }
+
     // Test entry only. Capture Application.dataPath on the Editor main thread;
     // AICodedbPaths may already be overridden by a simulated action context.
     internal sealed class AICodedbTestWorkspace
@@ -21,6 +27,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         private readonly List<Exception> _cleanupFailures = new List<Exception>();
         private readonly List<IDisposable> _resources = new List<IDisposable>();
         private readonly Action<string, string> _probeFault;
+        private readonly AICodedbTestPathProfile _pathProfile;
         private bool _created;
         private bool _owned;
         private bool _reserved;
@@ -29,8 +36,12 @@ namespace Rice.AI.Codedb.Editor.Tests
         internal string Root { get; }
         internal string OwnershipPath => Path.Combine(Root, ".codedb-test-owner");
 
-        private AICodedbTestWorkspace(Action<string, string> probeFault, string ownershipToken = null)
+        private AICodedbTestWorkspace(Action<string, string> probeFault, string ownershipToken = null,
+            AICodedbTestPathProfile pathProfile = AICodedbTestPathProfile.Compact)
         {
+            if (pathProfile != AICodedbTestPathProfile.Compact && pathProfile != AICodedbTestPathProfile.CompactAndLegacy)
+                throw new ArgumentOutOfRangeException(nameof(pathProfile));
+            _pathProfile = pathProfile;
             _token = ownershipToken ?? Guid.NewGuid().ToString("N");
             if (!Guid.TryParseExact(_token, "N", out _) || _token != _token.ToLowerInvariant())
                 throw new InvalidOperationException("Workspace ownership token must contain 32 lowercase hex characters.");
@@ -43,24 +54,25 @@ namespace Rice.AI.Codedb.Editor.Tests
                 || !Directory.Exists(assets))
                 throw new InvalidOperationException("Actual Unity project Assets context is unavailable; no workspace fallback exists.");
             ProjectRoot = Canonical(Path.GetDirectoryName(assets));
-            _parent = Path.Combine(ProjectRoot, "Library", "CodeDB", "Tests");
-            Root = Path.Combine(_parent, _token.Substring(0, 12));
+            _parent = Path.Combine(ProjectRoot, "Library", "cdt");
+            Root = Path.Combine(_parent, _token.Substring(0, 8));
             _probeFault = probeFault;
         }
 
         internal static void Run(Action<AICodedbTestWorkspace> body, Action<string, string> probeFault = null,
-            string ownershipToken = null)
+            string ownershipToken = null, AICodedbTestPathProfile pathProfile = AICodedbTestPathProfile.Compact)
         {
-            var workspace = new AICodedbTestWorkspace(probeFault, ownershipToken);
+            var workspace = new AICodedbTestWorkspace(probeFault, ownershipToken, pathProfile);
             Exception primary = null;
             try { workspace.Initialize(); body(workspace); }
             catch (Exception exception) { primary = exception; }
             workspace.Complete(primary);
         }
 
-        internal static async Task RunAsync(Func<AICodedbTestWorkspace, Task> body)
+        internal static async Task RunAsync(Func<AICodedbTestWorkspace, Task> body,
+            AICodedbTestPathProfile pathProfile = AICodedbTestPathProfile.Compact)
         {
-            var workspace = new AICodedbTestWorkspace(null);
+            var workspace = new AICodedbTestWorkspace(null, pathProfile: pathProfile);
             Exception primary = null;
             try { workspace.Initialize(); await body(workspace); }
             catch (Exception exception) { primary = exception; }
@@ -151,46 +163,87 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Directory.Delete(probeDirectory, false);
                 if (Directory.Exists(probeDirectory)) throw new IOException("Workspace probe directory remains.");
                 operation = "probe deepest Manager record and publication paths";
-                ProbeReceiptPaths(Root);
+                ProbeReceiptPaths(Root, _pathProfile);
             }
             catch (Exception exception)
             {
                 throw new IOException("Test workspace setup failed during " + operation + " at " + Root
-                    + "; no alternate root was selected.", exception);
+                    + "; no alternate root was selected. " + exception.Message, exception);
             }
         }
 
-        internal void ProbeReceiptPaths(string receiptRoot)
+        internal void ProbeReceiptPaths(string receiptRoot,
+            AICodedbTestPathProfile pathProfile = AICodedbTestPathProfile.Compact)
         {
-            try { AssertDescendant(_parent, receiptRoot); }
+            if (pathProfile != AICodedbTestPathProfile.Compact && pathProfile != AICodedbTestPathProfile.CompactAndLegacy)
+                throw new ArgumentOutOfRangeException(nameof(pathProfile));
+            try { ValidateCleanupTarget(receiptRoot); }
             catch (Exception exception)
             {
-                throw new IOException("Deep Manager path validation failed (length " + receiptRoot.Length + "): " + receiptRoot, exception);
+                throw new IOException("Deep Manager " + pathProfile + " validate failed (length "
+                    + receiptRoot.Length + "): " + receiptRoot, exception);
             }
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
                 GetPath("project"), GetPath("package"), "path probe");
             using (AICodedbPaths.UseManagerActionsRootForTests(receiptRoot))
             {
-                foreach (var path in AICodedbPaths.GetManagerReceiptRequiredPaths(context,
-                    new string('a', 32), new string('b', 64)))
+                var paths = new List<KeyValuePair<string, string>>();
+                foreach (var path in AICodedbPaths.GetManagerReceiptRequiredPaths(context, new string('a', 32), new string('b', 64)))
+                    paths.Add(new KeyValuePair<string, string>("compact", path));
+                if (pathProfile == AICodedbTestPathProfile.CompactAndLegacy)
+                    foreach (var kind in new[] { "admitted", "claim", "terminal", "start-failure" })
+                        paths.Add(new KeyValuePair<string, string>("legacy", AICodedbPaths.GetManagerStageReceiptPath(
+                            AICodedbPaths.GetManagerActionReceiptRoot(context, new string('a', 32), null),
+                            new string('b', 64), kind, null)));
+                var createdDirectories = new List<string>();
+                foreach (var entry in paths)
                 {
+                    var path = entry.Value;
+                    var operation = "create";
                     try
                     {
-                        AssertNoReparse(path);
-                        Directory.CreateDirectory(Path.GetDirectoryName(path));
+                        ValidateCleanupTarget(path);
+                        _probeFault?.Invoke(entry.Key + "-" + operation, path);
+                        var missing = new Stack<string>();
+                        var directory = Path.GetDirectoryName(path);
+                        while (!Directory.Exists(directory))
+                        {
+                            ValidateCleanupTarget(directory);
+                            missing.Push(directory);
+                            directory = Path.GetDirectoryName(directory);
+                        }
+                        while (missing.Count != 0)
+                        {
+                            directory = missing.Pop();
+                            Directory.CreateDirectory(directory);
+                            createdDirectories.Add(directory);
+                        }
                         using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                             stream.WriteByte(71);
+                        operation = "read";
+                        _probeFault?.Invoke(entry.Key + "-" + operation, path);
                         if (File.ReadAllText(path) != "G") throw new IOException("Deep path probe bytes changed.");
+                        operation = "delete";
+                        _probeFault?.Invoke(entry.Key + "-" + operation, path);
+                        ValidateCleanupTarget(path);
                         File.Delete(path);
                     }
                     catch (Exception exception)
                     {
-                        throw new IOException("Deep Manager path probe failed (length " + path.Length + "): " + path, exception);
+                        throw new IOException("Deep Manager " + entry.Key + " " + operation
+                            + " failed (length " + path.Length + "): " + path, exception);
                     }
                 }
-                // Remove only empty probe-owned directories; preserve the run root.
-                Directory.Delete(AICodedbPaths.GetManagerActionReceiptRoot(context, new string('a', 32)), false);
-                Directory.Delete(AICodedbPaths.GetManagerActionIndexDirectory(context), false);
+                for (var i = createdDirectories.Count - 1; i >= 0; i--)
+                {
+                    var directory = createdDirectories[i];
+                    try { ValidateCleanupTarget(directory); Directory.Delete(directory, false); }
+                    catch (Exception exception)
+                    {
+                        throw new IOException("Deep Manager " + pathProfile + " delete-directory failed (length "
+                            + directory.Length + "): " + directory, exception);
+                    }
+                }
             }
         }
 
@@ -314,22 +367,24 @@ namespace Rice.AI.Codedb.Editor.Tests
         public void TestWorkspace_OwnedRootUsesActualProjectAndProbesCapabilities()
         {
             string root = null;
+            var legacyProbeObserved = false;
             AICodedbTestWorkspace.Run(workspace =>
             {
                 root = workspace.Root;
-                var expectedParent = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "CodeDB", "Tests"));
+                var expectedParent = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "cdt"));
                 Assert.That(Path.GetDirectoryName(root), Is.EqualTo(expectedParent));
                 Assert.That(File.Exists(workspace.OwnershipPath), Is.True);
-                Assert.That(Path.GetFileName(root), Does.Match("^[0-9a-f]{12}$"));
+                Assert.That(Path.GetFileName(root), Does.Match("^[0-9a-f]{8}$"));
                 Assert.That(File.ReadAllText(workspace.OwnershipPath), Does.Match("^[0-9a-f]{32}$"));
                 Assert.That(Directory.Exists(Path.Combine(root, "capability-probe")), Is.False);
+                Assert.That(legacyProbeObserved, Is.False, "Default compact profile must not probe legacy paths.");
                 var file = workspace.GetPath("owned.txt");
                 File.WriteAllText(file, "owned");
                 Assert.That(File.ReadAllText(file), Is.EqualTo("owned"));
                 using (AICodedbPaths.UseActionContext(new AICodedbEditorExecutionContext(
                     RuntimePlatform.WindowsEditor, workspace.GetPath("project"), workspace.GetPath("package"), "fixture")))
                     Assert.That(workspace.Root, Is.EqualTo(root));
-            });
+            }, (operation, path) => legacyProbeObserved |= operation.StartsWith("legacy-", StringComparison.Ordinal));
             Assert.That(Directory.Exists(root), Is.False);
         }
 
@@ -351,6 +406,93 @@ namespace Rice.AI.Codedb.Editor.Tests
                         maximum = Math.Max(maximum, path.Length);
                     Assert.That(maximum, Is.GreaterThanOrEqualTo(204));
                     TestContext.WriteLine("Deepest actual production path: " + maximum);
+                }
+            });
+        }
+
+        [TestCase(AICodedbTestPathProfile.Compact)]
+        [TestCase(AICodedbTestPathProfile.CompactAndLegacy)]
+        public void TestWorkspace_ProfileProbesFullPathsBeforeBodyAndRemovesProbeDirectories(AICodedbTestPathProfile profile)
+        {
+            var compactReads = new List<string>();
+            var legacyReads = new List<string>();
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                Assert.That(compactReads.Count, Is.GreaterThan(0));
+                Assert.That(legacyReads.Count, Is.EqualTo(profile == AICodedbTestPathProfile.CompactAndLegacy ? 4 : 0));
+                Assert.That(Directory.GetDirectories(workspace.Root), Is.Empty);
+                var root = workspace.Root.Length >= 85 ? workspace.Root
+                    : workspace.GetPath(new string('d', Math.Max(1, 85 - workspace.Root.Length - 1)));
+                compactReads.Clear();
+                legacyReads.Clear();
+                workspace.ProbeReceiptPaths(root, profile);
+                var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "profile");
+                using (AICodedbPaths.UseManagerActionsRootForTests(root))
+                {
+                    var compactMaximum = 0;
+                    var compactDeepestPath = string.Empty;
+                    foreach (var path in AICodedbPaths.GetManagerReceiptRequiredPaths(context, new string('a', 32), new string('b', 64)))
+                    {
+                        Assert.That(compactReads, Does.Contain(path));
+                        Assert.That(File.Exists(path), Is.False);
+                        if (path.Length > compactMaximum) { compactMaximum = path.Length; compactDeepestPath = path; }
+                    }
+                    Assert.That(compactMaximum, Is.GreaterThanOrEqualTo(191));
+                    TestContext.WriteLine("compact deepest actual probe path length=" + compactMaximum + ": " + compactDeepestPath);
+                    if (profile == AICodedbTestPathProfile.CompactAndLegacy)
+                    {
+                        var legacyRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, new string('a', 32), null);
+                        var maximum = 0;
+                        var deepestPath = string.Empty;
+                        foreach (var kind in new[] { "admitted", "claim", "terminal", "start-failure" })
+                        {
+                            var path = AICodedbPaths.GetManagerStageReceiptPath(legacyRoot, new string('b', 64), kind, null);
+                            Assert.That(legacyReads, Does.Contain(path));
+                            Assert.That(File.Exists(path), Is.False);
+                            if (path.Length > maximum) { maximum = path.Length; deepestPath = path; }
+                        }
+                        Assert.That(maximum, Is.GreaterThanOrEqualTo(252));
+                        Assert.That(Directory.Exists(legacyRoot), Is.False);
+                        TestContext.WriteLine("legacy deepest actual probe path length=" + maximum + ": " + deepestPath);
+                    }
+                    else Assert.That(legacyReads, Is.Empty);
+                }
+                Assert.That(Directory.GetDirectories(workspace.Root), Is.Empty);
+            }, (operation, path) =>
+            {
+                if (operation == "compact-read") compactReads.Add(path);
+                if (operation == "legacy-read") legacyReads.Add(path);
+            }, pathProfile: profile);
+        }
+
+        [TestCase("create")]
+        [TestCase("read")]
+        [TestCase("delete")]
+        public void TestWorkspace_LegacyCapabilityFailureReportsExactPathAndRestoresScope(string operation)
+        {
+            AICodedbTestWorkspace.Run(outer =>
+            {
+                using (AICodedbPaths.UseManagerActionsRootForTests(outer.Root))
+                {
+                    string failedPath = null;
+                    string attemptedRoot = null;
+                    var entered = false;
+                    var failure = Assert.Throws<IOException>(() => AICodedbTestWorkspace.Run(_ => entered = true,
+                        (step, path) =>
+                        {
+                            if (step == "probe-create") attemptedRoot = path;
+                            if (step != "legacy-" + operation) return;
+                            failedPath = path;
+                            throw new IOException("Injected legacy API failure");
+                        }, pathProfile: AICodedbTestPathProfile.CompactAndLegacy));
+                    Assert.That(entered, Is.False);
+                    Assert.That(failedPath, Is.Not.Null);
+                    Assert.That(failure.Message, Does.Contain("legacy " + operation).And.Contain(failedPath)
+                        .And.Contain("length " + failedPath.Length));
+                    Assert.That(AICodedbPaths.GetManagerActionsRoot(), Is.EqualTo(AICodedbPaths.NormalizePath(outer.Root)));
+                    Assert.That(Directory.Exists(attemptedRoot), Is.False);
+                    Assert.That(File.Exists(attemptedRoot + ".reserve"), Is.False);
                 }
             });
         }

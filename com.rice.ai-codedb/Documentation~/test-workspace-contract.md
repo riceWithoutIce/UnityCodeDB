@@ -9,7 +9,7 @@ reference it. Design approval does not claim existing tests already comply.
 | Purpose | Owning context | Destination | Git policy |
 | --- | --- | --- | --- |
 | Repository script/non-Unity test scratch | Explicit authorized development checkout | `.artifacts/tests/<run-id>/` | Ignore generated contents. |
-| Unity EditMode test scratch | Actual Unity project executing the tests | `Library/CodeDB/Tests/<run-id>/` | Ignore generated contents under Library. |
+| Unity EditMode test scratch | Actual Unity project executing the tests | `Library/cdt/<run-id>/` | Ignore generated contents under Library. |
 | Package exports and delivery intermediates | Authorized development checkout | `.artifacts/<candidate-id>/` | Follow workflow provenance/retention rules. |
 | Development recovery backups | Authorized development checkout | `.backups/<backup-id>/` | Follow workflow protected-backup rules. |
 
@@ -99,3 +99,39 @@ The compact layout implementation was source-accepted after FIX01 on2026-10-08:
 path derivation and deepest-path probes. Historical records remain unchanged.
 Human Unity compile and34methods/80cases remain pending; source/PS evidence does
 not prove Unity System.IO behavior.
+
+## Unified test-runtime adaptation - 2026-10-08
+
+After human failure in a retained legacy receipt fixture, the unified Unity test
+root is revised to `Library/cdt/<8 lowercase hex>/` (`cdt` = CodeDB tests). This
+supersedes the earlier12hex `Library/CodeDB/Tests` root for new owned test runs,
+not production receipts or historical directories. Full32hex ownership tokens,
+exclusive reservation, no adoption, containment and cleanup checks remain required.
+The short name is only a locator; collisions explicitly fail before body execution.
+No automatic migration/deletion of earlier test roots and no runtime fallback.
+
+The current S29 project's legacy admitted path would be247 characters and legacy
+start-failure252, compared to260/265 before this revision. These are calculations,
+not Unity PASS or support for arbitrary project lengths. The shared workspace owns
+path capability profiles: compact is the default; tests that intentionally read
+legacy receipts explicitly request compact-plus-legacy before body execution.
+Probe both with the actual System.IO create/read/delete APIs. Legacy paths retain
+full Project24/Package24/Action32/Stage64 structure and all four record filenames;
+use existing production path helpers, not a fake shortened legacy structure.
+Include actual journal/temporary paths from the exercised consumers. Do not
+invent legacy writer execution/temporary paths when only old records are read.
+Report failing layout, operation, full path and length on setup failure. A compact
+PASS never implies legacy feasibility. Unsupported length is an explicit failed
+setup, never a skip, PASS, alternate root or Windows configuration instruction.
+
+Test entry declarations must match the supported Unity test runner. S29 asynchronous
+context tests retain real Task/await behavior but expose two separate parameterless
+UnityTest IEnumerator entries (terminal/nonterminal), yielding until completion
+and propagating fault/cancellation. No async void, main-thread blocking wait,
+Task-returning TestCase entry or framework/Unity version upgrade workaround.
+One merged human checklist retains unresolved prior context cases alongside the
+latest receipt/workspace suite; unexecuted historical cases cannot disappear.
+
+This adaptation was source-accepted after independent review on2026-10-08.
+The merged human manifest contains39methods/88cases. Compile, runner discovery
+and actual Unity path execution remain pending; source acceptance is not runtime PASS.

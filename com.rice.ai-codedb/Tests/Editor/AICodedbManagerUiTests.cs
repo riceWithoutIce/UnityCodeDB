@@ -1227,7 +1227,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                         StringComparison.OrdinalIgnoreCase))
                     workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(actionRoot));
             }
-            });
+            }, pathProfile: AICodedbTestPathProfile.CompactAndLegacy);
         }
 
         [Test]
@@ -1340,7 +1340,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 if (Directory.Exists(indexDirectory) && Path.GetFileName(indexDirectory).Length == 24)
                     workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(indexDirectory));
             }
-            });
+            }, pathProfile: AICodedbTestPathProfile.CompactAndLegacy);
         }
 
         [Test]

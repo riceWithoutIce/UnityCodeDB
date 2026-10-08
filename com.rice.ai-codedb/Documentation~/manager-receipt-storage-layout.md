@@ -217,3 +217,13 @@ PowerShell writer12/12 passed at a227-character tested publication path. C#34
 methods/80cases and actual Unity filesystem behavior remain unrun; S29 integration
 is not accepted by this source decision. New delivery must preserve exact reviewed
 bytes and pass commit-derived/extracted artifact gates before human validation.
+
+## Human test follow-up: legacy fixture feasibility
+
+Human validation of the accepted artifact failed while writing a legacy fixture
+at260 characters, before any recovery assertion. Compact path evidence does not
+cover this retained old layout. The shared test workspace contract's subsequent
+`Library/cdt/<8hex>` revision and explicit compact-plus-legacy capability profile
+govern new test runs. Production layouts/full identities and old-record read rules
+do not change; historical records and exports remain untouched. Runtime feasibility
+of the revised tests remains pending human validation.

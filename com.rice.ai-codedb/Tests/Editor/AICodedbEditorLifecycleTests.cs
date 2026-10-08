@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
@@ -9,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using UnityEngine.TestTools;
 
 namespace Rice.AI.Codedb.Editor.Tests
 {
@@ -16,9 +18,26 @@ namespace Rice.AI.Codedb.Editor.Tests
     // legacy OS-temp SetUp/TearDown below.
     internal sealed class AICodedbS29ExecutionContextTests
     {
-        [TestCase(true)]
-        [TestCase(false)]
-        public async Task LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait(bool terminal)
+        [UnityTest]
+        public IEnumerator LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait_Terminal()
+        {
+            return RunLifecycleExecutionContextAcrossAwait(true);
+        }
+
+        [UnityTest]
+        public IEnumerator LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait_Nonterminal()
+        {
+            return RunLifecycleExecutionContextAcrossAwait(false);
+        }
+
+        private static IEnumerator RunLifecycleExecutionContextAcrossAwait(bool terminal)
+        {
+            var task = LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait(terminal);
+            while (!task.IsCompleted) yield return null;
+            task.GetAwaiter().GetResult();
+        }
+
+        private static async Task LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait(bool terminal)
         {
             await AICodedbTestWorkspace.RunAsync(async workspace =>
             {

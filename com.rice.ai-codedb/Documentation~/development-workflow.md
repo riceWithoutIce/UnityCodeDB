@@ -1170,3 +1170,10 @@ or merge evidence. Preserve existing journal lookup and old-format read-only
 evidence. Close C# admission, PowerShell writer, recovery, markers and test
 consumers together, without a competing mapping database, silent migration or
 relaxed production-root restrictions for tests.
+
+For mixed compact/legacy fixture coverage, explicitly select and probe each
+exercised layout before the test body. Include legacy filename overhead even when
+production writes only compact records. Async test entry points must be supported
+by the consumer Unity test runner; preserve internal await semantics and propagate
+errors through supported coroutine entries. Merge still-open prior case groups
+into the new human manifest instead of dropping them when regenerating a checklist.
