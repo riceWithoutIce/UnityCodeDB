@@ -1051,11 +1051,9 @@ namespace Rice.AI.Codedb.Editor
                 else if (action == "DryRun" && !observed && result.Succeeded && !command.Present
                     && AICodedbHostPayloadStatusBuilder.Build(true, result).State != AICodedbHostPayloadState.Unknown)
                     observed = true;
-                else if (action == "Upgrade" && !refusedUpgrade && !result.Succeeded
-                    && command.Present && command.IsValid && command.Action == "UPGRADE"
-                    && command.Outcome == "FAILED" && command.Phase == "PREFLIGHT"
-                    && command.ExitCode == result.ExitCode && command.MutatedScopes.Length == 0
-                    && command.CleanupState == "COMPLETE")
+                else if (action == "Upgrade" && !refusedUpgrade
+                    && AICodedbMaterializerCommandSemantics.ClassifyHistoricalNonSuccess(result)
+                        == AICodedbHistoricalNonSuccess.UpgradeRefusedWithoutEffects)
                     refusedUpgrade = true;
                 else
                     return AICodedbManagerActionRecoveryOutcome.Conflict(conflict);

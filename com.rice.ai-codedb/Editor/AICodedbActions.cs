@@ -228,16 +228,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool HasFailedInstallPendingEffects(AICodedbCommandResult result)
         {
-            if (result == null || !result.HasAuthoritativeTerminalEvidence || result.Succeeded
-                || result.TimedOut || result.OutputOverflow || result.OutputDrainIncomplete)
-                return false;
-            var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
-            return command.Present && command.IsValid && command.Action == "INSTALL"
-                && command.Outcome == "FAILED" && command.Phase == "CANDIDATE"
-                && command.ExitCode == result.ExitCode && command.CleanupState == "PENDING"
-                && command.MutatedScopes.Length == 2
-                && Array.IndexOf(command.MutatedScopes, "host_runtime") >= 0
-                && Array.IndexOf(command.MutatedScopes, "instance_candidate") >= 0;
+            return AICodedbMaterializerCommandSemantics.ClassifyHistoricalNonSuccess(result)
+                == AICodedbHistoricalNonSuccess.InstallPendingEffects;
         }
 
         internal static bool IsExplicitRemoveIntegrationAdmissionAllowed(

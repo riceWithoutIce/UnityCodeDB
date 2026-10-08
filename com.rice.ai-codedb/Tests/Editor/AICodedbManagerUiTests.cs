@@ -19,13 +19,15 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             private readonly string _root;
             private readonly IDisposable _scope;
+            private readonly string _historicalOutcome;
             internal readonly AICodedbEditorExecutionContext Context;
             internal readonly string ActionId = Guid.NewGuid().ToString("N");
-            internal string InstallOutput => CommandOutput("INSTALL", "CANDIDATE", "PENDING", "host_runtime", "instance_candidate");
+            internal string InstallOutput => HistoricalCommandOutput("INSTALL", _historicalOutcome);
 
             internal ManagerReceiptFixture(AICodedbTestWorkspace workspace, AICodedbEditorExecutionContext context, bool resolved,
-                string title = "Install CodeDB")
+                string title = "Install CodeDB", string historicalOutcome = "FAILED")
             {
+                _historicalOutcome = historicalOutcome;
                 Context = context;
                 _root = workspace.Root;
                 workspace.ValidateCleanupTarget(context.ProjectRoot);
@@ -153,8 +155,23 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             internal void AddFollowUps(bool upgradeTerminal = true, string upgradeOutput = null)
             {
-                Add("DryRun", "[UPGRADE_READY] Candidate generation is available.", exit: 0);
-                Add("Upgrade", upgradeOutput ?? CommandOutput("UPGRADE", "PREFLIGHT", "COMPLETE"), upgradeTerminal);
+                Add("DryRun", HistoricalDryRunOutput, exit: 0);
+                Add("Upgrade", upgradeOutput ?? HistoricalCommandOutput("UPGRADE", _historicalOutcome), upgradeTerminal);
+            }
+
+            // Sanitized real three-stage shape; never use machine journal identities.
+            internal const string HistoricalDryRunOutput =
+                "[PRODUCT_LAYER PREREQUISITE] CURRENT - Fixture prerequisites verified.\n"
+                + "[PRODUCT_LAYER INSTALLED] MISSING\n[PRODUCT_LAYER CONFIGURED] MISSING\n"
+                + "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE\n[PRODUCT_STATE] NEEDS_ATTENTION\n[INSTANCE] NONE\n";
+
+            internal static string HistoricalCommandOutput(string action, string outcome = "BLOCKED")
+            {
+                var install = action == "INSTALL";
+                return CommandOutput(action, install ? "CANDIDATE" : "PREFLIGHT", install ? "PENDING" : "COMPLETE",
+                        install ? new[] { "host_runtime", "instance_candidate" } : Array.Empty<string>())
+                    .Replace("\"FAILED\"", "\"" + outcome + "\"")
+                    .Replace("\"FIXTURE\"", install ? "\"INSTANCE_CANDIDATE_FAILED\"" : "\"INSTANCE_CONVERGENCE_FAILED\"");
             }
 
             internal static string CommandOutput(string action, string phase, string cleanup, params string[] scopes)
@@ -334,16 +351,20 @@ namespace Rice.AI.Codedb.Editor.Tests
             });
         }
 
-        [TestCase(false, false)]
-        [TestCase(false, true)]
-        [TestCase(true, false)]
-        [TestCase(true, true)]
-        public void ManagerReceipt_FailedInstallRestoresOriginalResultAndRemovalGate(bool threeStages, bool resolved)
+        [TestCase(false, false, "FAILED")]
+        [TestCase(false, true, "FAILED")]
+        [TestCase(true, false, "FAILED")]
+        [TestCase(true, true, "FAILED")]
+        [TestCase(false, false, "BLOCKED")]
+        [TestCase(false, true, "BLOCKED")]
+        [TestCase(true, false, "BLOCKED")]
+        [TestCase(true, true, "BLOCKED")]
+        public void ManagerReceipt_FailedInstallRestoresOriginalResultAndRemovalGate(bool threeStages, bool resolved, string outcome)
         {
             AICodedbTestWorkspace.Run(workspace =>
             {
                 using var sessionFixture = new ManagerActionSessionFixture(workspace);
-                using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, resolved);
+                using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, resolved, historicalOutcome: outcome);
                 if (threeStages && resolved) fixture.AddFollowUps();
                 fixture.Add("Install", fixture.InstallOutput);
                 if (threeStages && !resolved) fixture.AddFollowUps();
@@ -388,6 +409,160 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(dispatched, Is.False);
                 Assert.That(AICodedbManagerActionSession.TryStart("Uninstall CodeDB from Project", replacement, 3d, out _), Is.True);
             });
+        }
+
+        [Test]
+        public void MaterializerResults_ProductionWriterFeedsHistoricalRecoveryAndSession()
+        {
+            // Resolve the actual installed Package before fixture scopes replace context.
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(AICodedbProjectSettingsTests).Assembly);
+            Assert.That(package, Is.Not.Null);
+            var script = Path.Combine(package.resolvedPath, "Tests~", "test-codedb-host-payload-materializer.ps1");
+            Assert.That(File.Exists(script), Is.True, "The exact delivered Package must contain its writer harness.");
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var outputs = RunProductionCommandWriter(script, workspace);
+                Assert.That(outputs.Count, Is.EqualTo(6));
+                for (var i = 0; i < outputs.Count; i++)
+                {
+                    var command = AICodedbMaterializerCommandStatusParser.Parse(outputs[i]);
+                    var install = i % 2 == 0;
+                    Assert.That(command.IsValid, Is.True, command.Detail);
+                    Assert.That(command.Action, Is.EqualTo(install ? "INSTALL" : "UPGRADE"));
+                    Assert.That(command.Outcome, Is.EqualTo(i < 2 ? "BLOCKED" : i < 4 ? "FAILED" : install ? "INSTALLED" : "CONVERGED"));
+                    Assert.That(command.ExitCode, Is.EqualTo(i < 4 ? 6 : 0));
+                    Assert.That(command.CleanupState, Is.EqualTo(i < 4 && install ? "PENDING" : "COMPLETE"));
+                    if (i < 4)
+                        Assert.That(command.ReasonCode, Is.EqualTo(install ? "INSTANCE_CANDIDATE_FAILED" : "INSTANCE_CONVERGENCE_FAILED"));
+                    var result = new AICodedbCommandResult(command.ExitCode, outputs[i], "", false,
+                        authoritativeTerminalEvidence: true);
+                    Assert.That(AICodedbMaterializerCommandSemantics.ClassifyHistoricalNonSuccess(result),
+                        Is.EqualTo(i >= 4 ? AICodedbHistoricalNonSuccess.None : install
+                            ? AICodedbHistoricalNonSuccess.InstallPendingEffects : AICodedbHistoricalNonSuccess.UpgradeRefusedWithoutEffects));
+                    Assert.That(AICodedbActions.HasFailedInstallPendingEffects(result), Is.EqualTo(i < 4 && install));
+                }
+                using var sessionFixture = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, true);
+                fixture.Add("Install", outputs[0]);
+                fixture.Add("DryRun", ManagerReceiptFixture.HistoricalDryRunOutput, exit: 0);
+                fixture.Add("Upgrade", outputs[1]);
+                var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+                Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
+                Assert.That(recovery.Result.StandardOutput, Is.EqualTo(outputs[0]));
+                var read = AICodedbManagerActionJournal.Read(fixture.Context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                Assert.That(read.HistoricalWarning, Does.Contain("PENDING"));
+                AICodedbManagerActionSession.RestoreDurable(fixture.Context, read, 1d);
+                var session = AICodedbManagerActionSession.CurrentFor(fixture.Context);
+                Assert.That(session.Result.StandardOutput, Is.EqualTo(outputs[0]));
+                Assert.That(session.Result.Succeeded, Is.False);
+                Assert.That(AICodedbActions.CanRequestInstallReconcile(session.Result), Is.False);
+            });
+        }
+
+        private static List<string> RunProductionCommandWriter(string script, AICodedbTestWorkspace workspace)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script + "\" -CommandResultSemanticsOnly",
+                WorkingDirectory = workspace.Root,
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = new UTF8Encoding(false), StandardErrorEncoding = new UTF8Encoding(false)
+            };
+            start.EnvironmentVariables["TEMP"] = workspace.Root;
+            start.EnvironmentVariables["TMP"] = workspace.Root;
+            using var process = System.Diagnostics.Process.Start(start);
+            Assert.That(process, Is.Not.Null);
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(15000))
+            {
+                process.Kill(); // Only the fixture process created immediately above.
+                process.WaitForExit(5000);
+                Assert.Fail("Isolated command-result writer timed out.");
+            }
+            Assert.That(Task.WaitAll(new Task[] { stdout, stderr }, 5000), Is.True, "Writer output drain timed out.");
+            Assert.That(process.ExitCode, Is.EqualTo(0), stderr.Result);
+            Assert.That(stderr.Result, Is.Empty);
+            Assert.That(stdout.Result.Length, Is.LessThan(16384), "Unexpected writer harness output.");
+            var results = new List<string>();
+            foreach (var line in stdout.Result.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                if (line.StartsWith("[COMMAND_RESULT] ", StringComparison.Ordinal)) results.Add(line);
+            Assert.That(stdout.Result, Does.Contain("[COMMAND_RESULT_SEMANTICS] 6/6"));
+            return results;
+        }
+
+        [TestCase("INSTALL", "zero-exit")]
+        [TestCase("UPGRADE", "zero-exit")]
+        [TestCase("INSTALL", "exit-mismatch")]
+        [TestCase("UPGRADE", "exit-mismatch")]
+        [TestCase("INSTALL", "success-outcome")]
+        [TestCase("UPGRADE", "success-outcome")]
+        [TestCase("INSTALL", "unsupported-outcome")]
+        [TestCase("UPGRADE", "unsupported-outcome")]
+        [TestCase("INSTALL", "action")]
+        [TestCase("UPGRADE", "action")]
+        [TestCase("INSTALL", "phase")]
+        [TestCase("UPGRADE", "phase")]
+        [TestCase("INSTALL", "scopes")]
+        [TestCase("UPGRADE", "scopes")]
+        [TestCase("INSTALL", "cleanup")]
+        [TestCase("UPGRADE", "cleanup")]
+        [TestCase("INSTALL", "missing")]
+        [TestCase("UPGRADE", "missing")]
+        [TestCase("INSTALL", "malformed")]
+        [TestCase("UPGRADE", "malformed")]
+        public void MaterializerResults_UnsupportedShapeCannotResolveHistoricalChain(string action, string defect)
+        {
+            var install = action == "INSTALL";
+            var output = ManagerReceiptFixture.HistoricalCommandOutput(action);
+            var record = AICodedbStrictJson.ParseObject(output.Substring("[COMMAND_RESULT] ".Length), "fixture result");
+            var exit = defect == "zero-exit" ? 0 : 6;
+            if (defect == "zero-exit") record["exit_code"] = 0;
+            if (defect == "exit-mismatch") record["exit_code"] = 7;
+            if (defect == "success-outcome") record["outcome"] = install ? "INSTALLED" : "CONVERGED";
+            if (defect == "unsupported-outcome") record["outcome"] = "UNKNOWN";
+            if (defect == "action") record["action"] = "REMOVE";
+            if (defect == "phase") record["phase"] = install ? "PREFLIGHT" : "CANDIDATE";
+            if (defect == "scopes") record["mutated_scopes"] = install ? Array.Empty<string>() : new[] { "host_runtime" };
+            if (defect == "cleanup") record["cleanup_state"] = install ? "COMPLETE" : "PENDING";
+            output = defect == "missing" ? "No command result." : defect == "malformed" ? "[COMMAND_RESULT] {}"
+                : "[COMMAND_RESULT] " + AICodedbControlContractMigrationClassifierTests.SerializeObject(record);
+            Assert.That(AICodedbMaterializerCommandSemantics.ClassifyHistoricalNonSuccess(
+                new AICodedbCommandResult(exit, output, "", false, authoritativeTerminalEvidence: true)),
+                Is.EqualTo(AICodedbHistoricalNonSuccess.None));
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var sessionFixture = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, true, historicalOutcome: "BLOCKED");
+                fixture.Add("Install", install ? output : fixture.InstallOutput, exit: install ? exit : 6);
+                fixture.Add("DryRun", ManagerReceiptFixture.HistoricalDryRunOutput, exit: 0);
+                fixture.Add("Upgrade", install ? ManagerReceiptFixture.HistoricalCommandOutput("UPGRADE") : output, exit: install ? 6 : exit);
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+                Assert.That(AICodedbManagerActionJournal.Read(fixture.Context).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+            });
+        }
+
+        [TestCase("INSTALL", "authority")]
+        [TestCase("UPGRADE", "authority")]
+        [TestCase("INSTALL", "timeout")]
+        [TestCase("UPGRADE", "timeout")]
+        [TestCase("INSTALL", "overflow")]
+        [TestCase("UPGRADE", "overflow")]
+        [TestCase("INSTALL", "drain")]
+        [TestCase("UPGRADE", "drain")]
+        public void MaterializerResults_IncompleteEvidenceIsNotKnownFailure(string action, string defect)
+        {
+            var result = new AICodedbCommandResult(6, ManagerReceiptFixture.HistoricalCommandOutput(action), "",
+                defect == "timeout", authoritativeTerminalEvidence: defect != "authority",
+                outputOverflow: defect == "overflow", outputDrainIncomplete: defect == "drain");
+            Assert.That(AICodedbMaterializerCommandSemantics.ClassifyHistoricalNonSuccess(result),
+                Is.EqualTo(AICodedbHistoricalNonSuccess.None));
+            Assert.That(AICodedbActions.HasFailedInstallPendingEffects(result), Is.False);
         }
 
         [TestCase("pending")]

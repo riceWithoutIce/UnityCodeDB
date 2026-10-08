@@ -1,0 +1,19 @@
+{
+  "baseline_head": "3b09859045d0d4547d9ba2cef332a550e8530f99",
+  "branch": "codex/v0.3.0-legacy-workflow",
+  "status": "SOURCE_IMPLEMENTED_PS_WRITER_PASS_CSHARP_UNITY_PENDING",
+  "changed_files": [
+    { "path": "com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs", "sha256": "5ec8a457dd78feb8f595d3f3d48576dbef3980d7026023c8a11fecb034adf619", "bytes": 65459 },
+    { "path": "com.rice.ai-codedb/Editor/AICodedbActions.cs", "sha256": "3d57d7c463aab77dd539890f084dea6452b2f42f6471d9e0003ab6def3c3f1ff", "bytes": 38259 },
+    { "path": "com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs", "sha256": "580b521707b99660e41c730e1067d67662cca910dbacfa92500d552e61ddd78b", "bytes": 119811 },
+    { "path": "com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs", "sha256": "7f03271cef5f89b673a4ee1b9f01a15b5d89e1bdd76b96852694c1e2179576ef", "bytes": 316378 },
+    { "path": "com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1", "sha256": "22d40b81ea0359020d5ce49635992540da6f384985922a9019201a37b096d0ad", "bytes": 937029 }
+  ],
+  "unchanged_production_writer": {
+    "path": "com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1",
+    "sha256": "39e7872ab387457c477da318a271776ae4c9fc565e12af0f26ba2c8d072cc16a",
+    "bytes": 657785
+  },
+  "executed_evidence": { "powershell_writer_cases": 6, "powershell_writer_failures": 0, "scoped_diff_check_exit": 0 },
+  "pending_unity_evidence": { "method_groups": 5, "nunit_cases": 45, "includes_actual_writer_to_real_csharp_consumers": true }
+}

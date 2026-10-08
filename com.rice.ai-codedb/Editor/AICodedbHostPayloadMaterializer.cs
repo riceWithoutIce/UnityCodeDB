@@ -488,6 +488,38 @@ namespace Rice.AI.Codedb.Editor
         }
     }
 
+    internal enum AICodedbHistoricalNonSuccess
+    {
+        None,
+        InstallPendingEffects,
+        UpgradeRefusedWithoutEffects
+    }
+
+    internal static class AICodedbMaterializerCommandSemantics
+    {
+        // Classification does not release admission or clear another operation's effects.
+        // Keep strict decoding separate from these bounded, action-specific meanings.
+        internal static AICodedbHistoricalNonSuccess ClassifyHistoricalNonSuccess(AICodedbCommandResult result)
+        {
+            if (result == null || !result.HasAuthoritativeTerminalEvidence || result.ExitCode == 0
+                || result.TimedOut || result.OutputOverflow || result.OutputDrainIncomplete)
+                return AICodedbHistoricalNonSuccess.None;
+            var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+            if (!command.Present || !command.IsValid || command.ExitCode != result.ExitCode
+                || (command.Outcome != "BLOCKED" && command.Outcome != "FAILED"))
+                return AICodedbHistoricalNonSuccess.None;
+            if (command.Action == "INSTALL" && command.Phase == "CANDIDATE"
+                && command.CleanupState == "PENDING" && command.MutatedScopes.Length == 2
+                && Array.IndexOf(command.MutatedScopes, "host_runtime") >= 0
+                && Array.IndexOf(command.MutatedScopes, "instance_candidate") >= 0)
+                return AICodedbHistoricalNonSuccess.InstallPendingEffects;
+            if (command.Action == "UPGRADE" && command.Phase == "PREFLIGHT"
+                && command.CleanupState == "COMPLETE" && command.MutatedScopes.Length == 0)
+                return AICodedbHistoricalNonSuccess.UpgradeRefusedWithoutEffects;
+            return AICodedbHistoricalNonSuccess.None;
+        }
+    }
+
     internal static class AICodedbMaterializerCommandStatusParser
     {
         private const string Prefix = "[COMMAND_RESULT]";

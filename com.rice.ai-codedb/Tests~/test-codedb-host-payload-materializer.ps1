@@ -2,6 +2,8 @@
 
 [CmdletBinding()]
 param(
+    [switch]$CommandResultSemanticsOnly,
+
     [switch]$RepairOnly,
 
     [switch]$McpAvailabilityOnly,
@@ -52,8 +54,67 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (@($RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $FailedPreparationRecoveryOnly, $FailedPreparationInterruptionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if (@($CommandResultSemanticsOnly, $RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $FailedPreparationRecoveryOnly, $FailedPreparationInterruptionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
+}
+
+if ($CommandResultSemanticsOnly) {
+    # Import only the actual writer and its direct dependencies/defaults. Never
+    # dot-source the materializer, whose top-level entry may mutate a project.
+    $sourcePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Tools~/materialize-codedb-host-payload.ps1'
+    $parseTokens = $null
+    $parseErrors = $null
+    $sourceAst = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$parseTokens, [ref]$parseErrors)
+    if ($parseErrors.Count -ne 0) { throw 'Production materializer failed parsing.' }
+    $functionNames = @('Test-MaterializerMutationAction', 'Set-MaterializerCommandPhase',
+        'Add-MaterializerMutationScope', 'Set-MaterializerCommandOutcome', 'Write-MaterializerCommandResult')
+    $variableNames = @('ManagedBy', 'MachinePrerequisiteStatus', 'CommandResultWritten', 'CommandPhase',
+        'CommandOutcome', 'CommandReasonCode', 'CommandCleanupState', 'CommandNextAction', 'CommandMutatedScopes')
+    $definitions = @($sourceAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -cin $functionNames
+    })
+    $initializers = @($sourceAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -cin @($variableNames | ForEach-Object { '$script:' + $_ })
+    })
+    if ($definitions.Count -ne $functionNames.Count -or $initializers.Count -ne $variableNames.Count) {
+        throw 'Production writer dependency/default closure changed; update the reviewed harness.'
+    }
+    foreach ($definition in $definitions) { . ([scriptblock]::Create($definition.Extent.Text)) }
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    foreach ($variant in @('DefaultFailure', 'ExplicitFailure', 'Success')) {
+        foreach ($Action in @('Install', 'Upgrade')) {
+            foreach ($initializer in $initializers) { . ([scriptblock]::Create($initializer.Extent.Text)) }
+            $code = if ($variant -ceq 'Success') { 0 } else { 6 }
+            $cleanup = if ($Action -ceq 'Install') { 'PENDING' } else { 'COMPLETE' }
+            $reason = if ($Action -ceq 'Install') { 'INSTANCE_CANDIDATE_FAILED' } else { 'INSTANCE_CONVERGENCE_FAILED' }
+            if ($Action -ceq 'Install') {
+                Add-MaterializerMutationScope -Scope 'host_runtime'
+                Add-MaterializerMutationScope -Scope 'instance_candidate'
+                Set-MaterializerCommandPhase -Phase 'CANDIDATE'
+            }
+            if ($variant -ceq 'ExplicitFailure') {
+                Set-MaterializerCommandOutcome -Outcome 'FAILED' -ReasonCode $reason -CleanupState $cleanup -NextAction 'Review the original failure; no automatic replay.'
+            } elseif ($variant -ceq 'DefaultFailure') {
+                # Context supplied by the failed operation, leaving outcome and
+                # cleanup to the writer's unmodified production defaults.
+                $script:CommandReasonCode = $reason
+            }
+            $lines = @(Write-MaterializerCommandResult -ExitCode $code -ErrorDetail 'Fixture-owned operation result.' 6>&1 | ForEach-Object { $_.ToString() })
+            if ($lines.Count -ne 1 -or -not $lines[0].StartsWith('[COMMAND_RESULT] ')) { throw 'Writer must emit one result.' }
+            $record = $lines[0].Substring('[COMMAND_RESULT] '.Length) | ConvertFrom-Json
+            $expectedOutcome = if ($variant -ceq 'Success') {
+                if ($Action -ceq 'Install') { 'INSTALLED' } else { 'CONVERGED' }
+            } elseif ($variant -ceq 'ExplicitFailure') { 'FAILED' } else { 'BLOCKED' }
+            if ($record.outcome -cne $expectedOutcome -or $record.action -cne $Action.ToUpperInvariant() -or $record.exit_code -ne $code -or
+                $record.cleanup_state -cne $(if ($code -eq 0) { 'COMPLETE' } else { $cleanup })) {
+                throw 'Actual writer result disagrees with its frozen action contract.'
+            }
+            Write-Output $lines[0]
+        }
+    }
+    Write-Output '[COMMAND_RESULT_SEMANTICS] 6/6 actual production writer scenarios passed; C# consumer execution is a separate Editor test.'
+    return
 }
 
 
