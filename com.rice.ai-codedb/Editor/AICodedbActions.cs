@@ -104,13 +104,18 @@ namespace Rice.AI.Codedb.Editor
         /// <summary>
         /// Replaces a recognized byte-exact legacy host payload and regenerates its ignored runtime config.
         /// </summary>
+        internal const string RedeployUiPreflightStage = "redeploy-ui-preflight";
+        internal const string RedeployWorkerPreflightStage = "redeploy-worker-preflight";
+        internal const string RedeployMutationStage = "redeploy-mutation";
+        internal const string RedeployRuntimeConfigStage = "redeploy-runtime-config";
+
         internal static AICodedbCommandResult RunHostPayloadRedeploy(bool confirmedProjectMutation)
         {
             if (!confirmedProjectMutation)
                 return AICodedbHostPayloadMaterializer.RunRedeploy(false);
 
             AICodedbCommandResult preflightResult;
-            using (AICodedbPaths.UseActionStage("redeploy-worker-preflight", false))
+            using (AICodedbPaths.UseActionStage(RedeployWorkerPreflightStage, false))
                 preflightResult = AICodedbHostPayloadMaterializer.RunDryRun();
             if (!preflightResult.Succeeded)
                 return preflightResult;
@@ -144,13 +149,13 @@ namespace Rice.AI.Codedb.Editor
             }
 
             AICodedbCommandResult redeployResult;
-            using (AICodedbPaths.UseActionStage("redeploy-mutation", false))
+            using (AICodedbPaths.UseActionStage(RedeployMutationStage, false))
                 redeployResult = AICodedbHostPayloadMaterializer.RunRedeploy(true);
             if (!redeployResult.Succeeded)
                 return redeployResult;
 
             AICodedbCommandResult configResult;
-            using (AICodedbPaths.UseActionStage("redeploy-runtime-config", true))
+            using (AICodedbPaths.UseActionStage(RedeployRuntimeConfigStage, true))
                 configResult = RunRegenerateRuntimeConfig();
             return CombineResults(redeployResult, configResult);
         }
@@ -219,6 +224,20 @@ namespace Rice.AI.Codedb.Editor
         {
             if (CanRequestInstallReconcile(result))
                 AICodedbEditorLifecycle.RequestReconcile();
+        }
+
+        internal static bool HasFailedInstallPendingEffects(AICodedbCommandResult result)
+        {
+            if (result == null || !result.HasAuthoritativeTerminalEvidence || result.Succeeded
+                || result.TimedOut || result.OutputOverflow || result.OutputDrainIncomplete)
+                return false;
+            var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+            return command.Present && command.IsValid && command.Action == "INSTALL"
+                && command.Outcome == "FAILED" && command.Phase == "CANDIDATE"
+                && command.ExitCode == result.ExitCode && command.CleanupState == "PENDING"
+                && command.MutatedScopes.Length == 2
+                && Array.IndexOf(command.MutatedScopes, "host_runtime") >= 0
+                && Array.IndexOf(command.MutatedScopes, "instance_candidate") >= 0;
         }
 
         internal static bool IsExplicitRemoveIntegrationAdmissionAllowed(

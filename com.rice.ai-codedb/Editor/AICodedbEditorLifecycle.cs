@@ -630,6 +630,7 @@ namespace Rice.AI.Codedb.Editor
             if (Interlocked.CompareExchange(ref _reconcileInFlight, 1, 0) != 0)
                 return;
 
+            using var lifecycleContext = UseLifecycleExecutionContext(_executionContext);
             var epoch = PostProviderReconcile.BeginEpoch(out var forcePostProvider);
             var cacheRevisionAtStart = GetLifecycleCacheRevision();
             force |= forcePostProvider;
@@ -1863,6 +1864,7 @@ namespace Rice.AI.Codedb.Editor
             string action,
             CancellationToken cancellationToken)
         {
+            using var lifecycleContext = UseLifecycleExecutionContext(context);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.PowerShellOrNode);
             var response = SupervisorBridge.SendCommand(
@@ -2366,6 +2368,13 @@ namespace Rice.AI.Codedb.Editor
                     EditorApplication.isUpdating,
                     IsPlayModeMaintenanceSuspended()))
                 BeginReconcile(true);
+        }
+
+        // Automatic observation/convergence retains its captured roots, never a
+        // caller's confirmation, Manager identity, terminal stage or dispatch tracker.
+        internal static IDisposable UseLifecycleExecutionContext(AICodedbEditorExecutionContext context)
+        {
+            return AICodedbPaths.UseActionContext(context);
         }
 
         internal static async Task<AICodedbReconcileOutcome> RequestPostProviderReconcileAsync()

@@ -500,7 +500,7 @@ namespace Rice.AI.Codedb.Editor
                 ? "has a recorded command outcome, but retained admission/project effects remain uncertain."
                 : "has an unknown command outcome.";
             return "Previous action " + session.ActionId + " (" + session.Title
-                + ", original Package " + session.Context.PackageRoot
+                + ", original Package " + (session.HasOriginalContext ? session.Context.PackageRoot : "unavailable")
                 + ") " + commandOutcome + " Current product status is independent."
                 + " New project changes remain blocked until execution safety is proved."
                 + (string.IsNullOrEmpty(warning) ? string.Empty : "\n" + warning);
@@ -2442,7 +2442,7 @@ namespace Rice.AI.Codedb.Editor
                 "Host Payload Redeploy",
                 _ => Task.Run(() =>
                 {
-                    using (AICodedbPaths.UseActionStage("redeploy-ui-preflight", false))
+                    using (AICodedbPaths.UseActionStage(AICodedbActions.RedeployUiPreflightStage, false))
                         return AICodedbActions.RunHostPayloadDryRun();
                 }),
                 ContinueHostPayloadRedeployAfterPreflightAsync);
@@ -3421,6 +3421,7 @@ namespace Rice.AI.Codedb.Editor
         internal bool IsRunning { get; private set; }
         internal bool IsRecovering { get; private set; }
         internal bool IsEvidenceConflict { get; private set; }
+        internal bool HasOriginalContext { get; private set; } = true;
         private bool _durableAdmitted;
         private bool _legacyReceipt;
         internal AICodedbManagerActionIndex DurableIndex => new AICodedbManagerActionIndex(
@@ -3489,20 +3490,35 @@ namespace Rice.AI.Codedb.Editor
         {
             lock (Gate)
             {
-                if (read.State == AICodedbManagerActionIndexState.Empty
-                    || (_current != null && _current.IsRunning))
+                if (_current != null && _current.IsRunning)
                     return;
+                if (read.State == AICodedbManagerActionIndexState.Empty)
+                {
+                    if (read.HistoricalResult != null && read.Index != null
+                        && (_current == null || (_current.IsRecovering
+                            && string.Equals(_current.ActionId, read.Index.ActionId, StringComparison.Ordinal)
+                            && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot, StringComparison.OrdinalIgnoreCase))))
+                    {
+                        _current = new AICodedbManagerActionSession(read.Index.Title,
+                            read.Index.Context, now, read.Index.ActionId, true);
+                        _current.TryCompleteRecovery(read.HistoricalResult, now);
+                    }
+                    return;
+                }
                 if (read.State == AICodedbManagerActionIndexState.Conflict)
                 {
-                    var prior = _current != null && _current.IsRecovering
+                    var prior = _current != null && _current.IsRecovering && _current.HasOriginalContext
                         && AICodedbSupervisorProtocol.IsManagerActionId(_current.ActionId)
+                        && string.Equals(_current.ActionId, read.ActionId, StringComparison.Ordinal)
+                        && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot, StringComparison.OrdinalIgnoreCase)
                         ? _current : null;
                     var retainedId = AICodedbSupervisorProtocol.IsManagerActionId(read.ActionId)
                         ? read.ActionId : prior?.ActionId ?? string.Empty;
                     _current = new AICodedbManagerActionSession(
-                        "Previous CodeDB action", prior?.Context ?? currentContext,
+                        "Previous CodeDB action", read.Index?.Context ?? prior?.Context ?? currentContext,
                         now, retainedId, true);
                     _current.IsEvidenceConflict = true;
+                    _current.HasOriginalContext = read.Index != null || prior != null;
                     _current.Status.SetRecoveryDetail(read.Detail);
                     return;
                 }

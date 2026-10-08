@@ -74,6 +74,7 @@ namespace Rice.AI.Codedb.Editor
         private static readonly AsyncLocal<bool?> ActionStageTerminal = new AsyncLocal<bool?>();
         private static readonly AsyncLocal<AICodedbManagerDispatchTracker> ActionDispatch =
             new AsyncLocal<AICodedbManagerDispatchTracker>();
+        private static readonly AsyncLocal<string> ReceiptRootForTests = new AsyncLocal<string>();
         private static string _cachedPackageRootPath = string.Empty;
 
         internal static string ProjectRoot => ActionContext.Value?.ProjectRoot
@@ -102,18 +103,27 @@ namespace Rice.AI.Codedb.Editor
             var previousEffect = ActionEffect.Value;
             var previousAuthority = ActionAuthority.Value;
             var previousDispatch = ActionDispatch.Value;
+            var previousStage = ActionStage.Value;
+            var previousTerminal = ActionStageTerminal.Value;
+            var sameAction = !string.IsNullOrEmpty(actionId)
+                && string.Equals(previousActionId, actionId, StringComparison.Ordinal);
             ActionContext.Value = context;
             ActionId.Value = actionId ?? string.Empty;
             ActionEffect.Value = effectClass ?? string.Empty;
             ActionAuthority.Value = authorizationSource ?? string.Empty;
-            ActionDispatch.Value = string.Equals(previousActionId, actionId, StringComparison.Ordinal)
-                ? previousDispatch : new AICodedbManagerDispatchTracker();
+            ActionDispatch.Value = sameAction ? previousDispatch
+                : string.IsNullOrEmpty(actionId) ? null : new AICodedbManagerDispatchTracker();
+            if (!sameAction)
+            {
+                ActionStage.Value = null;
+                ActionStageTerminal.Value = string.IsNullOrEmpty(actionId) ? false : true;
+            }
             return new ActionContextScope(
                 previous,
                 previousActionId,
                 previousEffect,
                 previousAuthority,
-                previousDispatch);
+                previousDispatch, previousStage, previousTerminal);
         }
 
         internal static IDisposable UseActionStage(string stage, bool terminalForAction)
@@ -134,19 +144,23 @@ namespace Rice.AI.Codedb.Editor
             private readonly string _previousEffect;
             private readonly string _previousAuthority;
             private readonly AICodedbManagerDispatchTracker _previousDispatch;
+            private readonly string _previousStage;
+            private readonly bool? _previousTerminal;
 
             internal ActionContextScope(
                 AICodedbEditorExecutionContext? previous,
                 string previousActionId,
                 string previousEffect,
                 string previousAuthority,
-                AICodedbManagerDispatchTracker previousDispatch)
+                AICodedbManagerDispatchTracker previousDispatch, string previousStage, bool? previousTerminal)
             {
                 _previous = previous;
                 _previousActionId = previousActionId;
                 _previousEffect = previousEffect;
                 _previousAuthority = previousAuthority;
                 _previousDispatch = previousDispatch;
+                _previousStage = previousStage;
+                _previousTerminal = previousTerminal;
             }
 
             public void Dispose()
@@ -156,6 +170,8 @@ namespace Rice.AI.Codedb.Editor
                 ActionEffect.Value = _previousEffect;
                 ActionAuthority.Value = _previousAuthority;
                 ActionDispatch.Value = _previousDispatch;
+                ActionStage.Value = _previousStage;
+                ActionStageTerminal.Value = _previousTerminal;
             }
         }
 
@@ -294,6 +310,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static string GetManagerActionsRoot()
         {
+            if (ReceiptRootForTests.Value != null)
+                return ReceiptRootForTests.Value;
             var localAppData = Environment.GetEnvironmentVariable(
                 "LOCALAPPDATA",
                 EnvironmentVariableTarget.Process);
@@ -306,6 +324,21 @@ namespace Rice.AI.Codedb.Editor
                 "Rice",
                 "CodeDB",
                 "manager-actions"));
+        }
+
+        // Async-local fixture isolation avoids changing process-wide LOCALAPPDATA.
+        internal static IDisposable UseManagerActionsRootForTests(string root)
+        {
+            var previous = ReceiptRootForTests.Value;
+            ReceiptRootForTests.Value = NormalizePath(Path.GetFullPath(root));
+            return new ReceiptRootScope(previous);
+        }
+
+        private sealed class ReceiptRootScope : IDisposable
+        {
+            private readonly string _previous;
+            internal ReceiptRootScope(string previous) { _previous = previous; }
+            public void Dispose() { ReceiptRootForTests.Value = _previous; }
         }
 
         internal static string GetManagerActionIndexDirectory(AICodedbEditorExecutionContext context)

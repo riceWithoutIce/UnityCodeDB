@@ -41,11 +41,12 @@ namespace Rice.AI.Codedb.Editor
         internal string ActionId { get; }
         internal bool IsLegacyReceipt { get; }
         internal string HistoricalWarning { get; }
+        internal AICodedbCommandResult HistoricalResult { get; }
 
         internal AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState state,
             AICodedbManagerActionIndex index = null, string detail = null,
             string actionId = null, bool isLegacyReceipt = false,
-            string historicalWarning = null)
+            string historicalWarning = null, AICodedbCommandResult historicalResult = null)
         {
             State = state;
             Index = index;
@@ -53,6 +54,7 @@ namespace Rice.AI.Codedb.Editor
             ActionId = index?.ActionId ?? actionId ?? string.Empty;
             IsLegacyReceipt = isLegacyReceipt;
             HistoricalWarning = historicalWarning ?? string.Empty;
+            HistoricalResult = historicalResult;
         }
     }
 
@@ -68,6 +70,7 @@ namespace Rice.AI.Codedb.Editor
 
         private sealed class ResolvedMarker
         {
+            internal AICodedbEditorExecutionContext Context;
             internal string PackageKey;
             internal AICodedbManagerActionEvidenceKind Disposition;
             internal bool HistoricalUnknown;
@@ -255,6 +258,7 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException("The historical unknown-action marker is invalid.");
             return new ResolvedMarker
             {
+                Context = previous,
                 PackageKey = AICodedbPaths.GetManagerActionPackageKey(previous),
                 Disposition = dispositionText == "CommandTerminal"
                     ? AICodedbManagerActionEvidenceKind.CommandTerminal
@@ -278,6 +282,9 @@ namespace Rice.AI.Codedb.Editor
             AICodedbManagerActionIndex pending = null;
             var matchedHistorical = new HashSet<string>(StringComparer.Ordinal);
             var retainedUnknown = new List<string>();
+            AICodedbManagerActionIndex failedInstallIndex = null;
+            AICodedbCommandResult failedInstallResult = null;
+            var failedInstallCount = 0;
             var packageDirectories = Directory.GetDirectories(directory);
             if (packageDirectories.Length > 64)
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
@@ -308,6 +315,13 @@ namespace Rice.AI.Codedb.Editor
                                 "A resolved pre-effect marker conflicts with its Package directory.", actionId);
                         continue;
                     }
+                    AICodedbManagerActionIndex authenticatedOriginal = null;
+                    if (resolved.TryGetValue(actionId, out var originalMarker)
+                        && string.Equals(Path.GetFileName(packageDirectory),
+                            originalMarker.PackageKey.Substring(0, 24), StringComparison.Ordinal))
+                        authenticatedOriginal = new AICodedbManagerActionIndex(actionId,
+                            "Previous CodeDB action", "ExistingBackendEffect",
+                            "ExistingActionSpecificBackend", originalMarker.Context);
                     try
                     {
                         var stages = Directory.GetDirectories(actionDirectory);
@@ -334,6 +348,10 @@ namespace Rice.AI.Codedb.Editor
                                 StringComparison.Ordinal))
                             throw new InvalidOperationException("The historical action identity is conflicting.");
                         var outcome = AICodedbProcessRunner.RecoverManagerAction(original, actionId);
+                        if (outcome.State != AICodedbManagerActionRecoveryState.Conflict)
+                            authenticatedOriginal = new AICodedbManagerActionIndex(actionId,
+                                "Previous CodeDB action", "ExistingBackendEffect",
+                                "ExistingActionSpecificBackend", original);
                         if (resolved.TryGetValue(actionId, out var marker))
                         {
                             if (!string.Equals(marker.PackageKey,
@@ -367,8 +385,22 @@ namespace Rice.AI.Codedb.Editor
                                     + ") still has an unknown command outcome. Its historical reconciliation"
                                     + " is not a command terminal or authority for a new project change.");
                             }
-                            continue;
                         }
+                        if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                            && AICodedbActions.HasFailedInstallPendingEffects(outcome.Result))
+                        {
+                            failedInstallCount++;
+                            failedInstallIndex = new AICodedbManagerActionIndex(actionId,
+                                "Install CodeDB", "ConfirmedProjectMutation",
+                                AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"), original);
+                            failedInstallResult = outcome.Result;
+                            retainedUnknown.Add("Historical action " + actionId + " (original Package "
+                                + original.PackageRoot + ") has a recorded failed INSTALL with PENDING cleanup."
+                                + " Later completed stages do not clear its recorded effects."
+                                + " Removal requires separate confirmation and the existing live safety check.");
+                        }
+                        if (resolved.ContainsKey(actionId))
+                            continue;
                         if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
                             || outcome.State == AICodedbManagerActionRecoveryState.PreEffectRefusal)
                             continue;
@@ -382,7 +414,7 @@ namespace Rice.AI.Codedb.Editor
                     catch (Exception exception)
                     {
                         return new AICodedbManagerActionIndexRead(
-                            AICodedbManagerActionIndexState.Conflict, null,
+                            AICodedbManagerActionIndexState.Conflict, authenticatedOriginal,
                             "Historical Manager action receipt validation failed: " + exception.Message,
                             actionId);
                     }
@@ -396,7 +428,9 @@ namespace Rice.AI.Codedb.Editor
             var historicalWarning = string.Join("\n", retainedUnknown);
             return pending == null
                 ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
-                    historicalWarning: historicalWarning)
+                    failedInstallCount == 1 ? failedInstallIndex : null,
+                    historicalWarning: historicalWarning,
+                    historicalResult: failedInstallCount == 1 ? failedInstallResult : null)
                 : new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
                     pending, isLegacyReceipt: true, historicalWarning: historicalWarning);
         }

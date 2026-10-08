@@ -15,6 +15,400 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        private sealed class ManagerReceiptFixture : IDisposable
+        {
+            private readonly string _root = Path.Combine(Path.GetTempPath(), "codedb-s29-receipts-" + Guid.NewGuid().ToString("N"));
+            private readonly IDisposable _scope;
+            internal readonly AICodedbEditorExecutionContext Context;
+            internal readonly string ActionId = Guid.NewGuid().ToString("N");
+            internal string InstallOutput => CommandOutput("INSTALL", "CANDIDATE", "PENDING", "host_runtime", "instance_candidate");
+
+            internal ManagerReceiptFixture(AICodedbEditorExecutionContext context, bool resolved,
+                string title = "Install CodeDB")
+            {
+                Context = context;
+                _scope = AICodedbPaths.UseManagerActionsRootForTests(_root);
+                var index = new AICodedbManagerActionIndex(ActionId, title,
+                    "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority(title), context);
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(index, out var error), Is.True, error);
+                if (resolved)
+                    Assert.That(AICodedbManagerActionJournal.TryRelease(index,
+                        AICodedbManagerActionEvidenceKind.CommandTerminal, out error), Is.True, error);
+            }
+
+            internal string Add(string action, string output, bool terminal = true, int exit = 6,
+                string stageName = null, string scriptPath = null)
+            {
+                var records = CreateManagerActionReceiptEnvelope();
+                var arguments = action == "RuntimeConfig" ? new[] { "-Force" }
+                    : AICodedbHostPayloadMaterializer.BuildScriptArguments(
+                        (AICodedbHostPayloadAction)Enum.Parse(typeof(AICodedbHostPayloadAction), action),
+                        action == "Install" || action == "Redeploy", Context.ProjectRoot);
+                var argumentHash = Hash(string.Join("\n", arguments));
+                var scriptHash = new string('a', 64);
+                var identity = Hash(scriptHash + "\n" + argumentHash + "\n120000");
+                var stageId = Hash(ActionId + "\n" + (stageName ?? Guid.NewGuid().ToString("N")) + "\n" + identity);
+                var stageRoot = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(Context, ActionId), stageId);
+                Directory.CreateDirectory(stageRoot);
+                foreach (var record in records)
+                {
+                    record["action_id"] = ActionId;
+                    record["stage_id"] = stageId;
+                    record["project_key"] = AICodedbPaths.GetManagerActionProjectKey(Context);
+                    record["package_key"] = AICodedbPaths.GetManagerActionPackageKey(Context);
+                }
+                foreach (var record in new[] { records[0], records[2] })
+                {
+                    record["project_identity"] = "sha256:" + records[0]["project_key"];
+                    record["package_identity"] = "sha256:" + records[0]["package_key"];
+                    record["effect_class"] = "ConfirmedProjectMutation";
+                    record["authorization_source"] = AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB");
+                    record["command_identity_sha256"] = identity;
+                    record["terminal_for_action"] = terminal;
+                }
+                records[0]["project_root"] = Context.ProjectRoot;
+                records[0]["package_root"] = Context.PackageRoot;
+                records[0]["writer_sha256"] = new string('b', 64);
+                records[0]["command"] = new Dictionary<string, object>
+                {
+                    ["script_path"] = scriptPath ?? AICodedbPaths.NormalizePath(Path.Combine(Context.PackageRoot,
+                        AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath)),
+                    ["script_sha256"] = scriptHash, ["arguments_sha256"] = argumentHash,
+                    ["arguments"] = arguments, ["timeout_ms"] = 120000
+                };
+                records[2]["stdout"] = output;
+                records[2]["stderr"] = string.Empty;
+                records[2]["exit_code"] = exit;
+                records[2]["output_drain_incomplete"] = false;
+                var names = new[] { "admitted.json", "claim.json", "terminal.json" };
+                for (var i = 0; i < names.Length; i++)
+                    File.WriteAllText(Path.Combine(stageRoot, names[i]),
+                        AICodedbControlContractMigrationClassifierTests.SerializeObject(records[i]), new UTF8Encoding(false));
+                return stageRoot;
+            }
+
+            internal Dictionary<string, string> AddRedeploy(bool manager, string failedStage = null,
+                string configPath = null)
+            {
+                var stages = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (manager)
+                {
+                    stages["ui"] = Add("DryRun", "[REDEPLOY_READY] Owned payload can redeploy.", false,
+                        failedStage == "ui" ? 6 : 0, AICodedbActions.RedeployUiPreflightStage);
+                    if (failedStage == "ui") return stages;
+                }
+                stages["worker"] = Add("DryRun", "[REDEPLOY_READY] Owned payload can redeploy.", false,
+                    failedStage == "worker" ? 6 : 0, AICodedbActions.RedeployWorkerPreflightStage);
+                if (failedStage == "worker") return stages;
+                var mutation = failedStage == "mutation"
+                    ? CommandOutput("REDEPLOY", "MUTATION", "PENDING", "host_runtime")
+                    : CommandOutput("REDEPLOY", "COMPLETE", "COMPLETE", "host_runtime")
+                        .Replace("\"FAILED\"", "\"CONVERGED\"").Replace("\"exit_code\":6", "\"exit_code\":0");
+                stages["mutation"] = Add("Redeploy", mutation, false, failedStage == "mutation" ? 6 : 0,
+                    AICodedbActions.RedeployMutationStage);
+                if (failedStage == "mutation" || failedStage == "missing-config") return stages;
+                stages["config"] = Add("RuntimeConfig", "Runtime config generated.", true,
+                    failedStage == "config" ? 6 : 0, AICodedbActions.RedeployRuntimeConfigStage,
+                    configPath ?? AICodedbPaths.NormalizePath(Path.Combine(Context.ProjectRoot,
+                        AICodedbProjectSettings.HostGenerationsRelativePath, "fixture-generation",
+                        "scripts/prepare-codedb-project-runtime.ps1")));
+                return stages;
+            }
+
+            internal static void ChangeField(string stage, string filename, string field, object value)
+            {
+                var path = Path.Combine(stage, filename);
+                var record = AICodedbStrictJson.ReadObject(path, 1048576, "fixture stage");
+                record[field] = value;
+                File.WriteAllText(path, AICodedbControlContractMigrationClassifierTests.SerializeObject(record), new UTF8Encoding(false));
+            }
+
+            internal void AddFollowUps(bool upgradeTerminal = true, string upgradeOutput = null)
+            {
+                Add("DryRun", "[UPGRADE_READY] Candidate generation is available.", exit: 0);
+                Add("Upgrade", upgradeOutput ?? CommandOutput("UPGRADE", "PREFLIGHT", "COMPLETE"), upgradeTerminal);
+            }
+
+            internal static string CommandOutput(string action, string phase, string cleanup, params string[] scopes)
+            {
+                return "[COMMAND_RESULT] " + AICodedbControlContractMigrationClassifierTests.SerializeObject(new Dictionary<string, object>
+                {
+                    ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                    ["action"] = action, ["outcome"] = "FAILED", ["phase"] = phase,
+                    ["reason_code"] = "FIXTURE", ["mutated_scopes"] = scopes,
+                    ["cleanup_state"] = cleanup, ["next_action"] = "Review result",
+                    ["exit_code"] = 6, ["detail"] = "fixture"
+                });
+            }
+
+            private static string Hash(string value)
+            {
+                using (var sha = SHA256.Create())
+                    return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value)))
+                        .Replace("-", string.Empty).ToLowerInvariant();
+            }
+
+            public void Dispose()
+            {
+                try { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
+                finally { _scope.Dispose(); }
+            }
+        }
+
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void ManagerReceipt_DeclaredRedeployCompletesSessionAndResolvedHistory(bool manager, bool resolved)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, resolved, "Host Payload Redeploy");
+            fixture.AddRedeploy(manager, configPath: resolved
+                ? AICodedbPaths.NormalizePath(Path.Combine(fixture.Context.ProjectRoot,
+                    AICodedbProjectSettings.PrepareRuntimeScriptRelativePath)) : null);
+            var records = new Dictionary<string, byte[]>();
+            foreach (var path in Directory.GetFiles(AICodedbPaths.GetManagerActionReceiptRoot(fixture.Context, fixture.ActionId),
+                "*.json", SearchOption.AllDirectories)) records.Add(path, File.ReadAllBytes(path));
+            var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+            Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
+            Assert.That(recovery.Result.Succeeded, Is.True);
+            Assert.That(recovery.Result.TerminalForManagerAction, Is.True);
+            Assert.That(recovery.Result.StandardOutput, Does.Contain("REDEPLOY").And.Contain("Runtime config generated."));
+            var command = AICodedbMaterializerCommandStatusParser.Parse(recovery.Result.StandardOutput);
+            Assert.That(command.IsValid, Is.True);
+            Assert.That(command.MutatedScopes, Is.EqualTo(new[] { "host_runtime" }));
+            foreach (var record in records)
+                Assert.That(File.ReadAllBytes(record.Key), Is.EqualTo(record.Value), record.Key);
+            var current = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                fixture.Context.ProjectRoot, fixture.Context.PackageRoot + "-replacement", "fixture");
+            var read = AICodedbManagerActionJournal.Read(current);
+            Assert.That(read.State, Is.EqualTo(resolved ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Pending));
+            if (!resolved)
+            {
+                AICodedbManagerActionSession.RestoreDurable(current, read, 1d);
+                var session = AICodedbManagerActionSession.CurrentFor(current);
+                Assert.That(session.Context.PackageRoot, Is.EqualTo(fixture.Context.PackageRoot));
+                Assert.That(session.TryReleaseDurableIndex(recovery.Result, out var error), Is.True, error);
+                Assert.That(session.TryCompleteRecovery(recovery.Result, 2d), Is.True);
+                Assert.That(session.IsRecovering, Is.False);
+                Assert.That(session.Result.StandardOutput, Is.EqualTo(recovery.Result.StandardOutput));
+                Assert.That(AICodedbManagerActionJournal.Read(current).State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+            }
+            Assert.That(AICodedbManagerActionSession.TryStart("Host Payload Verify", current, 3d, out var next), Is.True);
+            Assert.That(next.ActionId, Is.Not.EqualTo(fixture.ActionId));
+        }
+
+        [TestCase(true, "ui")]
+        [TestCase(true, "worker")]
+        [TestCase(false, "worker")]
+        [TestCase(true, "mutation")]
+        [TestCase(false, "mutation")]
+        [TestCase(true, "config")]
+        [TestCase(false, "config")]
+        public void ManagerReceipt_DeclaredRedeployEarlyFailureRetainsFailureAndEffects(bool manager, string failedStage)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, false, "Host Payload Redeploy");
+            var stages = fixture.AddRedeploy(manager, failedStage);
+            var failurePath = Path.Combine(stages[failedStage], "terminal.json");
+            var failureBytes = File.ReadAllBytes(failurePath);
+            var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+            Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
+            Assert.That(recovery.Result.Succeeded, Is.False);
+            Assert.That(recovery.Result.ExitCode, Is.EqualTo(6));
+            Assert.That(recovery.Result.HasAuthoritativeTerminalEvidence, Is.True);
+            Assert.That(recovery.Result.TerminalForManagerAction, Is.True);
+            Assert.That(File.ReadAllBytes(failurePath), Is.EqualTo(failureBytes));
+            if (failedStage == "mutation" || failedStage == "config")
+            {
+                var command = AICodedbMaterializerCommandStatusParser.Parse(recovery.Result.StandardOutput);
+                Assert.That(command.IsValid, Is.True);
+                Assert.That(command.Action, Is.EqualTo("REDEPLOY"));
+                Assert.That(command.MutatedScopes, Is.EqualTo(new[] { "host_runtime" }));
+                Assert.That(command.CleanupState, Is.EqualTo(failedStage == "mutation" ? "PENDING" : "COMPLETE"));
+            }
+            var read = AICodedbManagerActionJournal.Read(fixture.Context);
+            AICodedbManagerActionSession.RestoreDurable(fixture.Context, read, 1d);
+            var session = AICodedbManagerActionSession.CurrentFor(fixture.Context);
+            Assert.That(session.TryReleaseDurableIndex(recovery.Result, out var error), Is.True, error);
+            Assert.That(session.TryCompleteRecovery(recovery.Result, 2d), Is.True);
+            Assert.That(session.Result.Succeeded, Is.False);
+            Assert.That(AICodedbManagerActionJournal.Read(fixture.Context).State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+        }
+
+        [TestCase("extra-mutation")]
+        [TestCase("unknown-name")]
+        [TestCase("wrong-terminal")]
+        [TestCase("malformed")]
+        [TestCase("unbound-arguments")]
+        [TestCase("wrong-script")]
+        [TestCase("pending-stage")]
+        [TestCase("missing-predecessor")]
+        [TestCase("incomplete-output")]
+        [TestCase("missing-config")]
+        [TestCase("failure-with-successor")]
+        public void ManagerReceipt_DeclaredRedeployRejectsUnknownOrIncompleteChain(string defect)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, true, "Host Payload Redeploy");
+            var stages = fixture.AddRedeploy(true, defect == "missing-config" ? "missing-config" : null,
+                defect == "wrong-script" ? AICodedbPaths.NormalizePath(Path.Combine(fixture.Context.ProjectRoot, "unexpected.ps1")) : null);
+            if (defect == "extra-mutation") fixture.Add("Install", fixture.InstallOutput, false);
+            if (defect == "unknown-name")
+                fixture.Add("Redeploy", ManagerReceiptFixture.CommandOutput("REDEPLOY", "MUTATION", "PENDING", "host_runtime"), false,
+                    stageName: "redeploy-undeclared-mutation");
+            if (defect == "wrong-terminal")
+            {
+                ManagerReceiptFixture.ChangeField(stages["mutation"], "admitted.json", "terminal_for_action", true);
+                ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "terminal_for_action", true);
+            }
+            if (defect == "malformed") File.WriteAllText(Path.Combine(stages["worker"], "terminal.json"), "{}");
+            if (defect == "unbound-arguments")
+            {
+                var path = Path.Combine(stages["worker"], "admitted.json");
+                File.WriteAllText(path, File.ReadAllText(path).Replace("-ProjectRoot", "-Unexpected"));
+            }
+            if (defect == "pending-stage") File.Delete(Path.Combine(stages["config"], "terminal.json"));
+            if (defect == "missing-predecessor") Directory.Delete(stages["worker"], true);
+            if (defect == "incomplete-output")
+                ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "output_drain_incomplete", true);
+            if (defect == "failure-with-successor")
+            {
+                ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "exit_code", 6);
+                ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "stdout",
+                    ManagerReceiptFixture.CommandOutput("REDEPLOY", "MUTATION", "PENDING", "host_runtime"));
+            }
+            var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+            Assert.That(recovery.State, Is.EqualTo(defect == "missing-config" || defect == "incomplete-output"
+                ? AICodedbManagerActionRecoveryState.Pending : AICodedbManagerActionRecoveryState.Conflict));
+            var read = AICodedbManagerActionJournal.Read(fixture.Context);
+            Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+            AICodedbManagerActionSession.RestoreDurable(fixture.Context, read, 1d);
+            Assert.That(AICodedbManagerActionSession.TryStart("Host Payload Verify", fixture.Context, 2d, out _), Is.False);
+        }
+
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void ManagerReceipt_FailedInstallRestoresOriginalResultAndRemovalGate(bool threeStages, bool resolved)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, resolved);
+            if (threeStages && resolved) fixture.AddFollowUps();
+            fixture.Add("Install", fixture.InstallOutput);
+            if (threeStages && !resolved) fixture.AddFollowUps();
+            var replacement = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                fixture.Context.ProjectRoot, fixture.Context.PackageRoot + "-replacement", "fixture");
+            var before = new Dictionary<string, byte[]>();
+            foreach (var file in Directory.GetFiles(AICodedbPaths.GetManagerActionIndexDirectory(fixture.Context), "*.json", SearchOption.AllDirectories))
+                before.Add(file, File.ReadAllBytes(file));
+            var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+            Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
+            Assert.That(recovery.Result.StandardOutput, Is.EqualTo(fixture.InstallOutput));
+            Assert.That(recovery.Result.Succeeded, Is.False);
+            Assert.That(AICodedbActions.HasFailedInstallPendingEffects(recovery.Result), Is.True);
+            var read = AICodedbManagerActionJournal.Read(replacement);
+            Assert.That(read.State, Is.EqualTo(resolved ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Pending));
+            AICodedbManagerActionSession.RestoreDurable(replacement, read, 1d);
+            var session = AICodedbManagerActionSession.CurrentFor(replacement);
+            Assert.That(session.Context.PackageRoot, Is.EqualTo(fixture.Context.PackageRoot));
+            if (!resolved)
+            {
+                Assert.That(session.TryReleaseDurableIndex(recovery.Result, out var error), Is.True, error);
+                Assert.That(session.TryCompleteRecovery(recovery.Result, 2d), Is.True);
+            }
+            Assert.That(session.IsRecovering, Is.False);
+            Assert.That(session.Result.StandardOutput, Is.EqualTo(fixture.InstallOutput));
+            Assert.That(AICodedbActions.CanRequestInstallReconcile(session.Result), Is.False);
+            Assert.That(AICodedbManagerActionJournal.Read(replacement).HistoricalWarning,
+                Does.Contain("PENDING").And.Contain(fixture.Context.PackageRoot));
+            if (resolved)
+                foreach (var file in before)
+                    Assert.That(File.ReadAllBytes(file.Key), Is.EqualTo(file.Value), file.Key);
+            var command = AICodedbMaterializerCommandStatusParser.Parse(session.Result.StandardOutput);
+            AICodedbProductStatus Status(bool safe) => new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention, AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked, AICodedbProductLayerState.Blocked,
+                "", command, AICodedbProductAttentionReason.None, "", safe);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(
+                AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), true), false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(false), false), Is.False);
+            var dispatched = false;
+            Assert.That(AICodedbManagerWindow.ConfirmAndRunUninstallCodeDB(() => false, () => dispatched = true), Is.False);
+            Assert.That(dispatched, Is.False);
+            Assert.That(AICodedbManagerActionSession.TryStart("Uninstall CodeDB from Project", replacement, 3d, out _), Is.True);
+        }
+
+        [TestCase("pending")]
+        [TestCase("malformed")]
+        [TestCase("identity")]
+        [TestCase("arguments")]
+        [TestCase("extra-mutation")]
+        [TestCase("nonterminal")]
+        [TestCase("mutating-upgrade")]
+        [TestCase("duplicate-install")]
+        public void ManagerReceipt_UnclassifiedEvidenceStaysBlockedWithOriginalPackage(string defect)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, true);
+            var install = fixture.Add("Install", fixture.InstallOutput);
+            fixture.AddFollowUps(defect != "nonterminal", defect == "mutating-upgrade"
+                ? ManagerReceiptFixture.CommandOutput("UPGRADE", "PREFLIGHT", "COMPLETE", "host_runtime") : null);
+            var terminalPath = Path.Combine(install, "terminal.json");
+            if (defect == "pending") File.Delete(terminalPath);
+            if (defect == "malformed") File.WriteAllText(terminalPath, "{}");
+            if (defect == "identity") File.WriteAllText(terminalPath,
+                File.ReadAllText(terminalPath).Replace(fixture.ActionId, Guid.NewGuid().ToString("N")));
+            if (defect == "arguments")
+            {
+                var path = Path.Combine(install, "admitted.json");
+                File.WriteAllText(path, File.ReadAllText(path).Replace("-ProjectRoot", "-Unexpected"));
+            }
+            if (defect == "extra-mutation" || defect == "duplicate-install")
+                fixture.Add("Install", fixture.InstallOutput, defect != "extra-mutation");
+            Assert.That(AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId).State,
+                Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+            var current = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                fixture.Context.ProjectRoot, fixture.Context.PackageRoot + "-new", "fixture");
+            var read = AICodedbManagerActionJournal.Read(current);
+            Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+            AICodedbManagerActionSession.RestoreDurable(current, read, 1d);
+            var session = AICodedbManagerActionSession.CurrentFor(current);
+            Assert.That(AICodedbManagerWindow.BuildHistoricalActionWarning(session, read.HistoricalWarning),
+                Does.Contain(fixture.Context.PackageRoot).And.Not.Contain(current.PackageRoot));
+            Assert.That(AICodedbManagerActionSession.TryStart("Install CodeDB", current, 2d, out _), Is.False);
+        }
+
+        [Test]
+        public void ManagerReceipt_ConflictWithoutAuthenticatedContextLabelsOriginalUnavailable()
+        {
+            using var fixture = new ManagerActionSessionFixture();
+            AICodedbManagerActionSession.RestoreDurable(fixture.Context,
+                new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
+                    detail: "invalid identity", actionId: Guid.NewGuid().ToString("N")), 1d);
+            var session = AICodedbManagerActionSession.CurrentFor(fixture.Context);
+            Assert.That(AICodedbManagerWindow.BuildHistoricalActionWarning(session, ""),
+                Does.Contain("original Package unavailable").And.Not.Contain(fixture.Context.PackageRoot));
+        }
+
+        [TestCase("terminal", AICodedbManagerActionRecoveryState.Terminal)]
+        [TestCase("pending", AICodedbManagerActionRecoveryState.Pending)]
+        [TestCase("nonterminal", AICodedbManagerActionRecoveryState.Pending)]
+        public void ManagerReceipt_SingleStagePreservesNormalTerminalAndUnknown(
+            string shape, AICodedbManagerActionRecoveryState expected)
+        {
+            using var sessionFixture = new ManagerActionSessionFixture();
+            using var fixture = new ManagerReceiptFixture(sessionFixture.Context, false);
+            var stage = fixture.Add("DryRun", "[UPGRADE_READY] Candidate generation is available.",
+                shape != "nonterminal", 0);
+            if (shape == "pending") File.Delete(Path.Combine(stage, "terminal.json"));
+            var read = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
+            Assert.That(read.State, Is.EqualTo(expected));
+            if (expected == AICodedbManagerActionRecoveryState.Terminal)
+                Assert.That(read.Result.Succeeded, Is.True);
+        }
+
         [Test]
         public void DirectInstallArguments_BindActualActionBeforeAdmission()
         {
@@ -2917,7 +3311,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             File.WriteAllText(path, value, new UTF8Encoding(false));
         }
 
-        private static string SerializeObject(Dictionary<string, object> value)
+        internal static string SerializeObject(Dictionary<string, object> value)
         {
             var keys = new List<string>(value.Keys);
             keys.Sort(StringComparer.Ordinal);
@@ -2944,6 +3338,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 return (bool)value ? "true" : "false";
             if (value is int || value is long)
                 return Convert.ToString(value, CultureInfo.InvariantCulture);
+            if (value is string[] strings)
+                return "[" + string.Join(",", Array.ConvertAll(strings, item => SerializeValue(item))) + "]";
+            if (value is List<object> items)
+                return "[" + string.Join(",", items.ConvertAll(SerializeValue)) + "]";
             var objectValue = value as Dictionary<string, object>;
             if (objectValue != null)
                 return SerializeObject(objectValue);

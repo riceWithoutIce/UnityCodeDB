@@ -14,6 +14,75 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbEditorLifecycleTests
     {
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait(bool terminal)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "codedb-s29-context-" + Guid.NewGuid().ToString("N"));
+            var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                Path.Combine(root, "project"), Path.Combine(root, "package"), "fixture");
+            var actionId = Guid.NewGuid().ToString("N");
+            using (AICodedbPaths.UseActionContext(context, actionId, "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission"))
+            using (AICodedbPaths.UseActionStage("install-stage", terminal))
+            {
+                var tracker = AICodedbPaths.CurrentActionDispatchTracker;
+                await Task.Run(async () =>
+                {
+                    using (AICodedbEditorLifecycle.UseLifecycleExecutionContext(context))
+                    {
+                        await Task.Yield();
+                        Assert.That(AICodedbPaths.ProjectRoot, Is.EqualTo(context.ProjectRoot));
+                        Assert.That(AICodedbPaths.PackageRootPath, Is.EqualTo(context.PackageRoot));
+                        Assert.That(AICodedbPaths.CurrentActionId, Is.Empty);
+                        Assert.That(AICodedbPaths.CurrentActionEffect, Is.Empty);
+                        Assert.That(AICodedbPaths.CurrentActionAuthority, Is.Empty);
+                        Assert.That(AICodedbPaths.CurrentActionStage, Is.Empty);
+                        Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.False);
+                        Assert.That(AICodedbPaths.CurrentActionDispatchTracker, Is.Null);
+                        using (AICodedbPaths.UseActionStage("must-not-attach", true))
+                            Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.False);
+                    }
+                    Assert.That(AICodedbPaths.CurrentActionId, Is.EqualTo(actionId));
+                    Assert.That(AICodedbPaths.CurrentActionStage, Is.EqualTo("install-stage"));
+                    Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.EqualTo(terminal));
+                    Assert.That(AICodedbPaths.CurrentActionDispatchTracker, Is.SameAs(tracker));
+                });
+                Assert.That(AICodedbPaths.CurrentActionId, Is.EqualTo(actionId));
+                Assert.That(tracker.DirectWriterDispatchAttempted, Is.False);
+            }
+        }
+
+        [Test]
+        public void ActionContext_NewIdentityResetsStageAndRestoresOuterScope()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "codedb-s29-nested-" + Guid.NewGuid().ToString("N"));
+            var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                Path.Combine(root, "project"), Path.Combine(root, "package"), "fixture");
+            var outerId = Guid.NewGuid().ToString("N");
+            using (AICodedbPaths.UseActionContext(context, outerId, "outer-effect", "outer-authority"))
+            using (AICodedbPaths.UseActionStage("outer-stage", false))
+            {
+                var outerTracker = AICodedbPaths.CurrentActionDispatchTracker;
+                using (AICodedbPaths.UseActionContext(context, outerId, "outer-effect", "outer-authority"))
+                {
+                    Assert.That(AICodedbPaths.CurrentActionStage, Is.EqualTo("outer-stage"));
+                    Assert.That(AICodedbPaths.CurrentActionDispatchTracker, Is.SameAs(outerTracker));
+                }
+                using (AICodedbPaths.UseActionContext(context, Guid.NewGuid().ToString("N")))
+                {
+                    Assert.That(AICodedbPaths.CurrentActionStage, Is.Empty);
+                    Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.True);
+                    Assert.That(AICodedbPaths.CurrentActionEffect, Is.Empty);
+                    Assert.That(AICodedbPaths.CurrentActionAuthority, Is.Empty);
+                    Assert.That(AICodedbPaths.CurrentActionDispatchTracker, Is.Not.SameAs(outerTracker));
+                }
+                Assert.That(AICodedbPaths.CurrentActionStage, Is.EqualTo("outer-stage"));
+                Assert.That(AICodedbPaths.CurrentActionStageIsTerminal, Is.False);
+                Assert.That(AICodedbPaths.CurrentActionEffect, Is.EqualTo("outer-effect"));
+                Assert.That(AICodedbPaths.CurrentActionAuthority, Is.EqualTo("outer-authority"));
+            }
+        }
+
         [TestCase(AICodedbCurrentInstanceState.Missing, true, true)]
         [TestCase(AICodedbCurrentInstanceState.Missing, false, false)]
         [TestCase(AICodedbCurrentInstanceState.Current, true, false)]

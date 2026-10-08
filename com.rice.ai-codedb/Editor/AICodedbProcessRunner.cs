@@ -753,7 +753,7 @@ namespace Rice.AI.Codedb.Editor
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "The Manager action receipt contains too many stage entries.");
 
-                AICodedbCommandResult terminalResult = null;
+                var completedStages = new List<RecoveredManagerStage>();
                 AICodedbCommandResult refusalResult = null;
                 var evidenceObserved = false;
                 var pendingObserved = false;
@@ -781,7 +781,7 @@ namespace Rice.AI.Codedb.Editor
                     var startFailurePath = Path.Combine(stageDirectory, "start-failure.json");
                     if (File.Exists(startFailurePath))
                     {
-                        if (File.Exists(terminalPath) || refusalResult != null || terminalResult != null)
+                        if (File.Exists(terminalPath) || refusalResult != null || completedStages.Count != 0)
                             return AICodedbManagerActionRecoveryOutcome.Conflict(
                                 "Conflicting Manager action stage outcomes exist.");
                         var failure = ReadStartFailureReceipt(context, actionId, startFailurePath);
@@ -798,24 +798,26 @@ namespace Rice.AI.Codedb.Editor
                         pendingObserved = true;
                         continue;
                     }
-                    var outcome = ReadTerminalReceipt(context, actionId, terminalPath);
+                    var outcome = ReadTerminalReceipt(context, actionId, terminalPath, out var admission);
                     if (outcome.State == AICodedbManagerActionRecoveryState.Conflict)
                         return outcome;
                     if (outcome.State != AICodedbManagerActionRecoveryState.Terminal)
-                        continue;
-                    if (!outcome.Result.TerminalForManagerAction)
-                        continue;
-                    if (terminalResult != null || refusalResult != null)
+                        return outcome;
+                    if (refusalResult != null)
                         return AICodedbManagerActionRecoveryOutcome.Conflict(
-                            "Multiple terminal stages claim the same Manager action.");
-                    terminalResult = outcome.Result;
+                            "Conflicting Manager action stage outcomes exist.");
+                    completedStages.Add(new RecoveredManagerStage(admission, outcome.Result));
                 }
 
-                if (pendingObserved && (terminalResult != null || refusalResult != null))
+                if (pendingObserved && (completedStages.Count != 0 || refusalResult != null))
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "A Manager action has both pending and terminal stage evidence.");
-                if (terminalResult != null)
-                    return AICodedbManagerActionRecoveryOutcome.Terminal(terminalResult);
+                if (TryRecoverDeclaredRedeploy(context, completedStages, out var redeploy))
+                    return redeploy;
+                if (completedStages.Count == 1 && completedStages[0].Result.TerminalForManagerAction)
+                    return AICodedbManagerActionRecoveryOutcome.Terminal(completedStages[0].Result);
+                if (completedStages.Count > 1)
+                    return RecoverFailedInstallFollowUp(context, completedStages);
                 if (refusalResult != null)
                     return AICodedbManagerActionRecoveryOutcome.PreEffectRefusal(refusalResult);
                 return evidenceObserved
@@ -831,15 +833,258 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        private sealed class RecoveredManagerStage
+        {
+            internal readonly Dictionary<string, object> Admission;
+            internal readonly AICodedbCommandResult Result;
+            internal RecoveredManagerStage(Dictionary<string, object> admission, AICodedbCommandResult result)
+            {
+                Admission = admission;
+                Result = result;
+            }
+        }
+
+        private static bool TryRecoverDeclaredRedeploy(AICodedbEditorExecutionContext context,
+            List<RecoveredManagerStage> stages, out AICodedbManagerActionRecoveryOutcome outcome)
+        {
+            outcome = null;
+            var names = new[] { AICodedbActions.RedeployUiPreflightStage,
+                AICodedbActions.RedeployWorkerPreflightStage, AICodedbActions.RedeployMutationStage,
+                AICodedbActions.RedeployRuntimeConfigStage };
+            var declared = new Dictionary<string, RecoveredManagerStage>(StringComparer.Ordinal);
+            foreach (var stage in stages)
+                foreach (var name in names)
+                    if (ComputeSha256(stage.Result.ActionId + "\n" + name + "\n"
+                            + AICodedbStrictJson.GetRequiredString(stage.Admission, "command_identity_sha256", "Redeploy admission"))
+                        == AICodedbStrictJson.GetRequiredString(stage.Admission, "stage_id", "Redeploy admission"))
+                    {
+                        if (declared.ContainsKey(name))
+                        {
+                            outcome = AICodedbManagerActionRecoveryOutcome.Conflict("Duplicate declared Redeploy stage.");
+                            return true;
+                        }
+                        declared.Add(name, stage);
+                    }
+            if (declared.Count == 0) return false;
+            if (declared.Count != stages.Count)
+            {
+                outcome = AICodedbManagerActionRecoveryOutcome.Conflict("Redeploy has an undeclared additional stage.");
+                return true;
+            }
+            var first = declared.ContainsKey(names[0]) ? 0 : 1;
+            AICodedbCommandResult mutation = null;
+            for (var index = first; index < names.Length; index++)
+            {
+                if (!declared.TryGetValue(names[index], out var stage))
+                {
+                    outcome = declared.Count == index - first
+                        ? AICodedbManagerActionRecoveryOutcome.Pending("The declared Redeploy chain has no completed final stage; no success or replay was inferred.")
+                        : AICodedbManagerActionRecoveryOutcome.Conflict("The declared Redeploy chain has a missing predecessor.");
+                    return true;
+                }
+                var result = stage.Result;
+                var final = index == 3;
+                if (result.TerminalForManagerAction != final)
+                {
+                    outcome = AICodedbManagerActionRecoveryOutcome.Conflict("Redeploy stage terminal attribution is inconsistent.");
+                    return true;
+                }
+                if (result.TimedOut || result.OutputOverflow || result.OutputDrainIncomplete)
+                {
+                    outcome = AICodedbManagerActionRecoveryOutcome.Pending("Redeploy stage execution or output is incomplete; its effects remain unproved.");
+                    return true;
+                }
+                if (final)
+                {
+                    var command = AICodedbStrictJson.RequireObject(stage.Admission["command"], "Redeploy config command");
+                    var path = AICodedbStrictJson.GetRequiredString(command, "script_path", "Redeploy config command");
+                    var arguments = ReadBoundCommandArguments(stage, path);
+                    if (!IsDeclaredRedeployConfigPath(context, path) || arguments.Length != 1 || arguments[0] != "-Force"
+                        || AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput).Present)
+                        throw new InvalidOperationException("Redeploy runtime-config command is not the declared project script.");
+                    // Include the original mutation output even if config failed.
+                    // Config completion cannot erase mutation scopes or cleanup state.
+                    outcome = AICodedbManagerActionRecoveryOutcome.Terminal(BuildRedeployActionResult(mutation, result));
+                    return true;
+                }
+                var action = ReadAuthenticatedMaterializerAction(context, stage, true);
+                var status = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+                if (index < 2)
+                {
+                    if (action != "DryRun" || status.Present)
+                        throw new InvalidOperationException("Redeploy preflight is not a read-only DryRun.");
+                    if (result.Succeeded && !AICodedbHostPayloadStatusBuilder.Build(true, result).CanRedeploy)
+                    {
+                        outcome = declared.Count == index - first + 1
+                            ? AICodedbManagerActionRecoveryOutcome.Pending("Redeploy preflight did not admit mutation; the Manager decision is not recorded here.")
+                            : AICodedbManagerActionRecoveryOutcome.Conflict("Redeploy continued after a refusing preflight.");
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (action != "Redeploy" || !status.Present || !status.IsValid
+                        || status.Action != "REDEPLOY" || status.ExitCode != result.ExitCode
+                        || (result.Succeeded && (status.Outcome != "CONVERGED" || status.CleanupState != "COMPLETE"))
+                        || (!result.Succeeded && status.Outcome != "BLOCKED" && status.Outcome != "FAILED"))
+                        throw new InvalidOperationException("Redeploy mutation result is not an authenticated completed command result.");
+                    mutation = result;
+                }
+                if (!result.Succeeded)
+                {
+                    outcome = declared.Count == index - first + 1
+                        ? AICodedbManagerActionRecoveryOutcome.Terminal(BuildRedeployActionResult(null, result))
+                        : AICodedbManagerActionRecoveryOutcome.Conflict("Redeploy continued after a failed stage.");
+                    return true;
+                }
+            }
+            throw new InvalidOperationException("Redeploy chain classification did not terminate.");
+        }
+
+        private static AICodedbCommandResult BuildRedeployActionResult(
+            AICodedbCommandResult mutation, AICodedbCommandResult last)
+        {
+            return new AICodedbCommandResult(last.ExitCode,
+                mutation == null ? last.StandardOutput : mutation.StandardOutput + Environment.NewLine + last.StandardOutput,
+                mutation == null ? last.StandardError : mutation.StandardError + Environment.NewLine + last.StandardError,
+                false, (mutation?.ElapsedMilliseconds ?? 0) + last.ElapsedMilliseconds,
+                false, true, last.ActionId, true);
+        }
+
+        private static bool IsDeclaredRedeployConfigPath(AICodedbEditorExecutionContext context, string path)
+        {
+            if (!string.Equals(path, AICodedbPaths.NormalizePath(Path.GetFullPath(path)), StringComparison.OrdinalIgnoreCase))
+                return false;
+            var legacy = AICodedbPaths.NormalizePath(Path.Combine(context.ProjectRoot,
+                AICodedbProjectSettings.PrepareRuntimeScriptRelativePath));
+            if (string.Equals(path, legacy, StringComparison.OrdinalIgnoreCase)) return true;
+            var prefix = AICodedbPaths.NormalizePath(Path.Combine(context.ProjectRoot,
+                AICodedbProjectSettings.HostGenerationsRelativePath)).TrimEnd('/') + "/";
+            const string suffix = "/scripts/prepare-codedb-project-runtime.ps1";
+            if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || !path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return false;
+            var generation = path.Substring(prefix.Length, path.Length - prefix.Length - suffix.Length);
+            if (generation.Length == 0 || generation.Length > 64 || generation == "." || generation == "..") return false;
+            foreach (var character in generation)
+                if (!((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+                    || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-'))
+                    return false;
+            return true;
+        }
+
+        private static AICodedbManagerActionRecoveryOutcome RecoverFailedInstallFollowUp(
+            AICodedbEditorExecutionContext context, List<RecoveredManagerStage> stages)
+        {
+            const string conflict = "Completed Manager stages do not prove the bounded failed INSTALL follow-up shape.";
+            if (stages.Count != 3)
+                return AICodedbManagerActionRecoveryOutcome.Conflict(conflict);
+            AICodedbCommandResult install = null;
+            var observed = false;
+            var refusedUpgrade = false;
+            foreach (var stage in stages)
+            {
+                var result = stage.Result;
+                if (!result.TerminalForManagerAction || result.TimedOut
+                    || result.OutputOverflow || result.OutputDrainIncomplete)
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(conflict);
+                var action = ReadAuthenticatedMaterializerAction(context, stage);
+                var command = AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+                if (action == "Install" && install == null
+                    && AICodedbActions.HasFailedInstallPendingEffects(result))
+                    install = result;
+                else if (action == "DryRun" && !observed && result.Succeeded && !command.Present
+                    && AICodedbHostPayloadStatusBuilder.Build(true, result).State != AICodedbHostPayloadState.Unknown)
+                    observed = true;
+                else if (action == "Upgrade" && !refusedUpgrade && !result.Succeeded
+                    && command.Present && command.IsValid && command.Action == "UPGRADE"
+                    && command.Outcome == "FAILED" && command.Phase == "PREFLIGHT"
+                    && command.ExitCode == result.ExitCode && command.MutatedScopes.Length == 0
+                    && command.CleanupState == "COMPLETE")
+                    refusedUpgrade = true;
+                else
+                    return AICodedbManagerActionRecoveryOutcome.Conflict(conflict);
+            }
+            // Return the original object and output. A follow-up's COMPLETE is
+            // local to that attempt and cannot clear INSTALL's mutations/PENDING.
+            return install != null && observed && refusedUpgrade
+                ? AICodedbManagerActionRecoveryOutcome.Terminal(install)
+                : AICodedbManagerActionRecoveryOutcome.Conflict(conflict);
+        }
+
+        private static string[] ReadBoundCommandArguments(RecoveredManagerStage stage, string expectedScriptPath)
+        {
+            const string label = "historical materializer command";
+            var admission = stage.Admission;
+            var command = AICodedbStrictJson.RequireObject(admission["command"], label);
+            var arguments = AICodedbStrictJson.GetRequiredStringArray(command, "arguments", label);
+            var argumentHash = ComputeSha256(string.Join("\n", arguments));
+            var scriptHash = AICodedbStrictJson.GetRequiredString(command, "script_sha256", label);
+            var timeout = AICodedbStrictJson.GetRequiredInt32(command, "timeout_ms", label);
+            var scriptPath = AICodedbStrictJson.GetRequiredString(command, "script_path", label);
+            if (scriptHash.Length != 64 || !IsLowerHex(scriptHash)
+                || !string.Equals(scriptPath, expectedScriptPath, StringComparison.OrdinalIgnoreCase)
+                || argumentHash != AICodedbStrictJson.GetRequiredString(command, "arguments_sha256", label)
+                || ComputeSha256(scriptHash + "\n" + argumentHash + "\n"
+                    + timeout.ToString(CultureInfo.InvariantCulture))
+                    != AICodedbStrictJson.GetRequiredString(admission, "command_identity_sha256", label)
+                || AICodedbStrictJson.GetRequiredString(admission, "effect_class", label) != "ConfirmedProjectMutation"
+                || AICodedbStrictJson.GetRequiredString(admission, "authorization_source", label)
+                    != AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"))
+                throw new InvalidOperationException("Historical materializer command identity is inconsistent.");
+            return arguments;
+        }
+
+        private static string ReadAuthenticatedMaterializerAction(
+            AICodedbEditorExecutionContext context, RecoveredManagerStage stage, bool allowRedeploy = false)
+        {
+            var arguments = ReadBoundCommandArguments(stage, AICodedbPaths.NormalizePath(Path.Combine(context.PackageRoot,
+                AICodedbProjectSettings.HostPayloadMaterializerScriptPackageRelativePath)));
+            var options = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var argument in arguments)
+                if (argument == null || argument.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                    throw new InvalidOperationException("Historical command argument is invalid.");
+            for (var index = 0; index < arguments.Length; index++)
+            {
+                var name = arguments[index];
+                if (name == "-ConfirmedProjectMutation")
+                    options.Add(name, "true");
+                else if (name == "-Action" || name == "-ProjectRoot" || name == "-OriginatingActionId"
+                    || name == "-OriginatingOperationId" || name == "-EditorSessionId"
+                    || name == "-EditorProcessId" || name == "-EditorProcessStartTicks")
+                {
+                    if (++index >= arguments.Length || string.IsNullOrEmpty(arguments[index]))
+                        throw new InvalidOperationException("Historical command option has no value.");
+                    options.Add(name, arguments[index]);
+                }
+                else
+                    throw new InvalidOperationException("Historical command option is unclassified.");
+            }
+            if (!options.TryGetValue("-Action", out var action)
+                || !options.TryGetValue("-ProjectRoot", out var project)
+                || !string.Equals(project, context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || options.ContainsKey("-ConfirmedProjectMutation") != (action == "Install" || (allowRedeploy && action == "Redeploy"))
+                || (options.TryGetValue("-OriginatingActionId", out var originatingAction)
+                    && originatingAction != stage.Result.ActionId))
+                throw new InvalidOperationException("Historical command action binding is inconsistent.");
+            return action;
+        }
+
         private static AICodedbManagerActionRecoveryOutcome ReadTerminalReceipt(
             AICodedbEditorExecutionContext context,
             string actionId,
             string terminalPath)
         {
+            return ReadTerminalReceipt(context, actionId, terminalPath, out _);
+        }
+
+        private static AICodedbManagerActionRecoveryOutcome ReadTerminalReceipt(
+            AICodedbEditorExecutionContext context, string actionId, string terminalPath,
+            out Dictionary<string, object> admitted)
+        {
             AssertReceiptPath(context, terminalPath);
             var stageRoot = Path.GetDirectoryName(terminalPath);
             var stageId = Path.GetFileName(stageRoot);
-            var admitted = AICodedbStrictJson.ReadObject(
+            admitted = AICodedbStrictJson.ReadObject(
                 Path.Combine(stageRoot, "admitted.json"),
                 ManagerActionReceiptMaximumBytes,
                 "CodeDB Manager action admission");
