@@ -78,6 +78,9 @@ The reusable development and validation process is defined in the
 [development workflow](development-workflow.md); version roadmaps may add
 narrower, version-specific gates without duplicating the workflow.
 
+Development/test temporary directory ownership and cleanup are defined in the
+[test workspace contract](test-workspace-contract.md).
+
 ## Version Support Policy
 
 Published `v0.2.x` artifacts remain immutable historical versions. They are

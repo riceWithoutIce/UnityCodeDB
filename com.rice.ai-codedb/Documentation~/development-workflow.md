@@ -501,6 +501,16 @@ The beginning of a task is read-only and bounded:
 Existing dirty worktree changes are preserved. They are not reset, checked out,
 cleaned, or rewritten unless the user explicitly authorizes that exact action.
 
+## Development Test Workspace Ownership
+
+Test-owned ephemeral fixture roots follow the
+[Development Test Workspace Contract](test-workspace-contract.md): repository
+tests use `.artifacts/tests/<run-id>/`; Unity tests use the actual test project's
+`Library/CodeDB/Tests/<run-id>/`. Their entry point owns root selection, isolation,
+capability checks and bounded cleanup; helpers receive explicit owned paths.
+System temp is not an implicit fallback. This does not move real runtime or
+machine-level state or authorize cleanup of historical fixtures.
+
 ## Bounded Inspection
 
 The first pass over a large file, generated output, log, or session record is an
@@ -853,6 +863,12 @@ The focused check does not replace the full Package-boundary gate or prove
 Unity/consumer behavior. Review relative paths, environment-derived paths,
 and test-to-production binding at the directly affected call sites as part
 of the task's normal source review.
+
+For changed test writers, also apply the [test workspace contract](test-workspace-contract.md).
+Freeze root authority, direct consumers and cleanup/error evidence in the same
+task envelope. A drive-literal scan alone cannot validate environment-derived
+root selection. Check actual entry-to-helper binding and preserve primary test
+failures when cleanup fails; no separate per-directory approval gate is added.
 
 ## Focused Testing And Regression Convergence
 
