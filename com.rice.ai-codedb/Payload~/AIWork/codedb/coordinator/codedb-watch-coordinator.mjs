@@ -9,6 +9,7 @@ import readline from "node:readline";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { acquireCodedbHostUseLease } from "../shared/codedb-host-use-gate.mjs";
+import { launchCodedbDaemon } from "../shared/codedb-daemon-launch.mjs";
 
 const STATE_FILE = "coordinator-state.json";
 const LOCK_FILE = "coordinator.lock";
@@ -484,13 +485,7 @@ async function runStart(rawOptions) {
       daemonArgs.push("--adapter-worker", context.adapterWorker);
     }
   }
-  const daemon = spawn(process.execPath, daemonArgs, {
-    cwd: context.root,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  daemon.unref();
+  await launchCodedbDaemon(process.execPath, daemonArgs, context.root);
 
   const timer = Date.now();
   while (Date.now() - timer < context.startupTimeoutMs) {

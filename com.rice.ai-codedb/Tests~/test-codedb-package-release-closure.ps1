@@ -105,6 +105,7 @@ function Repair-CanonicalMetadata {
 function ConvertTo-InstanceConsumerProjection {
     param([string]$Text, [ValidateSet('common', 'worker')][string]$Kind)
     if ($Kind -eq 'common') {
+        if ($Text.Contains('Assert-CodedbInstanceManifestFields -Properties $manifest')) { return $Text }
         $binding = '. (Join-Path $PSScriptRoot "..\shared\codedb-machine-provider-contract.ps1")'
         Assert-Closure ($Text.Split(@($binding), [StringSplitOptions]::None).Length -eq 2) 'Common Provider binding is not unique.'
         $Text = $Text.Replace($binding, $binding + "`n" + '. (Join-Path $PSScriptRoot "..\shared\codedb-instance-manifest-contract.ps1")')
@@ -124,12 +125,30 @@ function ConvertTo-InstanceConsumerProjection {
         $projected = $body.Replace('Get-CodedbProviderManifestString', 'Get-CodedbInstanceManifestString').Replace('Get-CodedbProviderManifestInt32', 'Get-CodedbInstanceManifestInt32')
         return $Text.Replace($body, $projected)
     }
+    if ($Text.Contains('const instance = parseCodedbInstanceManifest(instanceText, "CodeDB instance manifest");')) { return $Text }
     $binding = 'import { GENERATION_CONTRACT } from "../shared/codedb-host-use-gate.mjs";'
     Assert-Closure ($Text.Split(@($binding), [StringSplitOptions]::None).Length -eq 2) 'Worker generation binding is not unique.'
     $Text = $Text.Replace($binding, $binding + "`n" + 'import { parseCodedbInstanceManifest } from "../shared/codedb-instance-manifest-contract.mjs";')
     $decoder = 'const instance = parseStrictFlatJson(instanceText, "CodeDB instance manifest");'
     Assert-Closure ($Text.Split(@($decoder), [StringSplitOptions]::None).Length -eq 2) 'Worker instance decoder binding is not unique.'
     return $Text.Replace($decoder, 'const instance = parseCodedbInstanceManifest(instanceText, "CodeDB instance manifest");')
+}
+
+function ConvertTo-NativeLaunchProjection {
+    param([string]$Text)
+    # Project only the creation boundary. Generation demand/identity bindings are
+    # intentionally different from flat bootstrap and remain byte-for-byte intact.
+    $anchor = 'import { fileURLToPath } from "node:url";'
+    $binding = 'import { launchCodedbDaemon } from "../shared/codedb-daemon-launch.mjs";'
+    Assert-Closure ($Text.Split(@($anchor), [StringSplitOptions]::None).Length -eq 2) 'Coordinator URL binding is not unique.'
+    if ($Text.Contains($binding)) {
+        Assert-Closure ($Text.Contains('await launchCodedbDaemon(process.execPath, daemonArgs, context.root, { ...process.env, RICE_CODEDB_UNITY_ROOT: context.root });')) 'Existing coordinator launch projection drifted.'
+        return $Text
+    }
+    $Text = $Text.Replace($anchor, $anchor + "`n" + $binding)
+    $oldLaunch = '(?ms)^  const daemon = spawn\(process\.execPath, daemonArgs, \{\r?\n    cwd: context\.root,\r?\n    env: \{ \.\.\.process\.env, RICE_CODEDB_UNITY_ROOT: context\.root \},\r?\n    detached: true,\r?\n    stdio: "ignore",\r?\n    windowsHide: true\r?\n  \}\);\r?\n  daemon\.unref\(\);'
+    Assert-Closure ([regex]::Matches($Text, $oldLaunch).Count -eq 1) 'Coordinator creation boundary is not unique.'
+    return [regex]::Replace($Text, $oldLaunch, '  await launchCodedbDaemon(process.execPath, daemonArgs, context.root, { ...process.env, RICE_CODEDB_UNITY_ROOT: context.root });')
 }
 
 function New-CanonicalSuccessorGeneration {
@@ -153,6 +172,8 @@ function New-CanonicalSuccessorGeneration {
     # Produce both changed consumer bodies before any successor write.
     $common = ConvertTo-InstanceConsumerProjection -Text ([IO.File]::ReadAllText((Join-Path $priorRoot 'scripts\codedb-project-common.ps1'))) -Kind common
     $worker = ConvertTo-InstanceConsumerProjection -Text ([IO.File]::ReadAllText((Join-Path $priorRoot 'wrapper\codedb-project-instance-worker.mjs'))) -Kind worker
+    $coordinator = ConvertTo-NativeLaunchProjection -Text ([IO.File]::ReadAllText((Join-Path $priorRoot 'coordinator\codedb-watch-coordinator.mjs')))
+    & (Join-Path $Root 'Tools~/build-codedb-daemon-launch.ps1') -PackageRoot $Root -VerifyOnly | Out-Host
     $oldGenerationId = [string]$Payload.generation_id
     # Read the existing marker compatibility constants from their production authority.
     $tokens = $null; $errors = $null
@@ -204,6 +225,13 @@ function New-CanonicalSuccessorGeneration {
     [IO.File]::WriteAllText((Join-Path $nextRoot 'scripts\codedb-project-common.ps1'), $common, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $nextRoot 'wrapper\codedb-project-instance-worker.mjs'), $worker, [Text.UTF8Encoding]::new($false))
     foreach ($helper in $helpers) { Copy-Item -LiteralPath (Join-Path $canonicalShared $helper) -Destination (Join-Path $nextRoot ('shared\' + $helper)) }
+    [IO.File]::WriteAllText((Join-Path $nextRoot 'coordinator/codedb-watch-coordinator.mjs'), $coordinator, [Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath (Join-Path $canonicalShared 'codedb-daemon-launch.mjs') -Destination (Join-Path $nextRoot 'shared/codedb-daemon-launch.mjs')
+    $nativeTarget = Join-Path $nextRoot 'native/win-x64'
+    [void][IO.Directory]::CreateDirectory($nativeTarget)
+    foreach ($name in @('codedb-daemon-launch.exe', 'build-manifest.json')) {
+        Copy-Item -LiteralPath (Join-Path $payloadRoot ('AIWork/codedb/native/win-x64/' + $name)) -Destination (Join-Path $nativeTarget $name)
+    }
     $Generation.generation_id = $Identity; $Generation.payload_version = $Identity; $Generation.payload_sequence = $sequence
     $generationFiles = [Collections.Generic.List[object]]::new()
     [string[]]$paths = @(Get-ChildItem -LiteralPath $nextRoot -Recurse -File | ForEach-Object { $_.FullName.Substring($nextRoot.Length + 1).Replace('\', '/') })
@@ -348,6 +376,9 @@ foreach ($entry in @($generation.files)) {
 
 $flatRoot = Join-Path $payloadRoot "AIWork\codedb"
 $generationRoot = Join-Path $payloadRoot ("Generations\$generationId")
+foreach ($runtimeRoot in @($flatRoot, $generationRoot)) {
+    & (Join-Path $root 'Tools~/build-codedb-daemon-launch.ps1') -PackageRoot $root -NativeRoot (Join-Path $runtimeRoot 'native/win-x64') -VerifyOnly
+}
 $actualSources = @(
     Get-ChildItem -LiteralPath $flatRoot -Recurse -File | ForEach-Object { $_.FullName.Substring($payloadRoot.Length + 1).Replace('\', '/') }
     Get-ChildItem -LiteralPath $generationRoot -Recurse -File | ForEach-Object { $_.FullName.Substring($payloadRoot.Length + 1).Replace('\', '/') }
