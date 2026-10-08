@@ -50,18 +50,64 @@ function Invoke-ManagerActionWriterScenarios {
     $sourceWriter = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Tools~\invoke-codedb-manager-action.ps1'))
     Assert-True -Condition (-not ([IO.File]::ReadAllText($sourceWriter) -match '(?i)\bAdd-Type\b')) -Message 'The one-shot writer still requires runtime source compilation.'
     $fixtureTag = [Guid]::NewGuid().ToString('N')
-    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('codedb-manager-action-' + $fixtureTag)
+    $checkoutRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+    $testParent = Join-Path $checkoutRoot '.artifacts\tests'
+    $fixtureRoot = Join-Path $testParent $fixtureTag.Substring(0, 12)
+    $ownerPath = Join-Path $fixtureRoot '.codedb-test-owner'
+    $reservationPath = $fixtureRoot + '.reserve'
+    function Assert-FixturePath([string]$Path) {
+        $full = [IO.Path]::GetFullPath($Path)
+        $prefix = $checkoutRoot.TrimEnd('\') + '\'
+        Assert-True -Condition $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -Message 'Fixture path escapes the checkout.'
+        $node = [IO.Path]::GetPathRoot($full)
+        foreach ($part in $full.Substring($node.Length).Split('\')) {
+            $node = Join-Path $node $part
+            if (-not (Test-Path -LiteralPath $node)) { break }
+            Assert-True -Condition (((Get-Item -LiteralPath $node -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) -Message 'Fixture path traverses a reparse point.'
+        }
+    }
+    Assert-FixturePath $fixtureRoot
+    Assert-FixturePath $reservationPath
+    [void][IO.Directory]::CreateDirectory($testParent)
+    $reservation = [IO.File]::Open($reservationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $bytes = [Text.Encoding]::UTF8.GetBytes($fixtureTag); $reservation.Write($bytes, 0, $bytes.Length) }
+    finally { $reservation.Dispose() }
+    if (Test-Path -LiteralPath $fixtureRoot) { [IO.File]::Delete($reservationPath); throw 'Fixture allocation collision; no existing run was adopted.' }
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    [IO.File]::WriteAllText($ownerPath, $fixtureTag)
     $projectRoot = Join-Path $fixtureRoot 'project'
     $packageRoot = Join-Path $fixtureRoot 'package'
     $writerPath = Join-Path $packageRoot 'Tools~\invoke-codedb-manager-action.ps1'
-    $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', [EnvironmentVariableTarget]::Process)
-    if ([string]::IsNullOrWhiteSpace($localAppData)) {
-        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    }
-    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($localAppData)) -Message 'Fixture LocalApplicationData is unavailable.'
+    $localAppData = Join-Path $fixtureRoot 'local'
+    $privateTemp = Join-Path $fixtureRoot 'temp'
+    [void][IO.Directory]::CreateDirectory($privateTemp)
     $receiptRoot = Join-Path $localAppData 'Rice\CodeDB\manager-actions'
     $actionRoots = New-Object 'System.Collections.Generic.List[string]'
     $ownedHolderProofs = New-Object 'System.Collections.Generic.List[string]'
+    $primaryFailure = $null
+    $maximumMeasuredPath = 0
+    function Invoke-FixtureWriter([string]$AdmissionFile) {
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = $powerShellExe
+        $info.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $writerPath + '" -ReceiptPath "' + $AdmissionFile + '"'
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.WorkingDirectory = $fixtureRoot
+        $info.EnvironmentVariables['LOCALAPPDATA'] = $scenarioLocalAppData
+        $info.EnvironmentVariables['TEMP'] = $privateTemp
+        $info.EnvironmentVariables['TMP'] = $privateTemp
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $info
+        try {
+            Assert-True -Condition $process.Start() -Message 'Isolated fixture writer did not start.'
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(45000)) { $process.Kill(); $null = $process.WaitForExit(1000); throw 'Owned fixture writer exceeded its deadline.' }
+            return [pscustomobject]@{ Exit = $process.ExitCode; Output = $stdoutTask.Result + $stderrTask.Result }
+        } finally { $process.Dispose() }
+    }
     try {
         [void](New-Item -ItemType Directory -Path $projectRoot, (Split-Path $writerPath -Parent) -Force)
         Copy-Item -LiteralPath $sourceWriter -Destination $writerPath
@@ -70,14 +116,16 @@ function Invoke-ManagerActionWriterScenarios {
         $writerHash = (Get-FileHash -LiteralPath $writerPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $powerShellExe = Join-Path $PSHOME 'powershell.exe'
 
-        foreach ($scenario in @('success', 'failure', 'timeout', 'overflow', 'inherited-output-handle', 'start-failure', 'identity-rejected')) {
+        foreach ($scenario in @('success', 'failure', 'timeout', 'overflow', 'inherited-output-handle', 'start-failure', 'identity-rejected', 'replay', 'full-identity-collision', 'wrong-layout', 'deepest-path', 'legacy-argument')) {
+            $scenarioLocalAppData = if ($scenario -eq 'deepest-path') { Join-Path $fixtureRoot ('local-' + ('d' * 30)) } else { $localAppData }
+            $receiptRoot = Join-Path $scenarioLocalAppData 'Rice\CodeDB\manager-actions'
             $actionId = [Guid]::NewGuid().ToString('N')
             $scenarioProjectRoot = if ($scenario -eq 'start-failure') {
                 Join-Path $fixtureRoot 'missing-project'
             } else { $projectRoot }
             $projectKey = Get-FixtureSha256 ([IO.Path]::GetFullPath($scenarioProjectRoot).Replace('\', '/').ToLowerInvariant())
             $projectPhysicalKey = $projectKey.Substring(0, 24)
-            $actionRoot = Join-Path (Join-Path (Join-Path $receiptRoot $projectPhysicalKey) $packagePhysicalKey) $actionId
+            $actionRoot = Join-Path $receiptRoot $actionId
             $actionRoots.Add($actionRoot)
             $commandPath = if ($scenario -eq 'start-failure') {
                 Join-Path $packageRoot 'Tools~\start-failure.ps1'
@@ -105,10 +153,11 @@ function Invoke-ManagerActionWriterScenarios {
             $timeoutMs = if ($scenario -eq 'timeout') { 100 } else { 20000 }
             $commandIdentity = Get-FixtureSha256 ("$commandHash`n$argumentHash`n$timeoutMs")
             $stageId = Get-FixtureSha256 ("$actionId`n$scenario`n$commandIdentity")
-            $stageRoot = Join-Path $actionRoot $stageId
+            $stageRoot = $actionRoot
             [void](New-Item -ItemType Directory -Path $stageRoot -Force)
             $admitted = [ordered]@{
                 schema_version = 1
+                storage_layout = 'compact-v1'
                 managed_by = 'com.rice.ai-codedb'
                 state = 'admitted'
                 action_id = $actionId
@@ -135,19 +184,35 @@ function Invoke-ManagerActionWriterScenarios {
             if ($scenario -eq 'identity-rejected') {
                 $admitted.project_identity = 'sha256:' + ('0' * 64)
             }
-            $admittedPath = Join-Path $stageRoot 'admitted.json'
+            $manifest = [ordered]@{ schema_version = 1; storage_layout = 'compact-v1'; managed_by = 'com.rice.ai-codedb'; action_id = $actionId; project_key = $projectKey; package_key = $packageKey; project_root = $admitted.project_root; package_root = $admitted.package_root }
+            if ($scenario -eq 'full-identity-collision') { $manifest.project_key = '0' * 64 }
+            if ($scenario -eq 'wrong-layout') { $admitted.storage_layout = 'unknown' }
+            [IO.File]::WriteAllText((Join-Path $actionRoot 'action.json'), ($manifest | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+            $admittedPath = Join-Path $stageRoot ($stageId.Substring(0, 16) + '.admitted.json')
             [IO.File]::WriteAllText($admittedPath,
                 ($admitted | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
-            $ErrorActionPreference = 'Continue'
-            $writerOutput = & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $writerPath -ReceiptPath $stageRoot 2>&1
-            $writerExit = $LASTEXITCODE
-            $ErrorActionPreference = 'Stop'
-            $claimPath = Join-Path $stageRoot 'claim.json'
-            $terminalPath = Join-Path $stageRoot 'terminal.json'
-            $startFailurePath = Join-Path $stageRoot 'start-failure.json'
-            if ($scenario -eq 'identity-rejected') {
+            $claimPath = Join-Path $stageRoot ($stageId.Substring(0, 16) + '.claim.json')
+            $terminalPath = Join-Path $stageRoot ($stageId.Substring(0, 16) + '.terminal.json')
+            $startFailurePath = Join-Path $stageRoot ($stageId.Substring(0, 16) + '.start-failure.json')
+            foreach ($probePath in @(($startFailurePath + '.' + ('0' * 32) + '.tmp'), (Join-Path $actionRoot ('r.' + ('0' * 32) + '.tmp')))) {
+                $maximumMeasuredPath = [Math]::Max($maximumMeasuredPath, $probePath.Length)
+                $probe = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $probe.WriteByte(71) } finally { $probe.Dispose() }
+                Assert-Equal -Actual ([IO.File]::ReadAllText($probePath)) -Expected 'G' -Label 'Deep publication path read'
+                [IO.File]::Delete($probePath)
+            }
+            if ($scenario -eq 'replay') {
+                [IO.File]::WriteAllText($claimPath, 'existing-claim')
+                $previousClaim = (Get-FileHash -LiteralPath $claimPath).Hash
+            }
+            $invocationPath = if ($scenario -eq 'legacy-argument') { $stageRoot } else { $admittedPath }
+            $writerResult = Invoke-FixtureWriter $invocationPath
+            $writerOutput = $writerResult.Output
+            $writerExit = $writerResult.Exit
+            if ($scenario -in @('identity-rejected', 'full-identity-collision', 'wrong-layout', 'legacy-argument', 'replay')) {
                 Assert-True -Condition ($writerExit -ne 0) -Message 'Mismatched identity was accepted.'
-                Assert-True -Condition (-not (Test-Path -LiteralPath $claimPath)) -Message 'Rejected identity acquired a claim.'
+                if ($scenario -eq 'replay') { Assert-Equal -Actual (Get-FileHash -LiteralPath $claimPath).Hash -Expected $previousClaim -Label 'Existing claim preserved' }
+                else { Assert-True -Condition (-not (Test-Path -LiteralPath $claimPath)) -Message 'Rejected identity acquired a claim.' }
                 Assert-True -Condition (-not (Test-Path -LiteralPath $terminalPath)) -Message 'Rejected identity acquired a terminal receipt.'
                 Assert-True -Condition (-not (Test-Path -LiteralPath $startFailurePath)) -Message 'Rejected identity acquired a start-failure receipt.'
                 continue
@@ -179,7 +244,8 @@ function Invoke-ManagerActionWriterScenarios {
             Assert-Equal -Actual $terminal.action_id -Expected $actionId -Label "$scenario action id"
             Assert-Equal -Actual $terminal.stage_id -Expected $stageId -Label "$scenario stage id"
             Assert-True -Condition ($terminal.writer_pid -gt 0 -and $terminal.child_pid -gt 0) -Message "$scenario process identity missing."
-            if ($scenario -eq 'success') {
+            Assert-Equal -Actual $terminal.storage_layout -Expected 'compact-v1' -Label "$scenario storage layout"
+            if ($scenario -in @('success', 'deepest-path')) {
                 Assert-Equal -Actual $terminal.exit_code -Expected 0 -Label 'Success exit'
                 Assert-True -Condition ($terminal.stdout -match 'fixture-ok') -Message 'Success output missing.'
             } elseif ($scenario -eq 'failure') {
@@ -197,9 +263,11 @@ function Invoke-ManagerActionWriterScenarios {
                 Assert-True -Condition (-not $terminal.timed_out) -Message 'Overflow was misclassified as timeout.'
             }
         }
-        Write-Host '[OK] Focused Manager action writer receipt scenarios passed.'
+        Write-Host "[OK] Focused Manager action writer scenarios=12; deepest publication path=$maximumMeasuredPath characters; isolated child environment."
     }
+    catch { $primaryFailure = $_ }
     finally {
+      try {
         foreach ($proofPath in $ownedHolderProofs) {
             if (Test-Path -LiteralPath $proofPath -PathType Leaf) {
                 $proof = [IO.File]::ReadAllText($proofPath).Split('|')
@@ -216,20 +284,36 @@ function Invoke-ManagerActionWriterScenarios {
                 }
             }
         }
-        foreach ($actionRoot in $actionRoots) {
-            $resolved = [IO.Path]::GetFullPath($actionRoot)
-            $expected = [IO.Path]::GetFullPath($receiptRoot).TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
-            if ($resolved.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase) -and
-                (Split-Path $resolved -Leaf) -match '^[0-9a-f]{32}$' -and
-                (Test-Path -LiteralPath $resolved)) {
-                Remove-Item -LiteralPath $resolved -Recurse -Force
+        Assert-Equal -Actual ([IO.File]::ReadAllText($ownerPath)) -Expected $fixtureTag -Label 'Fixture cleanup owner'
+        $resolved = [IO.Path]::GetFullPath($fixtureRoot)
+        Assert-FixturePath $resolved
+        $expected = [IO.Path]::GetFullPath($testParent).TrimEnd('\') + '\'
+        Assert-True -Condition ($resolved.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $resolved -Leaf) -ceq $fixtureTag.Substring(0, 12)) -Message 'Fixture cleanup containment failed.'
+        $pending = New-Object 'System.Collections.Generic.Queue[string]'
+        $pending.Enqueue($resolved)
+        $files = New-Object 'System.Collections.Generic.List[string]'
+        $directories = New-Object 'System.Collections.Generic.List[string]'
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Dequeue()
+            Assert-True -Condition (((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) -Message 'Fixture cleanup reparse escape.'
+            foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+                Assert-True -Condition (($files.Count + $directories.Count) -lt 256 -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) -Message 'Fixture cleanup bound or reparse failure.'
+                if ($item.PSIsContainer) { $directories.Add($item.FullName); $pending.Enqueue($item.FullName) }
+                else { $files.Add($item.FullName) }
             }
         }
-        if ((Test-Path -LiteralPath $fixtureRoot) -and
-            (Split-Path $fixtureRoot -Leaf) -eq ('codedb-manager-action-' + $fixtureTag)) {
-            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
-        }
+        foreach ($file in $files) { if ($file -ne $ownerPath) { [IO.File]::Delete($file) } }
+        for ($i = $directories.Count - 1; $i -ge 0; $i--) { [IO.Directory]::Delete($directories[$i], $false) }
+        [IO.File]::Delete($ownerPath)
+        [IO.Directory]::Delete($resolved, $false)
+        Assert-Equal -Actual ([IO.File]::ReadAllText($reservationPath)) -Expected $fixtureTag -Label 'Fixture reservation owner'
+        [IO.File]::Delete($reservationPath)
+      } catch {
+        if ($null -ne $primaryFailure) { throw "Primary fixture failure: $primaryFailure; separate cleanup failure: $_; residual=$fixtureRoot" }
+        throw
+      }
     }
+    if ($null -ne $primaryFailure) { throw $primaryFailure }
 }
 
 if ($ManagerActionWriterOnly) {

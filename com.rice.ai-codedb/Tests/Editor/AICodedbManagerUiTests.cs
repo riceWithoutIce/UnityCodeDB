@@ -27,7 +27,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 string title = "Install CodeDB")
             {
                 Context = context;
-                _root = workspace.GetPath("receipts-" + Guid.NewGuid().ToString("N"));
+                _root = workspace.Root;
                 workspace.ValidateCleanupTarget(context.ProjectRoot);
                 workspace.ValidateCleanupTarget(context.PackageRoot);
                 var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(_root);
@@ -52,10 +52,11 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var scriptHash = new string('a', 64);
                 var identity = Hash(scriptHash + "\n" + argumentHash + "\n120000");
                 var stageId = Hash(ActionId + "\n" + (stageName ?? Guid.NewGuid().ToString("N")) + "\n" + identity);
-                var stageRoot = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(Context, ActionId), stageId);
-                Directory.CreateDirectory(stageRoot);
+                var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(Context, ActionId);
+                var stagePrefix = Path.Combine(actionRoot, stageId.Substring(0, 16));
                 foreach (var record in records)
                 {
+                    record["storage_layout"] = AICodedbPaths.CompactReceiptLayout;
                     record["action_id"] = ActionId;
                     record["stage_id"] = stageId;
                     record["project_key"] = AICodedbPaths.GetManagerActionProjectKey(Context);
@@ -86,9 +87,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 records[2]["output_drain_incomplete"] = false;
                 var names = new[] { "admitted.json", "claim.json", "terminal.json" };
                 for (var i = 0; i < names.Length; i++)
-                    File.WriteAllText(Path.Combine(stageRoot, names[i]),
+                    File.WriteAllText(AICodedbPaths.GetManagerStageReceiptPath(actionRoot, stageId,
+                            names[i].Substring(0, names[i].Length - 5)),
                         AICodedbControlContractMigrationClassifierTests.SerializeObject(records[i]), new UTF8Encoding(false));
-                return stageRoot;
+                return stagePrefix;
             }
 
             internal Dictionary<string, string> AddRedeploy(bool manager, string failedStage = null,
@@ -119,12 +121,34 @@ namespace Rice.AI.Codedb.Editor.Tests
                 return stages;
             }
 
-            internal static void ChangeField(string stage, string filename, string field, object value)
+            internal static void ChangeField(string stagePrefix, string filename, string field, object value)
             {
-                var path = Path.Combine(stage, filename);
+                var path = StagePath(stagePrefix, filename);
+                Assert.That(File.Exists(path), Is.True, "Required fixture record is missing: " + path);
                 var record = AICodedbStrictJson.ReadObject(path, 1048576, "fixture stage");
                 record[field] = value;
                 File.WriteAllText(path, AICodedbControlContractMigrationClassifierTests.SerializeObject(record), new UTF8Encoding(false));
+            }
+
+            internal static string StagePath(string stagePrefix, string filename) => stagePrefix + "." + filename;
+
+            internal static void DeleteStage(AICodedbTestWorkspace workspace, string stagePrefix)
+            {
+                var names = new[] { "admitted.json", "claim.json", "terminal.json", "start-failure.json" };
+                var paths = new string[names.Length];
+                for (var i = 0; i < names.Length; i++)
+                {
+                    paths[i] = StagePath(stagePrefix, names[i]);
+                    workspace.ValidateCleanupTarget(paths[i]);
+                    if (i < 3)
+                        Assert.That(File.Exists(paths[i]), Is.True, "Required predecessor record is missing: " + paths[i]);
+                }
+                foreach (var path in paths)
+                {
+                    workspace.ValidateCleanupTarget(path);
+                    if (File.Exists(path)) File.Delete(path);
+                    Assert.That(File.Exists(path), Is.False, "Predecessor record remains: " + path);
+                }
             }
 
             internal void AddFollowUps(bool upgradeTerminal = true, string upgradeOutput = null)
@@ -218,7 +242,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 using var sessionFixture = new ManagerActionSessionFixture(workspace);
                 using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, false, "Host Payload Redeploy");
                 var stages = fixture.AddRedeploy(manager, failedStage);
-                var failurePath = Path.Combine(stages[failedStage], "terminal.json");
+                var failurePath = ManagerReceiptFixture.StagePath(stages[failedStage], "terminal.json");
                 var failureBytes = File.ReadAllBytes(failurePath);
                 var recovery = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
                 Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
@@ -273,14 +297,25 @@ namespace Rice.AI.Codedb.Editor.Tests
                     ManagerReceiptFixture.ChangeField(stages["mutation"], "admitted.json", "terminal_for_action", true);
                     ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "terminal_for_action", true);
                 }
-                if (defect == "malformed") File.WriteAllText(Path.Combine(stages["worker"], "terminal.json"), "{}");
+                if (defect == "malformed")
+                {
+                    var path = ManagerReceiptFixture.StagePath(stages["worker"], "terminal.json");
+                    Assert.That(File.Exists(path), Is.True, "Required fixture terminal is missing: " + path);
+                    File.WriteAllText(path, "{}");
+                }
                 if (defect == "unbound-arguments")
                 {
-                    var path = Path.Combine(stages["worker"], "admitted.json");
+                    var path = ManagerReceiptFixture.StagePath(stages["worker"], "admitted.json");
+                    Assert.That(File.Exists(path), Is.True, "Required fixture admission is missing: " + path);
                     File.WriteAllText(path, File.ReadAllText(path).Replace("-ProjectRoot", "-Unexpected"));
                 }
-                if (defect == "pending-stage") File.Delete(Path.Combine(stages["config"], "terminal.json"));
-                if (defect == "missing-predecessor") workspace.DeleteOwnedTree(stages["worker"]);
+                if (defect == "pending-stage")
+                {
+                    var path = ManagerReceiptFixture.StagePath(stages["config"], "terminal.json");
+                    Assert.That(File.Exists(path), Is.True, "Required fixture terminal is missing: " + path);
+                    File.Delete(path);
+                }
+                if (defect == "missing-predecessor") ManagerReceiptFixture.DeleteStage(workspace, stages["worker"]);
                 if (defect == "incomplete-output")
                     ManagerReceiptFixture.ChangeField(stages["mutation"], "terminal.json", "output_drain_incomplete", true);
                 if (defect == "failure-with-successor")
@@ -369,17 +404,19 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 using var sessionFixture = new ManagerActionSessionFixture(workspace);
                 using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, true);
-                var install = fixture.Add("Install", fixture.InstallOutput);
+                var installPrefix = fixture.Add("Install", fixture.InstallOutput);
                 fixture.AddFollowUps(defect != "nonterminal", defect == "mutating-upgrade"
                     ? ManagerReceiptFixture.CommandOutput("UPGRADE", "PREFLIGHT", "COMPLETE", "host_runtime") : null);
-                var terminalPath = Path.Combine(install, "terminal.json");
+                var terminalPath = ManagerReceiptFixture.StagePath(installPrefix, "terminal.json");
+                Assert.That(File.Exists(terminalPath), Is.True, "Required fixture terminal is missing: " + terminalPath);
                 if (defect == "pending") File.Delete(terminalPath);
                 if (defect == "malformed") File.WriteAllText(terminalPath, "{}");
                 if (defect == "identity") File.WriteAllText(terminalPath,
                     File.ReadAllText(terminalPath).Replace(fixture.ActionId, Guid.NewGuid().ToString("N")));
                 if (defect == "arguments")
                 {
-                    var path = Path.Combine(install, "admitted.json");
+                    var path = ManagerReceiptFixture.StagePath(installPrefix, "admitted.json");
+                    Assert.That(File.Exists(path), Is.True, "Required fixture admission is missing: " + path);
                     File.WriteAllText(path, File.ReadAllText(path).Replace("-ProjectRoot", "-Unexpected"));
                 }
                 if (defect == "extra-mutation" || defect == "duplicate-install")
@@ -390,11 +427,25 @@ namespace Rice.AI.Codedb.Editor.Tests
                     fixture.Context.ProjectRoot, fixture.Context.PackageRoot + "-new", "fixture");
                 var read = AICodedbManagerActionJournal.Read(current);
                 Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(read.ActionId, Is.EqualTo(fixture.ActionId));
+                Assert.That(read.Index, Is.Not.Null);
+                Assert.That(read.Index.ActionId, Is.EqualTo(fixture.ActionId));
+                Assert.That(read.Index.Context.ProjectRoot, Is.EqualTo(fixture.Context.ProjectRoot));
+                Assert.That(read.Index.Context.PackageRoot, Is.EqualTo(fixture.Context.PackageRoot));
+                Assert.That(read.Index.StorageLayout, Is.EqualTo(AICodedbPaths.CompactReceiptLayout));
+                Assert.That(read.HistoricalResult, Is.Null);
                 AICodedbManagerActionSession.RestoreDurable(current, read, 1d);
                 var session = AICodedbManagerActionSession.CurrentFor(current);
+                Assert.That(session.ActionId, Is.EqualTo(fixture.ActionId));
+                Assert.That(session.HasOriginalContext, Is.True);
+                Assert.That(session.IsEvidenceConflict, Is.True);
+                Assert.That(session.Context.PackageRoot, Is.EqualTo(fixture.Context.PackageRoot));
+                Assert.That(session.StorageLayout, Is.EqualTo(AICodedbPaths.CompactReceiptLayout));
                 Assert.That(AICodedbManagerWindow.BuildHistoricalActionWarning(session, read.HistoricalWarning),
                     Does.Contain(fixture.Context.PackageRoot).And.Not.Contain(current.PackageRoot));
                 Assert.That(AICodedbManagerActionSession.TryStart("Install CodeDB", current, 2d, out _), Is.False);
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(new AICodedbManagerActionIndex(
+                    Guid.NewGuid().ToString("N"), "Host Payload Verify", "Observation", "PackageMaterializer", current), out _), Is.False);
             });
         }
 
@@ -425,7 +476,12 @@ namespace Rice.AI.Codedb.Editor.Tests
                 using var fixture = new ManagerReceiptFixture(workspace, sessionFixture.Context, false);
                 var stage = fixture.Add("DryRun", "[UPGRADE_READY] Candidate generation is available.",
                     shape != "nonterminal", 0);
-                if (shape == "pending") File.Delete(Path.Combine(stage, "terminal.json"));
+                if (shape == "pending")
+                {
+                    var path = ManagerReceiptFixture.StagePath(stage, "terminal.json");
+                    Assert.That(File.Exists(path), Is.True, "Required fixture terminal is missing: " + path);
+                    File.Delete(path);
+                }
                 var read = AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId);
                 Assert.That(read.State, Is.EqualTo(expected));
                 if (expected == AICodedbManagerActionRecoveryState.Terminal)
@@ -528,7 +584,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     sessionGateHeld = true;
                     _savedSession = (AICodedbManagerActionSession)_currentField.GetValue(null);
                     Token = Guid.NewGuid().ToString("N");
-                    var root = workspace.GetPath("sessions/" + Token);
+                    var root = workspace.Root;
                     Context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
                         Path.Combine(root, "project"), Path.Combine(root, "package"), Token);
                     PendingKey = "Rice.AI.Codedb.Manager.PendingAction." + Context.ProjectRoot;
@@ -988,12 +1044,16 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void ManagerActionJournal_RestoresOriginalIdAfterFullExitAndPackageReplacement()
         {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+            using var sessionFixture = new ManagerActionSessionFixture(workspace);
+            using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
             var tag = Guid.NewGuid().ToString("N");
-            var project = Path.Combine(Path.GetTempPath(), "codedb-journal-project-" + tag);
+            var project = workspace.GetPath("project");
             var original = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                project, Path.Combine(Path.GetTempPath(), "codedb-original-package-" + tag), tag);
+                project, workspace.GetPath("package"), tag);
             var replacement = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                project, Path.Combine(Path.GetTempPath(), "codedb-replacement-package-" + tag), tag);
+                project, workspace.GetPath("replacement"), tag);
             var actionId = Guid.NewGuid().ToString("N");
             var index = new AICodedbManagerActionIndex(actionId, "Host Payload Sync",
                 "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission", original);
@@ -1006,6 +1066,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Pending));
                 Assert.That(read.Index.ActionId, Is.EqualTo(actionId));
                 Assert.That(read.Index.Context.PackageRoot, Is.EqualTo(original.PackageRoot));
+                Assert.That(read.Index.StorageLayout, Is.EqualTo(AICodedbPaths.CompactReceiptLayout));
                 AICodedbManagerActionSession.ClearCompleted();
                 AICodedbManagerActionSession.RestoreDurable(replacement, read, 1d);
                 var recovered = AICodedbManagerActionSession.CurrentFor(replacement);
@@ -1033,17 +1094,20 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var directory = Path.GetDirectoryName(indexPath);
                 if (Directory.Exists(directory)
                     && Path.GetFileName(directory).Length == 24)
-                    Directory.Delete(directory, true);
+                    workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(directory));
             }
+            });
         }
 
         [Test]
         public void ManagerActionJournal_CorruptOrConflictingIndexFailsClosed()
         {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+            using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
             var tag = Guid.NewGuid().ToString("N");
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-journal-conflict-" + tag),
-                Path.Combine(Path.GetTempPath(), "codedb-journal-package-" + tag), tag);
+                workspace.GetPath("project"), workspace.GetPath("package"), tag);
             var index = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"),
                 "Host Payload Verify", "Observation", "PackageMaterializer", context);
             var path = AICodedbPaths.GetManagerActionIndexPath(context, index.ActionId);
@@ -1070,8 +1134,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var directory = Path.GetDirectoryName(path);
                 if (Directory.Exists(directory)
                     && Path.GetFileName(directory).Length == 24)
-                    Directory.Delete(directory, true);
+                    workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(directory));
             }
+            });
         }
 
         [Test]
@@ -1092,16 +1157,18 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void ManagerActionRecovery_ClaimWithoutTerminalStaysUnknownAndStartFailureIsDistinct()
         {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+            using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
             var tag = Guid.NewGuid().ToString("N");
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-receipt-project-" + tag),
-                Path.Combine(Path.GetTempPath(), "codedb-receipt-package-" + tag), tag);
+                workspace.GetPath("project"), workspace.GetPath("package"), tag);
             var actionId = Guid.NewGuid().ToString("N");
             var stageId = new string('a', 64);
             var projectKey = AICodedbPaths.GetManagerActionProjectKey(context);
             var packageKey = AICodedbPaths.GetManagerActionPackageKey(context);
             var commandIdentity = new string('b', 64);
-            var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
+            var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId, null);
             var stageRoot = Path.Combine(actionRoot, stageId);
             var admittedPath = Path.Combine(stageRoot, "admitted.json");
             var claimPath = Path.Combine(stageRoot, "claim.json");
@@ -1125,14 +1192,14 @@ namespace Rice.AI.Codedb.Editor.Tests
                     + "\"package_key\":\"" + packageKey + "\",\"writer_pid\":4242,"
                     + "\"writer_start_utc_ticks\":\"" + writerTicks.ToString(CultureInfo.InvariantCulture) + "\"}";
                 File.WriteAllText(claimPath, claim);
-                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId).State,
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId, null).State,
                     Is.EqualTo(AICodedbManagerActionRecoveryState.Pending));
                 var legacy = AICodedbManagerActionJournal.Read(context);
                 Assert.That(legacy.State, Is.EqualTo(AICodedbManagerActionIndexState.Pending));
                 Assert.That(legacy.IsLegacyReceipt, Is.True);
                 Assert.That(legacy.ActionId, Is.EqualTo(actionId));
                 File.WriteAllText(claimPath, claim.Replace("\"writer_pid\":4242", "\"writer_pid\":0"));
-                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId).State,
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(context, actionId, null).State,
                     Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
                 Assert.That(AICodedbManagerActionJournal.Read(context).State,
                     Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
@@ -1145,7 +1212,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     + "\"command_identity_sha256\":\"" + commandIdentity + "\","
                     + "\"writer_pid\":4242,\"reason\":\"CHILD_START_FAILED\","
                     + "\"completed_at_utc\":\"" + DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture) + "\"}");
-                var recovery = AICodedbProcessRunner.RecoverManagerAction(context, actionId);
+                var recovery = AICodedbProcessRunner.RecoverManagerAction(context, actionId, null);
                 Assert.That(recovery.State, Is.EqualTo(AICodedbManagerActionRecoveryState.PreEffectRefusal));
                 Assert.That(recovery.Result.HasAuthoritativeTerminalEvidence, Is.False);
                 Assert.That(recovery.Result.ActionId, Is.EqualTo(actionId));
@@ -1158,21 +1225,24 @@ namespace Rice.AI.Codedb.Editor.Tests
                     && Path.GetFileName(actionRoot) == actionId
                     && actionRoot.StartsWith(AICodedbPaths.GetManagerActionsRoot() + "/",
                         StringComparison.OrdinalIgnoreCase))
-                    Directory.Delete(actionRoot, true);
+                    workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(actionRoot));
             }
+            });
         }
 
         [Test]
         public void ManagerActionJournal_HistoricalUnknownMarkerReleasesOnlyBoundPendingStage()
         {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+            using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
             const string actionId = "3049af7cfc9f4260928e3f89d18672c0";
             const string stageId = "b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56";
             const string writerSha = "d6fa8f5a828fcc823e54b44683903e0ec3173d23b1af64931324fa2093a039cf";
             var tag = Guid.NewGuid().ToString("N");
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
-                Path.Combine(Path.GetTempPath(), "codedb-historical-project-" + tag),
-                Path.Combine(Path.GetTempPath(), "codedb-historical-package-" + tag), tag);
-            var stageRoot = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId), stageId);
+                workspace.GetPath("project"), workspace.GetPath("package"), tag);
+            var stageRoot = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId, null), stageId);
             var admissionPath = Path.Combine(stageRoot, "admitted.json");
             var claimPath = Path.Combine(stageRoot, "claim.json");
             var markerPath = Path.Combine(AICodedbPaths.GetManagerActionIndexDirectory(context),
@@ -1259,7 +1329,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(AICodedbManagerActionJournal.Read(context).State,
                     Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
                 File.WriteAllText(markerPath, marker);
-                Directory.Delete(stageRoot, true);
+                workspace.DeleteOwnedTree(stageRoot);
                 Directory.Delete(Path.GetDirectoryName(stageRoot));
                 Assert.That(AICodedbManagerActionJournal.Read(context).State,
                     Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
@@ -1268,8 +1338,9 @@ namespace Rice.AI.Codedb.Editor.Tests
             {
                 var indexDirectory = Path.GetDirectoryName(markerPath);
                 if (Directory.Exists(indexDirectory) && Path.GetFileName(indexDirectory).Length == 24)
-                    Directory.Delete(indexDirectory, true);
+                    workspace.CaptureCleanup(() => workspace.DeleteOwnedTree(indexDirectory));
             }
+            });
         }
 
         [Test]
@@ -1278,6 +1349,92 @@ namespace Rice.AI.Codedb.Editor.Tests
             var records = CreateManagerActionReceiptEnvelope();
             Assert.That(AICodedbProcessRunner.HasValidManagerActionReceiptEnvelope(
                 records[0], records[1], records[2]), Is.True);
+        }
+
+        [TestCase("admitted.json", false)]
+        [TestCase("admitted.json", true)]
+        [TestCase("claim.json", false)]
+        [TestCase("claim.json", true)]
+        [TestCase("terminal.json", false)]
+        [TestCase("terminal.json", true)]
+        public void ManagerReceipt_CompactMissingOrWrongLayoutIsConflict(string filename, bool wrong)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                var stage = fixture.Add("Install", fixture.InstallOutput);
+                var path = ManagerReceiptFixture.StagePath(stage, filename);
+                var record = AICodedbStrictJson.ReadObject(path, 1048576, "layout fixture");
+                if (wrong) record["storage_layout"] = "unknown";
+                else record.Remove("storage_layout");
+                File.WriteAllText(path, AICodedbControlContractMigrationClassifierTests.SerializeObject(record));
+                Assert.That(AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ManagerReceipt_DuplicateOrPrefixCollisionCannotReplaceAdmission(bool prefixCollision)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                var stage = fixture.Add("Install", fixture.InstallOutput);
+                var path = ManagerReceiptFixture.StagePath(stage, "admitted.json");
+                var before = File.ReadAllBytes(path);
+                var record = AICodedbStrictJson.ReadObject(path, 1048576, "collision fixture");
+                var stageId = (string)record["stage_id"];
+                if (prefixCollision) record["stage_id"] = stageId.Substring(0, 16) + new string(stageId[16] == 'a' ? 'b' : 'a', 48);
+                var method = typeof(AICodedbProcessRunner).GetMethod("WriteNewUtf8FileAtomic",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                Assert.That(method, Is.Not.Null);
+                Assert.Throws<System.Reflection.TargetInvocationException>(() => method.Invoke(null,
+                    new object[] { path, AICodedbControlContractMigrationClassifierTests.SerializeObject(record) }));
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+                Assert.That(Directory.GetFiles(Path.GetDirectoryName(path), "*.tmp"), Is.Empty);
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(new AICodedbManagerActionIndex(
+                    fixture.ActionId, "Install CodeDB", "ConfirmedProjectMutation",
+                    AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"), fixture.Context), out _), Is.False);
+            });
+        }
+
+        [TestCase("manifest")]
+        [TestCase("stage")]
+        [TestCase("legacy-location")]
+        [TestCase("journal-layout")]
+        public void ManagerReceipt_CompactFullIdentityAndLocationsFailClosed(string defect)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                var stage = fixture.Add("Install", fixture.InstallOutput);
+                if (defect == "legacy-location")
+                    Directory.CreateDirectory(AICodedbPaths.GetManagerActionReceiptRoot(fixture.Context, fixture.ActionId, null));
+                else
+                {
+                    var path = defect == "manifest" ? Path.Combine(Path.GetDirectoryName(stage), "action.json")
+                        : defect == "journal-layout" ? AICodedbPaths.GetManagerActionIndexPath(fixture.Context, fixture.ActionId)
+                        : ManagerReceiptFixture.StagePath(stage, "terminal.json");
+                    var record = AICodedbStrictJson.ReadObject(path, 1048576, "identity fixture");
+                    if (defect == "manifest") record["project_key"] = new string('0', 64);
+                    else if (defect == "journal-layout") record.Remove("storage_layout");
+                    else
+                    {
+                        var id = (string)record["stage_id"];
+                        record["stage_id"] = id.Substring(0, 16) + new string(id[16] == 'a' ? 'b' : 'a', 48);
+                    }
+                    File.WriteAllText(path, AICodedbControlContractMigrationClassifierTests.SerializeObject(record));
+                }
+                if (defect == "journal-layout")
+                    Assert.That(AICodedbManagerActionJournal.Read(fixture.Context).State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                else
+                    Assert.That(AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId).State,
+                        Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+            });
         }
 
         [TestCase(0, "schema_version")]

@@ -79,3 +79,23 @@ Existing external/system-temp leftovers are not automatically migrated/deleted.
 Existing frozen artifacts and failure evidence remain unchanged. Implementing
 this design, cleanup of old leftovers and running Unity retain their task-specific
 authority; this design freeze alone authorizes none of those actions.
+
+## Compact receipt layout agreement - 2026-10-08
+
+The [Manager receipt storage layout](manager-receipt-storage-layout.md) freezes
+the subsequently agreed example: one owned run root, direct Action containers,
+Stage/evidence filenames, no receipts-GUID or project/Package directory nesting.
+The later approved refinement retains full Action ID directories and Stage hash
+prefix16 filenames solely for location, with full-identity collision validation.
+Existing journal remains the lookup authority; old records stay in place behind
+an explicit legacy reader. Workspaces use short exclusive names; exact allocation
+must be specified before dispatch. This is a shared production/test layout target,
+not a test-only bypass. That design freeze did not alter historical records.
+Full consumer-path budgeting must include publication suffixes and target-runtime
+deep-path probes; the existing shallow capability probe alone is insufficient.
+
+The compact layout implementation was source-accepted after FIX01 on2026-10-08:
+12hex exclusively reserved workspace names, full ownership tokens, actual production
+path derivation and deepest-path probes. Historical records remain unchanged.
+Human Unity compile and34methods/80cases remain pending; source/PS evidence does
+not prove Unity System.IO behavior.

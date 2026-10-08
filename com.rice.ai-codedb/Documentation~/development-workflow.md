@@ -1156,3 +1156,17 @@ runtime or migration slice.
 
 Changes to this workflow are themselves a process decision: discuss and freeze
 the change before applying it to an active implementation task.
+
+For changed physical storage layouts, include full consumer-path length and
+publication suffixes in the same contract/evidence map. A writable parent or
+short-path probe does not prove deepest consumer operations work. Test and
+production receipt layout must share an authority; see the frozen
+[Manager layout design](manager-receipt-storage-layout.md). This gate does not
+authorize migration or expand an existing test-only source allowlist.
+
+Manager receipt changes follow that contract's full-Action/prefix16-Stage rules.
+Full record identities remain authoritative; locator collisions cannot overwrite
+or merge evidence. Preserve existing journal lookup and old-format read-only
+evidence. Close C# admission, PowerShell writer, recovery, markers and test
+consumers together, without a competing mapping database, silent migration or
+relaxed production-root restrictions for tests.

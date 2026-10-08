@@ -650,6 +650,7 @@ namespace Rice.AI.Codedb.Editor
             }
 
             var writerDispatched = false;
+            string attemptedAdmissionPath = null;
             try
             {
                 var arguments = scriptArguments ?? new string[0];
@@ -663,14 +664,36 @@ namespace Rice.AI.Codedb.Editor
                     : AICodedbPaths.CurrentActionStage;
                 var stageId = ComputeSha256(actionId + "\n" + stageName + "\n" + commandIdentity);
                 var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
-                var stageRoot = AICodedbPaths.NormalizePath(Path.Combine(actionRoot, stageId));
-                EnsureReceiptDirectory(context, actionRoot, stageRoot);
-                var admittedPath = Path.Combine(stageRoot, "admitted.json");
+                AICodedbPaths.ValidateManagerReceiptPaths(context, actionId, stageId);
+                var owner = AICodedbManagerActionJournal.Read(context);
+                if (owner.State != AICodedbManagerActionIndexState.Pending || owner.Index == null
+                    || owner.Index.ActionId != actionId
+                    || owner.Index.StorageLayout != AICodedbPaths.CompactReceiptLayout
+                    || !string.Equals(owner.Index.Context.PackageRoot, context.PackageRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The compact action has no matching journal owner.");
+                ValidateActionManifest(context, actionId);
+                var admittedPath = AICodedbPaths.GetManagerStageReceiptPath(actionRoot, stageId, "admitted");
+                attemptedAdmissionPath = admittedPath;
                 if (File.Exists(admittedPath)
-                    || File.Exists(Path.Combine(stageRoot, "claim.json"))
-                    || File.Exists(Path.Combine(stageRoot, "terminal.json"))
-                    || File.Exists(Path.Combine(stageRoot, "start-failure.json")))
+                    || File.Exists(ReceiptSibling(admittedPath, "claim"))
+                    || File.Exists(ReceiptSibling(admittedPath, "terminal"))
+                    || File.Exists(ReceiptSibling(admittedPath, "start-failure")))
                 {
+                    if (File.Exists(admittedPath))
+                    {
+                        try
+                        {
+                            var prior = AICodedbStrictJson.ReadObject(admittedPath, ManagerActionReceiptMaximumBytes,
+                                "Existing Manager stage admission");
+                            if (AICodedbStrictJson.GetRequiredString(prior, "stage_id", "Existing Manager stage admission") != stageId)
+                                return UnconfirmedManagerActionResult(actionId,
+                                    "Stage prefix collision: the existing admission has a different complete stage identity.");
+                        }
+                        catch (Exception exception)
+                        {
+                            return UnconfirmedManagerActionResult(actionId, "Existing stage evidence is conflicting: " + exception.Message);
+                        }
+                    }
                     return UnconfirmedManagerActionResult(
                         actionId,
                         "The Manager action stage already has durable evidence; automatic replay was blocked.");
@@ -696,10 +719,10 @@ namespace Rice.AI.Codedb.Editor
                         context,
                         normalizedWriterPath,
                         null,
-                        new[] { "-ReceiptPath", stageRoot }),
+                        new[] { "-ReceiptPath", admittedPath }),
                     checked(timeoutMilliseconds + ManagerActionWriterGraceMilliseconds));
-                var terminalPath = Path.Combine(stageRoot, "terminal.json");
-                var startFailurePath = Path.Combine(stageRoot, "start-failure.json");
+                var terminalPath = ReceiptSibling(admittedPath, "terminal");
+                var startFailurePath = ReceiptSibling(admittedPath, "start-failure");
                 if (File.Exists(startFailurePath))
                 {
                     if (File.Exists(terminalPath))
@@ -726,7 +749,7 @@ namespace Rice.AI.Codedb.Editor
             }
             catch (Exception exception)
             {
-                return writerDispatched
+                return writerDispatched || (attemptedAdmissionPath != null && File.Exists(attemptedAdmissionPath))
                     ? UnconfirmedManagerActionResult(actionId, exception.Message)
                     : PreEffectManagerActionResult(actionId, exception.Message);
             }
@@ -734,22 +757,55 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbManagerActionRecoveryOutcome RecoverManagerAction(
             AICodedbEditorExecutionContext context,
-            string actionId)
+            string actionId, string storageLayout = AICodedbPaths.CompactReceiptLayout)
         {
             if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
                 return AICodedbManagerActionRecoveryOutcome.Conflict("The persisted Manager action id is invalid.");
             try
             {
-                var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId);
+                var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId, storageLayout);
+                var otherRoot = AICodedbPaths.GetManagerActionReceiptRoot(context, actionId,
+                    storageLayout == null ? AICodedbPaths.CompactReceiptLayout : null);
+                if (Directory.Exists(otherRoot))
+                    return AICodedbManagerActionRecoveryOutcome.Conflict("Conflicting old/new action locations exist.");
                 if (!Directory.Exists(actionRoot))
                     return AICodedbManagerActionRecoveryOutcome.NotFound(
                         "No Package-owned direct-command receipt exists for this action.");
                 AssertReceiptPath(context, actionRoot);
-                if (Directory.GetFiles(actionRoot).Length != 0)
+                var compact = storageLayout == AICodedbPaths.CompactReceiptLayout;
+                if (compact) ValidateActionManifest(context, actionId);
+                if (!compact && Directory.GetFiles(actionRoot).Length != 0)
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "Unexpected files exist at the Manager action receipt root.");
-                var stageDirectories = Directory.GetDirectories(actionRoot);
-                if (stageDirectories.Length > 32)
+                var stageAdmissions = new List<string>();
+                if (compact)
+                {
+                    if (Directory.GetDirectories(actionRoot).Length != 0)
+                        throw new InvalidOperationException("Unexpected compact action subdirectory.");
+                    var files = Directory.GetFiles(actionRoot);
+                    if (files.Length > 129)
+                        throw new InvalidOperationException("Compact action evidence exceeds its bounded record count.");
+                    foreach (var file in files)
+                    {
+                        AssertReceiptPath(context, file);
+                        var name = Path.GetFileName(file);
+                        if (name == "action.json") continue;
+                        if (name.Length < 22 || name[16] != '.' || !IsLowerHex(name.Substring(0, 16))
+                            || (name.Substring(17) != "admitted.json"
+                                && name.Substring(17) != "claim.json"
+                                && name.Substring(17) != "terminal.json"
+                                && name.Substring(17) != "start-failure.json"))
+                            throw new InvalidOperationException("Unexpected compact action evidence file.");
+                        var admissionPath = ReceiptSibling(file, "admitted");
+                        if (!File.Exists(admissionPath))
+                            throw new InvalidOperationException("Compact evidence has no admission record.");
+                        if (!stageAdmissions.Contains(admissionPath)) stageAdmissions.Add(admissionPath);
+                    }
+                }
+                else
+                    foreach (var directory in Directory.GetDirectories(actionRoot))
+                        stageAdmissions.Add(Path.Combine(directory, "admitted.json"));
+                if (stageAdmissions.Count > 32)
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "The Manager action receipt contains too many stage entries.");
 
@@ -757,13 +813,14 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbCommandResult refusalResult = null;
                 var evidenceObserved = false;
                 var pendingObserved = false;
-                foreach (var stageDirectory in stageDirectories)
+                foreach (var admittedPath in stageAdmissions)
                 {
+                    var stageDirectory = Path.GetDirectoryName(admittedPath);
                     AssertReceiptPath(context, stageDirectory);
                     if (Directory.GetDirectories(stageDirectory).Length != 0)
                         return AICodedbManagerActionRecoveryOutcome.Conflict(
                             "A Manager action stage contains an unexpected directory.");
-                    foreach (var file in Directory.GetFiles(stageDirectory))
+                    foreach (var file in compact ? new string[0] : Directory.GetFiles(stageDirectory))
                     {
                         AssertReceiptPath(context, file);
                         var name = Path.GetFileName(file);
@@ -773,12 +830,11 @@ namespace Rice.AI.Codedb.Editor
                                 "An unexpected Manager action stage file exists.");
                     }
                     evidenceObserved = true;
-                    var admittedPath = Path.Combine(stageDirectory, "admitted.json");
                     if (!File.Exists(admittedPath))
                         return AICodedbManagerActionRecoveryOutcome.Conflict(
                             "A Manager action stage has no admission record.");
-                    var terminalPath = Path.Combine(stageDirectory, "terminal.json");
-                    var startFailurePath = Path.Combine(stageDirectory, "start-failure.json");
+                    var terminalPath = ReceiptSibling(admittedPath, "terminal");
+                    var startFailurePath = ReceiptSibling(admittedPath, "start-failure");
                     if (File.Exists(startFailurePath))
                     {
                         if (File.Exists(terminalPath) || refusalResult != null || completedStages.Count != 0)
@@ -792,7 +848,7 @@ namespace Rice.AI.Codedb.Editor
                     }
                     if (!File.Exists(terminalPath))
                     {
-                        var pending = ValidatePendingStage(context, actionId, stageDirectory);
+                        var pending = ValidatePendingStage(context, actionId, admittedPath);
                         if (pending.State == AICodedbManagerActionRecoveryState.Conflict)
                             return pending;
                         pendingObserved = true;
@@ -1082,20 +1138,19 @@ namespace Rice.AI.Codedb.Editor
             out Dictionary<string, object> admitted)
         {
             AssertReceiptPath(context, terminalPath);
-            var stageRoot = Path.GetDirectoryName(terminalPath);
-            var stageId = Path.GetFileName(stageRoot);
             admitted = AICodedbStrictJson.ReadObject(
-                Path.Combine(stageRoot, "admitted.json"),
+                ReceiptSibling(terminalPath, "admitted"),
                 ManagerActionReceiptMaximumBytes,
                 "CodeDB Manager action admission");
             var claim = AICodedbStrictJson.ReadObject(
-                Path.Combine(stageRoot, "claim.json"),
+                ReceiptSibling(terminalPath, "claim"),
                 ManagerActionReceiptMaximumBytes,
                 "CodeDB Manager action writer claim");
             var receipt = AICodedbStrictJson.ReadObject(
                 terminalPath,
                 ManagerActionReceiptMaximumBytes,
                 "CodeDB Manager action terminal receipt");
+            var stageId = ValidateReceiptLocation(context, actionId, terminalPath, "terminal", admitted, claim, receipt);
             if (!HasValidManagerActionReceiptEnvelope(admitted, claim, receipt)
                 || stageId.Length != 64 || !IsLowerHex(stageId)
                 || !string.Equals(
@@ -1201,15 +1256,15 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static AICodedbManagerActionRecoveryOutcome ValidatePendingStage(
-            AICodedbEditorExecutionContext context, string actionId, string stageRoot)
+            AICodedbEditorExecutionContext context, string actionId, string admittedPath)
         {
             try
             {
                 const string admissionLabel = "CodeDB Manager action admission";
                 const string claimLabel = "CodeDB Manager action writer claim";
-                var stageId = Path.GetFileName(stageRoot);
-                var admitted = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "admitted.json"),
+                var admitted = AICodedbStrictJson.ReadObject(admittedPath,
                     ManagerActionReceiptMaximumBytes, admissionLabel);
+                var stageId = ValidateReceiptLocation(context, actionId, admittedPath, "admitted", admitted);
                 if (stageId.Length != 64 || !IsLowerHex(stageId)
                     || AICodedbStrictJson.GetRequiredInt32(admitted, "schema_version", admissionLabel) != 1
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(admitted, "managed_by", admissionLabel),
@@ -1234,11 +1289,12 @@ namespace Rice.AI.Codedb.Editor
                         context.PackageRoot, StringComparison.OrdinalIgnoreCase))
                     return AICodedbManagerActionRecoveryOutcome.Conflict(
                         "A pending Manager action stage has conflicting admission identity.");
-                var claimPath = Path.Combine(stageRoot, "claim.json");
+                var claimPath = ReceiptSibling(admittedPath, "claim");
                 if (File.Exists(claimPath))
                 {
                     var claim = AICodedbStrictJson.ReadObject(claimPath,
                         ManagerActionReceiptMaximumBytes, claimLabel);
+                    ValidateReceiptLocation(context, actionId, claimPath, "claim", admitted, claim);
                     if (AICodedbStrictJson.GetRequiredInt32(claim, "schema_version", claimLabel) != 1
                         || !string.Equals(AICodedbStrictJson.GetRequiredString(claim, "managed_by", claimLabel),
                             "com.rice.ai-codedb", StringComparison.Ordinal)
@@ -1272,17 +1328,16 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 AssertReceiptPath(context, path);
-                var stageRoot = Path.GetDirectoryName(path);
-                var stageId = Path.GetFileName(stageRoot);
                 const string admissionLabel = "CodeDB Manager action admission";
                 const string claimLabel = "CodeDB Manager action writer claim";
                 const string failureLabel = "CodeDB Manager action start failure";
-                var admitted = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "admitted.json"),
+                var admitted = AICodedbStrictJson.ReadObject(ReceiptSibling(path, "admitted"),
                     ManagerActionReceiptMaximumBytes, admissionLabel);
-                var claim = AICodedbStrictJson.ReadObject(Path.Combine(stageRoot, "claim.json"),
+                var claim = AICodedbStrictJson.ReadObject(ReceiptSibling(path, "claim"),
                     ManagerActionReceiptMaximumBytes, claimLabel);
                 var failure = AICodedbStrictJson.ReadObject(path,
                     ManagerActionReceiptMaximumBytes, failureLabel);
+                var stageId = ValidateReceiptLocation(context, actionId, path, "start-failure", admitted, claim, failure);
                 var writerTicksText = AICodedbStrictJson.GetRequiredString(
                     claim, "writer_start_utc_ticks", claimLabel);
                 var completedText = AICodedbStrictJson.GetRequiredString(
@@ -1462,6 +1517,7 @@ namespace Rice.AI.Codedb.Editor
             var packageKey = AICodedbPaths.GetManagerActionPackageKey(context);
             var builder = new StringBuilder();
             builder.Append("{\n  \"schema_version\": 1,\n  \"managed_by\": \"com.rice.ai-codedb\",\n  \"state\": \"admitted\",")
+                .Append("\n  \"storage_layout\": \"compact-v1\",")
                 .Append("\n  \"action_id\": \"").Append(EscapeJson(actionId)).Append("\",")
                 .Append("\n  \"stage_id\": \"").Append(EscapeJson(stageId)).Append("\",")
                 .Append("\n  \"terminal_for_action\": ").Append(AICodedbPaths.CurrentActionStageIsTerminal ? "true" : "false").Append(',')
@@ -1492,14 +1548,62 @@ namespace Rice.AI.Codedb.Editor
             return builder.ToString();
         }
 
-        private static void EnsureReceiptDirectory(
-            AICodedbEditorExecutionContext context,
-            string actionRoot,
-            string stageRoot)
+        private static string ReceiptSibling(string path, string kind)
         {
-            Directory.CreateDirectory(stageRoot);
-            AssertReceiptPath(context, actionRoot);
-            AssertReceiptPath(context, stageRoot);
+            var name = Path.GetFileName(path);
+            var prefix = name.Length > 17 && name[16] == '.' ? name.Substring(0, 17) : string.Empty;
+            return Path.Combine(Path.GetDirectoryName(path), prefix + kind + ".json");
+        }
+
+        private static string ValidateReceiptLocation(AICodedbEditorExecutionContext context,
+            string actionId, string path, string kind, params Dictionary<string, object>[] records)
+        {
+            var compact = Path.GetFileName(path) != kind + ".json";
+            var layout = compact ? AICodedbPaths.CompactReceiptLayout : null;
+            var stageId = AICodedbStrictJson.GetRequiredString(records[0], "stage_id", "Manager admission");
+            var expected = AICodedbPaths.GetManagerStageReceiptPath(
+                AICodedbPaths.GetManagerActionReceiptRoot(context, actionId, layout), stageId, kind, layout);
+            if (!string.Equals(AICodedbPaths.NormalizePath(path), expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Manager stage locator conflicts with its full identity.");
+            foreach (var record in records)
+                if (AICodedbPaths.ReadReceiptStorageLayout(record) != layout)
+                    throw new InvalidOperationException("Manager receipt storage layout is missing or conflicting.");
+            return stageId;
+        }
+
+        internal static void PublishActionManifest(AICodedbManagerActionIndex index)
+        {
+            var context = index.Context;
+            var root = AICodedbPaths.GetManagerActionReceiptRoot(context, index.ActionId);
+            AssertReceiptPath(context, root);
+            if (Directory.Exists(root))
+                throw new InvalidOperationException("Manager action locator is already reserved; no adoption or replay is allowed.");
+            Directory.CreateDirectory(root);
+            AssertReceiptPath(context, root);
+            var json = "{\"schema_version\":1,\"storage_layout\":\"compact-v1\",\"managed_by\":\"com.rice.ai-codedb\","
+                + "\"action_id\":\"" + index.ActionId + "\",\"project_key\":\""
+                + AICodedbPaths.GetManagerActionProjectKey(context) + "\",\"package_key\":\""
+                + AICodedbPaths.GetManagerActionPackageKey(context) + "\",\"project_root\":\""
+                + EscapeJson(context.ProjectRoot) + "\",\"package_root\":\"" + EscapeJson(context.PackageRoot) + "\"}";
+            WriteNewUtf8FileAtomic(Path.Combine(root, "action.json"), json);
+            ValidateActionManifest(context, index.ActionId);
+        }
+
+        internal static void ValidateActionManifest(AICodedbEditorExecutionContext context, string actionId)
+        {
+            var path = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId), "action.json");
+            AssertReceiptPath(context, path);
+            var record = AICodedbStrictJson.ReadObject(path, 16384, "Manager action identity manifest");
+            const string label = "Manager action identity manifest";
+            if (AICodedbPaths.ReadReceiptStorageLayout(record) != AICodedbPaths.CompactReceiptLayout
+                || AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
+                || AICodedbStrictJson.GetRequiredString(record, "managed_by", label) != "com.rice.ai-codedb"
+                || AICodedbStrictJson.GetRequiredString(record, "action_id", label) != actionId
+                || AICodedbStrictJson.GetRequiredString(record, "project_key", label) != AICodedbPaths.GetManagerActionProjectKey(context)
+                || AICodedbStrictJson.GetRequiredString(record, "package_key", label) != AICodedbPaths.GetManagerActionPackageKey(context)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "project_root", label), context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "package_root", label), context.PackageRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Manager action locator conflicts with its complete identity.");
         }
 
         private static void AssertReceiptPath(
@@ -1539,9 +1643,12 @@ namespace Rice.AI.Codedb.Editor
             var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
-                File.WriteAllText(temp, value, new UTF8Encoding(false));
-                if (File.Exists(path))
-                    throw new InvalidOperationException("Manager action admission evidence already exists.");
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    var bytes = new UTF8Encoding(false).GetBytes(value);
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
                 File.Move(temp, path);
             }
             finally

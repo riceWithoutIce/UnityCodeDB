@@ -17,18 +17,23 @@ namespace Rice.AI.Codedb.Editor.Tests
         private const int MaximumEntries = 4096;
         private const int MaximumDepth = 32;
         private readonly string _parent;
-        private readonly string _token = Guid.NewGuid().ToString("N");
+        private readonly string _token;
         private readonly List<Exception> _cleanupFailures = new List<Exception>();
         private readonly List<IDisposable> _resources = new List<IDisposable>();
         private readonly Action<string, string> _probeFault;
         private bool _created;
         private bool _owned;
+        private bool _reserved;
+        private string ReservationPath => Root + ".reserve";
         internal string ProjectRoot { get; }
         internal string Root { get; }
         internal string OwnershipPath => Path.Combine(Root, ".codedb-test-owner");
 
-        private AICodedbTestWorkspace(Action<string, string> probeFault)
+        private AICodedbTestWorkspace(Action<string, string> probeFault, string ownershipToken = null)
         {
+            _token = ownershipToken ?? Guid.NewGuid().ToString("N");
+            if (!Guid.TryParseExact(_token, "N", out _) || _token != _token.ToLowerInvariant())
+                throw new InvalidOperationException("Workspace ownership token must contain 32 lowercase hex characters.");
             var context = SynchronizationContext.Current;
             if (context == null || context.GetType().FullName != "UnityEngine.UnitySynchronizationContext")
                 throw new InvalidOperationException("Test workspace capture requires the Editor main thread.");
@@ -39,13 +44,14 @@ namespace Rice.AI.Codedb.Editor.Tests
                 throw new InvalidOperationException("Actual Unity project Assets context is unavailable; no workspace fallback exists.");
             ProjectRoot = Canonical(Path.GetDirectoryName(assets));
             _parent = Path.Combine(ProjectRoot, "Library", "CodeDB", "Tests");
-            Root = Path.Combine(_parent, "run-" + _token);
+            Root = Path.Combine(_parent, _token.Substring(0, 12));
             _probeFault = probeFault;
         }
 
-        internal static void Run(Action<AICodedbTestWorkspace> body, Action<string, string> probeFault = null)
+        internal static void Run(Action<AICodedbTestWorkspace> body, Action<string, string> probeFault = null,
+            string ownershipToken = null)
         {
-            var workspace = new AICodedbTestWorkspace(probeFault);
+            var workspace = new AICodedbTestWorkspace(probeFault, ownershipToken);
             Exception primary = null;
             try { workspace.Initialize(); body(workspace); }
             catch (Exception exception) { primary = exception; }
@@ -111,6 +117,13 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AssertDescendant(ProjectRoot, _parent);
                 AssertDescendant(_parent, Root);
                 AssertNoReparse(Root);
+                Directory.CreateDirectory(_parent);
+                using (var reservation = new FileStream(ReservationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    var bytes = Encoding.UTF8.GetBytes(_token);
+                    reservation.Write(bytes, 0, bytes.Length);
+                }
+                _reserved = true;
                 if (Directory.Exists(Root) || File.Exists(Root))
                     throw new IOException("The unique test workspace already exists.");
                 Directory.CreateDirectory(Root);
@@ -137,11 +150,47 @@ namespace Rice.AI.Codedb.Editor.Tests
                 File.Delete(probeFile);
                 Directory.Delete(probeDirectory, false);
                 if (Directory.Exists(probeDirectory)) throw new IOException("Workspace probe directory remains.");
+                operation = "probe deepest Manager record and publication paths";
+                ProbeReceiptPaths(Root);
             }
             catch (Exception exception)
             {
                 throw new IOException("Test workspace setup failed during " + operation + " at " + Root
                     + "; no alternate root was selected.", exception);
+            }
+        }
+
+        internal void ProbeReceiptPaths(string receiptRoot)
+        {
+            try { AssertDescendant(_parent, receiptRoot); }
+            catch (Exception exception)
+            {
+                throw new IOException("Deep Manager path validation failed (length " + receiptRoot.Length + "): " + receiptRoot, exception);
+            }
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                GetPath("project"), GetPath("package"), "path probe");
+            using (AICodedbPaths.UseManagerActionsRootForTests(receiptRoot))
+            {
+                foreach (var path in AICodedbPaths.GetManagerReceiptRequiredPaths(context,
+                    new string('a', 32), new string('b', 64)))
+                {
+                    try
+                    {
+                        AssertNoReparse(path);
+                        Directory.CreateDirectory(Path.GetDirectoryName(path));
+                        using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                            stream.WriteByte(71);
+                        if (File.ReadAllText(path) != "G") throw new IOException("Deep path probe bytes changed.");
+                        File.Delete(path);
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new IOException("Deep Manager path probe failed (length " + path.Length + "): " + path, exception);
+                    }
+                }
+                // Remove only empty probe-owned directories; preserve the run root.
+                Directory.Delete(AICodedbPaths.GetManagerActionReceiptRoot(context, new string('a', 32)), false);
+                Directory.Delete(AICodedbPaths.GetManagerActionIndexDirectory(context), false);
             }
         }
 
@@ -207,6 +256,14 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             for (var index = _resources.Count - 1; index >= 0; index--) _resources[index].Dispose();
             CaptureCleanup(CleanupOwnedRoot);
+            CaptureCleanup(() =>
+            {
+                if (!_reserved) return;
+                AssertNoReparse(ReservationPath);
+                if (File.ReadAllText(ReservationPath) != _token)
+                    throw new IOException("Workspace reservation ownership changed: " + ReservationPath);
+                File.Delete(ReservationPath);
+            });
             if (_cleanupFailures.Count != 0)
             {
                 var failures = new List<Exception>();
@@ -263,6 +320,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var expectedParent = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "CodeDB", "Tests"));
                 Assert.That(Path.GetDirectoryName(root), Is.EqualTo(expectedParent));
                 Assert.That(File.Exists(workspace.OwnershipPath), Is.True);
+                Assert.That(Path.GetFileName(root), Does.Match("^[0-9a-f]{12}$"));
+                Assert.That(File.ReadAllText(workspace.OwnershipPath), Does.Match("^[0-9a-f]{32}$"));
                 Assert.That(Directory.Exists(Path.Combine(root, "capability-probe")), Is.False);
                 var file = workspace.GetPath("owned.txt");
                 File.WriteAllText(file, "owned");
@@ -272,6 +331,54 @@ namespace Rice.AI.Codedb.Editor.Tests
                     Assert.That(workspace.Root, Is.EqualTo(root));
             });
             Assert.That(Directory.Exists(root), Is.False);
+        }
+
+        [Test]
+        public void TestWorkspace_ProbesS29DepthUsingProductionPaths()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                // Observed S29 receipt root length is 98; longest C# publication
+                // path is 204. A longer current project naturally increases both.
+                var root = workspace.GetPath(new string('d', Math.Max(1, 98 - workspace.Root.Length - 1)));
+                workspace.ProbeReceiptPaths(root);
+                using (AICodedbPaths.UseManagerActionsRootForTests(root))
+                {
+                    var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                        workspace.GetPath("project"), workspace.GetPath("package"), "depth");
+                    var maximum = 0;
+                    foreach (var path in AICodedbPaths.GetManagerReceiptRequiredPaths(context, new string('a', 32), new string('b', 64)))
+                        maximum = Math.Max(maximum, path.Length);
+                    Assert.That(maximum, Is.GreaterThanOrEqualTo(204));
+                    TestContext.WriteLine("Deepest actual production path: " + maximum);
+                }
+            });
+        }
+
+        [Test]
+        public void TestWorkspace_ExclusiveCollisionPreservesExistingOwner()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var token = File.ReadAllText(workspace.OwnershipPath);
+                var bodyEntered = false;
+                Assert.Throws<IOException>(() => AICodedbTestWorkspace.Run(_ => bodyEntered = true,
+                    ownershipToken: token));
+                Assert.That(bodyEntered, Is.False);
+                Assert.That(File.ReadAllText(workspace.OwnershipPath), Is.EqualTo(token));
+                workspace.ValidateCleanupTarget(workspace.Root);
+            });
+        }
+
+        [Test]
+        public void TestWorkspace_OverlongComponentReportsExactPathWithoutFallback()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var root = Path.Combine(workspace.Root, new string('x', 256));
+                var failure = Assert.Throws<IOException>(() => workspace.ProbeReceiptPaths(root));
+                Assert.That(failure.Message, Does.Contain("length").And.Contain(root));
+            });
         }
 
         [TestCase("probe-create")]

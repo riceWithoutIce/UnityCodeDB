@@ -13,16 +13,18 @@ namespace Rice.AI.Codedb.Editor
         internal string EffectClass { get; }
         internal string AuthorizationSource { get; }
         internal AICodedbEditorExecutionContext Context { get; }
+        internal string StorageLayout { get; }
 
         internal AICodedbManagerActionIndex(string actionId, string title,
             string effectClass, string authorizationSource,
-            AICodedbEditorExecutionContext context)
+            AICodedbEditorExecutionContext context, string storageLayout = AICodedbPaths.CompactReceiptLayout)
         {
             ActionId = actionId;
             Title = title;
             EffectClass = effectClass;
             AuthorizationSource = authorizationSource;
             Context = context;
+            StorageLayout = storageLayout;
         }
     }
 
@@ -70,6 +72,7 @@ namespace Rice.AI.Codedb.Editor
 
         private sealed class ResolvedMarker
         {
+            internal string StorageLayout;
             internal AICodedbEditorExecutionContext Context;
             internal string PackageKey;
             internal AICodedbManagerActionEvidenceKind Disposition;
@@ -128,8 +131,12 @@ namespace Rice.AI.Codedb.Editor
                 var packageRoot = AICodedbStrictJson.GetRequiredString(record, "package_root", label);
                 var effect = AICodedbStrictJson.GetRequiredString(record, "effect_class", label);
                 var authority = AICodedbStrictJson.GetRequiredString(record, "authorization_source", label);
+                var storageLayout = AICodedbPaths.ReadReceiptStorageLayout(record);
                 var previousContext = new AICodedbEditorExecutionContext(
                     context.Platform, projectRoot, packageRoot, context.ProjectDisplayName);
+                if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(previousContext, actionId,
+                        storageLayout == null ? AICodedbPaths.CompactReceiptLayout : null)))
+                    throw new InvalidOperationException("Journal layout conflicts with another action location.");
                 if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
                     || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "managed_by", label),
                         "com.rice.ai-codedb", StringComparison.Ordinal)
@@ -149,8 +156,8 @@ namespace Rice.AI.Codedb.Editor
                     || !string.Equals(authority, AICodedbManagerActionSession.ClassifyAuthority(title),
                         StringComparison.Ordinal)
                     || (resolved.TryGetValue(candidateId, out var closure)
-                        && !string.Equals(closure.PackageKey,
-                            AICodedbPaths.GetManagerActionPackageKey(previousContext), StringComparison.Ordinal)))
+                        && (closure.StorageLayout != storageLayout || !string.Equals(closure.PackageKey,
+                            AICodedbPaths.GetManagerActionPackageKey(previousContext), StringComparison.Ordinal))))
                 {
                     return new AICodedbManagerActionIndexRead(
                         AICodedbManagerActionIndexState.Conflict, null,
@@ -161,7 +168,7 @@ namespace Rice.AI.Codedb.Editor
                 // never changes the disposition or permits a second owner.
                 var history = ReadLegacyPending(context, directory, resolved);
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
-                    new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext),
+                    new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext, storageLayout),
                     historicalWarning: history.State == AICodedbManagerActionIndexState.Conflict
                         ? "Retained action history could not be verified: " + history.Detail
                         : history.HistoricalWarning);
@@ -196,8 +203,12 @@ namespace Rice.AI.Codedb.Editor
                 context.ProjectRoot, packageRoot, context.ProjectDisplayName);
             var dispositionText = AICodedbStrictJson.GetRequiredString(record, "disposition", label);
             var historicalUnknown = dispositionText == "HistoricalUnknownReconciled";
+            var storageLayout = AICodedbPaths.ReadReceiptStorageLayout(record);
             var schemaVersion = AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label);
-            if (schemaVersion != (historicalUnknown ? 2 : 1)
+            if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(previous, actionId,
+                    storageLayout == null ? AICodedbPaths.CompactReceiptLayout : null)))
+                throw new InvalidOperationException("Resolved marker layout conflicts with another action location.");
+            if ((historicalUnknown && storageLayout != null) || schemaVersion != (historicalUnknown ? 2 : 1)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "managed_by", label),
                     "com.rice.ai-codedb", StringComparison.Ordinal)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "state", label),
@@ -258,6 +269,7 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException("The historical unknown-action marker is invalid.");
             return new ResolvedMarker
             {
+                StorageLayout = storageLayout,
                 Context = previous,
                 PackageKey = AICodedbPaths.GetManagerActionPackageKey(previous),
                 Disposition = dispositionText == "CommandTerminal"
@@ -301,6 +313,8 @@ namespace Rice.AI.Codedb.Editor
                 {
                     AssertPath(actionDirectory);
                     var actionId = Path.GetFileName(actionDirectory);
+                    if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId)))
+                        throw new InvalidOperationException("Conflicting compact and legacy action locations exist.");
                     if (++actionsSeen > 4096 || !AICodedbSupervisorProtocol.IsManagerActionId(actionId))
                         return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
                             null, "Historical Manager action receipt enumeration is invalid or exceeds its bound.",
@@ -321,7 +335,7 @@ namespace Rice.AI.Codedb.Editor
                             originalMarker.PackageKey.Substring(0, 24), StringComparison.Ordinal))
                         authenticatedOriginal = new AICodedbManagerActionIndex(actionId,
                             "Previous CodeDB action", "ExistingBackendEffect",
-                            "ExistingActionSpecificBackend", originalMarker.Context);
+                            "ExistingActionSpecificBackend", originalMarker.Context, null);
                     try
                     {
                         var stages = Directory.GetDirectories(actionDirectory);
@@ -347,11 +361,11 @@ namespace Rice.AI.Codedb.Editor
                                 AICodedbPaths.GetManagerActionPackageKey(original).Substring(0, 24),
                                 StringComparison.Ordinal))
                             throw new InvalidOperationException("The historical action identity is conflicting.");
-                        var outcome = AICodedbProcessRunner.RecoverManagerAction(original, actionId);
+                        var outcome = AICodedbProcessRunner.RecoverManagerAction(original, actionId, null);
                         if (outcome.State != AICodedbManagerActionRecoveryState.Conflict)
                             authenticatedOriginal = new AICodedbManagerActionIndex(actionId,
                                 "Previous CodeDB action", "ExistingBackendEffect",
-                                "ExistingActionSpecificBackend", original);
+                                "ExistingActionSpecificBackend", original, null);
                         if (resolved.TryGetValue(actionId, out var marker))
                         {
                             if (!string.Equals(marker.PackageKey,
@@ -392,7 +406,7 @@ namespace Rice.AI.Codedb.Editor
                             failedInstallCount++;
                             failedInstallIndex = new AICodedbManagerActionIndex(actionId,
                                 "Install CodeDB", "ConfirmedProjectMutation",
-                                AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"), original);
+                                AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"), original, null);
                             failedInstallResult = outcome.Result;
                             retainedUnknown.Add("Historical action " + actionId + " (original Package "
                                 + original.PackageRoot + ") has a recorded failed INSTALL with PENDING cleanup."
@@ -409,7 +423,7 @@ namespace Rice.AI.Codedb.Editor
                                 "Historical action evidence is conflicting or has multiple pending owners.");
                         pending = new AICodedbManagerActionIndex(actionId,
                             "Previous CodeDB action", "ExistingBackendEffect",
-                            "ExistingActionSpecificBackend", original);
+                            "ExistingActionSpecificBackend", original, null);
                     }
                     catch (Exception exception)
                     {
@@ -421,10 +435,40 @@ namespace Rice.AI.Codedb.Editor
                 }
             }
             foreach (var closure in resolved)
+            {
+                if (closure.Value.StorageLayout == AICodedbPaths.CompactReceiptLayout)
+                {
+                    var marker = closure.Value;
+                    var outcome = AICodedbProcessRunner.RecoverManagerAction(marker.Context, closure.Key, marker.StorageLayout);
+                    if (outcome.State == AICodedbManagerActionRecoveryState.Conflict
+                        || (marker.Disposition == AICodedbManagerActionEvidenceKind.CommandTerminal
+                            && outcome.State != AICodedbManagerActionRecoveryState.Terminal
+                            && outcome.State != AICodedbManagerActionRecoveryState.NotFound)
+                        || (marker.Disposition == AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                            && outcome.State == AICodedbManagerActionRecoveryState.Terminal))
+                        return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
+                            new AICodedbManagerActionIndex(closure.Key, "Previous CodeDB action",
+                                "ExistingBackendEffect", "ExistingActionSpecificBackend", marker.Context, marker.StorageLayout),
+                            "Resolved compact action conflicts with its original receipt: " + outcome.Detail, closure.Key);
+                    if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
+                        && AICodedbActions.HasFailedInstallPendingEffects(outcome.Result))
+                    {
+                        failedInstallCount++;
+                        failedInstallIndex = new AICodedbManagerActionIndex(closure.Key, "Install CodeDB",
+                            "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
+                            marker.Context, marker.StorageLayout);
+                        failedInstallResult = outcome.Result;
+                        retainedUnknown.Add("Historical action " + closure.Key + " (original Package "
+                            + marker.Context.PackageRoot + ") has a recorded failed INSTALL with PENDING cleanup."
+                            + " Later completed stages do not clear its recorded effects."
+                            + " Removal requires separate confirmation and the existing live safety check.");
+                    }
+                }
                 if (closure.Value.HistoricalUnknown && !matchedHistorical.Contains(closure.Key))
                     return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
                         null, "A historical unknown-action marker has no matching original receipt.",
                         closure.Key);
+            }
             var historicalWarning = string.Join("\n", retainedUnknown);
             return pending == null
                 ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
@@ -499,6 +543,12 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 var path = AICodedbPaths.GetManagerActionIndexPath(index.Context, index.ActionId);
+                if (index.StorageLayout != AICodedbPaths.CompactReceiptLayout)
+                    throw new InvalidOperationException("New admission requires compact-v1 storage.");
+                AICodedbPaths.ValidateManagerReceiptPaths(index.Context, index.ActionId, new string('0', 64));
+                if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(index.Context, index.ActionId))
+                    || Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(index.Context, index.ActionId, null)))
+                    throw new InvalidOperationException("Action locator already has evidence; reuse was blocked.");
                 var directory = AICodedbPaths.GetManagerActionIndexDirectory(index.Context);
                 AssertPath(directory);
                 Directory.CreateDirectory(directory);
@@ -521,6 +571,7 @@ namespace Rice.AI.Codedb.Editor
                         return false;
                     }
                 var json = "{\n  \"schema_version\": 1,\n  \"managed_by\": \"com.rice.ai-codedb\","
+                    + "\n  \"storage_layout\": \"compact-v1\","
                     + "\n  \"state\": \"pending\","
                     + "\n  \"action_id\": \"" + Escape(index.ActionId) + "\","
                     + "\n  \"title\": \"" + Escape(index.Title) + "\","
@@ -551,6 +602,7 @@ namespace Rice.AI.Codedb.Editor
                 if (read.State != AICodedbManagerActionIndexState.Pending
                     || !string.Equals(read.Index.ActionId, index.ActionId, StringComparison.Ordinal))
                     throw new InvalidOperationException("The published Manager action index failed identity verification.");
+                AICodedbProcessRunner.PublishActionManifest(index);
                 return true;
                 }
             }
@@ -584,7 +636,8 @@ namespace Rice.AI.Codedb.Editor
                     if (read.State != AICodedbManagerActionIndexState.Pending
                         || !string.Equals(read.Index.ActionId, index.ActionId, StringComparison.Ordinal)
                         || !string.Equals(read.Index.Context.PackageRoot, index.Context.PackageRoot,
-                            StringComparison.OrdinalIgnoreCase))
+                            StringComparison.OrdinalIgnoreCase)
+                        || read.Index.StorageLayout != index.StorageLayout)
                     {
                         detail = "The Manager action index no longer matches the completed action.";
                         return false;
@@ -593,6 +646,7 @@ namespace Rice.AI.Codedb.Editor
                         "resolved-action-" + index.ActionId + ".json");
                     AssertPath(resolvedPath);
                     var resolvedJson = "{\n  \"schema_version\": 1,"
+                        + (index.StorageLayout == null ? string.Empty : "\n  \"storage_layout\": \"compact-v1\",")
                         + "\n  \"managed_by\": \"com.rice.ai-codedb\","
                         + "\n  \"state\": \"resolved\","
                         + "\n  \"action_id\": \"" + index.ActionId + "\","

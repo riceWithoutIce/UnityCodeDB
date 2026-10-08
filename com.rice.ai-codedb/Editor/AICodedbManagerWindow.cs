@@ -512,7 +512,7 @@ namespace Rice.AI.Codedb.Editor
             try
             {
                 var direct = await Task.Run(() =>
-                    AICodedbProcessRunner.RecoverManagerAction(session.Context, session.ActionId));
+                    AICodedbProcessRunner.RecoverManagerAction(session.Context, session.ActionId, session.StorageLayout));
                 var outcome = direct.State == AICodedbManagerActionRecoveryState.NotFound
                     ? await AICodedbEditorLifecycle.RecoverManagerActionAsync(
                         session.Context, session.ActionId)
@@ -2653,7 +2653,7 @@ namespace Rice.AI.Codedb.Editor
                 return reported;
 
             var direct = await Task.Run(() => AICodedbProcessRunner.RecoverManagerAction(
-                session.Context, session.ActionId));
+                session.Context, session.ActionId, session.StorageLayout));
             if (direct.State == AICodedbManagerActionRecoveryState.Conflict
                 || direct.State == AICodedbManagerActionRecoveryState.Pending)
                 return UnconfirmedActionResult(session.ActionId, direct.Detail);
@@ -3424,8 +3424,9 @@ namespace Rice.AI.Codedb.Editor
         internal bool HasOriginalContext { get; private set; } = true;
         private bool _durableAdmitted;
         private bool _legacyReceipt;
+        internal string StorageLayout { get; private set; } = AICodedbPaths.CompactReceiptLayout;
         internal AICodedbManagerActionIndex DurableIndex => new AICodedbManagerActionIndex(
-            ActionId, Title, EffectClass, AuthorizationSource, Context);
+            ActionId, Title, EffectClass, AuthorizationSource, Context, StorageLayout);
 
         private AICodedbManagerActionSession(
             string title,
@@ -3501,6 +3502,7 @@ namespace Rice.AI.Codedb.Editor
                     {
                         _current = new AICodedbManagerActionSession(read.Index.Title,
                             read.Index.Context, now, read.Index.ActionId, true);
+                        _current.StorageLayout = read.Index.StorageLayout;
                         _current.TryCompleteRecovery(read.HistoricalResult, now);
                     }
                     return;
@@ -3519,6 +3521,7 @@ namespace Rice.AI.Codedb.Editor
                         now, retainedId, true);
                     _current.IsEvidenceConflict = true;
                     _current.HasOriginalContext = read.Index != null || prior != null;
+                    _current.StorageLayout = read.Index?.StorageLayout ?? prior?.StorageLayout;
                     _current.Status.SetRecoveryDetail(read.Detail);
                     return;
                 }
@@ -3529,12 +3532,14 @@ namespace Rice.AI.Codedb.Editor
                 {
                     _current._durableAdmitted = !read.IsLegacyReceipt;
                     _current._legacyReceipt = read.IsLegacyReceipt;
+                    _current.StorageLayout = read.Index.StorageLayout;
                     return;
                 }
                 _current = new AICodedbManagerActionSession(read.Index.Title,
                     read.Index.Context, now, read.Index.ActionId, true);
                 _current._durableAdmitted = !read.IsLegacyReceipt;
                 _current._legacyReceipt = read.IsLegacyReceipt;
+                _current.StorageLayout = read.Index.StorageLayout;
             }
         }
 

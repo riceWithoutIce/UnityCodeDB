@@ -89,13 +89,10 @@ function Write-AtomicJson {
     if (-not $text.EndsWith("`n", [StringComparison]::Ordinal)) { $text += "`n" }
     $temp = Join-Path (Split-Path -Path $Path -Parent) ('r.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        [IO.File]::WriteAllText($temp, $text, $utf8NoBom)
-        if (Test-Path -LiteralPath $Path) {
-            [IO.File]::Replace($temp, $Path, $null)
-        }
-        else {
-            [IO.File]::Move($temp, $Path)
-        }
+        $stream = [IO.File]::Open($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $bytes = $utf8NoBom.GetBytes($text); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        [IO.File]::Move($temp, $Path)
     }
     finally {
         if (Test-Path -LiteralPath $temp) { [IO.File]::Delete($temp) }
@@ -149,10 +146,21 @@ $receiptPath = Get-NormalizedPath $ReceiptPath
 if (-not (Test-PathInside $receiptRoot $receiptPath)) { throw 'Manager action receipt path escapes its scoped root.' }
 Assert-NoReparseTraversal $receiptRoot $receiptPath 'Manager action receipt path'
 
-$admittedPath = Join-Path $receiptPath 'admitted.json'
-$claimPath = Join-Path $receiptPath 'claim.json'
-$terminalPath = Join-Path $receiptPath 'terminal.json'
-$startFailurePath = Join-Path $receiptPath 'start-failure.json'
+$admittedPath = $receiptPath
+$admittedName = [IO.Path]::GetFileName($admittedPath)
+if ($admittedName -cnotmatch '^[0-9a-f]{16}\.admitted\.json$' -or
+    -not [IO.File]::Exists($admittedPath)) { throw 'ReceiptPath must name a compact admission file.' }
+$actionRoot = [IO.Path]::GetDirectoryName($admittedPath)
+$stagePrefix = $admittedName.Substring(0, 16)
+$claimPath = Join-Path $actionRoot ($stagePrefix + '.claim.json')
+$terminalPath = Join-Path $actionRoot ($stagePrefix + '.terminal.json')
+$startFailurePath = Join-Path $actionRoot ($stagePrefix + '.start-failure.json')
+$manifestPath = Join-Path $actionRoot 'action.json'
+foreach ($path in @($manifestPath, $admittedPath, $claimPath, $terminalPath, $startFailurePath,
+    ($startFailurePath + '.' + ('0' * 32) + '.tmp'), (Join-Path $actionRoot ('r.' + ('0' * 32) + '.tmp')))) {
+    try { $null = [IO.Path]::GetFullPath($path); Assert-NoReparseTraversal $receiptRoot $path 'Manager evidence' }
+    catch { throw "Manager evidence path validation failed (length $($path.Length)): $path; $_" }
+}
 if (-not (Test-Path -LiteralPath $admittedPath -PathType Leaf)) { throw 'Manager action admission record is missing.' }
 if ((Get-Item -LiteralPath $admittedPath).Length -gt $maximumReceiptBytes) { throw 'Manager action admission record exceeds its bound.' }
 if (Test-Path -LiteralPath $claimPath) { throw 'Manager action stage already has a writer claim.' }
@@ -160,7 +168,7 @@ if (Test-Path -LiteralPath $terminalPath) { throw 'Manager action stage already 
 if (Test-Path -LiteralPath $startFailurePath) { throw 'Manager action stage already has a start-failure receipt.' }
 
 $admitted = [IO.File]::ReadAllText($admittedPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-if ($admitted.schema_version -ne $schemaVersion -or $admitted.managed_by -cne $managedBy -or $admitted.state -cne 'admitted') {
+if ($admitted.schema_version -ne $schemaVersion -or $admitted.managed_by -cne $managedBy -or $admitted.state -cne 'admitted' -or $admitted.storage_layout -cne 'compact-v1') {
     throw 'Manager action admission envelope is invalid.'
 }
 if (-not (Test-Id ([string]$admitted.action_id) 32) -or -not (Test-Id ([string]$admitted.stage_id) 64)) {
@@ -169,13 +177,27 @@ if (-not (Test-Id ([string]$admitted.action_id) 32) -or -not (Test-Id ([string]$
 if (-not (Test-Id ([string]$admitted.project_key) 64) -or -not (Test-Id ([string]$admitted.package_key) 64)) {
     throw 'Manager action project or Package key is invalid.'
 }
-$expectedSuffix = Join-Path (Join-Path (Join-Path (Get-PhysicalIdentityKey ([string]$admitted.project_key)) (Get-PhysicalIdentityKey ([string]$admitted.package_key))) ([string]$admitted.action_id)) ([string]$admitted.stage_id)
-if (-not $receiptPath.EndsWith($expectedSuffix, [StringComparison]::OrdinalIgnoreCase)) {
+$expectedPath = Join-Path (Join-Path $receiptRoot ([string]$admitted.action_id)) (([string]$admitted.stage_id).Substring(0, 16) + '.admitted.json')
+if (-not $receiptPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Manager action receipt path does not match its admitted identity.'
 }
 
 $projectRoot = Get-NormalizedPath ([string]$admitted.project_root)
 $packageRoot = Get-NormalizedPath ([string]$admitted.package_root)
+if (-not [IO.File]::Exists($manifestPath) -or (Get-Item -LiteralPath $manifestPath).Length -gt 16384) {
+    throw 'Compact action identity manifest is missing or exceeds its bound.'
+}
+$manifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+if ($manifest.schema_version -ne 1 -or $manifest.storage_layout -cne 'compact-v1' -or $manifest.managed_by -cne $managedBy) {
+    throw 'Compact action identity manifest envelope is invalid.'
+}
+foreach ($key in @('action_id', 'project_key', 'package_key', 'project_root', 'package_root')) {
+    if (-not [string]::Equals([string]$manifest.$key, [string]$admitted.$key, [StringComparison]::Ordinal)) {
+        throw "Compact action identity manifest conflicts on $key."
+    }
+}
+$legacyAction = Join-Path (Join-Path (Join-Path $receiptRoot (Get-PhysicalIdentityKey ([string]$admitted.project_key))) (Get-PhysicalIdentityKey ([string]$admitted.package_key))) ([string]$admitted.action_id)
+if (Test-Path -LiteralPath $legacyAction) { throw 'Conflicting legacy action location exists.' }
 $projectKey = Get-Sha256Hex -Bytes ($utf8NoBom.GetBytes($projectRoot.Replace('\', '/').ToLowerInvariant()))
 $packageKey = Get-Sha256Hex -Bytes ($utf8NoBom.GetBytes($packageRoot.Replace('\', '/').ToLowerInvariant()))
 if ($projectKey -cne [string]$admitted.project_key -or
@@ -210,6 +232,8 @@ if ((Get-Sha256Hex $utf8NoBom.GetBytes($argumentText)) -cne ([string]$admitted.c
 }
 $timeoutMilliseconds = [int]$admitted.command.timeout_ms
 if ($timeoutMilliseconds -lt 1 -or $timeoutMilliseconds -gt 1800000) { throw 'Manager action timeout is invalid.' }
+$expectedCommandIdentity = Get-Sha256Hex $utf8NoBom.GetBytes(([string]$admitted.command.script_sha256 + "`n" + [string]$admitted.command.arguments_sha256 + "`n" + $timeoutMilliseconds.ToString([Globalization.CultureInfo]::InvariantCulture)))
+if ($expectedCommandIdentity -cne [string]$admitted.command_identity_sha256) { throw 'Manager command identity conflicts with its complete command.' }
 
 $startInfo = New-Object Diagnostics.ProcessStartInfo
 $startInfo.FileName = 'powershell.exe'
@@ -227,6 +251,7 @@ $child.StartInfo = $startInfo
 $writerProcess = [Diagnostics.Process]::GetCurrentProcess()
 $claim = [ordered]@{
     schema_version = $schemaVersion
+    storage_layout = 'compact-v1'
     managed_by = $managedBy
     state = 'claimed'
     action_id = [string]$admitted.action_id
@@ -253,6 +278,7 @@ if ($null -ne $startError) {
     $child.Dispose()
     $startFailure = [ordered]@{
         schema_version = $schemaVersion
+        storage_layout = 'compact-v1'
         managed_by = $managedBy
         state = 'start_failed'
         action_id = [string]$admitted.action_id
@@ -354,6 +380,7 @@ $stopwatch.Stop()
 
 $terminal = [ordered]@{
     schema_version = $schemaVersion
+    storage_layout = 'compact-v1'
     managed_by = $managedBy
     state = 'terminal'
     action_id = [string]$admitted.action_id

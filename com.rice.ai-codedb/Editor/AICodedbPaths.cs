@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -295,17 +296,77 @@ namespace Rice.AI.Codedb.Editor
                 "codebase-mcp.exe"));
         }
 
+        internal const string CompactReceiptLayout = "compact-v1";
+
         internal static string GetManagerActionReceiptRoot(
             AICodedbEditorExecutionContext context,
-            string actionId)
+            string actionId, string storageLayout = CompactReceiptLayout)
         {
             if (!AICodedbSupervisorProtocol.IsManagerActionId(actionId))
                 throw new ArgumentException("The Manager action id is invalid.", nameof(actionId));
+            if (storageLayout == CompactReceiptLayout)
+                return NormalizePath(Path.Combine(GetManagerActionsRoot(), actionId));
+            if (storageLayout != null)
+                throw new InvalidOperationException("Unknown Manager receipt storage layout.");
             return NormalizePath(Path.Combine(
                 GetManagerActionsRoot(),
                 GetManagerActionPhysicalKey(GetManagerActionProjectKey(context)),
                 GetManagerActionPhysicalKey(GetManagerActionPackageKey(context)),
                 actionId));
+        }
+
+        internal static string GetManagerStageReceiptPath(string actionRoot, string stageId,
+            string kind, string storageLayout = CompactReceiptLayout)
+        {
+            if (stageId == null || stageId.Length != 64 || !IsLowerHex(stageId))
+                throw new InvalidOperationException("The complete Manager stage identity is invalid.");
+            if (kind != "admitted" && kind != "claim" && kind != "terminal" && kind != "start-failure")
+                throw new InvalidOperationException("Unknown Manager evidence kind.");
+            if (storageLayout == CompactReceiptLayout)
+                return NormalizePath(Path.Combine(actionRoot, stageId.Substring(0, 16) + "." + kind + ".json"));
+            if (storageLayout != null)
+                throw new InvalidOperationException("Unknown Manager receipt storage layout.");
+            return NormalizePath(Path.Combine(actionRoot, stageId, kind + ".json"));
+        }
+
+        internal static string ReadReceiptStorageLayout(Dictionary<string, object> record)
+        {
+            if (!record.ContainsKey("storage_layout")) return null;
+            var layout = AICodedbStrictJson.GetRequiredString(record, "storage_layout", "Manager receipt layout");
+            if (layout != CompactReceiptLayout)
+                throw new InvalidOperationException("Unknown Manager receipt storage layout.");
+            return layout;
+        }
+
+        // Resolve every complete path using the runtime's own Path API. Actual
+        // create/read/delete capability is probed by the owned test entry.
+        internal static string[] GetManagerReceiptRequiredPaths(AICodedbEditorExecutionContext context,
+            string actionId, string stageId)
+        {
+            var root = GetManagerActionReceiptRoot(context, actionId);
+            var longest = GetManagerStageReceiptPath(root, stageId, "start-failure");
+            return new[] { Path.Combine(root, "action.json"),
+                Path.Combine(root, "action.json." + new string('0', 32) + ".tmp"),
+                longest, longest + "." + new string('0', 32) + ".tmp",
+                Path.Combine(root, "r." + new string('0', 32) + ".tmp"),
+                GetManagerActionIndexPath(context, actionId),
+                Path.Combine(GetManagerActionIndexDirectory(context), "resolved-action-" + actionId + ".json"),
+                Path.Combine(GetManagerActionIndexDirectory(context), "index.lock"),
+                Path.Combine(GetManagerActionsRoot(), "index-" + new string('0', 32) + ".tmp") };
+        }
+
+        internal static void ValidateManagerReceiptPaths(AICodedbEditorExecutionContext context,
+            string actionId, string stageId)
+        {
+            foreach (var path in GetManagerReceiptRequiredPaths(context, actionId, stageId))
+            {
+                try { Path.GetFullPath(path); }
+                catch (Exception exception)
+                {
+                    throw new IOException("Manager receipt path is unavailable (length " + path.Length
+                        + "): " + path, exception);
+                }
+            }
         }
 
         internal static string GetManagerActionsRoot()
