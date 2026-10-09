@@ -48,6 +48,10 @@ param(
 
     [switch]$RetainedCandidateRecoveryOnly,
 
+    [switch]$RetainedOptionalFlatOnly,
+
+    [string]$RetainedFixtureRoot,
+
     [switch]$FailedPreparationInterruptionOnly,
 
     [switch]$TransactionOnly
@@ -126,7 +130,13 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
     $familyClock = [Diagnostics.Stopwatch]::StartNew()
     $tag = [guid]::NewGuid().ToString('N')
-    $fixtureContainer = if ($RetainedCandidateRecoveryOnly) {
+    $fixtureContainer = if ($RetainedOptionalFlatOnly) {
+        $parent = if ($RetainedFixtureRoot) { [IO.Path]::GetFullPath($RetainedFixtureRoot) } else {
+            Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.artifacts/tests/s29-optional-flat'
+        }
+        if (-not [IO.Path]::IsPathRooted($parent)) { throw 'Optional flat fixture parent must be absolute.' }
+        Join-Path $parent ('r-' + $tag.Substring(0,8))
+    } elseif ($RetainedCandidateRecoveryOnly) {
         Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ('.artifacts/tests/rc41-retained-continuation-' + $tag)
     } else { Join-Path ([IO.Path]::GetTempPath()) ('codedb-s28-integration-' + $tag) }
     $fixtureRoot = Join-Path $fixtureContainer 'installed'
@@ -270,6 +280,9 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     try {
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-strict-json.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
+        if ($RetainedOptionalFlatOnly) {
+            Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-text-adapter-output-contract.ps1')
+        }
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\materialize-codedb-host-payload.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\codedb-instance-engine.ps1')
         $script:PhaseCCaseCount = 0
@@ -296,7 +309,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
                 $script:PhaseCCaseCount = 0
                 if ($FailedPreparationRecovery -or $FailedPreparationInterruption) {
                     if ($FailedPreparationRecovery) {
-                        foreach ($wrapperMode in $(if($global:RetainedCandidateRecoveryOnly){@('CURRENT')}else{@('CURRENT','ABSENT','OLD')})) {
+                        foreach ($wrapperMode in $(if($global:RetainedOptionalFlatOnly){@('ABSENT')}elseif($global:RetainedCandidateRecoveryOnly){@('CURRENT')}else{@('CURRENT','ABSENT','OLD')})) {
                             Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode $wrapperMode
                         }
                     }
@@ -433,7 +446,11 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
         Write-Host ("[PASS] NextChangeAdmissionIntegrationOnly; cases=" + $script:PhaseCCaseCount + "; native_children=0; elapsed_ms=" + $familyClock.ElapsedMilliseconds + "; canonical generation=" + $manifest.GenerationId)
     } finally {
         $resolved = [IO.Path]::GetFullPath($fixtureContainer)
-        if($RetainedCandidateRecoveryOnly) {
+        if($RetainedOptionalFlatOnly) {
+            $expected = [IO.Path]::GetFullPath((Join-Path $parent ('r-' + $tag.Substring(0,8))))
+            if ($resolved -cne $expected) { throw 'Optional flat fixture evidence root is not owned.' }
+            Write-Host "[RETAINED_FIXTURE_EVIDENCE] $resolved"
+        } elseif($RetainedCandidateRecoveryOnly) {
             $repositoryArtifactRoot=[IO.Path]::GetFullPath((Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.artifacts/tests')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar
             if(-not $resolved.StartsWith($repositoryArtifactRoot,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -cne ('rc41-retained-continuation-'+$tag)){throw 'Retained fixture evidence root is not owned.'}
             Write-Host "[RETAINED_FIXTURE_EVIDENCE] $resolved"
@@ -731,6 +748,12 @@ function Invoke-RetainedCandidateRecoveryCase {
         Assert-PhaseC -Condition ((Test-Path $marker) -and -not (Test-Path (Join-Path $indexRoot "resolved-action-$actionId.pending.json")) -and (Get-FileSha256 -Path (Join-Path $receipts "$prefix.terminal.json")) -ceq $terminalHash) -Label 'explicit-disposition-completion-preserves-original-incomplete-failure'
         $null=Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         Write-PhaseCRecord -Path (Join-Path (Split-Path $ProjectRoot -Parent) 'emitted-record-context.json') -Document ([ordered]@{project_root=$ProjectRoot;package_root=$PackageRoot;local_app_data=$localData;action_id=$actionId;marker_path=$marker;terminal_path=Join-Path $receipts "$prefix.terminal.json"})
+        if ($global:RetainedOptionalFlatOnly) {
+            Assert-PhaseC -Condition (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'AIWork/codedb'))) -Label 'pre-handoff-optional-flat-root-absent'
+            Assert-PhaseC -Condition (@((Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId (Get-InstanceDesiredState -ProjectRoot $ProjectRoot).StateId).Document.retained_effects | Where-Object { $_.relative_path -ceq 'AIWork/codedb' }).Count -eq 0) -Label 'absent-optional-flat-root-not-recorded'
+            Write-Host "[EMITTED_PROOF] $(Join-Path (Split-Path $ProjectRoot -Parent) 'emitted-record-context.json')"
+            return
+        }
         $global:RetainedCandidateActionId=''
         Invoke-InstanceConvergence -ActionName Install -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $markerPath
         $fresh=Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
@@ -820,6 +843,7 @@ function Invoke-FailedPreparationRecoveryCases {
         Copy-Item -LiteralPath (Join-Path $oldSource $relative) -Destination $target
     }
     foreach ($relative in @('wrapper/codedb-project-wrapper.mjs', 'shared/codedb-instance-manifest-contract.ps1')) {
+        if (Get-Variable RetainedOptionalFlatOnly -Scope Global -ValueOnly -ErrorAction SilentlyContinue) { continue }
         if ($relative -ceq 'wrapper/codedb-project-wrapper.mjs' -and $WrapperMode -ceq 'ABSENT') { continue }
         $source = Join-Path $oldSource $relative
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { $source = Join-Path $manifest.Root ('AIWork/codedb/' + $relative) }
@@ -979,9 +1003,10 @@ function Invoke-FailedPreparationRecoveryCases {
     Remove-Item -LiteralPath $v1path
 }
 
-if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly) {
-    $global:RetainedCandidateRecoveryOnly=[bool]$RetainedCandidateRecoveryOnly
-    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:($FailedPreparationRecoveryOnly -or $RetainedCandidateRecoveryOnly) -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
+if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly) {
+    $global:RetainedOptionalFlatOnly=[bool]$RetainedOptionalFlatOnly
+    $global:RetainedCandidateRecoveryOnly=[bool]($RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly)
+    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:($FailedPreparationRecoveryOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly) -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
     return
 }
 

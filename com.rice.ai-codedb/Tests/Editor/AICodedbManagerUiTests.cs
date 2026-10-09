@@ -1434,16 +1434,23 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void ManagerActionJournal_ActualPowerShellRetainedEffectsProofPreservesFailedOutcomeAndReleasesSession()
         {
-            // This input is emitted by the actual confirmed Uninstall production
-            // functions in RetainedCandidateRecoveryOnly. No reader-only marker
-            // fixture or synthesized terminal can satisfy this test.
-            var proofPath = Environment.GetEnvironmentVariable("RICE_CODEDB_RETAINED_EFFECTS_PROOF");
-            if (string.IsNullOrEmpty(proofPath))
-                Assert.Ignore("Run RetainedCandidateRecoveryOnly and supply its emitted-record-context.json path.");
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("The actual retained producer requires Windows PowerShell.");
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(AICodedbProjectSettingsTests).Assembly);
+            Assert.That(package, Is.Not.Null);
+            var script = Path.Combine(package.resolvedPath, "Tests~", "test-codedb-host-payload-materializer.ps1");
+            Assert.That(File.Exists(script), Is.True, "The delivered Package must contain its retained producer fixture.");
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+            // Generate actual production intent/disposition records before a fresh
+            // Install creates the optional flat root. No manual env setup required.
+            var proofPath = RunProductionOptionalFlatProof(script, workspace);
             var proof = AICodedbStrictJson.ReadObject(proofPath, 16384, "PS emitted retained effects test context");
             Func<string, string> field = name => AICodedbStrictJson.GetRequiredString(proof, name, "PS emitted context");
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
                 field("project_root"), field("package_root"), "PS emitted retained candidate");
+            var flatRoot = Path.Combine(context.ProjectRoot, "AIWork/codedb");
+            Assert.That(Directory.Exists(flatRoot) || File.Exists(flatRoot), Is.False);
             var managerRoot = Path.Combine(field("local_app_data"), "Rice/CodeDB/manager-actions");
             using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(managerRoot);
             var markerPath = field("marker_path");
@@ -1487,6 +1494,98 @@ namespace Rice.AI.Codedb.Editor.Tests
             try
             {
                 var original = File.ReadAllText(markerPath);
+                var intent = AICodedbStrictJson.ParseObject(File.ReadAllText(intentPath), "actual retained intent");
+                var effects = AICodedbStrictJson.GetRequiredArray(intent, "retained_effects", "actual retained intent");
+                string recordedDirectory = null;
+                foreach (var raw in effects)
+                {
+                    var effect = AICodedbStrictJson.RequireObject(raw, "actual retained effect");
+                    var relative = AICodedbStrictJson.GetRequiredString(effect, "relative_path", "actual retained effect");
+                    Assert.That(relative, Is.Not.EqualTo("AIWork/codedb"));
+                    if (recordedDirectory == null && relative.EndsWith("/logs", StringComparison.Ordinal))
+                        recordedDirectory = Path.Combine(context.ProjectRoot, relative);
+                }
+                Assert.That(recordedDirectory, Is.Not.Null);
+                var mandatoryGeneration = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/host/generations/"
+                    + AICodedbStrictJson.GetRequiredString(marker, "retained_generation_id", "actual retained marker"));
+                var mandatoryCandidate = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances/"
+                    + AICodedbStrictJson.GetRequiredString(marker, "retained_instance_id", "actual retained marker"));
+                foreach (var missing in new[] { recordedDirectory, mandatoryGeneration, mandatoryCandidate })
+                {
+                    var saved = workspace.GetPath("saved-effect");
+                    Directory.Move(missing, saved);
+                    try
+                    {
+                        Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                            Is.EqualTo(AICodedbManagerActionIndexState.Conflict), missing);
+                    }
+                    finally { Directory.Move(saved, missing); }
+                }
+                var recordedFile = Path.Combine(mandatoryCandidate, "config/codedb-mcp.toml");
+                var recordedBytes = File.ReadAllBytes(recordedFile);
+                try
+                {
+                    File.WriteAllText(recordedFile, "changed retained file");
+                    Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                        Is.EqualTo(AICodedbManagerActionIndexState.Conflict), "recorded file hash drift");
+                }
+                finally { File.WriteAllBytes(recordedFile, recordedBytes); }
+                foreach (var asFile in new[] { false, true })
+                {
+                    try
+                    {
+                        if (asFile) File.WriteAllText(flatRoot, "unexpected root file");
+                        else
+                        {
+                            Directory.CreateDirectory(flatRoot);
+                            File.WriteAllText(Path.Combine(flatRoot, "unknown.txt"), "unexpected descendant");
+                        }
+                        var refused = AICodedbManagerActionJournal.Read(context);
+                        Assert.That(refused.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                        Assert.That(refused.Detail, Does.Contain(asFile ? "AIWork/codedb." : "AIWork/codedb/unknown.txt"));
+                    }
+                    finally
+                    {
+                        if (File.Exists(flatRoot)) File.Delete(flatRoot);
+                        if (Directory.Exists(flatRoot)) workspace.DeleteOwnedTree(flatRoot);
+                    }
+                }
+                // A recorded optional directory remains required. Reauthenticate
+                // only this test fault's intent; the real emitted bytes are restored.
+                var recordedFlat = new Dictionary<string, object>
+                {
+                    { "relative_path", "AIWork/codedb" }, { "kind", "DIRECTORY" }, { "sha256", "" }
+                };
+                effects.Add(recordedFlat);
+                effects.Sort((a, b) => string.CompareOrdinal(
+                    AICodedbStrictJson.GetRequiredString(AICodedbStrictJson.RequireObject(a, "effect"), "relative_path", "effect"),
+                    AICodedbStrictJson.GetRequiredString(AICodedbStrictJson.RequireObject(b, "effect"), "relative_path", "effect")));
+                try
+                {
+                    File.WriteAllText(intentPath, AICodedbControlContractMigrationClassifierTests.SerializeObject(intent));
+                    using var sha = SHA256.Create();
+                    var changedHash = BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(intentPath)))
+                        .Replace("-", "").ToLowerInvariant();
+                    var oldHash = AICodedbStrictJson.GetRequiredString(marker, "removal_intent_sha256", "marker");
+                    File.WriteAllText(markerPath, original.Replace(oldHash, changedHash));
+                    Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                        Is.EqualTo(AICodedbManagerActionIndexState.Conflict), "recorded optional root disappeared");
+                }
+                finally
+                {
+                    File.WriteAllBytes(intentPath, intentBytes);
+                    File.WriteAllBytes(markerPath, markerBytes);
+                }
+                var redirectedTarget = workspace.GetPath("redirected-target");
+                Directory.CreateDirectory(redirectedTarget);
+                CreateDirectoryJunction(flatRoot, redirectedTarget);
+                try
+                {
+                    var refused = AICodedbManagerActionJournal.Read(context);
+                    Assert.That(refused.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                    Assert.That(refused.Detail, Does.Contain("redirect"));
+                }
+                finally { Directory.Delete(flatRoot); }
                 foreach (var hashName in new[] { "admission_sha256", "terminal_sha256", "removal_intent_sha256" })
                 {
                     var record = AICodedbStrictJson.ParseObject(original, "actual emitted marker");
@@ -1530,6 +1629,43 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(File.ReadAllBytes(terminalPath), Is.EqualTo(terminalBytes));
                 AICodedbManagerActionSession.ClearCompleted();
             }
+            });
+        }
+
+        private static string RunProductionOptionalFlatProof(string script, AICodedbTestWorkspace workspace)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script
+                    + "\" -RetainedOptionalFlatOnly -RetainedFixtureRoot \"" + workspace.Root + "\"",
+                WorkingDirectory = workspace.Root, UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = new UTF8Encoding(false), StandardErrorEncoding = new UTF8Encoding(false)
+            };
+            start.EnvironmentVariables["TEMP"] = workspace.Root;
+            start.EnvironmentVariables["TMP"] = workspace.Root;
+            using var process = System.Diagnostics.Process.Start(start);
+            Assert.That(process, Is.Not.Null);
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            Assert.That(process.WaitForExit(180000), Is.True, "Isolated retained producer timed out; no retry was made.");
+            Assert.That(Task.WaitAll(new Task[] { stdout, stderr }, 5000), Is.True, "Retained producer output drain timed out.");
+            File.WriteAllText(workspace.GetPath("producer.stdout.log"), stdout.Result, new UTF8Encoding(false));
+            File.WriteAllText(workspace.GetPath("producer.stderr.log"), stderr.Result, new UTF8Encoding(false));
+            Assert.That(process.ExitCode, Is.Zero, stderr.Result);
+            Assert.That(stdout.Result, Does.Contain("[PASS] FailedPreparationRecoveryOnly"));
+            foreach (var line in stdout.Result.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                if (line.StartsWith("[EMITTED_PROOF] ", StringComparison.Ordinal))
+                {
+                    var path = line.Substring("[EMITTED_PROOF] ".Length);
+                    Assert.That(Path.GetFullPath(path).StartsWith(Path.GetFullPath(workspace.Root)
+                        + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase), Is.True);
+                    Assert.That(File.Exists(path), Is.True);
+                    return path;
+                }
+            Assert.Fail("Actual production retained proof was not emitted.");
+            return null;
         }
 
         [Test]

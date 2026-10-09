@@ -426,10 +426,16 @@ namespace Rice.AI.Codedb.Editor
                     var relative = queue.Dequeue();
                     if (++count > 512) throw new InvalidOperationException("Failed candidate effect inventory exceeds bounds.");
                     var path = RetainedProjectPath(current, relative);
+                    // The producer omits only an absent optional flat bootstrap root.
+                    // Recorded paths were checked above; safe path/reparse checks must
+                    // still run before treating an unrecorded root as absent.
+                    if (relative == "AIWork/codedb" && !snapshot.Contains(relative)
+                        && !Directory.Exists(path) && !File.Exists(path))
+                        continue;
                     if (relative != "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
                         && !snapshot.Contains(relative)
                         && !((relative == "AIWork/codedb" || relative == "AIWork/codedb/wrapper") && Directory.Exists(path)))
-                        throw new InvalidOperationException("Failed candidate contains an unrecorded effect.");
+                        throw new InvalidOperationException("Failed candidate contains an unrecorded effect: " + relative + ".");
                     if (Directory.Exists(path))
                         foreach (var child in Directory.GetFileSystemEntries(path))
                             queue.Enqueue(relative + "/" + Path.GetFileName(child));

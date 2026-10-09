@@ -823,6 +823,12 @@ closure alone does not prove that a runtime consumer can read the record.
 
 ### Package Release Closure Gate
 
+For retained-effect consumer changes, include the pre-fresh-install topology
+when the optional bootstrap root is absent. A post-handoff emitted fixture may
+create the root and hide a producer/consumer disagreement. Use actual emitted
+records through the journal/session reader; retain adjacent missing recorded or
+mandatory path and unknown-present refusals. No broader filesystem matrix.
+
 For retained-recovery project-root consumer changes, distinguish immutable
 record/command byte authentication from platform path identity. The bounded
 consumer map includes the decoded receipt root and the recorded command argument
