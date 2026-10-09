@@ -660,8 +660,8 @@ function Invoke-InstanceManifestContractCases {
 }
 
 function Invoke-RetainedCandidateRecoveryCase {
-    param([string]$ProjectRoot,[string]$PackageRoot,$Manifest,$OldIntent)
-    $oldHash=Get-FileSha256 -Path $OldIntent.Path
+    param([string]$ProjectRoot,[string]$PackageRoot,$Manifest,$OldIntent,[switch]$BuildFixtureOnly)
+    $oldHash=if(-not $BuildFixtureOnly){Get-FileSha256 -Path $OldIntent.Path}else{''}
     foreach($file in $Manifest.Files) {
         if($file.Target.StartsWith($script:GenerationTargetPrefix,[StringComparison]::Ordinal)) {
             New-Item -ItemType Directory -Force -Path (Split-Path $file.TargetPath -Parent)|Out-Null
@@ -712,6 +712,11 @@ function Invoke-RetainedCandidateRecoveryCase {
     $terminal=[ordered]@{};foreach($key in $base.Keys){$terminal[$key]=$base[$key]};$terminal.state='terminal';$terminal.writer_pid=424242;$terminal.child_pid=424243;$terminal.command_identity_sha256=$identity;$terminal.terminal_for_action=$true;$terminal.exit_code=6;$terminal.timed_out=$false;$terminal.output_overflow=$false;$terminal.output_drain_incomplete=$true;$terminal.stdout='incomplete original INSTALL';$terminal.stderr='original failure';$terminal.elapsed_milliseconds=1;$terminal.completed_at_utc=[DateTime]::UtcNow.ToString('o')
     foreach($pair in @(@('admitted',$admission),@('claim',$claim),@('terminal',$terminal))){Write-PhaseCRecord -Path (Join-Path $receipts "$prefix.$($pair[0]).json") -Document $pair[1]}
     $terminalHash=Get-FileSha256 -Path (Join-Path $receipts "$prefix.terminal.json")
+    if($BuildFixtureOnly) {
+        # Narrow CLI harness reuses only this existing synthetic producer setup.
+        # Caller owns LOCALAPPDATA restoration; no recovery/backend call occurs.
+        return [pscustomobject]@{ActionId=$actionId;InstanceId=$id;LocalData=$localData;IndexRoot=$indexRoot;AdmissionPath=(Join-Path $receipts "$prefix.admitted.json");TerminalPath=(Join-Path $receipts "$prefix.terminal.json");TerminalHash=$terminalHash}
+    }
     function script:Get-CimInstance {param($ClassName,$ErrorAction);return [pscustomobject]@{ProcessId=424244;Name='powershell.exe';CommandLine='unrelated synthetic process'}}
     function script:Get-MaterializerProcessIdentity {param([int]$ProcessId);if($ProcessId -eq $PID){return [pscustomobject]@{Alive=$true;StartTicks='1'}};if($ProcessId -in @(424242,424243)){return [pscustomobject]@{Alive=$false;StartTicks=$null}};throw 'Process outside retained fixture.'}
     $global:RetainedCandidateActionId=$actionId;$global:TestFailRetainedCandidateDisposition=$true

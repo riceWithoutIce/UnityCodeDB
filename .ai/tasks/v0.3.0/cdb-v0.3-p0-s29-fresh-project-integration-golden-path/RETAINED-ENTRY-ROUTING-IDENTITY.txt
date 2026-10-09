@@ -1,0 +1,6 @@
+cba160409724648b9b5a740a9b88889c0c67d07e6a59436faa8382164fd4c792  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+82907dfa8a9408f4ba43b4e133cdec88850742951595810c3bd5f67fd61fed6a  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+fbddf748544569b611622bd80c8a4b64cec9dacbda98ec46d425e405489f3ce5  com.rice.ai-codedb/Tests~/test-codedb-retained-entry-routing.ps1
+c4558f82d56e4ec7e4da484dcd30029ea812e285e7a141ebcb4367907067caba  com.rice.ai-codedb/Payload~/payload-manifest.json
+ac35dd035c259c65064cc684101b51c3a435ca5cbb55f914d2e6b0d41d274089  com.rice.ai-codedb/Payload~/host-current.json
+c9114d7de03ea26520a07d32915c9e62a1a976028ec282051c9a1142a700f7ec  com.rice.ai-codedb/Payload~/Generations/poc.41/generation-manifest.json

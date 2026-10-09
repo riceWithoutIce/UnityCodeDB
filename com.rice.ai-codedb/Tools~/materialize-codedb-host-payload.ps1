@@ -11959,6 +11959,10 @@ try {
                 Write-MaterializerCommandResult -ExitCode 0
                 exit 0
             }
+            "UninstallPreflight" {
+                # Read-only retained recovery must reach the dedicated authority,
+                # original action and process validators below.
+            }
             "Install" {
                 Invoke-InstanceConvergence -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath -ActionName "Install"
                 Write-MaterializerCommandResult -ExitCode 0
