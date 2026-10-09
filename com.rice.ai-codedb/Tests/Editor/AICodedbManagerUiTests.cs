@@ -1578,7 +1578,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 }
                 var redirectedTarget = workspace.GetPath("redirected-target");
                 Directory.CreateDirectory(redirectedTarget);
-                CreateDirectoryJunction(flatRoot, redirectedTarget);
+                AICodedbHostPayloadMaterializerTests.CreateDirectoryJunction(flatRoot, redirectedTarget);
                 try
                 {
                     var refused = AICodedbManagerActionJournal.Read(context);
@@ -5429,7 +5429,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             return scriptPath;
         }
 
-        private static void CreateDirectoryJunction(string junctionPath, string targetPath)
+        internal static void CreateDirectoryJunction(string junctionPath, string targetPath)
         {
             var command = "New-Item -ItemType Junction -Path '"
                           + junctionPath.Replace("'", "''")
