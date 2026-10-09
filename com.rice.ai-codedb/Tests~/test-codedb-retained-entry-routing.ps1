@@ -1,11 +1,12 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param([switch]$DeclaredAdapterOutputs)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repositoryRoot = Split-Path $packageRoot -Parent
-$fixtureContainer = Join-Path $repositoryRoot ('.artifacts/tests/s29-entry/r-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+$family = if ($DeclaredAdapterOutputs) { 's29-adapter' } else { 's29-entry' }
+$fixtureContainer = Join-Path $repositoryRoot ('.artifacts/tests/' + $family + '/r-' + [guid]::NewGuid().ToString('N').Substring(0,8))
 $projectRoot = Join-Path $fixtureContainer 'p'
 $materializer = Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'
 $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
@@ -48,8 +49,9 @@ function Assert-Entry {
 }
 function Get-EntryDigest {
     param([string]$Root)
-    Get-TextSha256 -Text ((@(Get-ChildItem -LiteralPath $Root -Recurse -Force -File | Sort-Object FullName | ForEach-Object {
-        $_.FullName.Substring($Root.Length)+':'+(Get-FileSha256 -Path $_.FullName)
+    Get-TextSha256 -Text ((@(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+        if ($_.PSIsContainer) { 'D:'+ $_.FullName.Substring($Root.Length) }
+        else { 'F:'+ $_.FullName.Substring($Root.Length)+':'+(Get-FileSha256 -Path $_.FullName) }
     })) -join "`n")
 }
 function Invoke-EntryCli {
@@ -93,12 +95,44 @@ try {
     foreach($name in @('Assets','Packages','ProjectSettings')) {New-Item -ItemType Directory -Force -Path (Join-Path $projectRoot $name)|Out-Null}
     [IO.File]::WriteAllText((Join-Path $projectRoot 'Packages/manifest.json'),'{"dependencies":{}}',$utf8)
     [IO.File]::WriteAllText((Join-Path $projectRoot 'ProjectSettings/ProjectVersion.txt'),'m_EditorVersion: 2022.3.0f1',$utf8)
-    foreach($path in @('Payload~/AIWork/codedb/shared/codedb-strict-json.ps1','Payload~/AIWork/codedb/shared/codedb-instance-manifest-contract.ps1','Tools~/materialize-codedb-host-payload.ps1','Tools~/codedb-instance-engine.ps1')) {
+    foreach($path in @('Payload~/AIWork/codedb/shared/codedb-strict-json.ps1','Payload~/AIWork/codedb/shared/codedb-instance-manifest-contract.ps1','Payload~/AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1','Tools~/materialize-codedb-host-payload.ps1','Tools~/codedb-instance-engine.ps1')) {
         Import-EntryDefinitions (Join-Path $packageRoot $path)
     }
     Import-EntryDefinitions (Join-Path $PSScriptRoot 'test-codedb-host-payload-materializer.ps1') @('Write-PhaseCRecord','Invoke-RetainedCandidateRecoveryCase')
     $manifest=Read-PayloadManifest -Root (Join-Path $packageRoot 'Payload~') -ProjectRoot $projectRoot
     $fixture=Invoke-RetainedCandidateRecoveryCase -ProjectRoot $projectRoot -PackageRoot $packageRoot -Manifest $manifest -BuildFixtureOnly
+    if ($DeclaredAdapterOutputs) {
+        $instanceRoot=Join-Path $projectRoot ($script:InstancesRelativePath+'/'+$fixture.InstanceId)
+        $adapterContract=Get-CodedbTextAdapterOutputContract
+        # Execute each actual producer common script and context binding in its
+        # own scope. No path decoder or initializer is replaced by the fixture.
+        $flatCommon=Join-Path $packageRoot 'Payload~/AIWork/codedb/scripts/codedb-project-common.ps1'
+        $generationCommon=Join-Path $packageRoot ('Payload~/Generations/'+$manifest.GenerationId+'/scripts/codedb-project-common.ps1')
+        & {
+            param($Common,$Root,$Candidate)
+            . $Common
+            $context=Get-ProjectCodedbContext -UnityRoot $Root
+            $contract=Get-CodedbTextAdapterOutputContract
+            # Flat producer uses its legacy provider location. Only bind the
+            # candidate context here, then call the real initialization function.
+            $context.ProviderRoot=$Candidate
+            $context.TextAdapterRoot=Join-Path $Candidate $contract.RootRelativePath
+            $context.TextAdapterLogsRoot=Join-Path $Candidate $contract.LogsRelativePath
+            $context.TextAdapterTempRoot=Join-Path $Candidate $contract.TempRelativePath
+            New-ProjectCodedbTextAdapterRuntime -Context $context
+        } $flatCommon $projectRoot $instanceRoot
+        $priorInstance=[Environment]::GetEnvironmentVariable('RICE_CODEDB_INSTANCE_ROOT','Process')
+        try {
+            [Environment]::SetEnvironmentVariable('RICE_CODEDB_INSTANCE_ROOT',$instanceRoot,'Process')
+            & {
+                param($Common,$Root)
+                . $Common
+                $context=Get-ProjectCodedbContext -UnityRoot $Root
+                New-ProjectCodedbTextAdapterRuntime -Context $context
+            } $generationCommon $projectRoot
+        } finally { [Environment]::SetEnvironmentVariable('RICE_CODEDB_INSTANCE_ROOT',$priorInstance,'Process') }
+        Assert-Entry ((Test-Path (Join-Path $instanceRoot $adapterContract.LogsRelativePath) -PathType Container) -and (Test-Path (Join-Path $instanceRoot $adapterContract.TempRelativePath) -PathType Container)) 'actual-flat-and-generation-initializers-create-declared-trees'
+    }
     # Build authentic retained intent/desired-state fixtures with existing
     # producers. No backend recovery call is used to set up this test.
     $authority=Get-CurrentProjectRemovalAuthority -Manifest $manifest -ProjectRoot $projectRoot
@@ -134,6 +168,62 @@ exit $LASTEXITCODE
     Assert-Entry (@($runnerErrors).Count -eq 0) 'materialized-cli-runner-PS51-parse'
 
     Assert-EntryReadOnly -Label matching -ActionId $fixture.ActionId -Expected '[REMOVAL_PREFLIGHT] AVAILABLE' -ExitCode 0
+    $extraCli=0
+    if ($DeclaredAdapterOutputs) {
+        # Snapshot drift must refuse using the existing intent reader. Remove
+        # only fixture-owned new bytes before establishing the next snapshot.
+        $addedPaths=@()
+        foreach($tree in $adapterContract.RetainedOutputTrees) {
+            $nested=Join-Path $instanceRoot ($tree+'/nested')
+            New-Item -ItemType Directory -Path $nested | Out-Null
+            $added=Join-Path $nested 'opaque.dat'
+            [IO.File]::WriteAllText($added,'ordinary retained output '+$tree,$utf8)
+            $addedPaths += $added
+        }
+        Assert-EntryReadOnly -Label snapshot-drift -ActionId $fixture.ActionId -Expected 'retained effect snapshot changed'
+        $extraCli++
+        $authority.Effects=@(Get-FailedPreparationEffects -ProjectRoot $projectRoot -InstanceId $fixture.InstanceId -GenerationId $manifest.GenerationId -Manifest $manifest -Generation $authority.Evidence.Generation)
+        Write-PhaseCRecord $intentPath (New-FailedPreparationRemovalIntentDocument -ProjectRoot $projectRoot -StateId $stateId -Authority $authority)
+        Assert-EntryReadOnly -Label nonempty -ActionId $fixture.ActionId -Expected '[REMOVAL_PREFLIGHT] AVAILABLE' -ExitCode 0
+        $extraCli++
+        foreach($added in $addedPaths) {
+            $intent=(Read-BoundedJsonDocument -Path $intentPath -Label 'fixture retained outputs' -MaximumBytes 131072).Document
+            $rel=$added.Substring($projectRoot.Length+1).Replace('\','/')
+            $entry=@($intent.retained_effects | Where-Object {$_.relative_path -ceq $rel})
+            Assert-Entry ($entry.Count -eq 1 -and $entry[0].kind -ceq 'FILE' -and $entry[0].sha256 -ceq (Get-FileSha256 $added)) 'nonempty-output-hash-in-existing-v2-intent'
+        }
+        $logsRoot=Join-Path $instanceRoot $adapterContract.LogsRelativePath
+        $savedLogs=Join-Path $fixtureContainer 'saved-logs'
+        Move-Item -LiteralPath $logsRoot -Destination $savedLogs
+        try {
+            [IO.File]::WriteAllText($logsRoot,'declared tree root must be a directory',$utf8)
+            Assert-EntryReadOnly -Label file-at-tree-root -ActionId $fixture.ActionId -Expected ('unexpected mutable bytes outside declared output trees: '+$adapterContract.LogsRelativePath)
+            $extraCli++
+        } finally { [IO.File]::Delete($logsRoot); Move-Item -LiteralPath $savedLogs -Destination $logsRoot }
+        $outside=Join-Path $instanceRoot ($adapterContract.RootRelativePath+'/foreign')
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        try { Assert-EntryReadOnly -Label outside -ActionId $fixture.ActionId -Expected ($adapterContract.RootRelativePath+'/foreign'); $extraCli++ }
+        finally { [IO.Directory]::Delete($outside) }
+        # A redirected declared subtree remains refused before enumeration.
+        $redirectTarget=Join-Path $fixtureContainer 'redirect-target'
+        New-Item -ItemType Directory -Path $redirectTarget | Out-Null
+        $redirect=Join-Path $instanceRoot ($adapterContract.TempRelativePath+'/redirect')
+        New-Item -ItemType Junction -Path $redirect -Target $redirectTarget | Out-Null
+        try {
+            # Digest intentionally does not traverse redirect; it includes the
+            # junction and fixture target separately using fixed known paths.
+            $beforeIntent=Get-FileSha256 $intentPath; $beforeReceipts=Get-EntryDigest $fixture.LocalData
+            $redirectResult=Invoke-EntryCli -Label redirected -ActionName UninstallPreflight -ActionId $fixture.ActionId
+            Assert-Entry ($redirectResult.ExitCode -eq 4 -and $redirectResult.Text.Contains('redirect') -and $redirectResult.Text.Contains('reparse')) 'redirected-declared-output-refused-with-path'
+            Assert-Entry ((Get-FileSha256 $intentPath) -ceq $beforeIntent -and (Get-EntryDigest $fixture.LocalData) -ceq $beforeReceipts -and @(Get-ChildItem $redirectTarget -Force).Count -eq 0) 'redirect-refusal-preserves-intent-receipts-target'
+            $extraCli++
+        } finally { [IO.Directory]::Delete($redirect) }
+        foreach($name in @('manifest.json','files.jsonl','index.jsonl')) { [IO.File]::Delete((Join-Path $instanceRoot ($adapterContract.RootRelativePath+'/'+$name))) }
+        $authority.Effects=@(Get-FailedPreparationEffects -ProjectRoot $projectRoot -InstanceId $fixture.InstanceId -GenerationId $manifest.GenerationId -Manifest $manifest -Generation $authority.Evidence.Generation)
+        Write-PhaseCRecord $intentPath (New-FailedPreparationRemovalIntentDocument -ProjectRoot $projectRoot -StateId $stateId -Authority $authority)
+        Assert-EntryReadOnly -Label partial-no-manifest -ActionId $fixture.ActionId -Expected '[REMOVAL_PREFLIGHT] AVAILABLE' -ExitCode 0
+        $extraCli++
+    }
     Assert-EntryReadOnly -Label unknown -ActionId ([guid]::NewGuid().ToString('N')) -Expected 'not uniquely intent-bound'
     $admissionBytes=[IO.File]::ReadAllBytes($fixture.AdmissionPath)
     try {
@@ -168,8 +258,8 @@ exit $LASTEXITCODE
     $null=Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $projectRoot -StateId $stateId
     $null=Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $projectRoot
     Assert-Entry (-not (Test-Path (Join-Path $fixture.IndexRoot ('resolved-action-'+$fixture.ActionId+'.pending.json')))) 'production-readers-accept-emitted-links-no-pending-marker'
-    [IO.File]::WriteAllText((Join-Path $fixtureContainer 'summary.txt'),("PASS assertions=$script:assertions CLI=8 PS=$($PSVersionTable.PSVersion) fixture=$fixtureContainer"),$utf8)
-    Write-Host "[PASS] assertions=$script:assertions CLI=8 evidence=$fixtureContainer"
+    [IO.File]::WriteAllText((Join-Path $fixtureContainer 'summary.txt'),("PASS assertions=$script:assertions CLI=$(8+$extraCli) PS=$($PSVersionTable.PSVersion) fixture=$fixtureContainer"),$utf8)
+    Write-Host "[PASS] assertions=$script:assertions CLI=$(8+$extraCli) evidence=$fixtureContainer"
 } finally {
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA',$priorLocal,'Process')
 }

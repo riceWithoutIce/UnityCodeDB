@@ -152,6 +152,7 @@ foreach ($allowedTarget in @(
     "AIWork/codedb/native/win-x64/codedb-daemon-launch.exe",
     "AIWork/codedb/shared/codedb-daemon-launch.mjs",
     "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
+    "AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1",
     "AIWork/codedb/shared/codedb-strict-json.ps1",
     "AIWork/codedb/shared/codedb-instance-manifest-contract.ps1",
     "AIWork/codedb/shared/codedb-instance-manifest-contract.mjs",
@@ -201,6 +202,7 @@ foreach ($generationTarget in @(
     "scripts/validate-codedb-mcp-project-config.ps1",
     "scripts/verify-codedb-project.ps1",
     "shared/codedb-machine-provider-contract.ps1",
+    "shared/codedb-text-adapter-output-contract.ps1",
     "shared/codedb-strict-json.ps1",
     "shared/codedb-instance-manifest-contract.ps1",
     "shared/codedb-instance-manifest-contract.mjs",
@@ -905,6 +907,7 @@ function Get-PayloadContentIdentitySha256 {
 }
 
 . (Join-Path $PSScriptRoot '..\Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
+. (Join-Path $PSScriptRoot '..\Payload~\AIWork\codedb\shared\codedb-text-adapter-output-contract.ps1')
 
 function Get-RequiredJsonPropertyValue {
     param(

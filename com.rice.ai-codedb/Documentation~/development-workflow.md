@@ -823,6 +823,15 @@ closure alone does not prove that a runtime consumer can read the record.
 
 ### Package Release Closure Gate
 
+For a change to failed-candidate mutable-output retention, include the producer
+scope declaration, initialization consumer, recovery inventory consumer and
+existing snapshot reader in the same bounded ownership/evidence map. Record
+whether the operation preserves or deletes content; permission to inventory
+and preserve a declared tree is not physical-cleanup authority. Exercise the
+production declaration/initialization through the affected recovery entry with
+representative nonempty and partial outputs. Do not replace it with an empty
+handwritten topology or broaden the change into a generic ownership framework.
+
 Any task that exports, installs, or publishes a Package must prove the bytes
 that will be consumed, not only the source worktree. The release gate is a
 single ordered closure and is required before Unity, EditMode, external

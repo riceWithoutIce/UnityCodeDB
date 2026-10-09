@@ -2,6 +2,7 @@
 
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "..\shared\codedb-machine-provider-contract.ps1")
+. (Join-Path $PSScriptRoot "..\shared\codedb-text-adapter-output-contract.ps1")
 
 $script:CodedbMachineProviderCache = $null
 
@@ -75,6 +76,8 @@ function Get-ProjectCodedbContext {
     $codedbRoot = Join-Path $unityRoot "AIWork\codedb"
     $runtimeRoot = Join-Path $unityRoot "AIWork\.runtime\codedb"
     $providerRoot = Join-Path $runtimeRoot $providerName
+    $adapterOutput = Get-CodedbTextAdapterOutputContract
+    $adapterRoot = Join-Path $providerRoot $adapterOutput.RootRelativePath
 
     [pscustomobject]@{
         UnityRoot = $unityRoot
@@ -89,12 +92,12 @@ function Get-ProjectCodedbContext {
         ProviderIndexRoot = Join-Path $providerRoot "index"
         ProviderLogsRoot = Join-Path $providerRoot "logs"
         ProviderTempRoot = Join-Path $providerRoot "tmp"
-        TextAdapterRoot = Join-Path $providerRoot "adapter\text-index"
-        TextAdapterLogsRoot = Join-Path $providerRoot "adapter\text-index\logs"
-        TextAdapterTempRoot = Join-Path $providerRoot "adapter\text-index\tmp"
-        TextAdapterManifestPath = Join-Path $providerRoot "adapter\text-index\manifest.json"
-        TextAdapterFilesPath = Join-Path $providerRoot "adapter\text-index\files.jsonl"
-        TextAdapterIndexPath = Join-Path $providerRoot "adapter\text-index\index.jsonl"
+        TextAdapterRoot = $adapterRoot
+        TextAdapterLogsRoot = Join-Path $providerRoot $adapterOutput.LogsRelativePath
+        TextAdapterTempRoot = Join-Path $providerRoot $adapterOutput.TempRelativePath
+        TextAdapterManifestPath = Join-Path $adapterRoot 'manifest.json'
+        TextAdapterFilesPath = Join-Path $adapterRoot 'files.jsonl'
+        TextAdapterIndexPath = Join-Path $adapterRoot 'index.jsonl'
         WrapperScriptPath = Join-Path $codedbRoot "wrapper\codedb-project-wrapper.mjs"
         IgnoreTemplatePath = Join-Path $codedbRoot "codedbignore.example"
         RuntimeConfigTemplatePath = Join-Path $codedbRoot "codedb-mcp.runtime.example.toml"

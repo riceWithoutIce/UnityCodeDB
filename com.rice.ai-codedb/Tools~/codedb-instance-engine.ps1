@@ -1851,18 +1851,19 @@ function Get-FailedPreparationGeneratedFiles {
         }
         $allowed["config/$name"] = $true
     }
-    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/adapter/text-index/manifest.json" -Label 'failed candidate adapter'
+    $adapterRelative = (Get-CodedbTextAdapterOutputContract).RootRelativePath
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/$adapterRelative/manifest.json" -Label 'failed candidate adapter'
     if (Test-Path -LiteralPath $path) {
         Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed candidate adapter'
         $doc = (Read-BoundedJsonDocument -Path $path -Label 'failed candidate adapter' -MaximumBytes 131072).Document
         $slug = ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ([IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')))
         if ((Get-RequiredJsonInt32 -Object $doc -Name 'schemaVersion' -Label 'failed candidate adapter') -ne 1 -or
             (Get-RequiredJsonString -Object $doc -Name 'adapter' -Label 'failed candidate adapter') -cne 'shader-hlsl-text-index' -or
-            (Get-RequiredJsonString -Object $doc -Name 'output' -Label 'failed candidate adapter') -cne "$root/adapter/text-index" -or
+            (Get-RequiredJsonString -Object $doc -Name 'output' -Label 'failed candidate adapter') -cne "$root/$adapterRelative" -or
             (Get-RequiredJsonString -Object $doc -Name 'providerName' -Label 'failed candidate adapter') -cne "codedb-$slug-$($InstanceId.Substring(0, 8))") {
             throw 'Failed candidate adapter is not candidate-bound.'
         }
-        foreach ($name in @('manifest.json', 'files.jsonl', 'index.jsonl')) { $allowed["adapter/text-index/$name"] = $true }
+        foreach ($name in @('manifest.json', 'files.jsonl', 'index.jsonl')) { $allowed["$adapterRelative/$name"] = $true }
     }
     $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/index/manifest.json" -Label 'failed candidate index'
     if (Test-Path -LiteralPath $path) {
@@ -1923,10 +1924,10 @@ function Get-FailedPreparationEffects {
     while ($queue.Count -gt 0) {
         $relative = $queue.Dequeue()
         $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'failed preparation effect'
-        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed preparation effect'
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label "failed preparation effect $relative"
         if (-not (Test-Path -LiteralPath $path)) {
             if ($relative -ceq 'AIWork/codedb') { continue }
-            throw 'Failed preparation retained effect is missing.'
+            throw "Failed preparation retained effect is missing: $relative."
         }
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
         if ($entries.Count -ge 512) { throw 'Failed preparation effect inventory exceeds 512 entries.' }
@@ -1935,8 +1936,10 @@ function Get-FailedPreparationEffects {
             $hash = Get-FileSha256 -Path $path
             if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
                 $local = $relative.Substring($instanceRelative.Length + 1)
-                if (-not $generatedFiles.ContainsKey($local) -and $local -cnotmatch '^watch/lifecycle/editor-leases/[0-9a-f]{32}\.json$' -and $local -cnotmatch '^tmp/native-[0-9a-f]{32}\.(stdout|stderr)\.log$') {
-                    throw 'Failed preparation contains unexpected mutable bytes.'
+                if (-not $generatedFiles.ContainsKey($local) -and
+                    -not (Test-CodedbTextAdapterRetainedOutputPath -RelativePath $local -DescendantOnly) -and
+                    $local -cnotmatch '^watch/lifecycle/editor-leases/[0-9a-f]{32}\.json$' -and $local -cnotmatch '^tmp/native-[0-9a-f]{32}\.(stdout|stderr)\.log$') {
+                    throw "Failed preparation contains unexpected mutable bytes outside declared output trees: $local."
                 }
             } elseif ($relative.StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) -and $null -ne $Manifest) {
                 $owned = $Manifest.TargetMap.ContainsKey($relative) -and $hash -ceq [string]$Manifest.TargetMap[$relative].Sha256
@@ -1954,8 +1957,9 @@ function Get-FailedPreparationEffects {
             }
             if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
                 $local = $relative.Substring($instanceRelative.Length + 1)
-                if ($local -cnotin @($script:InstanceAllowedDirectories + @('adapter/text-index', 'watch/coordinator', 'watch/lifecycle', 'watch/lifecycle/editor-leases'))) {
-                    throw 'Failed preparation contains an unexpected mutable directory.'
+                if ($local -cnotin @($script:InstanceAllowedDirectories + @((Get-CodedbTextAdapterOutputContract).RootRelativePath, 'watch/coordinator', 'watch/lifecycle', 'watch/lifecycle/editor-leases')) -and
+                    -not (Test-CodedbTextAdapterRetainedOutputPath -RelativePath $local)) {
+                    throw "Failed preparation contains an unexpected mutable directory outside declared output trees: $local."
                 }
             }
             foreach ($child in @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)) {

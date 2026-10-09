@@ -9,9 +9,9 @@
                          },
     "owner_identity_version":  2,
     "package_version":  "0.3.0-preview.5",
-    "payload_version":  "poc.41",
-    "payload_sequence":  41,
-    "generation_id":  "poc.41",
+    "payload_version":  "poc.42",
+    "payload_sequence":  42,
+    "generation_id":  "poc.42",
     "bootstrap_protocol":  1,
     "bootstrap_transitions":  [
                                   {
@@ -552,7 +552,7 @@
                   {
                       "source":  "AIWork/codedb/scripts/codedb-project-common.ps1",
                       "target":  "AIWork/codedb/scripts/codedb-project-common.ps1",
-                      "sha256":  "c241fde4d4eb449603900dc763c094ba1cbc72d6d16c815d1342faed058d8a36"
+                      "sha256":  "98a3559db2b62944bb24a6fbbb2052f85a8b991b622e0e8b2d9cc004a24dc5b4"
                   },
                   {
                       "source":  "AIWork/codedb/scripts/emit-codedb-mcp-registration-draft.ps1",
@@ -650,154 +650,164 @@
                       "sha256":  "7f209316005ffd02bccd01c78ae1773d695694a77817d99f1753041b6aef4399"
                   },
                   {
-                      "source":  "Generations/poc.41/codedb-mcp.runtime.example.toml",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/codedb-mcp.runtime.example.toml",
+                      "source":  "Generations/poc.42/codedb-mcp.runtime.example.toml",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/codedb-mcp.runtime.example.toml",
                       "sha256":  "2e5a9a5a61a234dceb7b651d3d2d297fc68f418865b616cda35d8f99df5d183b"
                   },
                   {
-                      "source":  "Generations/poc.41/codedbignore.example",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/codedbignore.example",
+                      "source":  "Generations/poc.42/codedbignore.example",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/codedbignore.example",
                       "sha256":  "e5fcd177542bd42bea58549bc9726fff43975f8d950353e420663abf69770265"
                   },
                   {
-                      "source":  "Generations/poc.41/coordinator/codedb-watch-coordinator.mjs",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/coordinator/codedb-watch-coordinator.mjs",
+                      "source":  "Generations/poc.42/coordinator/codedb-watch-coordinator.mjs",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/coordinator/codedb-watch-coordinator.mjs",
                       "sha256":  "5a61242e336fac40ac5ce94729d71c676272f65510993481c80a0ee71651ed00"
                   },
                   {
-                      "source":  "Generations/poc.41/generation-manifest.json",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/generation-manifest.json",
-                      "sha256":  "c9114d7de03ea26520a07d32915c9e62a1a976028ec282051c9a1142a700f7ec"
+                      "source":  "Generations/poc.42/generation-manifest.json",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/generation-manifest.json",
+                      "sha256":  "2273266950bcd2867416821472285e217b64acdaae2fcf397712e8ab8defe026"
                   },
                   {
-                      "source":  "Generations/poc.41/native/win-x64/build-manifest.json",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/native/win-x64/build-manifest.json",
+                      "source":  "Generations/poc.42/native/win-x64/build-manifest.json",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/native/win-x64/build-manifest.json",
                       "sha256":  "bf3aea66660562dfa25ac0441ed5117efabdb80ddc0330281517cb93910588b5"
                   },
                   {
-                      "source":  "Generations/poc.41/native/win-x64/codedb-daemon-launch.exe",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/native/win-x64/codedb-daemon-launch.exe",
+                      "source":  "Generations/poc.42/native/win-x64/codedb-daemon-launch.exe",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/native/win-x64/codedb-daemon-launch.exe",
                       "sha256":  "6d1ec230841951f2c80e8b8a0ffd3a385a4abff394690cc69e367a102f3544a3"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/build-codedb-project-text-adapter.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/build-codedb-project-text-adapter.ps1",
+                      "source":  "Generations/poc.42/scripts/build-codedb-project-text-adapter.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/build-codedb-project-text-adapter.ps1",
                       "sha256":  "9baad71471cdef2999000fb8c487a9b253e6db85eaa5caba263acfda7c1afb15"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/check-codedb-project-freshness.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/check-codedb-project-freshness.ps1",
+                      "source":  "Generations/poc.42/scripts/check-codedb-project-freshness.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/check-codedb-project-freshness.ps1",
                       "sha256":  "9439f0dc19c7123a0eb77b046204f7007aa70dd0e739f176abe9166efb9f8319"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/clear-codedb-project-index.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/clear-codedb-project-index.ps1",
+                      "source":  "Generations/poc.42/scripts/clear-codedb-project-index.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/clear-codedb-project-index.ps1",
                       "sha256":  "7c9a5cb5053f9d915387adb0099818424b6e66d3cf81117700481ae615e18895"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/codedb-project-common.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/codedb-project-common.ps1",
-                      "sha256":  "996d52b9717fe7e07522c752f819e4d5ec8bd707bb200571799db3d5469649f8"
+                      "source":  "Generations/poc.42/scripts/codedb-project-common.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/codedb-project-common.ps1",
+                      "sha256":  "21208a16e7f65007200995f3fc81e6b8a8695199e72eaa6fa06d1b77ba71e311"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/emit-codedb-mcp-registration-draft.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/emit-codedb-mcp-registration-draft.ps1",
+                      "source":  "Generations/poc.42/scripts/emit-codedb-mcp-registration-draft.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/emit-codedb-mcp-registration-draft.ps1",
                       "sha256":  "f13c65249433a596c3427d93373f142ab8a83642f6e0565e7d5ec47271ba4198"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/manage-codedb-project-watch.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/manage-codedb-project-watch.ps1",
+                      "source":  "Generations/poc.42/scripts/manage-codedb-project-watch.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/manage-codedb-project-watch.ps1",
                       "sha256":  "2dd95cf67c0cf30a6c9e9333dcd739e49549ca3ba32e99a5ca95c0d8cc8c67eb"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/prepare-codedb-project-runtime.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/prepare-codedb-project-runtime.ps1",
+                      "source":  "Generations/poc.42/scripts/prepare-codedb-project-runtime.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/prepare-codedb-project-runtime.ps1",
                       "sha256":  "8d78f0a95bb02acfa17dce5a24b8115355e31d175749596712af0c3c5baecd4b"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/prepare-codedb-project-watch-config.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/prepare-codedb-project-watch-config.ps1",
+                      "source":  "Generations/poc.42/scripts/prepare-codedb-project-watch-config.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/prepare-codedb-project-watch-config.ps1",
                       "sha256":  "9c8842604f8c6f08c7ba7472b89200c65a722577956d4b4f05735937812202bf"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/probe-codedb-project-index.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/probe-codedb-project-index.ps1",
+                      "source":  "Generations/poc.42/scripts/probe-codedb-project-index.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/probe-codedb-project-index.ps1",
                       "sha256":  "fa11c21247a031cbbef0f0278663e218cf7c7aa4bdc00171279b880a1d8996ac"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/probe-codedb-project-text-adapter.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/probe-codedb-project-text-adapter.ps1",
+                      "source":  "Generations/poc.42/scripts/probe-codedb-project-text-adapter.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/probe-codedb-project-text-adapter.ps1",
                       "sha256":  "122a09545c19596f7ae0597d80273d32545400f0f1bd4c43cc2e08a7fb502b6e"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/refresh-codedb-project-if-stale.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/refresh-codedb-project-if-stale.ps1",
+                      "source":  "Generations/poc.42/scripts/refresh-codedb-project-if-stale.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/refresh-codedb-project-if-stale.ps1",
                       "sha256":  "59227ae1bb7bd0e9746941cf79ec410a04e9c70438394a718cbe38f963a2e466"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/refresh-codedb-project.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/refresh-codedb-project.ps1",
+                      "source":  "Generations/poc.42/scripts/refresh-codedb-project.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/refresh-codedb-project.ps1",
                       "sha256":  "867f60230873ed62a38a5afb514bbae17f4c5f9d6376fb1ce57beabea1fd7b84"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/run-codedb-project-text-adapter-worker.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/run-codedb-project-text-adapter-worker.ps1",
+                      "source":  "Generations/poc.42/scripts/run-codedb-project-text-adapter-worker.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/run-codedb-project-text-adapter-worker.ps1",
                       "sha256":  "e47fba2fa4704d96f9fb9ea7a081d224cb1c5335906743de52fcb76bc1c6b170"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/show-codedb-project-provider-guidance.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/show-codedb-project-provider-guidance.ps1",
+                      "source":  "Generations/poc.42/scripts/show-codedb-project-provider-guidance.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/show-codedb-project-provider-guidance.ps1",
                       "sha256":  "50635b8b02ea206f099e82b4ea95074b0401f33cd68d945650d70b96e9a956a5"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/validate-codedb-mcp-project-config.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/validate-codedb-mcp-project-config.ps1",
+                      "source":  "Generations/poc.42/scripts/validate-codedb-mcp-project-config.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/validate-codedb-mcp-project-config.ps1",
                       "sha256":  "d02322765472e183287d3b4545737d3877b31228ca5ecb8b69df85651d220fb8"
                   },
                   {
-                      "source":  "Generations/poc.41/scripts/verify-codedb-project.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/scripts/verify-codedb-project.ps1",
+                      "source":  "Generations/poc.42/scripts/verify-codedb-project.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/scripts/verify-codedb-project.ps1",
                       "sha256":  "58525fda55dc4209bd491e061669a055a3246f4707acc571cc56870f58975fe5"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-daemon-launch.mjs",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-daemon-launch.mjs",
+                      "source":  "Generations/poc.42/shared/codedb-daemon-launch.mjs",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-daemon-launch.mjs",
                       "sha256":  "9d606df32b90136944cfc446778c1e3d391a96efabfb735a8207fa592b6fe118"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-host-use-gate.mjs",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-host-use-gate.mjs",
+                      "source":  "Generations/poc.42/shared/codedb-host-use-gate.mjs",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-host-use-gate.mjs",
                       "sha256":  "384c56f7202e9d3e35085a5c89956d57d952535143d35f1b9e86a71cec942618"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-instance-manifest-contract.mjs",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-instance-manifest-contract.mjs",
+                      "source":  "Generations/poc.42/shared/codedb-instance-manifest-contract.mjs",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-instance-manifest-contract.mjs",
                       "sha256":  "de2366310169830738ceef4cba4d24e2b54da72f6a8a11ec8c564b4dc298d07f"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-instance-manifest-contract.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-instance-manifest-contract.ps1",
+                      "source":  "Generations/poc.42/shared/codedb-instance-manifest-contract.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-instance-manifest-contract.ps1",
                       "sha256":  "1475c473e5fba702841caf1d8973c6e9af0bd3330d5dabee46c8189adfa94eb2"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-machine-provider-contract.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-machine-provider-contract.ps1",
+                      "source":  "Generations/poc.42/shared/codedb-machine-provider-contract.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-machine-provider-contract.ps1",
                       "sha256":  "ebcaf8792a5f759ed9639c7250d1d411362ec4a90a32dcbf506020b10fd872be"
                   },
                   {
-                      "source":  "Generations/poc.41/shared/codedb-strict-json.ps1",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/shared/codedb-strict-json.ps1",
+                      "source":  "Generations/poc.42/shared/codedb-strict-json.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-strict-json.ps1",
                       "sha256":  "cf30671af81fdf06be2a45be2749e35667032324c40005e59ab516aa853e42a4"
                   },
                   {
-                      "source":  "Generations/poc.41/wrapper/codedb-project-instance-worker.mjs",
-                      "target":  "AIWork/.runtime/codedb/host/generations/poc.41/wrapper/codedb-project-instance-worker.mjs",
+                      "source":  "Generations/poc.42/wrapper/codedb-project-instance-worker.mjs",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/wrapper/codedb-project-instance-worker.mjs",
                       "sha256":  "5578c9baec9968402296351c86dbecd14691871488aa73539a99e98735a94ea1"
                   },
                   {
                       "source":  "host-current.json",
                       "target":  "AIWork/.runtime/codedb/host/current.json",
-                      "sha256":  "ac35dd035c259c65064cc684101b51c3a435ca5cbb55f914d2e6b0d41d274089"
+                      "sha256":  "3bd992ea2245d50fa927d39bddc6cd7f8e74420d696596b8436b2da928c1a870"
+                  },
+                  {
+                      "source":  "AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1",
+                      "target":  "AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1",
+                      "sha256":  "af7b59e570fb9382e59859bfe0922fe09131fc0060ae153d5ec41315b5da600e"
+                  },
+                  {
+                      "source":  "Generations/poc.42/shared/codedb-text-adapter-output-contract.ps1",
+                      "target":  "AIWork/.runtime/codedb/host/generations/poc.42/shared/codedb-text-adapter-output-contract.ps1",
+                      "sha256":  "af7b59e570fb9382e59859bfe0922fe09131fc0060ae153d5ec41315b5da600e"
                   }
               ]
 }
