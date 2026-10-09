@@ -1503,7 +1503,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     var text = File.ReadAllText(recordPath);
                     var record = AICodedbStrictJson.ParseObject(text, "actual emitted root fault");
                     record["project_root"] = refusedRoot;
-                    File.WriteAllText(recordPath, SerializeObject(record));
+                    File.WriteAllText(recordPath, AICodedbControlContractMigrationClassifierTests.SerializeObject(record));
                     Assert.That(File.ReadAllText(recordPath), Is.Not.EqualTo(text), "root fault must change bytes");
                     if (recordPath != markerPath)
                     {
