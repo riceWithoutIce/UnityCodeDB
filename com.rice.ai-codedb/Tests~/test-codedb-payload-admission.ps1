@@ -8,8 +8,22 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) { $PackageRoot = Join-Path $PSScriptRoot '..' }
 $package = [IO.Path]::GetFullPath($PackageRoot)
-$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-$testRoot = [IO.Path]::GetFullPath((Join-Path $repo '.artifacts/tests'))
+$evidenceBase = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+$testRoot = [IO.Path]::GetFullPath((Join-Path $evidenceBase '.artifacts/tests'))
+# Extracted Packages may live below a checkout. Resolve the Git top-level
+# independently so archive's relative pathspec is rooted at the real repository.
+try {
+    $gitRootOutput = @(& git -C $package rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $gitRootOutput.Count -ne 1 -or [string]::IsNullOrWhiteSpace($gitRootOutput[0])) {
+        throw 'Git did not return one repository root.'
+    }
+    $repo = [IO.Path]::GetFullPath($gitRootOutput[0])
+    if (-not (Test-Path -LiteralPath (Join-Path $repo 'com.rice.ai-codedb') -PathType Container)) {
+        throw 'The repository root does not contain com.rice.ai-codedb.'
+    }
+} catch {
+    throw "Cannot discover the fixture archive Git root from PackageRoot '$package': $($_.Exception.Message)"
+}
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $EvidenceRoot = Join-Path $testRoot ('pa41-admission-' + [Guid]::NewGuid().ToString('N'))
 }
@@ -24,6 +38,7 @@ function Assert-Test([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 function Save-Text([string]$Path, [string]$Text) { [IO.File]::WriteAllText($Path, $Text, $utf8) }
+Save-Text (Join-Path $evidence 'roots.txt') ("package_under_test=$package`nevidence_base=$evidenceBase`narchive_git_root=$repo")
 function Snapshot([string]$Root) {
     (@(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
         $relative = $_.FullName.Substring($Root.Length).Replace('\', '/')
@@ -115,9 +130,17 @@ $stageParent = Join-Path $evidence 'stage'
 Assert-Test ($LASTEXITCODE -eq 0) 'Fixture extraction failed.'
 $stage = Join-Path $stageParent 'com.rice.ai-codedb'
 $changedPaths = @('Tools~/materialize-codedb-host-payload.ps1', 'Tests~/test-codedb-package-release-closure.ps1', 'Tests~/export-codedb-package.ps1', 'Tests~/test-codedb-payload-admission.ps1')
+$overlayProof = @()
 foreach ($relative in $changedPaths) {
-    Copy-Item -LiteralPath (Join-Path $package $relative) -Destination (Join-Path $stage $relative)
+    $sourcePath = Join-Path $package $relative
+    $stagePath = Join-Path $stage $relative
+    Copy-Item -LiteralPath $sourcePath -Destination $stagePath
+    $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stageHash = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Test ($sourceHash -ceq $stageHash) ('Package-under-test overlay mismatch: ' + $relative)
+    $overlayProof += '{0} source={1} sha256={2} stage_sha256={3}' -f $relative, $sourcePath, $sourceHash, $stageHash
 }
+Save-Text (Join-Path $evidence 'package-under-test-overlays.txt') ($overlayProof -join "`n")
 $staged = Invoke-ExportGate 'source-snapshot-stage' $stage
 Assert-Test ($staged.ExitCode -eq 0 -and $staged.Out -match '\[PACKAGE_EXPORT_GATE\] PASS ' -and $staged.Out -match '\[PACKAGE_BYTE_CLOSURE\] PASS ') 'Staged export gate failed.'
 . (Join-Path $package 'Tests~/export-codedb-package.ps1') -Commit fixture -OutputRoot $evidence -LoadFunctionsOnly
