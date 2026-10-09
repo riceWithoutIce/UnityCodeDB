@@ -172,8 +172,26 @@ namespace Rice.AI.Codedb.Editor
             AICodedbEditorExecutionContext context,
             CancellationToken cancellationToken)
         {
+            var journal = AICodedbManagerActionJournal.Read(context);
+            if (journal.Index != null && journal.State != AICodedbManagerActionIndexState.Empty)
+                return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScript(
+                    context, ReadTimeoutMilliseconds, cancellationToken,
+                    "-Action", "UninstallPreflight", "-ProjectRoot", context.ProjectRoot,
+                    "-RetainedCandidateActionId", journal.Index.ActionId);
             return Run(context, AICodedbHostPayloadAction.UninstallPreflight,
                 false, cancellationToken);
+        }
+
+        internal static Task<AICodedbCommandResult> RunFailedCandidateUninstallRecoveryAsync(
+            AICodedbEditorExecutionContext context, string originalActionId)
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(originalActionId))
+                throw new ArgumentException("An original INSTALL action is required.", nameof(originalActionId));
+            // Administrative current-effects disposition; no original command
+            // replay, Manager writer stage, or claimed successful old terminal.
+            return AICodedbProcessRunner.RunResolvedPackageMaterializerPowerShellScriptAsync(
+                context, MutationTimeoutMilliseconds, "-Action", "Uninstall", "-ProjectRoot", context.ProjectRoot,
+                "-ConfirmedProjectMutation", "-RetainedCandidateActionId", originalActionId);
         }
 
         internal static bool HasAuthenticatedRemovalPreflight(AICodedbCommandResult result)

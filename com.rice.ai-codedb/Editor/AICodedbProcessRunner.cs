@@ -16,6 +16,7 @@ namespace Rice.AI.Codedb.Editor
     {
         CommandTerminal,
         PreEffectRefusal,
+        FailedCandidateEffectsRetained,
         Indeterminate
     }
 
@@ -32,6 +33,8 @@ namespace Rice.AI.Codedb.Editor
         internal bool HasAuthoritativeTerminalEvidence { get; }
         internal bool TerminalForManagerAction { get; }
         internal AICodedbManagerActionEvidenceKind ManagerActionEvidenceKind { get; }
+        internal bool FailedCandidateEffectsRetained =>
+            ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained;
         // Only the Supervisor Bridge may set this bit. It records a
         // read-only proof that the command is in the empty-runtime bootstrap
         // case; callers must never infer fallback permission from text output.

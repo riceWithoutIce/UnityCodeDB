@@ -1826,6 +1826,75 @@ function Get-InstanceDesiredState {
     }
 }
 
+function Get-FailedPreparationGeneratedFiles {
+    param([string]$ProjectRoot, [string]$InstanceId)
+    # Exact poc.40 generation writers and pinned Provider cache.rs declarations.
+    # Capture bytes are retained effects, never execution/readiness evidence.
+    $root = "$($script:InstancesRelativePath)/$InstanceId"
+    $allowed = @{'instance.json' = $true; 'watch/management.lock' = $true; 'watch/coordinator/coordinator.log' = $true}
+    foreach ($name in @('codedb-mcp.toml', 'codedb-mcp.watch.toml')) {
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/config/$name" -Label 'failed candidate config'
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed candidate config'
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.PSIsContainer -or $item.Length -gt 131072) { throw 'Failed candidate config is not bounded.' }
+        $section = ''; $storage = @(); $logs = @()
+        foreach ($line in [IO.File]::ReadAllLines($path)) {
+            if ($line -cmatch '^\s*\[([^\]]+)\]\s*(?:#.*)?$') { $section = $Matches[1] }
+            elseif ($section -ceq 'storage' -and $line -cmatch '^\s*dir\s*=\s*"([^"]+)"\s*(?:#.*)?$') { $storage += $Matches[1] }
+            elseif ($section -ceq 'logging' -and $line -cmatch '^\s*file\s*=\s*"([^"]+)"\s*(?:#.*)?$') { $logs += $Matches[1] }
+        }
+        if ($storage.Count -ne 1 -or $storage[0] -cne "$root/index") { throw 'Failed candidate config storage is not candidate-bound.' }
+        if ($name -ceq 'codedb-mcp.watch.toml') {
+            if ($logs.Count -ne 1 -or $logs[0] -cne "$root/logs/codedb-watch.log") { throw 'Failed candidate watch log is not candidate-bound.' }
+            $allowed['logs/codedb-watch.log'] = $true
+        }
+        $allowed["config/$name"] = $true
+    }
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/adapter/text-index/manifest.json" -Label 'failed candidate adapter'
+    if (Test-Path -LiteralPath $path) {
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed candidate adapter'
+        $doc = (Read-BoundedJsonDocument -Path $path -Label 'failed candidate adapter' -MaximumBytes 131072).Document
+        $slug = ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ([IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')))
+        if ((Get-RequiredJsonInt32 -Object $doc -Name 'schemaVersion' -Label 'failed candidate adapter') -ne 1 -or
+            (Get-RequiredJsonString -Object $doc -Name 'adapter' -Label 'failed candidate adapter') -cne 'shader-hlsl-text-index' -or
+            (Get-RequiredJsonString -Object $doc -Name 'output' -Label 'failed candidate adapter') -cne "$root/adapter/text-index" -or
+            (Get-RequiredJsonString -Object $doc -Name 'providerName' -Label 'failed candidate adapter') -cne "codedb-$slug-$($InstanceId.Substring(0, 8))") {
+            throw 'Failed candidate adapter is not candidate-bound.'
+        }
+        foreach ($name in @('manifest.json', 'files.jsonl', 'index.jsonl')) { $allowed["adapter/text-index/$name"] = $true }
+    }
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/index/manifest.json" -Label 'failed candidate index'
+    if (Test-Path -LiteralPath $path) {
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed candidate index'
+        $doc = (Read-BoundedJsonDocument -Path $path -Label 'failed candidate index' -MaximumBytes 131072).Document
+        $fields = [ordered]@{payload_file='index';outlines_file='outlines';outlines_index_file='outlines_index';fingerprints_file='fingerprints';deps_file='deps';bm25_postings_file='bm25'}
+        $generation = ''
+        foreach ($field in $fields.Keys) {
+            $name = Get-RequiredJsonString -Object $doc -Name $field -Label 'failed candidate index'
+            $suffix = if ($field -ceq 'bm25_postings_file') {'postings'} else {'bin'}
+            if ($name -cnotmatch ('^' + $fields[$field] + '\.([0-9]{1,20}\.[0-9]{1,10}\.[0-9]{1,20})\.' + $suffix + '$')) { throw 'Failed candidate index output is unowned.' }
+            $token = $Matches[1]
+            if ($generation -eq '') {$generation = $token}
+            if ($generation -cne $token) { throw 'Failed candidate index output generations conflict.' }
+            $allowed["index/$name"] = $true
+        }
+        $allowed['index/manifest.json'] = $true
+    }
+    $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$root/watch/lifecycle/desired-state.json" -Label 'failed candidate lifecycle'
+    if (Test-Path -LiteralPath $path) {
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'failed candidate lifecycle'
+        $doc = (Read-BoundedJsonDocument -Path $path -Label 'failed candidate lifecycle' -MaximumBytes 131072).Document
+        if ((Get-RequiredJsonInt32 -Object $doc -Name 'schema_version' -Label 'failed candidate lifecycle') -ne 1 -or
+            (Get-RequiredJsonString -Object $doc -Name 'managed_by' -Label 'failed candidate lifecycle') -cne $script:ManagedBy -or
+            (Get-RequiredJsonString -Object $doc -Name 'project_identity' -Label 'failed candidate lifecycle') -cne (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot) -or
+            -not [string]::Equals((Get-RequiredJsonString -Object $doc -Name 'project_root' -Label 'failed candidate lifecycle'), [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\','/'), [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-RequiredJsonString -Object $doc -Name 'desired_state' -Label 'failed candidate lifecycle') -cnotin @('enabled','disabled')) { throw 'Failed candidate lifecycle identity conflicts.' }
+        $allowed['watch/lifecycle/desired-state.json'] = $true
+    }
+    return $allowed
+}
+
 function Get-FailedPreparationEffects {
     param([string]$ProjectRoot, [string]$InstanceId, [string]$GenerationId, [AllowNull()]$Manifest, [AllowNull()]$Generation)
 
@@ -1848,6 +1917,7 @@ function Get-FailedPreparationEffects {
         }
     }
     $entries = @{}
+    $generatedFiles = Get-FailedPreparationGeneratedFiles -ProjectRoot $ProjectRoot -InstanceId $InstanceId
     $queue = New-Object 'System.Collections.Generic.Queue[string]'
     foreach ($root in $roots) { $queue.Enqueue($root) }
     while ($queue.Count -gt 0) {
@@ -1865,7 +1935,7 @@ function Get-FailedPreparationEffects {
             $hash = Get-FileSha256 -Path $path
             if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
                 $local = $relative.Substring($instanceRelative.Length + 1)
-                if ($local -cne 'instance.json' -and $local -cnotmatch '^watch/lifecycle/editor-leases/[0-9a-f]{32}\.json$') {
+                if (-not $generatedFiles.ContainsKey($local) -and $local -cnotmatch '^watch/lifecycle/editor-leases/[0-9a-f]{32}\.json$' -and $local -cnotmatch '^tmp/native-[0-9a-f]{32}\.(stdout|stderr)\.log$') {
                     throw 'Failed preparation contains unexpected mutable bytes.'
                 }
             } elseif ($relative.StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) -and $null -ne $Manifest) {
@@ -1884,7 +1954,7 @@ function Get-FailedPreparationEffects {
             }
             if ($relative.StartsWith($instanceRelative + '/', [StringComparison]::Ordinal)) {
                 $local = $relative.Substring($instanceRelative.Length + 1)
-                if ($local -cnotin @($script:InstanceAllowedDirectories + @('watch/lifecycle', 'watch/lifecycle/editor-leases'))) {
+                if ($local -cnotin @($script:InstanceAllowedDirectories + @('adapter/text-index', 'watch/coordinator', 'watch/lifecycle', 'watch/lifecycle/editor-leases'))) {
                     throw 'Failed preparation contains an unexpected mutable directory.'
                 }
             }
@@ -1997,7 +2067,7 @@ function Assert-FailedPreparationEffects {
 }
 
 function Get-FailedPreparationRemovalAuthority {
-    param($Manifest, [string]$ProjectRoot)
+    param($Manifest, [string]$ProjectRoot, [switch]$AllowNone)
     $controlRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceControlRelativePath -Label 'failed preparation control'
     if (Test-Path -LiteralPath $controlRoot) {
         foreach ($entry in @(Get-ChildItem -LiteralPath $controlRoot -Force)) {
@@ -2019,8 +2089,20 @@ function Get-FailedPreparationRemovalAuthority {
     }
     $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'failed preparation instances'
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'Failed preparation requires one exactly bound instance.' }
-    $instances = @(Get-ChildItem -LiteralPath $root -Force)
-    if ($instances.Count -ne 1 -or -not $instances[0].PSIsContainer -or $instances[0].Name -cnotmatch '^[0-9a-f]{32}$') { throw 'Failed preparation requires one exactly bound instance.' }
+    $bound = @{}; $generations = @{}
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        if ($bound.ContainsKey($intent.InstanceId)) { throw 'Failed preparation retained candidate binding is duplicated.' }
+        $bound[$intent.InstanceId] = $true
+        $generations[[string]$intent.Document.retained_generation_id] = $true
+    }
+    $instances = @()
+    foreach ($item in @(Get-ChildItem -LiteralPath $root -Force)) {
+        Assert-NoReparsePoint -Path $item.FullName -Root $ProjectRoot -Label 'failed preparation candidate'
+        if (-not $item.PSIsContainer -or $item.Name -cnotmatch '^[0-9a-f]{32}$') { throw 'Failed preparation contains an unknown instance entry.' }
+        if (-not $bound.ContainsKey($item.Name)) { $instances += $item }
+    }
+    if ($instances.Count -eq 0 -and $AllowNone) { return $null }
+    if ($instances.Count -ne 1) { throw 'Failed preparation requires one exactly bound instance.' }
     # Bound mutable traversal before the existing full manifest/generation reader.
     $instancePath = Join-Path $instances[0].FullName 'instance.json'
     Assert-NoReparsePoint -Path $instancePath -Root $ProjectRoot -Label 'failed preparation manifest'
@@ -2029,7 +2111,12 @@ function Get-FailedPreparationRemovalAuthority {
     if ($document.state -cne 'PROVISIONING' -or $document.verified_at_utc -cne '' -or
         $null -eq $document.PSObject.Properties['originating_action'] -or $document.originating_action.action -cne 'INSTALL') { throw 'Failed preparation requires an unverified original INSTALL manifest.' }
     $generationRoots = @(Get-ChildItem -LiteralPath (Join-Path $hostRoot 'generations') -Force -ErrorAction Stop)
-    if ($generationRoots.Count -ne 1 -or $generationRoots[0].Name -cne $document.generation_id -or -not $generationRoots[0].PSIsContainer) { throw 'Failed preparation host generation is ambiguous.' }
+    $generations[[string]$document.generation_id] = $true
+    if ($generationRoots.Count -ne $generations.Count) { throw 'Failed preparation host generation is ambiguous.' }
+    foreach ($generationRoot in $generationRoots) {
+        Assert-NoReparsePoint -Path $generationRoot.FullName -Root $ProjectRoot -Label 'failed preparation generation'
+        if (-not $generationRoot.PSIsContainer -or -not $generations.ContainsKey($generationRoot.Name)) { throw 'Failed preparation host generation is ambiguous.' }
+    }
     $null = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $instances[0].Name -GenerationId $document.generation_id)
     $evidence = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instances[0].FullName -AllowProvisioning -FailedPreparation
     $effects = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $evidence.InstanceId -GenerationId $document.generation_id -Manifest $Manifest -Generation $evidence.Generation)
@@ -5019,17 +5106,17 @@ function Invoke-InstanceConvergence {
 function Get-CurrentProjectRemovalAuthority {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [switch]$AllowNoNewCandidate
     )
 
     $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-    if ($desired.DesiredState -ne "INSTALLED") {
-        throw "Current project uninstall requires an installed desired state."
-    }
+    if ($desired.DesiredState -cnotin @('INSTALLED', 'UNINSTALLED')) { throw 'Current project uninstall desired state is invalid.' }
     $selected = Get-InstanceSelectedInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
     if ($null -eq $selected) {
-        return Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+        return Get-FailedPreparationRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNone:$AllowNoNewCandidate
     }
+    if ($desired.DesiredState -cne 'INSTALLED') { throw 'Uninstalled desired state conflicts with selected authority.' }
     $activation = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
     $selectedEvidence = if ($null -eq $activation) { $null } else {
         New-InstanceActivationSelectionEvidence -Instance $selected -Context $activation.Context
@@ -5070,17 +5157,41 @@ function Invoke-InstanceUninstall {
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $initialDesired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        $initialAuthority = if ($initialDesired.DesiredState -eq 'INSTALLED') { Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot } else { $null }
+        $initialAuthority = if ($initialDesired.DesiredState -eq 'INSTALLED' -or -not $AutomaticCleanup) { Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNoNewCandidate:($initialDesired.DesiredState -eq 'UNINSTALLED') } else { $null }
         $failedAuthority = if ($null -ne $initialAuthority -and $initialAuthority.Kind -ceq 'FAILED_PREPARATION') { $initialAuthority } else { $null }
         $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -FailedPreparationAuthority $failedAuthority
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED") {
-            Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED" -or -not $AutomaticCleanup) {
+            Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNoNewCandidate:($desiredBefore.DesiredState -eq 'UNINSTALLED')
         } else { $null }
         $previous = if ($null -eq $currentRemovalAuthority) { $null } else { $currentRemovalAuthority.Selection }
         $failedAuthority = if ($null -ne $currentRemovalAuthority -and $currentRemovalAuthority.Kind -ceq 'FAILED_PREPARATION') { $currentRemovalAuthority } else { $null }
         $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -FailedPreparationAuthority $failedAuthority
+        $recoveryActionVariable = Get-Variable -Name RetainedCandidateActionId -ErrorAction SilentlyContinue
+        $recoveryActionId = if ($null -eq $recoveryActionVariable) { '' } else { [string]$recoveryActionVariable.Value }
+        if (-not $AutomaticCleanup -and $null -ne $failedAuthority -and
+            (@(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot).Count -gt 0 -or $recoveryActionId -ne '')) {
+            if ($recoveryActionId -eq '') { throw 'Successive failed candidate retention requires explicit original INSTALL recovery confirmation.' }
+            $originalRecovery = Get-FailedCandidateActionEvidence -ProjectRoot $ProjectRoot -Candidate $failedAuthority.Evidence -ActionId $recoveryActionId
+            $null = Get-FailedCandidateProcessProof -Evidence $originalRecovery -ProjectRoot $ProjectRoot
+        }
+        # Explicit completion after intent commit publishes only the disposition.
+        # It does not repeat Install or mutate/replace an earlier intent.
+        if (-not $AutomaticCleanup -and $null -eq $failedAuthority -and $recoveryActionId -ne '') {
+            $matches = @()
+            foreach ($boundIntent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+                if ($boundIntent.Document.schema_version -ne 2) { continue }
+                $boundRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($boundIntent.InstanceId)" -Label 'retained candidate completion'
+                $boundCandidate = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $boundRoot -AllowProvisioning -FailedPreparation
+                if ($boundCandidate.Manifest.originating_action.action_id -ceq $recoveryActionId) { $matches += [pscustomobject]@{Intent=$boundIntent;Candidate=$boundCandidate} }
+            }
+            if ($matches.Count -ne 1) { throw 'Explicit failed candidate completion has no unique retained candidate.' }
+            Publish-FailedCandidateEffectsRetained -Manifest $Manifest -ProjectRoot $ProjectRoot -Candidate $matches[0].Candidate -ActionId $recoveryActionId -StateId $matches[0].Intent.Document.state_id
+            Set-MaterializerCommandPhase -Phase 'COMPLETE'
+            Set-MaterializerCommandOutcome -Outcome 'UNINSTALLED' -ReasonCode 'FAILED_CANDIDATE_EFFECTS_RETAINED' -CleanupState 'PENDING' -NextAction 'The original INSTALL remains failed/unknown. A separately confirmed fresh Install may create a distinct candidate.'
+            return
+        }
         if ($AutomaticCleanup -and
             ($desiredBefore.DesiredState -ne "UNINSTALLED" -or
              $desiredBefore.CleanupState -ne "PENDING" -or
@@ -5090,7 +5201,7 @@ function Invoke-InstanceUninstall {
             Set-MaterializerCommandOutcome -Outcome "SKIPPED" -ReasonCode "DESIRED_STATE_CHANGED" -CleanupState "COMPLETE" -NextAction "No action required."
             return
         }
-        if ($desiredBefore.DesiredState -eq "UNINSTALLED" -and $null -eq $previous) {
+        if ($desiredBefore.DesiredState -eq "UNINSTALLED" -and $null -eq $previous -and $null -eq $failedAuthority) {
             Invoke-TestUninstallAfterMcpHandshake
             $cleanupState = Get-InstanceUninstallCleanupState `
                 -ProjectRoot $ProjectRoot `
@@ -5171,6 +5282,13 @@ function Invoke-InstanceUninstall {
             }.GetNewClosure()
         } else { $null }
         Publish-InstanceOperation -ProjectRoot $ProjectRoot -ActionName "Uninstall" -CandidateInstanceId $operationId -Entries $entries.ToArray() -StageRoot $lock.Root -OperationRoot $operationRoot -VerifyBeforeMutation $verifyBeforeMutation -VerifyBeforeCommit $verification -VerifyEffectBoundary $effectBoundary -OperationId $operationId
+        if ($null -ne $failedAuthority -and $recoveryActionId -ne '') {
+                Publish-FailedCandidateEffectsRetained -Manifest $Manifest -ProjectRoot $ProjectRoot -Candidate $failedAuthority.Evidence -ActionId $recoveryActionId -StateId $stateId
+            # Retention is an inert current-effects disposition, not cleanup.
+            Set-MaterializerCommandPhase -Phase 'COMPLETE'
+            Set-MaterializerCommandOutcome -Outcome 'UNINSTALLED' -ReasonCode 'FAILED_CANDIDATE_EFFECTS_RETAINED' -CleanupState 'PENDING' -NextAction 'The failed candidate remains retained. Use separately confirmed Install to create a distinct candidate.'
+            return
+        }
         Invoke-TestUninstallAfterMcpHandshake
         $cleanupState = Get-InstanceUninstallCleanupState `
             -ProjectRoot $ProjectRoot `

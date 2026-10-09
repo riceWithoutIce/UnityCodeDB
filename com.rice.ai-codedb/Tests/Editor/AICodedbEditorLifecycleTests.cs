@@ -18,6 +18,35 @@ namespace Rice.AI.Codedb.Editor.Tests
     // legacy OS-temp SetUp/TearDown below.
     internal sealed class AICodedbS29ExecutionContextTests
     {
+        [Test]
+        public void RetainedCandidateUninstalledPresentationUsesWorkerPreflightWithoutDispatchOnCancelledWorker()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "retained candidate");
+                var status = new AICodedbProductStatus(AICodedbProductState.Uninstalled,
+                    AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable,
+                    "retained candidate", removalPreflightPassed: true);
+                var method = typeof(AICodedbEditorLifecycle).GetMethod("WithRemovalPreflight",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                Assert.That(method, Is.Not.Null);
+                var cancelled = new CancellationToken(true);
+                var projected = (AICodedbProductStatus)method.Invoke(null, new object[] {
+                    context, status, default(AICodedbCurrentInstanceStatus),
+                    new Func<bool>(() => throw new InvalidOperationException("Cancelled worker must not consult process work.")),
+                    cancelled, true });
+                Assert.That(projected.RemovalPreflightPassed, Is.True);
+                Assert.That(AICodedbManagerWindow.IsUninstallAvailable(projected, true), Is.True);
+                var blocked = new AICodedbProductStatus(AICodedbProductState.Uninstalled,
+                    AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable,
+                    "unknown candidate effects", removalPreflightPassed: false);
+                Assert.That(AICodedbManagerWindow.IsUninstallAvailable(blocked, true), Is.False);
+            });
+        }
+
         [UnityTest]
         public IEnumerator LifecycleExecutionContext_DetachesInheritedManagerStateAcrossAwait_Terminal()
         {

@@ -1406,6 +1406,61 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ManagerActionJournal_ActualPowerShellRetainedEffectsProofPreservesFailedOutcomeAndReleasesSession()
+        {
+            // This input is emitted by the actual confirmed Uninstall production
+            // functions in RetainedCandidateRecoveryOnly. No reader-only marker
+            // fixture or synthesized terminal can satisfy this test.
+            var proofPath = Environment.GetEnvironmentVariable("RICE_CODEDB_RETAINED_EFFECTS_PROOF");
+            if (string.IsNullOrEmpty(proofPath))
+                Assert.Ignore("Run RetainedCandidateRecoveryOnly and supply its emitted-record-context.json path.");
+            var proof = AICodedbStrictJson.ReadObject(proofPath, 16384, "PS emitted retained effects test context");
+            Func<string, string> field = name => AICodedbStrictJson.GetRequiredString(proof, name, "PS emitted context");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                field("project_root"), field("package_root"), "PS emitted retained candidate");
+            var managerRoot = Path.Combine(field("local_app_data"), "Rice/CodeDB/manager-actions");
+            using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(managerRoot);
+            var markerPath = field("marker_path");
+            var terminalPath = field("terminal_path");
+            var markerBytes = File.ReadAllBytes(markerPath);
+            var terminalBytes = File.ReadAllBytes(terminalPath);
+            AICodedbManagerActionSession.ClearCompleted();
+            var read = AICodedbManagerActionJournal.Read(context);
+            Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty), read.Detail);
+            Assert.That(read.HistoricalResult, Is.Not.Null, read.HistoricalWarning);
+            Assert.That(read.HistoricalResult.FailedCandidateEffectsRetained, Is.True);
+            Assert.That(read.HistoricalResult.HasAuthoritativeTerminalEvidence, Is.False);
+            Assert.That(read.HistoricalResult.ExitCode, Is.EqualTo(6));
+            Assert.That(read.HistoricalResult.OutputDrainIncomplete, Is.True);
+            Assert.That(read.HistoricalResult.StandardError, Is.EqualTo("original failure"));
+            AICodedbManagerActionSession.RestoreDurable(context, read, 1d);
+            var restored = AICodedbManagerActionSession.CurrentFor(context);
+            Assert.That(restored, Is.Not.Null);
+            Assert.That(restored.IsRecovering, Is.False);
+            Assert.That(restored.Result.FailedCandidateEffectsRetained, Is.True);
+            Assert.That(restored.Result.OutputDrainIncomplete, Is.True);
+            try
+            {
+                var original = File.ReadAllText(markerPath);
+                foreach (var hashName in new[] { "admission_sha256", "terminal_sha256", "removal_intent_sha256" })
+                {
+                    var marker = AICodedbStrictJson.ParseObject(original, "actual emitted marker");
+                    var hash = AICodedbStrictJson.GetRequiredString(marker, hashName, "actual emitted marker");
+                    File.WriteAllText(markerPath, original.Replace(hash, new string('0', 64)));
+                    var refused = AICodedbManagerActionJournal.Read(context);
+                    Assert.That(refused.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict), hashName);
+                    File.WriteAllBytes(markerPath, markerBytes);
+                }
+            }
+            finally
+            {
+                File.WriteAllBytes(markerPath, markerBytes);
+                Assert.That(File.ReadAllBytes(terminalPath), Is.EqualTo(terminalBytes));
+                AICodedbManagerActionSession.ClearCompleted();
+            }
+        }
+
+        [Test]
         public void ManagerActionJournal_HistoricalUnknownMarkerReleasesOnlyBoundPendingStage()
         {
             AICodedbTestWorkspace.Run(workspace =>

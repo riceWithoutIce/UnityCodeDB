@@ -1156,6 +1156,9 @@ namespace Rice.AI.Codedb.Editor
                 Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
                 Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
                 DeleteEditorLease();
+                var uninstalledStatus = WithRemovalPreflight(context,
+                    AICodedbProductStatusBuilder.Build(integrationStatus, null), currentInstance,
+                    canContinue, cancellationToken, true);
                 if (ShouldRunAutomaticUninstallCleanup(integrationStatus))
                 {
                     AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
@@ -1163,13 +1166,13 @@ namespace Rice.AI.Codedb.Editor
                     if (!canContinue())
                     {
                         RememberLifecycleProductStatus(
-                            AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                            uninstalledStatus);
                         return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
                     }
                     var cleanupResult = RememberHostStatusResult(
                         RunSupervisorCommand(context, "materialize", "Upgrade", cancellationToken));
                     RememberLifecycleProductStatus(
-                        AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                        uninstalledStatus);
                     return cleanupResult.Succeeded
                         ? LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled)
                         : LifecycleReconcileResult.WithWarning(
@@ -1180,7 +1183,7 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
                     AICodedbPostAdmissionDisposition.Uninstalled);
                 RememberLifecycleProductStatus(
-                    AICodedbProductStatusBuilder.Build(integrationStatus, null));
+                    uninstalledStatus);
                 return LifecycleReconcileResult.WithState(AICodedbProductState.Uninstalled);
             }
 

@@ -46,6 +46,8 @@ param(
 
     [switch]$FailedPreparationRecoveryOnly,
 
+    [switch]$RetainedCandidateRecoveryOnly,
+
     [switch]$FailedPreparationInterruptionOnly,
 
     [switch]$TransactionOnly
@@ -124,7 +126,9 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
     $familyClock = [Diagnostics.Stopwatch]::StartNew()
     $tag = [guid]::NewGuid().ToString('N')
-    $fixtureContainer = Join-Path ([IO.Path]::GetTempPath()) ('codedb-s28-integration-' + $tag)
+    $fixtureContainer = if ($RetainedCandidateRecoveryOnly) {
+        Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ('.artifacts/tests/rc41-retained-continuation-' + $tag)
+    } else { Join-Path ([IO.Path]::GetTempPath()) ('codedb-s28-integration-' + $tag) }
     $fixtureRoot = Join-Path $fixtureContainer 'installed'
     $integrationPackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $definitionBodies = @{}
@@ -283,7 +287,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
             $moduleParts.Add('param($fixtureContainer, $integrationPackageRoot, $definitionBodies)')
             foreach ($statementText in $definitionPreamble) { $moduleParts.Add($statementText) }
             foreach ($name in $definitionBodies.Keys) { $moduleParts.Add('function ' + $name + ' {' + $definitionBodies[$name] + '}') }
-            foreach ($name in @('Write-PhaseCRecord', 'Assert-PhaseC', 'Assert-PhaseCRejected', 'Invoke-PhaseCRecordFault', 'Copy-PhaseCCanonicalClosure', 'Write-PhaseCDesired', 'Invoke-FirstInstallAttributionCases', 'Invoke-FailedPreparationRecoveryCases')) {
+            foreach ($name in @('Write-PhaseCRecord', 'Assert-PhaseC', 'Assert-PhaseCRejected', 'Invoke-PhaseCRecordFault', 'Copy-PhaseCCanonicalClosure', 'Write-PhaseCDesired', 'Invoke-FirstInstallAttributionCases', 'Invoke-FailedPreparationRecoveryCases', 'Invoke-RetainedCandidateRecoveryCase')) {
                 $moduleParts.Add('function ' + $name + ' {' + (Get-Command $name).ScriptBlock.ToString() + '}')
             }
             $fixtureModule = New-Module -Name ('S29FirstInstall_' + $tag) -ScriptBlock ([scriptblock]::Create(($moduleParts -join "`n"))) -ArgumentList $fixtureContainer, $integrationPackageRoot, $definitionBodies
@@ -292,11 +296,11 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
                 $script:PhaseCCaseCount = 0
                 if ($FailedPreparationRecovery -or $FailedPreparationInterruption) {
                     if ($FailedPreparationRecovery) {
-                        foreach ($wrapperMode in @('CURRENT', 'ABSENT', 'OLD')) {
+                        foreach ($wrapperMode in $(if($global:RetainedCandidateRecoveryOnly){@('CURRENT')}else{@('CURRENT','ABSENT','OLD')})) {
                             Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode $wrapperMode
                         }
                     }
-                    Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode OLD -InterruptBeforeCommit
+                    if(-not $global:RetainedCandidateRecoveryOnly){Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode OLD -InterruptBeforeCommit}
                 } else {
                     Invoke-FirstInstallAttributionCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies
                 }
@@ -429,9 +433,15 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
         Write-Host ("[PASS] NextChangeAdmissionIntegrationOnly; cases=" + $script:PhaseCCaseCount + "; native_children=0; elapsed_ms=" + $familyClock.ElapsedMilliseconds + "; canonical generation=" + $manifest.GenerationId)
     } finally {
         $resolved = [IO.Path]::GetFullPath($fixtureContainer)
+        if($RetainedCandidateRecoveryOnly) {
+            $repositoryArtifactRoot=[IO.Path]::GetFullPath((Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.artifacts/tests')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar
+            if(-not $resolved.StartsWith($repositoryArtifactRoot,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -cne ('rc41-retained-continuation-'+$tag)){throw 'Retained fixture evidence root is not owned.'}
+            Write-Host "[RETAINED_FIXTURE_EVIDENCE] $resolved"
+        } else {
         $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
         if (-not $resolved.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -cne ('codedb-s28-integration-' + $tag)) { throw 'Integration fixture cleanup target is not the exact owned root.' }
         if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop }
+        }
     }
 }
 
@@ -649,6 +659,87 @@ function Invoke-InstanceManifestContractCases {
     Assert-PhaseC -Condition ($nodeCases.Count -eq 26) -Label 'exact-production-serializer-node-case-count'
 }
 
+function Invoke-RetainedCandidateRecoveryCase {
+    param([string]$ProjectRoot,[string]$PackageRoot,$Manifest,$OldIntent)
+    $oldHash=Get-FileSha256 -Path $OldIntent.Path
+    foreach($file in $Manifest.Files) {
+        if($file.Target.StartsWith($script:GenerationTargetPrefix,[StringComparison]::Ordinal)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $file.TargetPath -Parent)|Out-Null
+            Copy-Item -LiteralPath $file.SourcePath -Destination $file.TargetPath
+        }
+    }
+    $id=[guid]::NewGuid().ToString('N'); $actionId=[guid]::NewGuid().ToString('N'); $operationId=[guid]::NewGuid().ToString('N')
+    $relative="$($script:InstancesRelativePath)/$id"; $root=Join-Path $ProjectRoot $relative
+    foreach($directory in $script:InstanceAllowedDirectories) {New-Item -ItemType Directory -Force -Path (Join-Path $root $directory)|Out-Null}
+    $doc=New-InstanceManifestDocument -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceId $id -State PROVISIONING -CreatedAtUtc ([DateTime]::UtcNow.ToString('o')) -OriginatingAction ([ordered]@{action='INSTALL';action_id=$actionId;operation_id=$operationId})
+    $null=Write-InstanceManifest -InstanceRoot $root -Document $doc
+    $utf8=[Text.UTF8Encoding]::new($false)
+    # Use actual frozen runtime/adapter/lifecycle producers, never a fake decoder.
+    $commonPath=Join-Path $PackageRoot 'Payload~/Generations/poc.40/scripts/codedb-project-common.ps1'
+    $commonTokens=$null;$commonErrors=$null
+    $commonAst=[Management.Automation.Language.Parser]::ParseFile($commonPath,[ref]$commonTokens,[ref]$commonErrors)
+    if($commonErrors.Count){throw 'Producer common parse failed.'}
+    $slugDefinition=$commonAst.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'ConvertTo-CodedbProjectSlug'}
+    . ([scriptblock]::Create($slugDefinition.Extent.Text))
+    $providerName='codedb-'+(ConvertTo-CodedbProjectSlug -Value (Split-Path $ProjectRoot -Leaf))+'-'+$id.Substring(0,8)
+    $template=[IO.File]::ReadAllText((Join-Path $PackageRoot 'Payload~/Generations/poc.40/codedb-mcp.runtime.example.toml'))
+    [IO.File]::WriteAllText((Join-Path $root 'config/codedb-mcp.toml'),$template.Replace('__CODEDB_PROVIDER_SLUG__','instances/'+$id),$utf8)
+    $watchConfig="[storage]`ndir = `"$relative/index`"`n[logging]`nfile = `"$relative/logs/codedb-watch.log`"`n"
+    [IO.File]::WriteAllText((Join-Path $root 'config/codedb-mcp.watch.toml'),$watchConfig,$utf8)
+    $adapterRoot=Join-Path $root 'adapter/text-index';New-Item -ItemType Directory -Force -Path $adapterRoot|Out-Null
+    foreach($name in @('files.jsonl','index.jsonl')){[IO.File]::WriteAllText((Join-Path $adapterRoot $name),'',$utf8)}
+    Write-PhaseCRecord -Path (Join-Path $adapterRoot 'manifest.json') -Document ([ordered]@{schemaVersion=1;adapter='shader-hlsl-text-index';providerName=$providerName;output="$relative/adapter/text-index";files=@();fileCount=0;aggregateSha256=Get-FileSha256 -Path (Join-Path $adapterRoot 'files.jsonl')})
+    $index=[ordered]@{version=1;config_hash='0'*64;payload_file='index.1791454689784.51364.0.bin';outlines_file='outlines.1791454689784.51364.0.bin';outlines_index_file='outlines_index.1791454689784.51364.0.bin';fingerprints_file='fingerprints.1791454689784.51364.0.bin';deps_file='deps.1791454689784.51364.0.bin';bm25_postings_file='bm25.1791454689784.51364.0.postings'}
+    foreach($key in @('payload_file','outlines_file','outlines_index_file','fingerprints_file','deps_file')){[IO.File]::WriteAllText((Join-Path $root ('index/'+$index[$key])),'capture',$utf8)}
+    Write-PhaseCRecord -Path (Join-Path $root 'index/manifest.json') -Document $index
+    foreach($name in @('logs/codedb-watch.log','watch/management.lock','watch/coordinator/coordinator.log',('tmp/native-'+[guid]::NewGuid().ToString('N')+'.stdout.log'),('tmp/native-'+[guid]::NewGuid().ToString('N')+'.stderr.log'))){$path=Join-Path $root $name;New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent)|Out-Null;[IO.File]::WriteAllText($path,'capture',$utf8)}
+    Write-PhaseCRecord -Path (Join-Path $root 'watch/lifecycle/desired-state.json') -Document ([ordered]@{schema_version=1;managed_by=$script:ManagedBy;desired_state='enabled';project_root=$ProjectRoot;project_identity=Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot;updated_at_utc=[DateTime]::UtcNow.ToString('o');updated_by='valid-setup-default'})
+    $localData=Join-Path (Split-Path $ProjectRoot -Parent) 'manager-local';New-Item -ItemType Directory -Force -Path $localData|Out-Null
+    $priorLocal=[Environment]::GetEnvironmentVariable('LOCALAPPDATA','Process')
+    [Environment]::SetEnvironmentVariable('LOCALAPPDATA',$localData,'Process')
+    $projectKey=(Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot).Substring(7)
+    $packageKey=Get-TextSha256 -Text ($PackageRoot.Replace('\','/').TrimEnd('/').ToLowerInvariant())
+    $receipts=Join-Path $localData "Rice/CodeDB/manager-actions/$actionId";New-Item -ItemType Directory -Force -Path $receipts|Out-Null
+    $indexRoot=Join-Path $localData ('Rice/CodeDB/manager-actions/'+$projectKey.Substring(0,24));New-Item -ItemType Directory -Force -Path $indexRoot|Out-Null
+    $args=@('-Action','Install','-ProjectRoot',$ProjectRoot,'-ConfirmedProjectMutation','-OriginatingActionId',$actionId,'-OriginatingOperationId',$operationId)
+    $scriptPath=Join-Path $PackageRoot 'Tools~/materialize-codedb-host-payload.ps1';$scriptHash=Get-FileSha256 -Path $scriptPath
+    $argumentHash=Get-TextSha256 -Text ($args -join "`n");$identity=Get-TextSha256 -Text "$scriptHash`n$argumentHash`n600000"
+    $stage=Get-TextSha256 -Text "$actionId`nmaterialize-codedb-host-payload.ps1:$($argumentHash.Substring(0,16))`n$identity";$prefix=$stage.Substring(0,16)
+    $base=[ordered]@{schema_version=1;storage_layout='compact-v1';managed_by=$script:ManagedBy;action_id=$actionId;stage_id=$stage;project_key=$projectKey;package_key=$packageKey}
+    $admission=[ordered]@{};foreach($key in $base.Keys){$admission[$key]=$base[$key]}
+    $admission.state='admitted';$admission.project_root=$ProjectRoot;$admission.package_root=$PackageRoot;$admission.project_identity="sha256:$projectKey";$admission.package_identity="sha256:$packageKey";$admission.effect_class='ConfirmedProjectMutation';$admission.authorization_source='UserConfirmationAndBackendAdmission';$admission.terminal_for_action=$true;$admission.writer_sha256=Get-FileSha256 -Path (Join-Path $PackageRoot 'Tools~/invoke-codedb-manager-action.ps1');$admission.command_identity_sha256=$identity;$admission.command=[ordered]@{script_path=$scriptPath;script_sha256=$scriptHash;arguments=$args;arguments_sha256=$argumentHash;timeout_ms=600000}
+    $claim=[ordered]@{};foreach($key in $base.Keys){$claim[$key]=$base[$key]};$claim.state='claimed';$claim.writer_pid=424242;$claim.writer_start_utc_ticks='638000000000000000'
+    $terminal=[ordered]@{};foreach($key in $base.Keys){$terminal[$key]=$base[$key]};$terminal.state='terminal';$terminal.writer_pid=424242;$terminal.child_pid=424243;$terminal.command_identity_sha256=$identity;$terminal.terminal_for_action=$true;$terminal.exit_code=6;$terminal.timed_out=$false;$terminal.output_overflow=$false;$terminal.output_drain_incomplete=$true;$terminal.stdout='incomplete original INSTALL';$terminal.stderr='original failure';$terminal.elapsed_milliseconds=1;$terminal.completed_at_utc=[DateTime]::UtcNow.ToString('o')
+    foreach($pair in @(@('admitted',$admission),@('claim',$claim),@('terminal',$terminal))){Write-PhaseCRecord -Path (Join-Path $receipts "$prefix.$($pair[0]).json") -Document $pair[1]}
+    $terminalHash=Get-FileSha256 -Path (Join-Path $receipts "$prefix.terminal.json")
+    function script:Get-CimInstance {param($ClassName,$ErrorAction);return [pscustomobject]@{ProcessId=424244;Name='powershell.exe';CommandLine='unrelated synthetic process'}}
+    function script:Get-MaterializerProcessIdentity {param([int]$ProcessId);if($ProcessId -eq $PID){return [pscustomobject]@{Alive=$true;StartTicks='1'}};if($ProcessId -in @(424242,424243)){return [pscustomobject]@{Alive=$false;StartTicks=$null}};throw 'Process outside retained fixture.'}
+    $global:RetainedCandidateActionId=$actionId;$global:TestFailRetainedCandidateDisposition=$true
+    $markerPath=Join-Path $ProjectRoot $script:MarkerRelativePath
+    try {
+        Assert-PhaseCRejected -Body {Invoke-InstanceUninstall -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $markerPath} -Expected 'disposition interruption' -Label 'actual-intent-commit-before-disposition-interruption'
+        Assert-PhaseC -Condition (@(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot).Count -eq 2 -and (Get-FileSha256 -Path $OldIntent.Path) -ceq $oldHash) -Label 'two-retained-closures-preserve-old-intent'
+        $global:TestFailRetainedCandidateDisposition=$false
+        Invoke-InstanceUninstall -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $markerPath
+        $marker=Join-Path $indexRoot "resolved-action-$actionId.json"
+        Assert-PhaseC -Condition ((Test-Path $marker) -and -not (Test-Path (Join-Path $indexRoot "resolved-action-$actionId.pending.json")) -and (Get-FileSha256 -Path (Join-Path $receipts "$prefix.terminal.json")) -ceq $terminalHash) -Label 'explicit-disposition-completion-preserves-original-incomplete-failure'
+        $null=Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        Write-PhaseCRecord -Path (Join-Path (Split-Path $ProjectRoot -Parent) 'emitted-record-context.json') -Document ([ordered]@{project_root=$ProjectRoot;package_root=$PackageRoot;local_app_data=$localData;action_id=$actionId;marker_path=$marker;terminal_path=Join-Path $receipts "$prefix.terminal.json"})
+        $global:RetainedCandidateActionId=''
+        Invoke-InstanceConvergence -ActionName Install -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $markerPath
+        $fresh=Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
+        Assert-PhaseC -Condition ($fresh.InstanceId -cne $id -and $fresh.InstanceId -cne $OldIntent.InstanceId -and (Get-FileSha256 -Path $OldIntent.Path) -ceq $oldHash) -Label 'real-fresh-distinct-Install-handoff-preserves-both-closures'
+        # Reuse the existing exact installed-v1 production reader regression.
+        $v1id = [guid]::NewGuid().ToString('N')
+        $v1 = New-InstanceRemovalIntentDocument -ProjectRoot $ProjectRoot -StateId $v1id -AuthorityFingerprint ('1' * 64) -SelectionSha256 (Get-TextSha256 -Text $fresh.SelectionText) -ActivationSha256 '' -ActivationOperationSha256 '' -InstanceId $fresh.InstanceId -InstanceManifestSha256 $fresh.ManifestSha256 -GenerationId $Manifest.GenerationId -GenerationManifestSha256 $Manifest.TargetGenerationManifestSha256 -WrapperSha256 $Manifest.TargetMap['AIWork/codedb/wrapper/codedb-project-wrapper.mjs'].Sha256
+        $v1path = Join-Path $ProjectRoot ($script:InstanceRemovalIntentsRelativePath + '/' + $v1id + '.json')
+        Write-PhaseCRecord -Path $v1path -Document $v1
+        Assert-PhaseC -Condition ((Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $v1id).Document.schema_version -eq 1) -Label 'emitted-installed-v1-reader-compatible'
+        Remove-Item -LiteralPath $v1path
+        Write-Host "[EMITTED_PROOF] $(Join-Path (Split-Path $ProjectRoot -Parent) 'emitted-record-context.json')"
+    } finally { [Environment]::SetEnvironmentVariable('LOCALAPPDATA',$priorLocal,'Process');$global:RetainedCandidateActionId='';$global:TestFailRetainedCandidateDisposition=$false }
+}
+
 function Invoke-FailedPreparationRecoveryCases {
     param([string]$Container, [string]$PackageRoot, $Definitions,
         [ValidateSet('CURRENT', 'ABSENT', 'OLD')][string]$WrapperMode = 'CURRENT', [switch]$InterruptBeforeCommit)
@@ -802,6 +893,10 @@ function Invoke-FailedPreparationRecoveryCases {
     Assert-PhaseC -Condition ($intent.Document.retained_wrapper_sha256 -ceq $originalWrapperHash -and @($intent.Document.retained_effects | Where-Object { $_.relative_path -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' }).Count -eq 0) -Label ('actual-wrapper-observation-separated-' + $WrapperMode)
     Assert-PhaseC -Condition (@(Get-InstanceRemovalIntents -Manifest $manifest -ProjectRoot $root).Count -eq 1 -and (Test-Path -LiteralPath $leasePath)) -Label 'actual-intent-consumer-retains-lease-and-candidate'
     $intentBytes = [IO.File]::ReadAllBytes($intent.Path)
+    if($global:RetainedCandidateRecoveryOnly) {
+        Invoke-RetainedCandidateRecoveryCase -ProjectRoot $root -PackageRoot $PackageRoot -Manifest $manifest -OldIntent $intent
+        return
+    }
     Set-FailedRecordFault -Path $intent.Path -Change { param($d) $d.retained_effects[0].relative_path = '../outside' } -Read { Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $root -StateId $desired.StateId } -Expected 'path' -Label 'emitted-record-path-tamper'
     Set-FailedRecordFault -Path $intent.Path -Change { param($d) $d.retained_effects[0].sha256 = '0' * 64 } -Read { Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $root -StateId $desired.StateId } -Expected 'hash' -Label 'emitted-record-effect-tamper'
     # Leave a real COMMITTED finalization journal for the emitted removal intent;
@@ -878,8 +973,9 @@ function Invoke-FailedPreparationRecoveryCases {
     Remove-Item -LiteralPath $v1path
 }
 
-if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly) {
-    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:$FailedPreparationRecoveryOnly -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
+if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly) {
+    $global:RetainedCandidateRecoveryOnly=[bool]$RetainedCandidateRecoveryOnly
+    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:($FailedPreparationRecoveryOnly -or $RetainedCandidateRecoveryOnly) -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
     return
 }
 

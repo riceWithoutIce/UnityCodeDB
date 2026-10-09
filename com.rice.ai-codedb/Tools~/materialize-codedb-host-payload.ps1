@@ -27,6 +27,11 @@ param(
     [string]$HistoricalActionId,
 
     [ValidatePattern('^[0-9a-f]{32}$')]
+    [string]$RetainedCandidateActionId,
+
+    [switch]$TestFailRetainedCandidateDisposition,
+
+    [ValidatePattern('^[0-9a-f]{32}$')]
     [string]$OriginatingActionId,
 
     [ValidatePattern('^[0-9a-f]{32}$')]
@@ -10957,6 +10962,183 @@ function Assert-RemoveIntegrationTerminalState {
     }
 }
 
+function Get-FailedCandidateActionEvidence {
+    param([string]$ProjectRoot, $Candidate, [string]$ActionId)
+    if ($ActionId -cnotmatch '^[0-9a-f]{32}$' -or $Candidate.Manifest.originating_action.action -cne 'INSTALL' -or
+        $Candidate.Manifest.originating_action.action_id -cne $ActionId) { throw 'Failed candidate recovery does not match the original INSTALL action.' }
+    $localData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $override = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+    if (-not [string]::IsNullOrWhiteSpace($override)) {$localData=$override}
+    $managerRoot = [IO.Path]::GetFullPath((Join-Path $localData 'Rice/CodeDB/manager-actions'))
+    $projectKey = (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot).Substring(7)
+    $indexDirectory = Join-Path $managerRoot $projectKey.Substring(0,24)
+    $actionRoot = Join-Path $managerRoot $ActionId
+    Assert-NoReparsePoint -Path $actionRoot -Root $managerRoot -Label 'failed candidate original receipts'
+    # Compact receipts use a full64 stage identity and a16hex filename prefix.
+    # Legacy receipts retain their separate64hex directory layout.
+    $layout = 'compact-v1'; $admissions = @()
+    if (Test-Path -LiteralPath $actionRoot -PathType Container) {
+        $admissions = @(Get-ChildItem -LiteralPath $actionRoot -Force | Where-Object {$_.Name -cmatch '^[0-9a-f]{16}\.admitted\.json$' -and -not $_.PSIsContainer})
+    } else {
+        $layout = ''; $legacyActions = @()
+        foreach ($directory in @(Get-ChildItem -LiteralPath $indexDirectory -Directory -Force)) {
+            if ($directory.Name -cnotmatch '^[0-9a-f]{24}$') { throw 'Failed candidate receipt Package namespace is invalid.' }
+            $possible = Join-Path $directory.FullName $ActionId
+            Assert-NoReparsePoint -Path $possible -Root $managerRoot -Label 'failed candidate legacy receipts'
+            if (Test-Path -LiteralPath $possible -PathType Container) {$legacyActions += $possible}
+        }
+        if ($legacyActions.Count -ne 1) { throw 'Failed candidate original receipt layout is missing or ambiguous.' }
+        $actionRoot = $legacyActions[0]
+        foreach ($directory in @(Get-ChildItem -LiteralPath $actionRoot -Directory -Force)) {
+            if ($directory.Name -cnotmatch '^[0-9a-f]{64}$') { throw 'Failed candidate legacy stage is invalid.' }
+            $admissions += Get-Item -LiteralPath (Join-Path $directory.FullName 'admitted.json') -Force
+        }
+    }
+    if ($admissions.Count -ne 1) { throw 'Failed candidate recovery requires one exactly attributed INSTALL stage.' }
+    $admissionPath=$admissions[0].FullName
+    $admission=(Read-BoundedJsonDocument -Path $admissionPath -Label 'failed candidate admission' -MaximumBytes 262144).Document
+    $stageId=Get-RequiredJsonString -Object $admission -Name 'stage_id' -Label 'failed candidate admission'
+    if ($stageId -cnotmatch '^[0-9a-f]{64}$') {throw 'Failed candidate stage identity is invalid.'}
+    $stageRoot=Split-Path $admissionPath -Parent
+    $prefix=if($layout -ceq 'compact-v1') {$stageId.Substring(0,16)+'.'} else {''}
+    if ($admissions[0].Name -cne ($prefix+'admitted.json') -or ($layout -eq '' -and (Split-Path $stageRoot -Leaf) -cne $stageId)) {throw 'Failed candidate stage layout conflicts.'}
+    $claimPath=Join-Path $stageRoot ($prefix+'claim.json'); $terminalPath=Join-Path $stageRoot ($prefix+'terminal.json')
+    foreach ($path in @($admissionPath,$claimPath,$terminalPath)) {Assert-NoReparsePoint -Path $path -Root $managerRoot -Label 'failed candidate receipt'}
+    $claim=(Read-BoundedJsonDocument -Path $claimPath -Label 'failed candidate claim' -MaximumBytes 65536).Document
+    $terminal=(Read-BoundedJsonDocument -Path $terminalPath -Label 'failed candidate terminal' -MaximumBytes 262144).Document
+    $packageRoot=[IO.Path]::GetFullPath((Get-RequiredJsonString -Object $admission -Name 'package_root' -Label 'failed candidate admission'))
+    $packageKey=Get-TextSha256 -Text ($packageRoot.Replace('\','/').TrimEnd('/').ToLowerInvariant())
+    foreach ($entry in @(@($admission,'admitted'),@($claim,'claimed'),@($terminal,'terminal'))) {
+        $doc=$entry[0]
+        if ((Get-RequiredJsonInt32 -Object $doc -Name 'schema_version' -Label 'failed candidate receipt') -ne 1 -or
+            $doc.managed_by -cne $script:ManagedBy -or $doc.state -cne $entry[1] -or $doc.action_id -cne $ActionId -or
+            $doc.stage_id -cne $stageId -or $doc.project_key -cne $projectKey -or $doc.package_key -cne $packageKey -or
+            ($layout -ceq 'compact-v1' -and $doc.storage_layout -cne $layout)) {throw 'Failed candidate original receipts disagree.'}
+    }
+    if ($admission.project_identity -cne "sha256:$projectKey" -or $admission.package_identity -cne "sha256:$packageKey" -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string]$admission.project_root),[IO.Path]::GetFullPath($ProjectRoot),[StringComparison]::OrdinalIgnoreCase) -or
+        $admission.effect_class -cne 'ConfirmedProjectMutation' -or $admission.authorization_source -cne 'UserConfirmationAndBackendAdmission' -or
+        -not (Get-RequiredJsonBoolean -Object $admission -Name 'terminal_for_action' -Label 'failed candidate admission')) {throw 'Failed candidate admission context conflicts.'}
+    $command=$admission.command; $arguments=Get-RequiredJsonArray -Object $command -Name 'arguments' -Label 'failed candidate command'
+    $expectedScript=[IO.Path]::GetFullPath((Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'))
+    $writerPath=Join-Path $packageRoot 'Tools~/invoke-codedb-manager-action.ps1'
+    foreach($path in @($expectedScript,$writerPath)) {Assert-NoReparsePoint -Path $path -Root $packageRoot -Label 'failed candidate original Package'}
+    if (-not [string]::Equals([IO.Path]::GetFullPath([string]$command.script_path),$expectedScript,[StringComparison]::OrdinalIgnoreCase) -or
+        (Get-FileSha256 -Path $expectedScript) -cne $command.script_sha256 -or (Get-FileSha256 -Path $writerPath) -cne $admission.writer_sha256) {throw 'Failed candidate original Package bytes changed.'}
+    $expected=@{'-Action'='Install';'-ProjectRoot'=$ProjectRoot;'-OriginatingActionId'=$ActionId;'-OriginatingOperationId'=[string]$Candidate.Manifest.originating_action.operation_id}
+    $seen=@{}
+    for($i=0;$i -lt $arguments.Count;$i++) {
+        $key=[string]$arguments[$i]
+        if($key -ceq '-ConfirmedProjectMutation') {if($seen.ContainsKey($key)){throw 'Duplicate failed candidate confirmation'};$seen[$key]=$true;continue}
+        if($key -cnotin @('-Action','-ProjectRoot','-OriginatingActionId','-OriginatingOperationId','-EditorSessionId','-EditorProcessId','-EditorProcessStartTicks') -or $seen.ContainsKey($key) -or $i+1 -ge $arguments.Count) {throw 'Failed candidate command arguments are not the original INSTALL contract.'}
+        $seen[$key]=$true; $i++
+        if($expected.ContainsKey($key) -and -not [string]::Equals([string]$arguments[$i],[string]$expected[$key],$(if($key -ceq '-ProjectRoot'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))) {throw 'Failed candidate original INSTALL linkage conflicts.'}
+    }
+    foreach($key in @($expected.Keys)+@('-ConfirmedProjectMutation')) {if(-not $seen.ContainsKey($key)){throw 'Failed candidate original INSTALL linkage is missing.'}}
+    $argumentsHash=Get-TextSha256 -Text (($arguments | ForEach-Object {[string]$_}) -join "`n")
+    $timeout=Get-RequiredJsonInt32 -Object $command -Name 'timeout_ms' -Label 'failed candidate command'
+    $identity=Get-TextSha256 -Text "$($command.script_sha256)`n$argumentsHash`n$timeout"
+    if($timeout -le 0 -or $timeout -gt 1800000 -or $command.arguments_sha256 -cne $argumentsHash -or $admission.command_identity_sha256 -cne $identity -or $terminal.command_identity_sha256 -cne $identity -or
+        $terminal.writer_pid -ne $claim.writer_pid -or $terminal.exit_code -eq 0 -or -not (Get-RequiredJsonBoolean -Object $terminal -Name 'terminal_for_action' -Label 'failed candidate terminal')) {throw 'Failed candidate command/terminal identity conflicts.'}
+    return [pscustomobject]@{ActionId=$ActionId;StageId=$stageId;StorageLayout=$layout;ProjectKey=$projectKey;PackageKey=$packageKey;PackageRoot=$packageRoot;IndexDirectory=$indexDirectory;AdmissionSha256=Get-FileSha256 -Path $admissionPath;ClaimSha256=Get-FileSha256 -Path $claimPath;TerminalSha256=Get-FileSha256 -Path $terminalPath;CommandIdentity=$identity;WriterPid=[int]$claim.writer_pid;WriterTicks=[string]$claim.writer_start_utc_ticks;ChildPid=[int]$terminal.child_pid;Candidate=$Candidate}
+}
+
+function Get-RetainedCandidateForAction {
+    param($Manifest,[string]$ProjectRoot,[string]$ActionId)
+    $matches=@()
+    foreach($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        if($intent.Document.schema_version -ne 2){continue}
+        $root=Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($intent.InstanceId)" -Label 'failed candidate explicit completion'
+        $candidate=Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $root -AllowProvisioning -FailedPreparation
+        if($candidate.Manifest.originating_action.action_id -ceq $ActionId){$matches+=$candidate}
+    }
+    if($matches.Count -ne 1){throw 'Failed candidate explicit completion is not uniquely intent-bound.'}
+    return $matches[0]
+}
+
+function Get-FailedCandidateProcessProof {
+    param($Evidence,[string]$ProjectRoot)
+    if($Evidence.WriterPid -le 0 -or $Evidence.ChildPid -le 0 -or $Evidence.WriterTicks -cnotmatch '^[0-9]{15,20}$') {throw 'Failed candidate process attribution is invalid.'}
+    $writer=Get-MaterializerProcessIdentity -ProcessId $Evidence.WriterPid
+    if($writer.Alive -and ($null -eq $writer.StartTicks -or [string]$writer.StartTicks -ceq $Evidence.WriterTicks)) {throw 'Failed candidate original writer is live or ambiguous.'}
+    if((Get-MaterializerProcessIdentity -ProcessId $Evidence.ChildPid).Alive) {throw 'Failed candidate original child is live or ambiguous.'}
+    $rows=@()
+    foreach($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {$_.Name -in @('powershell.exe','pwsh.exe','node.exe','codebase-mcp.exe')})) {
+        if([int]$process.ProcessId -eq $PID){continue}
+        $line=[string]$process.CommandLine
+        if([string]::IsNullOrWhiteSpace($line)){throw 'Failed candidate relevant process command is unobservable.'}
+        if($line.Replace('\','/').IndexOf($ProjectRoot.Replace('\','/'),[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $line.IndexOf($Evidence.Candidate.InstanceId,[StringComparison]::OrdinalIgnoreCase) -ge 0){throw 'Failed candidate possible business descendant remains live.'}
+        $rows+="$($process.ProcessId)|$($process.Name)|$line"
+    }
+    if(-not (Get-InstanceRetirementHolderEvidence -Evidence $Evidence.Candidate -ProjectRoot $ProjectRoot).Clear){throw 'Failed candidate holder is live or ambiguous.'}
+    $processText = ($rows | Sort-Object) -join "`n"
+    if ($processText.Length -eq 0) { return 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }
+    return Get-TextSha256 -Text $processText
+}
+
+function Publish-FailedCandidateEffectsRetained {
+    param($Manifest,[string]$ProjectRoot,$Candidate,[string]$ActionId,[string]$StateId)
+    $first=Get-FailedCandidateActionEvidence -ProjectRoot $ProjectRoot -Candidate $Candidate -ActionId $ActionId
+    $processFirst=Get-FailedCandidateProcessProof -Evidence $first -ProjectRoot $ProjectRoot
+    Assert-NoReparsePoint -Path $first.IndexDirectory -Root (Split-Path $first.IndexDirectory -Parent) -Label 'failed candidate index'
+    $indexLock=$null
+    try {
+        $lockPath=Join-Path $first.IndexDirectory 'index.lock'
+        Assert-NoReparsePoint -Path $lockPath -Root $first.IndexDirectory -Label 'failed candidate index lock'
+        $indexLock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $intent=Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $StateId
+        $desired=Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        if($null -eq $intent -or $intent.Document.schema_version -ne 2 -or $intent.InstanceId -cne $Candidate.InstanceId -or $desired.DesiredState -cne 'UNINSTALLED' -or $desired.StateId -cne $StateId){throw 'Failed candidate disposition requires committed current removal authority.'}
+        $null=Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        foreach($relative in @($script:InstanceCurrentRelativePath,$script:InstanceLastKnownGoodRelativePath,$script:CurrentPointerRelativePath,$script:LastKnownGoodPointerRelativePath,"$($script:InstanceControlRelativePath)/contracts","$($script:InstanceControlRelativePath)/supervisor")) {
+            if(Test-Path -LiteralPath (Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'failed candidate current authority')){throw 'Failed candidate disposition conflicts with active authority.'}
+        }
+        $second=Get-FailedCandidateActionEvidence -ProjectRoot $ProjectRoot -Candidate $Candidate -ActionId $ActionId
+        if($second.AdmissionSha256 -cne $first.AdmissionSha256 -or $second.ClaimSha256 -cne $first.ClaimSha256 -or $second.TerminalSha256 -cne $first.TerminalSha256){throw 'Failed candidate original receipt changed during disposition.'}
+        $processSecond=Get-FailedCandidateProcessProof -Evidence $second -ProjectRoot $ProjectRoot
+        $intentRelative="$($script:InstanceRemovalIntentsRelativePath)/$StateId.json"
+        $intentHash=Get-FileSha256 -Path (Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $intentRelative -Label 'failed candidate intent')
+        $desiredHash=Get-FileSha256 -Path (Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceDesiredStateRelativePath -Label 'failed candidate desired')
+        $marker=[ordered]@{schema_version=2;managed_by=$script:ManagedBy;state='resolved';action_id=$ActionId;project_key=$first.ProjectKey;package_key=$first.PackageKey;project_root=$ProjectRoot.Replace('\','/').TrimEnd('/');package_root=$first.PackageRoot.Replace('\','/').TrimEnd('/');disposition='FailedCandidateEffectsRetained';command_outcome='failed_or_unknown';project_state='UNINSTALLED';stage_id=$first.StageId;admission_sha256=$first.AdmissionSha256;claim_sha256=$first.ClaimSha256;terminal_sha256=$first.TerminalSha256;command_identity_sha256=$first.CommandIdentity;retained_instance_id=$Candidate.InstanceId;retained_generation_id=$Candidate.Manifest.generation_id;removal_state_id=$StateId;removal_intent_relative_path=$intentRelative;removal_intent_sha256=$intentHash;desired_state_sha256=$desiredHash;process_observation_first_sha256=$processFirst;process_observation_second_sha256=$processSecond;observed_at_utc=[DateTime]::UtcNow.ToString('o')}
+        if($first.StorageLayout -ceq 'compact-v1'){$marker.storage_layout=$first.StorageLayout}
+        $markerPath=Join-Path $first.IndexDirectory "resolved-action-$ActionId.json"
+        Assert-NoReparsePoint -Path $markerPath -Root $first.IndexDirectory -Label 'failed candidate disposition'
+        if(Test-Path -LiteralPath $markerPath) {
+            $existing=(Read-BoundedJsonDocument -Path $markerPath -Label 'failed candidate disposition' -MaximumBytes 16384).Document
+            foreach($key in @('disposition','action_id','stage_id','admission_sha256','claim_sha256','terminal_sha256','removal_intent_sha256','desired_state_sha256')){if([string]$existing.$key -cne [string]$marker[$key]){throw 'Failed candidate existing disposition conflicts.'}}
+        } else {
+            $pendingPath=Join-Path $first.IndexDirectory "resolved-action-$ActionId.pending.json"
+            Assert-NoReparsePoint -Path $pendingPath -Root $first.IndexDirectory -Label 'failed candidate pending disposition'
+            # A partial record is never disposition authority. An explicit retry
+            # revalidates the same receipts/intent above before completing it.
+            if (Test-Path -LiteralPath $pendingPath) {
+                $pending = (Read-BoundedJsonDocument -Path $pendingPath -Label 'failed candidate pending disposition' -MaximumBytes 16384).Document
+                if (@($pending.PSObject.Properties).Count -ne $marker.Count) { throw 'Failed candidate pending disposition fields conflict.' }
+                foreach ($key in $marker.Keys) {
+                    if ($key -ceq 'observed_at_utc') { continue }
+                    if ($null -eq $pending.PSObject.Properties[$key] -or [string]$pending.$key -cne [string]$marker[$key]) {
+                        throw 'Failed candidate pending disposition evidence conflicts.'
+                    }
+                }
+                $observed = Get-RequiredJsonString -Object $pending -Name 'observed_at_utc' -Label 'failed candidate pending disposition'
+                $parsedObserved = [DateTimeOffset]::MinValue
+                if (-not [DateTimeOffset]::TryParse($observed, [ref]$parsedObserved)) { throw 'Failed candidate pending disposition timestamp is invalid.' }
+                # Keep the authenticated original pending bytes. Receipt, intent,
+                # current state and process/holder proof were revalidated above.
+            } else {
+                Write-DurableUtf8File -Path $pendingPath -Content (($marker | ConvertTo-Json -Depth 6)+"`n")
+            }
+            $failure=Get-Variable -Name TestFailRetainedCandidateDisposition -ErrorAction SilentlyContinue
+            if($null -ne $failure -and $failure.Value) {
+                if(-not $PocFixture){throw 'Disposition interruption seam requires PocFixture.'}
+                throw 'Injected retained candidate disposition interruption.'
+            }
+            [IO.File]::Move($pendingPath,$markerPath)
+        }
+        Write-Host '[FAILED_CANDIDATE_EFFECTS] RETAINED'
+    } finally {if($null -ne $indexLock){$indexLock.Dispose()}}
+}
+
 function Get-HistoricalUnknownActionEvidence {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
@@ -11942,7 +12124,18 @@ try {
         }
         "UninstallPreflight" {
             try {
-                $null = Get-CurrentProjectRemovalAuthority -Manifest $payload -ProjectRoot $projectRootPath
+                $authority = Get-CurrentProjectRemovalAuthority -Manifest $payload -ProjectRoot $projectRootPath -AllowNoNewCandidate
+                if($null -eq $authority -and -not [string]::IsNullOrEmpty($RetainedCandidateActionId)) {
+                    $candidate=Get-RetainedCandidateForAction -Manifest $payload -ProjectRoot $projectRootPath -ActionId $RetainedCandidateActionId
+                    $authority=[pscustomobject]@{Kind='FAILED_PREPARATION';Evidence=$candidate}
+                }
+                if($null -eq $authority){throw 'No current integration or explicitly retained recovery candidate is available.'}
+                if ($null -ne $authority -and $authority.Kind -ceq 'FAILED_PREPARATION') {
+                    $originId = [string]$authority.Evidence.Manifest.originating_action.action_id
+                    if(-not [string]::IsNullOrEmpty($RetainedCandidateActionId) -and $originId -cne $RetainedCandidateActionId){throw 'Uninstall preflight does not match the explicit original INSTALL action.'}
+                    $proof = Get-FailedCandidateActionEvidence -ProjectRoot $projectRootPath -Candidate $authority.Evidence -ActionId $originId
+                    $null = Get-FailedCandidateProcessProof -Evidence $proof -ProjectRoot $projectRootPath
+                }
                 Write-Host "[REMOVAL_PREFLIGHT] AVAILABLE"
             } catch {
                 Write-Host "[REMOVAL_PREFLIGHT] BLOCKED"
@@ -11953,6 +12146,7 @@ try {
             Invoke-Repair -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath
         }
         "Uninstall" {
+            if(-not [string]::IsNullOrEmpty($RetainedCandidateActionId) -and -not $ConfirmedProjectMutation){throw 'Failed candidate recovery requires existing Uninstall confirmation.'}
             Invoke-InstanceUninstall -Manifest $payload -ProjectRoot $projectRootPath -MarkerPath $markerPath
         }
     }

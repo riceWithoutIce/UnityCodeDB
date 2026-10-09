@@ -77,6 +77,8 @@ namespace Rice.AI.Codedb.Editor
             internal string PackageKey;
             internal AICodedbManagerActionEvidenceKind Disposition;
             internal bool HistoricalUnknown;
+            internal bool RetainedEffects;
+            internal AICodedbCommandResult OriginalResult;
             internal string StageId;
             internal string AdmissionSha256;
             internal string ClaimSha256;
@@ -106,6 +108,18 @@ namespace Rice.AI.Codedb.Editor
                     AssertPath(file);
                     var name = Path.GetFileName(file);
                     if (name == "index.lock") continue;
+                    if (name.StartsWith("resolved-action-", StringComparison.Ordinal)
+                        && name.EndsWith(".pending.json", StringComparison.Ordinal))
+                    {
+                        var pendingId = name.Substring("resolved-action-".Length,
+                            name.Length - "resolved-action-".Length - ".pending.json".Length);
+                        if (!AICodedbSupervisorProtocol.IsManagerActionId(pendingId))
+                            throw new InvalidOperationException("Pending candidate disposition id is invalid.");
+                        // Pending bytes are never closure authority. Authenticate
+                        // the original current index below so explicit completion
+                        // remains possible after reload; all mutations stay gated.
+                        continue;
+                    }
                     if (name.StartsWith("resolved-action-", StringComparison.Ordinal))
                     {
                         var resolvedId = ParseActionIdFromFilename(name, "resolved-action-");
@@ -166,6 +180,11 @@ namespace Rice.AI.Codedb.Editor
                 }
                 // Display history is independent of this current index. Reading it
                 // never changes the disposition or permits a second owner.
+                if (closure != null && closure.RetainedEffects)
+                    return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
+                        new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext, storageLayout),
+                        historicalWarning: "Original INSTALL remains failed/unknown; its candidate effects are inert and retained.",
+                        historicalResult: closure.OriginalResult);
                 var history = ReadLegacyPending(context, directory, resolved);
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
                     new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext, storageLayout),
@@ -202,6 +221,8 @@ namespace Rice.AI.Codedb.Editor
             var previous = new AICodedbEditorExecutionContext(context.Platform,
                 context.ProjectRoot, packageRoot, context.ProjectDisplayName);
             var dispositionText = AICodedbStrictJson.GetRequiredString(record, "disposition", label);
+            if (dispositionText == "FailedCandidateEffectsRetained")
+                return ReadRetainedEffectsMarker(context, previous, record, actionId);
             var historicalUnknown = dispositionText == "HistoricalUnknownReconciled";
             var storageLayout = AICodedbPaths.ReadReceiptStorageLayout(record);
             var schemaVersion = AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label);
@@ -287,6 +308,292 @@ namespace Rice.AI.Codedb.Editor
             };
         }
 
+        private static ResolvedMarker ReadRetainedEffectsMarker(
+            AICodedbEditorExecutionContext current, AICodedbEditorExecutionContext original,
+            Dictionary<string, object> marker, string actionId)
+        {
+            const string label = "failed candidate effects disposition";
+            Func<Dictionary<string, object>, string, string> value =
+                (record, field) => AICodedbStrictJson.GetRequiredString(record, field, label);
+            var layout = AICodedbPaths.ReadReceiptStorageLayout(marker);
+            var stageId = value(marker, "stage_id");
+            var stateId = value(marker, "removal_state_id");
+            var instanceId = value(marker, "retained_instance_id");
+            if (AICodedbStrictJson.GetRequiredInt32(marker, "schema_version", label) != 2
+                || value(marker, "managed_by") != "com.rice.ai-codedb" || value(marker, "state") != "resolved"
+                || value(marker, "action_id") != actionId || !IsLowerHex64(stageId)
+                || !AICodedbSupervisorProtocol.IsManagerActionId(stateId)
+                || !AICodedbSupervisorProtocol.IsManagerActionId(instanceId)
+                || !string.Equals(value(marker, "project_root"), current.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || value(marker, "project_key") != AICodedbPaths.GetManagerActionProjectKey(current)
+                || value(marker, "package_key") != AICodedbPaths.GetManagerActionPackageKey(original)
+                || value(marker, "command_outcome") != "failed_or_unknown"
+                || value(marker, "project_state") != "UNINSTALLED"
+                || !IsLowerHex64(value(marker, "process_observation_first_sha256"))
+                || !IsLowerHex64(value(marker, "process_observation_second_sha256")))
+                throw new InvalidOperationException("Failed candidate disposition identity is invalid.");
+            var actionRoot = AICodedbPaths.GetManagerActionReceiptRoot(original, actionId, layout);
+            if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(original, actionId,
+                    layout == null ? AICodedbPaths.CompactReceiptLayout : null)))
+                throw new InvalidOperationException("Failed candidate receipt layouts conflict.");
+            var receipts = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+            foreach (var kind in new[] { "admitted", "claim", "terminal" })
+            {
+                var path = AICodedbPaths.GetManagerStageReceiptPath(actionRoot, stageId, kind, layout);
+                AssertPath(path);
+                var hashName = kind == "admitted" ? "admission_sha256" : kind + "_sha256";
+                if (!IsLowerHex64(value(marker, hashName)) || GetFileSha256(path) != value(marker, hashName))
+                    throw new InvalidOperationException("Failed candidate original receipt hash changed.");
+                var receipt = AICodedbStrictJson.ReadObject(path, LegacyAdmissionMaximumBytes, label);
+                if (AICodedbStrictJson.GetRequiredInt32(receipt, "schema_version", label) != 1
+                    || value(receipt, "managed_by") != "com.rice.ai-codedb"
+                    || value(receipt, "action_id") != actionId || value(receipt, "stage_id") != stageId
+                    || value(receipt, "project_key") != value(marker, "project_key")
+                    || value(receipt, "package_key") != value(marker, "package_key")
+                    || AICodedbPaths.ReadReceiptStorageLayout(receipt) != layout)
+                    throw new InvalidOperationException("Failed candidate original receipt identity changed.");
+                receipts.Add(kind, receipt);
+            }
+            var admission = receipts["admitted"];
+            var terminal = receipts["terminal"];
+            if (value(admission, "state") != "admitted" || value(receipts["claim"], "state") != "claimed"
+                || value(terminal, "state") != "terminal"
+                || value(admission, "command_identity_sha256") != value(marker, "command_identity_sha256")
+                || value(terminal, "command_identity_sha256") != value(marker, "command_identity_sha256")
+                || !IsLowerHex64(value(marker, "command_identity_sha256"))
+                || value(admission, "effect_class") != "ConfirmedProjectMutation"
+                || value(admission, "authorization_source") != "UserConfirmationAndBackendAdmission"
+                || !AICodedbStrictJson.GetRequiredBoolean(admission, "terminal_for_action", label)
+                || !AICodedbStrictJson.GetRequiredBoolean(terminal, "terminal_for_action", label)
+                || AICodedbStrictJson.GetRequiredInt32(terminal, "exit_code", label) == 0)
+                throw new InvalidOperationException("Failed candidate original INSTALL outcome is invalid.");
+            var intentRelative = "AIWork/.runtime/codedb/control/removal-intents/" + stateId + ".json";
+            if (value(marker, "removal_intent_relative_path") != intentRelative)
+                throw new InvalidOperationException("Failed candidate intent path is invalid.");
+            var intentPath = RetainedProjectPath(current, intentRelative);
+            if (!IsLowerHex64(value(marker, "removal_intent_sha256"))
+                || RetainedFileHash(intentPath) != value(marker, "removal_intent_sha256"))
+                throw new InvalidOperationException("Failed candidate intent hash changed.");
+            var intent = AICodedbStrictJson.ReadObject(intentPath, 131072, label);
+            if (AICodedbStrictJson.GetRequiredInt32(intent, "schema_version", label) != 2
+                || value(intent, "managed_by") != "com.rice.ai-codedb"
+                || value(intent, "authority_kind") != "FAILED_PREPARATION"
+                || value(intent, "state_id") != stateId || value(intent, "operation_id") != stateId
+                || value(intent, "retained_instance_id") != instanceId
+                || value(intent, "retained_generation_id") != value(marker, "retained_generation_id")
+                || value(intent, "project_identity") != "sha256:" + value(marker, "project_key")
+                || !string.Equals(value(intent, "project_root"), current.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || !IsLowerHex64(value(intent, "authority_fingerprint")))
+                throw new InvalidOperationException("Failed candidate intent identity is invalid.");
+            var instanceRelative = "AIWork/.runtime/codedb/instances/" + instanceId;
+            var instancePath = RetainedProjectPath(current, instanceRelative + "/instance.json");
+            if (RetainedFileHash(instancePath) != value(intent, "retained_instance_manifest_sha256"))
+                throw new InvalidOperationException("Failed candidate instance hash changed.");
+            var instance = AICodedbStrictJson.ReadObject(instancePath, 131072, label);
+            var origin = AICodedbStrictJson.RequireObject(instance["originating_action"], label);
+            if (value(instance, "state") != "PROVISIONING" || value(instance, "verified_at_utc") != string.Empty
+                || value(instance, "instance_id") != instanceId
+                || value(instance, "generation_id") != value(marker, "retained_generation_id")
+                || value(instance, "project_identity") != value(intent, "project_identity")
+                || value(origin, "action") != "INSTALL" || value(origin, "action_id") != actionId)
+                throw new InvalidOperationException("Failed candidate original instance linkage changed.");
+            var effects = AICodedbStrictJson.GetRequiredArray(intent, "retained_effects", label);
+            if (effects.Count == 0 || effects.Count > 512)
+                throw new InvalidOperationException("Failed candidate effect inventory is invalid.");
+            var snapshot = new HashSet<string>(StringComparer.Ordinal);
+            var previous = string.Empty;
+            foreach (var raw in effects)
+            {
+                var effect = AICodedbStrictJson.RequireObject(raw, label);
+                var relative = value(effect, "relative_path");
+                var path = RetainedProjectPath(current, relative);
+                var kind = value(effect, "kind");
+                if (!snapshot.Add(relative) || string.CompareOrdinal(previous, relative) >= 0
+                    || (kind != "FILE" && kind != "DIRECTORY")
+                    || (kind == "FILE" && (!IsLowerHex64(value(effect, "sha256"))
+                        || RetainedFileHash(path) != value(effect, "sha256")))
+                    || (kind == "DIRECTORY" && (!Directory.Exists(path) || value(effect, "sha256") != string.Empty)))
+                    throw new InvalidOperationException("Failed candidate retained effects changed.");
+                previous = relative;
+            }
+            foreach (var root in new[] { instanceRelative,
+                "AIWork/.runtime/codedb/host/generations/" + value(marker, "retained_generation_id"), "AIWork/codedb" })
+            {
+                var queue = new Queue<string>(); queue.Enqueue(root);
+                var count = 0;
+                while (queue.Count != 0)
+                {
+                    var relative = queue.Dequeue();
+                    if (++count > 512) throw new InvalidOperationException("Failed candidate effect inventory exceeds bounds.");
+                    var path = RetainedProjectPath(current, relative);
+                    if (relative != "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+                        && !snapshot.Contains(relative)
+                        && !((relative == "AIWork/codedb" || relative == "AIWork/codedb/wrapper") && Directory.Exists(path)))
+                        throw new InvalidOperationException("Failed candidate contains an unrecorded effect.");
+                    if (Directory.Exists(path))
+                        foreach (var child in Directory.GetFileSystemEntries(path))
+                            queue.Enqueue(relative + "/" + Path.GetFileName(child));
+                }
+            }
+            ValidateRetainedCurrentState(current, marker, intent, instanceId);
+            var result = new AICodedbCommandResult(
+                AICodedbStrictJson.GetRequiredInt32(terminal, "exit_code", label),
+                value(terminal, "stdout"), value(terminal, "stderr"),
+                AICodedbStrictJson.GetRequiredBoolean(terminal, "timed_out", label),
+                authoritativeTerminalEvidence: false, actionId: actionId,
+                managerActionEvidenceKind: AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained,
+                outputOverflow: AICodedbStrictJson.GetRequiredBoolean(terminal, "output_overflow", label),
+                outputDrainIncomplete: AICodedbStrictJson.GetRequiredBoolean(terminal, "output_drain_incomplete", label));
+            return new ResolvedMarker { Context = original, PackageKey = value(marker, "package_key"),
+                StorageLayout = layout, StageId = stageId, RetainedEffects = true, OriginalResult = result,
+                Disposition = AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained };
+        }
+
+        private static string RetainedProjectPath(AICodedbEditorExecutionContext context, string relative)
+        {
+            if (string.IsNullOrEmpty(relative) || relative.IndexOf('\\') >= 0 || relative.StartsWith("/", StringComparison.Ordinal))
+                throw new InvalidOperationException("Retained project path is invalid.");
+            foreach (var segment in relative.Split('/'))
+                if (segment.Length == 0 || segment == "." || segment == ".." || segment.IndexOf(':') >= 0)
+                    throw new InvalidOperationException("Retained project path is redirected.");
+            var root = Path.GetFullPath(context.ProjectRoot).TrimEnd('/', '\\');
+            var path = Path.GetFullPath(Path.Combine(root, relative));
+            if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Retained project path escapes project.");
+            for (var item = path; !string.Equals(item, root, StringComparison.OrdinalIgnoreCase); item = Path.GetDirectoryName(item))
+                if ((File.Exists(item) || Directory.Exists(item)) && (File.GetAttributes(item) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Retained project path contains a redirect.");
+            return path;
+        }
+
+        private static string RetainedFileHash(string path)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var algorithm = SHA256.Create())
+                return BitConverter.ToString(algorithm.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+        }
+
+        private static void ValidateRetainedCurrentState(AICodedbEditorExecutionContext context,
+            Dictionary<string, object> marker, Dictionary<string, object> intent, string retainedId)
+        {
+            const string label = "retained candidate current state";
+            Func<Dictionary<string, object>, string, string> text =
+                (record, field) => AICodedbStrictJson.GetRequiredString(record, field, label);
+            var desiredPath = RetainedProjectPath(context, "AIWork/.runtime/codedb/control/desired-state.json");
+            var desired = AICodedbStrictJson.ReadObject(desiredPath, 32768, label);
+            if (AICodedbStrictJson.GetRequiredInt32(desired, "schema_version", label) != 1
+                || text(desired, "managed_by") != "com.rice.ai-codedb"
+                || text(desired, "project_identity") != text(intent, "project_identity")
+                || !string.Equals(text(desired, "project_root"), context.ProjectRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Retained candidate desired state identity conflicts.");
+            if (text(desired, "desired_state") == "UNINSTALLED")
+            {
+                if (text(desired, "state_id") != text(marker, "removal_state_id"))
+                {
+                    var nextState = text(desired, "state_id");
+                    if (!AICodedbSupervisorProtocol.IsManagerActionId(nextState))
+                        throw new InvalidOperationException("Retained candidate current removal state is invalid.");
+                    var nextPath = RetainedProjectPath(context, "AIWork/.runtime/codedb/control/removal-intents/" + nextState + ".json");
+                    var nextIntent = AICodedbStrictJson.ReadObject(nextPath, 131072, label);
+                    var nextInstance = AICodedbStrictJson.ReadObject(RetainedProjectPath(context,
+                        "AIWork/.runtime/codedb/instances/" + text(nextIntent, "retained_instance_id") + "/instance.json"), 131072, label);
+                    var nextOrigin = AICodedbStrictJson.RequireObject(nextInstance["originating_action"], label);
+                    var nextAction = text(nextOrigin, "action_id");
+                    if (nextAction == text(marker, "action_id") || text(nextIntent, "retained_instance_id") == retainedId)
+                        throw new InvalidOperationException("Retained candidate later removal conflicts with its original closure.");
+                    var nextMarkerPath = Path.Combine(AICodedbPaths.GetManagerActionIndexDirectory(context),
+                        "resolved-action-" + nextAction + ".json");
+                    AssertPath(nextMarkerPath);
+                    var nextMarker = AICodedbStrictJson.ReadObject(nextMarkerPath, MaximumBytes, label);
+                    if (text(nextMarker, "disposition") != "FailedCandidateEffectsRetained"
+                        || text(nextMarker, "removal_state_id") != nextState)
+                        throw new InvalidOperationException("Retained candidate later removal has no matching effects disposition.");
+                    var nextContext = new AICodedbEditorExecutionContext(context.Platform, context.ProjectRoot,
+                        text(nextMarker, "package_root"), context.ProjectDisplayName);
+                    ReadRetainedEffectsMarker(context, nextContext, nextMarker, nextAction);
+                }
+                else if (!IsLowerHex64(text(marker, "desired_state_sha256"))
+                    || RetainedFileHash(desiredPath) != text(marker, "desired_state_sha256"))
+                    throw new InvalidOperationException("Retained candidate current removal state changed.");
+                foreach (var relative in new[] { "AIWork/.runtime/codedb/control/current-instance.json",
+                    "AIWork/.runtime/codedb/control/last-known-good-instance.json",
+                    "AIWork/.runtime/codedb/host/current.json", "AIWork/.runtime/codedb/host/last-known-good.json",
+                    "AIWork/.runtime/codedb/control/contracts", "AIWork/.runtime/codedb/control/supervisor" })
+                {
+                    var path = RetainedProjectPath(context, relative);
+                    if (File.Exists(path) || Directory.Exists(path))
+                        throw new InvalidOperationException("Retained candidate current inactive authority conflicts.");
+                }
+                return;
+            }
+            // A subsequent explicit Install is a separate action. Preserve the
+            // old failure only after authentic different READY/COMMITTED handoff.
+            if (text(desired, "desired_state") != "INSTALLED")
+                throw new InvalidOperationException("Retained candidate current disposition is unresolved.");
+            var selected = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+            if (!selected.CanPublishEditorLease || selected.InstanceId == retainedId)
+                throw new InvalidOperationException("Retained candidate fresh selection is not authenticated.");
+            var instancePath = RetainedProjectPath(context, selected.InstanceRelativePath + "/instance.json");
+            var instance = AICodedbStrictJson.ReadObject(instancePath, 131072, label);
+            var origin = AICodedbStrictJson.RequireObject(instance["originating_action"], label);
+            var contract = AICodedbStrictJson.RequireObject(instance["control_contract"], label);
+            var id = text(contract, "id");
+            foreach (var character in id)
+                if (!char.IsLetterOrDigit(character) && character != '-' && character != '_' && character != '.')
+                    throw new InvalidOperationException("Retained candidate control contract path is invalid.");
+            if (id.Length == 0 || id == "." || id == ".." || text(origin, "action") != "INSTALL"
+                || text(instance, "state") != "READY" || text(origin, "action_id") == text(marker, "action_id"))
+                throw new InvalidOperationException("Retained candidate fresh INSTALL origin is invalid.");
+            var version = AICodedbStrictJson.GetRequiredInt32(contract, "version", label);
+            var root = "AIWork/.runtime/codedb/control/contracts/" + id + "/v" + version.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var activation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/activation.json"), 65536, label);
+            var operation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/operation.json"), 1048576, label);
+            if (text(activation, "publication_phase") != "COMMITTED" || text(operation, "phase") != "COMMITTED"
+                || text(operation, "action") != "INSTALL"
+                || text(activation, "operation_id") != text(operation, "operation_id")
+                || text(activation, "activation_epoch") != selected.ActivationEpoch
+                || text(operation, "activation_epoch") != selected.ActivationEpoch)
+                throw new InvalidOperationException("Retained candidate fresh activation is not committed INSTALL authority.");
+            foreach (var record in new[] { activation, operation })
+                if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
+                    || text(record, "managed_by") != "com.rice.ai-codedb"
+                    || text(record, "project_identity") != text(intent, "project_identity")
+                    || !string.Equals(text(record, "project_root"), context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || text(record, "runtime_contract_sha256") != text(instance, "runtime_contract_sha256"))
+                    throw new InvalidOperationException("Retained candidate fresh activation context conflicts.");
+            foreach (var evidence in new[] {
+                AICodedbStrictJson.RequireObject(operation["candidate"], label),
+                AICodedbStrictJson.RequireObject(activation["candidate"], label),
+                AICodedbStrictJson.RequireObject(activation["current"], label) })
+                if (text(evidence, "instance_id") != selected.InstanceId
+                    || text(evidence, "generation_id") != selected.GenerationId
+                    || text(evidence, "instance_manifest_sha256") != RetainedFileHash(instancePath)
+                    || text(evidence, "generation_manifest_sha256") != text(instance, "generation_manifest_sha256"))
+                    throw new InvalidOperationException("Retained candidate fresh activation selection conflicts.");
+            var wrapperPath = RetainedProjectPath(context, "AIWork/codedb/wrapper/codedb-project-wrapper.mjs");
+            var canonical = RetainedFileHash(RetainedProjectPath(context,
+                "AIWork/.runtime/codedb/host/generations/" + selected.GenerationId + "/wrapper/codedb-project-wrapper.mjs"));
+            if (RetainedFileHash(wrapperPath) != canonical)
+                throw new InvalidOperationException("Retained candidate fresh wrapper handoff bytes conflict.");
+            if (text(intent, "retained_wrapper_sha256") != canonical)
+            {
+                Dictionary<string, object> wrapperMutation = null;
+                foreach (var raw in AICodedbStrictJson.GetRequiredArray(operation, "mutations", label))
+                {
+                    var mutation = AICodedbStrictJson.RequireObject(raw, label);
+                    if (text(mutation, "target") != "AIWork/codedb/wrapper/codedb-project-wrapper.mjs") continue;
+                    if (wrapperMutation != null) throw new InvalidOperationException("Duplicate retained wrapper handoff.");
+                    wrapperMutation = mutation;
+                }
+                if (wrapperMutation == null || text(wrapperMutation, "mutation") != "write"
+                    || text(wrapperMutation, "desired_sha256") != canonical
+                    || text(wrapperMutation, "pre_image_sha256") != text(intent, "retained_wrapper_sha256")
+                    || AICodedbStrictJson.GetRequiredBoolean(wrapperMutation, "existed_before", label)
+                        != !string.IsNullOrEmpty(text(intent, "retained_wrapper_sha256")))
+                    throw new InvalidOperationException("Retained candidate committed wrapper mutation is unbound.");
+            }
+        }
+
         private static AICodedbManagerActionIndexRead ReadLegacyPending(
             AICodedbEditorExecutionContext context, string directory,
             Dictionary<string, ResolvedMarker> resolved)
@@ -368,6 +675,16 @@ namespace Rice.AI.Codedb.Editor
                                 "ExistingActionSpecificBackend", original, null);
                         if (resolved.TryGetValue(actionId, out var marker))
                         {
+                            if (marker.RetainedEffects)
+                            {
+                                failedInstallCount++;
+                                failedInstallIndex = new AICodedbManagerActionIndex(actionId, "Install CodeDB",
+                                    "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
+                                    marker.Context, marker.StorageLayout);
+                                failedInstallResult = marker.OriginalResult;
+                                retainedUnknown.Add("Original INSTALL " + actionId + " remains failed/unknown; candidate effects are retained.");
+                                continue;
+                            }
                             if (!string.Equals(marker.PackageKey,
                                     AICodedbPaths.GetManagerActionPackageKey(original), StringComparison.Ordinal)
                                 || (marker.Disposition == AICodedbManagerActionEvidenceKind.CommandTerminal
@@ -439,6 +756,16 @@ namespace Rice.AI.Codedb.Editor
                 if (closure.Value.StorageLayout == AICodedbPaths.CompactReceiptLayout)
                 {
                     var marker = closure.Value;
+                    if (marker.RetainedEffects)
+                    {
+                        failedInstallCount++;
+                        failedInstallIndex = new AICodedbManagerActionIndex(closure.Key, "Install CodeDB",
+                            "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
+                            marker.Context, marker.StorageLayout);
+                        failedInstallResult = marker.OriginalResult;
+                        retainedUnknown.Add("Original INSTALL " + closure.Key + " remains failed/unknown; its candidate effects are retained.");
+                        continue;
+                    }
                     var outcome = AICodedbProcessRunner.RecoverManagerAction(marker.Context, closure.Key, marker.StorageLayout);
                     if (outcome.State == AICodedbManagerActionRecoveryState.Conflict
                         || (marker.Disposition == AICodedbManagerActionEvidenceKind.CommandTerminal
@@ -564,6 +891,13 @@ namespace Rice.AI.Codedb.Editor
                         detail = "A project-stable Manager action index already exists; a second owner was blocked.";
                         return false;
                     }
+                    if (existing.Index != null && existing.HistoricalResult != null
+                        && existing.HistoricalResult.FailedCandidateEffectsRetained)
+                    {
+                        var completedPath = AICodedbPaths.GetManagerActionIndexPath(existing.Index.Context, existing.Index.ActionId);
+                        AssertPath(completedPath);
+                        if (File.Exists(completedPath)) File.Delete(completedPath);
+                    }
                     if (File.Exists(Path.Combine(directory,
                             "resolved-action-" + index.ActionId + ".json")))
                     {
@@ -611,6 +945,29 @@ namespace Rice.AI.Codedb.Editor
                 detail = "Manager action durable admission failed: " + exception.Message;
                 return false;
             }
+        }
+
+        internal static bool TryReleaseRetainedEffects(AICodedbManagerActionIndex index, out string detail)
+        {
+            detail = string.Empty;
+            try
+            {
+                var path = AICodedbPaths.GetManagerActionIndexPath(index.Context, index.ActionId);
+                AssertPath(path);
+                var lockPath = Path.Combine(Path.GetDirectoryName(path), "index.lock");
+                AssertPath(lockPath);
+                using (new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                {
+                    var read = Read(index.Context);
+                    if (read.State != AICodedbManagerActionIndexState.Empty || read.Index == null
+                        || read.Index.ActionId != index.ActionId || read.HistoricalResult == null
+                        || !read.HistoricalResult.FailedCandidateEffectsRetained)
+                        throw new InvalidOperationException("Retained candidate current-effects proof is incomplete.");
+                    if (File.Exists(path)) File.Delete(path);
+                }
+                return true;
+            }
+            catch (Exception exception) { detail = exception.Message; return false; }
         }
 
         internal static bool TryRelease(AICodedbManagerActionIndex index,

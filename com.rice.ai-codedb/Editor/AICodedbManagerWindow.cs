@@ -2230,16 +2230,59 @@ namespace Rice.AI.Codedb.Editor
                     UninstallCodeDBConfirmationMessage,
                     "Uninstall CodeDB",
                     "Cancel"),
-                () => RunUserActionAsync("Uninstall CodeDB from Project", AICodedbActions.RunUninstallCodeDBAsync));
+                () =>
+                {
+                    var retained = AICodedbManagerActionSession.CurrentFor(_executionContext);
+                    if (retained != null && retained.IsRecovering && retained.HasOriginalContext)
+                        RunFailedCandidateUninstallRecoveryAsync(retained);
+                    else
+                        RunUserActionAsync("Uninstall CodeDB from Project", AICodedbActions.RunUninstallCodeDBAsync);
+                });
+        }
+
+        private async void RunFailedCandidateUninstallRecoveryAsync(AICodedbManagerActionSession original)
+        {
+            if (_actionRecoveryInspectionInFlight || original == null || !original.IsRecovering
+                || !original.HasOriginalContext || _statusSnapshot == null
+                || !GetRemovalPresentationStatus().RemovalPreflightPassed) return;
+            _actionRecoveryInspectionInFlight = true;
+            try
+            {
+                var result = await AICodedbHostPayloadMaterializer.RunFailedCandidateUninstallRecoveryAsync(
+                    _executionContext, original.ActionId);
+                if (!result.Succeeded)
+                {
+                    original.SetRecoveryDetail(result.GetSummary() + " " + result.StandardError);
+                    return;
+                }
+                var read = await Task.Run(() => AICodedbManagerActionJournal.Read(_executionContext));
+                if (read.State != AICodedbManagerActionIndexState.Empty || read.Index == null
+                    || read.Index.ActionId != original.ActionId || read.HistoricalResult == null
+                    || !read.HistoricalResult.FailedCandidateEffectsRetained)
+                {
+                    original.SetRecoveryDetail("The confirmed Uninstall has no complete matching effects disposition. " + read.Detail);
+                    return;
+                }
+                var released = await Task.Run(() => AICodedbManagerActionJournal.TryReleaseRetainedEffects(read.Index, out var _));
+                if (!released) { original.SetRecoveryDetail("The retained effects index publication is incomplete."); return; }
+                original.CompleteRetainedEffectsRecovery(read.HistoricalResult, EditorApplication.timeSinceStartup);
+                AICodedbEditorLifecycle.RequestReconcile();
+            }
+            finally
+            {
+                _actionRecoveryInspectionInFlight = false;
+                AttachCurrentActionSession();
+                Repaint();
+            }
         }
 
         internal static bool IsUninstallAvailable(
             AICodedbProductStatus status,
             bool isProjectUninstalled)
         {
-            return !isProjectUninstalled
-                   && !status.RequiresReinstall
+            return !status.RequiresReinstall
                    && (status.State == AICodedbProductState.Ready
+                       || (isProjectUninstalled && status.State == AICodedbProductState.Uninstalled)
                        || (status.State == AICodedbProductState.NeedsAttention
                            && status.AttentionReason == AICodedbProductAttentionReason.None))
                    && status.RemovalPreflightPassed;
@@ -3709,11 +3752,13 @@ namespace Rice.AI.Codedb.Editor
                 if (!ReferenceEquals(_current, this) || !IsRecovering
                     || IsEvidenceConflict
                     || result == null || (!result.HasAuthoritativeTerminalEvidence
-                        && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal)
+                        && result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                        && !result.FailedCandidateEffectsRetained)
                     || !string.Equals(result.ActionId, ActionId, StringComparison.Ordinal))
                     return false;
                 Result = result;
                 Status.Complete(result, AICodedbProductState.Starting, false, now);
+                if (result.FailedCandidateEffectsRetained) _durableIndexRetained = false;
                 IsRecovering = _durableIndexRetained;
                 if (IsRecovering)
                     return true;
@@ -3721,6 +3766,19 @@ namespace Rice.AI.Codedb.Editor
                     .StartsWith(ActionId + "|", StringComparison.Ordinal))
                     SessionState.SetString(PendingKey(Context), string.Empty);
                 return true;
+            }
+        }
+
+        internal bool CompleteRetainedEffectsRecovery(AICodedbCommandResult result, double now)
+        {
+            lock (Gate)
+            {
+                if (!ReferenceEquals(_current, this) || !IsRecovering || !HasOriginalContext
+                    || result == null || !result.FailedCandidateEffectsRetained || result.ActionId != ActionId)
+                    return false;
+                IsEvidenceConflict = false;
+                _durableIndexRetained = false;
+                return TryCompleteRecovery(result, now);
             }
         }
 
