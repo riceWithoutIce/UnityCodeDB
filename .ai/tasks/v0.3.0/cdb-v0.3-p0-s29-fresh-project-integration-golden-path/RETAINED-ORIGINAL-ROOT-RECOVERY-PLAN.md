@@ -1,6 +1,11 @@
 # Proposed one-shot retained failed INSTALL disposition
 
-2026-10-09. PREPARED / AWAITING_REAL_MUTATION_AUTHORIZATION. S29 PARTIAL.
+2026-10-09. USER_AUTHORIZED_ONE_REAL_MUTATION_ATTEMPT. S29 PARTIAL.
+User replied "好的 继续" to Parent's explicit request to execute this prepared
+retained-effect recovery. This authorizes the single command and evidence checks
+below; fresh Install remains a separately confirmed gate.
+Execution completed once: native exit0 /33578ms; linked retained disposition
+verified. See RETAINED-ORIGINAL-ROOT-RECOVERY-RESULT.md. No replay or fresh Install.
 Authentic read-only preflight AVAILABLE, original8protected files unchanged.
 
 Target only UnityFreshInstallValidationProjectS29; original failed INSTALL
