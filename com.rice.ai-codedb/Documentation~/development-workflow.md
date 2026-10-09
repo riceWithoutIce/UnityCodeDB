@@ -823,6 +823,15 @@ closure alone does not prove that a runtime consumer can read the record.
 
 ### Package Release Closure Gate
 
+For retained-recovery project-root consumer changes, distinguish immutable
+record/command byte authentication from platform path identity. The bounded
+consumer map includes the decoded receipt root and the recorded command argument
+when both bind the current project. In focused actual-entry fixtures, independently
+select recorded and caller root spelling; a single reused path variable cannot
+prove cross-language slash/case/trailing-separator behavior. Keep original hash,
+different-project and incomplete-root refusals in the same focused proof. This
+adds no global path audit or new platform/schema framework.
+
 For a change to failed-candidate mutable-output retention, include the producer
 scope declaration, initialization consumer, recovery inventory consumer and
 existing snapshot reader in the same bounded ownership/evidence map. Record

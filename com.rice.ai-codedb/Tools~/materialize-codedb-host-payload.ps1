@@ -10965,6 +10965,32 @@ function Assert-RemoveIntegrationTerminalState {
     }
 }
 
+function Test-RetainedAbsoluteProjectRootIdentity {
+    param([AllowNull()][string]$Actual, [AllowNull()][string]$Expected)
+    $windows = [IO.Path]::DirectorySeparatorChar -eq '\'
+    foreach ($root in @($Actual, $Expected)) {
+        if ([string]::IsNullOrWhiteSpace($root) -or $root.IndexOf([char]0) -ge 0) { return $false }
+        if ($windows) {
+            $native = $root.Replace('/', '\')
+            if ($native -match '[<>"|?*\x00-\x1f]') { return $false }
+            if ($native -match '^[A-Za-z]:\\') {
+                if ($native.IndexOf(':', 2) -ge 0) { return $false }
+            } else {
+                if (-not $native.StartsWith('\\', [StringComparison]::Ordinal) -or $native.IndexOf(':') -ge 0) { return $false }
+                $parts = $native.Substring(2).Split([char]'\')
+                if ($parts.Length -lt 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or
+                    [string]::IsNullOrWhiteSpace($parts[1]) -or $parts[0] -in @('.', '..') -or
+                    $parts[1] -in @('.', '..')) { return $false }
+            }
+        } elseif ($root[0] -ne '/' -or $root.IndexOf([char]'\') -ge 0) { return $false }
+    }
+    try {
+        $comparison = if ($windows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        return [string]::Equals([IO.Path]::GetFullPath($Actual).TrimEnd([char[]]@('/', '\')),
+            [IO.Path]::GetFullPath($Expected).TrimEnd([char[]]@('/', '\')), $comparison)
+    } catch { return $false }
+}
+
 function Get-FailedCandidateActionEvidence {
     param([string]$ProjectRoot, $Candidate, [string]$ActionId)
     if ($ActionId -cnotmatch '^[0-9a-f]{32}$' -or $Candidate.Manifest.originating_action.action -cne 'INSTALL' -or
@@ -11019,7 +11045,7 @@ function Get-FailedCandidateActionEvidence {
             ($layout -ceq 'compact-v1' -and $doc.storage_layout -cne $layout)) {throw 'Failed candidate original receipts disagree.'}
     }
     if ($admission.project_identity -cne "sha256:$projectKey" -or $admission.package_identity -cne "sha256:$packageKey" -or
-        -not [string]::Equals([IO.Path]::GetFullPath([string]$admission.project_root),[IO.Path]::GetFullPath($ProjectRoot),[StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-RetainedAbsoluteProjectRootIdentity -Actual ([string]$admission.project_root) -Expected $ProjectRoot) -or
         $admission.effect_class -cne 'ConfirmedProjectMutation' -or $admission.authorization_source -cne 'UserConfirmationAndBackendAdmission' -or
         -not (Get-RequiredJsonBoolean -Object $admission -Name 'terminal_for_action' -Label 'failed candidate admission')) {throw 'Failed candidate admission context conflicts.'}
     $command=$admission.command; $arguments=Get-RequiredJsonArray -Object $command -Name 'arguments' -Label 'failed candidate command'
@@ -11035,7 +11061,12 @@ function Get-FailedCandidateActionEvidence {
         if($key -ceq '-ConfirmedProjectMutation') {if($seen.ContainsKey($key)){throw 'Duplicate failed candidate confirmation'};$seen[$key]=$true;continue}
         if($key -cnotin @('-Action','-ProjectRoot','-OriginatingActionId','-OriginatingOperationId','-EditorSessionId','-EditorProcessId','-EditorProcessStartTicks') -or $seen.ContainsKey($key) -or $i+1 -ge $arguments.Count) {throw 'Failed candidate command arguments are not the original INSTALL contract.'}
         $seen[$key]=$true; $i++
-        if($expected.ContainsKey($key) -and -not [string]::Equals([string]$arguments[$i],[string]$expected[$key],$(if($key -ceq '-ProjectRoot'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))) {throw 'Failed candidate original INSTALL linkage conflicts.'}
+        if($expected.ContainsKey($key)) {
+            $matches = if($key -ceq '-ProjectRoot') {
+                Test-RetainedAbsoluteProjectRootIdentity -Actual ([string]$arguments[$i]) -Expected $ProjectRoot
+            } else { [string]::Equals([string]$arguments[$i],[string]$expected[$key],[StringComparison]::Ordinal) }
+            if(-not $matches) {throw "Failed candidate original INSTALL linkage conflicts: $key."}
+        }
     }
     foreach($key in @($expected.Keys)+@('-ConfirmedProjectMutation')) {if(-not $seen.ContainsKey($key)){throw 'Failed candidate original INSTALL linkage is missing.'}}
     $argumentsHash=Get-TextSha256 -Text (($arguments | ForEach-Object {[string]$_}) -join "`n")

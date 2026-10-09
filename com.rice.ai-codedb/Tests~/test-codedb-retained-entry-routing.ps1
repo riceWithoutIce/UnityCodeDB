@@ -1,11 +1,12 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([switch]$DeclaredAdapterOutputs)
+param([switch]$DeclaredAdapterOutputs, [switch]$OriginalProjectRoots)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repositoryRoot = Split-Path $packageRoot -Parent
-$family = if ($DeclaredAdapterOutputs) { 's29-adapter' } else { 's29-entry' }
+if ($DeclaredAdapterOutputs -and $OriginalProjectRoots) { throw 'Select one focused proof mode.' }
+$family = if ($OriginalProjectRoots) { 's29-original-root' } elseif ($DeclaredAdapterOutputs) { 's29-adapter' } else { 's29-entry' }
 $fixtureContainer = Join-Path $repositoryRoot ('.artifacts/tests/' + $family + '/r-' + [guid]::NewGuid().ToString('N').Substring(0,8))
 $projectRoot = Join-Path $fixtureContainer 'p'
 $materializer = Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'
@@ -100,7 +101,9 @@ try {
     }
     Import-EntryDefinitions (Join-Path $PSScriptRoot 'test-codedb-host-payload-materializer.ps1') @('Write-PhaseCRecord','Invoke-RetainedCandidateRecoveryCase')
     $manifest=Read-PayloadManifest -Root (Join-Path $packageRoot 'Payload~') -ProjectRoot $projectRoot
-    $fixture=Invoke-RetainedCandidateRecoveryCase -ProjectRoot $projectRoot -PackageRoot $packageRoot -Manifest $manifest -BuildFixtureOnly
+    $fixtureParameters=@{ProjectRoot=$projectRoot;PackageRoot=$packageRoot;Manifest=$manifest;BuildFixtureOnly=$true}
+    if ($OriginalProjectRoots) { $fixtureParameters.RecordedProjectRoot=$projectRoot.Replace('\','/') }
+    $fixture=Invoke-RetainedCandidateRecoveryCase @fixtureParameters
     if ($DeclaredAdapterOutputs) {
         $instanceRoot=Join-Path $projectRoot ($script:InstancesRelativePath+'/'+$fixture.InstanceId)
         $adapterContract=Get-CodedbTextAdapterOutputContract
@@ -169,6 +172,36 @@ exit $LASTEXITCODE
 
     Assert-EntryReadOnly -Label matching -ActionId $fixture.ActionId -Expected '[REMOVAL_PREFLIGHT] AVAILABLE' -ExitCode 0
     $extraCli=0
+    if ($OriginalProjectRoots) {
+        $recorded=(Read-BoundedJsonDocument -Path $fixture.AdmissionPath -Label 'mixed-root admission' -MaximumBytes 131072).Document
+        Assert-Entry ($recorded.project_root -ceq $projectRoot.Replace('\','/') -and $recorded.project_root -cne $projectRoot -and $recorded.command.arguments[3] -ceq $recorded.project_root) 'independently-recorded-forward-slash-root-native-caller'
+        foreach ($equivalent in @($projectRoot.Replace('\','/'), ($projectRoot.ToUpperInvariant()+'\'))) {
+            Assert-Entry (Test-RetainedAbsoluteProjectRootIdentity $equivalent $projectRoot) 'absolute-root-slash-case-trailing-equivalence'
+        }
+        foreach ($invalid in @('relative/project', ($projectRoot.Substring(0,2)+'relative'), '\relative', '/relative', 'G:/bad?root', ('G:/bad'+[char]0+'root'), '\\server', (Join-Path $fixtureContainer 'other'))) {
+            Assert-Entry (-not (Test-RetainedAbsoluteProjectRootIdentity $invalid $projectRoot) -and -not (Test-RetainedAbsoluteProjectRootIdentity $projectRoot $invalid)) 'incomplete-malformed-or-different-root-rejected-both-operands'
+        }
+        $originalAdmission=[IO.File]::ReadAllBytes($fixture.AdmissionPath)
+        foreach ($scenario in @('variant','different','incomplete','hash-tamper','operation','incomplete-admission')) {
+            try {
+                $doc=(Read-BoundedJsonDocument -Path $fixture.AdmissionPath -Label 'root scenario admission' -MaximumBytes 131072).Document
+                $expected='Failed candidate original INSTALL linkage conflicts: -ProjectRoot.'; $exitCode=4
+                switch ($scenario) {
+                    variant { $doc.project_root=$projectRoot.Replace('\','/').ToUpperInvariant()+'/'; $expected='[REMOVAL_PREFLIGHT] AVAILABLE'; $exitCode=0 }
+                    different { $doc.command.arguments[3]=Join-Path $fixtureContainer 'other' }
+                    incomplete { $doc.command.arguments[3]=$projectRoot.Substring(0,2)+'relative' }
+                    'hash-tamper' { $doc.command.arguments[3]=$projectRoot; $expected='Failed candidate command/terminal identity conflicts.' }
+                    operation { $doc.command.arguments[8]='0'*32; $expected='Failed candidate original INSTALL linkage conflicts: -OriginatingOperationId.' }
+                    'incomplete-admission' { $doc.project_root='\relative'; $expected='Failed candidate admission context conflicts.' }
+                }
+                # Tampered cases deliberately retain the original raw hashes.
+                # The variant changes only non-hashed admission context spelling.
+                Write-PhaseCRecord $fixture.AdmissionPath $doc
+                Assert-EntryReadOnly -Label ('root-'+$scenario) -ActionId $fixture.ActionId -Expected $expected -ExitCode $exitCode
+                $extraCli++
+            } finally { [IO.File]::WriteAllBytes($fixture.AdmissionPath,$originalAdmission) }
+        }
+    }
     if ($DeclaredAdapterOutputs) {
         # Snapshot drift must refuse using the existing intent reader. Remove
         # only fixture-owned new bytes before establishing the next snapshot.
@@ -255,6 +288,10 @@ exit $LASTEXITCODE
     Assert-Entry ((Get-FileSha256 $intentPath) -ceq $intentHash -and (Get-EntryDigest (Split-Path $fixture.TerminalPath -Parent)) -ceq $receiptHash -and (Get-EntryDigest $instanceRoot) -ceq $instanceHash) 'confirmed-uninstall-preserves-intent-history-and-retained-effects'
     $terminal=(Read-BoundedJsonDocument -Path $fixture.TerminalPath -Label 'original terminal' -MaximumBytes 131072).Document
     Assert-Entry ($terminal.exit_code -eq 6 -and $terminal.output_drain_incomplete -and $terminal.stdout -ceq 'incomplete original INSTALL' -and $terminal.stderr -ceq 'original failure') 'original-incomplete-command-remains-failed'
+    if ($OriginalProjectRoots) {
+        $desired=(Read-BoundedJsonDocument -Path (Join-Path $projectRoot $script:InstanceDesiredStateRelativePath) -Label 'retained desired state' -MaximumBytes 131072).Document
+        Assert-Entry ($desired.desired_state -ceq 'UNINSTALLED' -and $desired.cleanup_state -ceq 'PENDING') 'mixed-root-retention-preserves-pending-logical-uninstall'
+    }
     $null=Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $projectRoot -StateId $stateId
     $null=Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $projectRoot
     Assert-Entry (-not (Test-Path (Join-Path $fixture.IndexRoot ('resolved-action-'+$fixture.ActionId+'.pending.json')))) 'production-readers-accept-emitted-links-no-pending-marker'

@@ -660,7 +660,8 @@ function Invoke-InstanceManifestContractCases {
 }
 
 function Invoke-RetainedCandidateRecoveryCase {
-    param([string]$ProjectRoot,[string]$PackageRoot,$Manifest,$OldIntent,[switch]$BuildFixtureOnly)
+    param([string]$ProjectRoot,[string]$PackageRoot,$Manifest,$OldIntent,[switch]$BuildFixtureOnly,[string]$RecordedProjectRoot)
+    if (-not $PSBoundParameters.ContainsKey('RecordedProjectRoot')) { $RecordedProjectRoot = $ProjectRoot }
     $oldHash=if(-not $BuildFixtureOnly){Get-FileSha256 -Path $OldIntent.Path}else{''}
     foreach($file in $Manifest.Files) {
         if($file.Target.StartsWith($script:GenerationTargetPrefix,[StringComparison]::Ordinal)) {
@@ -701,13 +702,13 @@ function Invoke-RetainedCandidateRecoveryCase {
     $packageKey=Get-TextSha256 -Text ($PackageRoot.Replace('\','/').TrimEnd('/').ToLowerInvariant())
     $receipts=Join-Path $localData "Rice/CodeDB/manager-actions/$actionId";New-Item -ItemType Directory -Force -Path $receipts|Out-Null
     $indexRoot=Join-Path $localData ('Rice/CodeDB/manager-actions/'+$projectKey.Substring(0,24));New-Item -ItemType Directory -Force -Path $indexRoot|Out-Null
-    $args=@('-Action','Install','-ProjectRoot',$ProjectRoot,'-ConfirmedProjectMutation','-OriginatingActionId',$actionId,'-OriginatingOperationId',$operationId)
+    $args=@('-Action','Install','-ProjectRoot',$RecordedProjectRoot,'-ConfirmedProjectMutation','-OriginatingActionId',$actionId,'-OriginatingOperationId',$operationId)
     $scriptPath=Join-Path $PackageRoot 'Tools~/materialize-codedb-host-payload.ps1';$scriptHash=Get-FileSha256 -Path $scriptPath
     $argumentHash=Get-TextSha256 -Text ($args -join "`n");$identity=Get-TextSha256 -Text "$scriptHash`n$argumentHash`n600000"
     $stage=Get-TextSha256 -Text "$actionId`nmaterialize-codedb-host-payload.ps1:$($argumentHash.Substring(0,16))`n$identity";$prefix=$stage.Substring(0,16)
     $base=[ordered]@{schema_version=1;storage_layout='compact-v1';managed_by=$script:ManagedBy;action_id=$actionId;stage_id=$stage;project_key=$projectKey;package_key=$packageKey}
     $admission=[ordered]@{};foreach($key in $base.Keys){$admission[$key]=$base[$key]}
-    $admission.state='admitted';$admission.project_root=$ProjectRoot;$admission.package_root=$PackageRoot;$admission.project_identity="sha256:$projectKey";$admission.package_identity="sha256:$packageKey";$admission.effect_class='ConfirmedProjectMutation';$admission.authorization_source='UserConfirmationAndBackendAdmission';$admission.terminal_for_action=$true;$admission.writer_sha256=Get-FileSha256 -Path (Join-Path $PackageRoot 'Tools~/invoke-codedb-manager-action.ps1');$admission.command_identity_sha256=$identity;$admission.command=[ordered]@{script_path=$scriptPath;script_sha256=$scriptHash;arguments=$args;arguments_sha256=$argumentHash;timeout_ms=600000}
+    $admission.state='admitted';$admission.project_root=$RecordedProjectRoot;$admission.package_root=$PackageRoot;$admission.project_identity="sha256:$projectKey";$admission.package_identity="sha256:$packageKey";$admission.effect_class='ConfirmedProjectMutation';$admission.authorization_source='UserConfirmationAndBackendAdmission';$admission.terminal_for_action=$true;$admission.writer_sha256=Get-FileSha256 -Path (Join-Path $PackageRoot 'Tools~/invoke-codedb-manager-action.ps1');$admission.command_identity_sha256=$identity;$admission.command=[ordered]@{script_path=$scriptPath;script_sha256=$scriptHash;arguments=$args;arguments_sha256=$argumentHash;timeout_ms=600000}
     $claim=[ordered]@{};foreach($key in $base.Keys){$claim[$key]=$base[$key]};$claim.state='claimed';$claim.writer_pid=424242;$claim.writer_start_utc_ticks='638000000000000000'
     $terminal=[ordered]@{};foreach($key in $base.Keys){$terminal[$key]=$base[$key]};$terminal.state='terminal';$terminal.writer_pid=424242;$terminal.child_pid=424243;$terminal.command_identity_sha256=$identity;$terminal.terminal_for_action=$true;$terminal.exit_code=6;$terminal.timed_out=$false;$terminal.output_overflow=$false;$terminal.output_drain_incomplete=$true;$terminal.stdout='incomplete original INSTALL';$terminal.stderr='original failure';$terminal.elapsed_milliseconds=1;$terminal.completed_at_utc=[DateTime]::UtcNow.ToString('o')
     foreach($pair in @(@('admitted',$admission),@('claim',$claim),@('terminal',$terminal))){Write-PhaseCRecord -Path (Join-Path $receipts "$prefix.$($pair[0]).json") -Document $pair[1]}
