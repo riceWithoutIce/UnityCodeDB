@@ -835,6 +835,17 @@ consumer, or publication evidence.
 - Export the artifact from the frozen commit only, extract that exact archive,
   and rerun the complete closure validator on the extracted single-root
   Package. A worktree-only pass does not authorize release.
+- Every export must also pass the production materializer's read-only payload
+  manifest admission route, including its exact target-path policy, on both the
+  commit-stage Package and exact ZIP extraction. Report byte/hash closure and
+  production admission separately; export PASS requires both. Manifest entries
+  cannot authorize themselves, and a focused native-output collector test does
+  not prove manifest admission. This check does not run project installation,
+  prerequisites, Unity, MCP, or an unchanged whole-product regression suite.
+- A task adding payload files must name their manifest writer, production
+  admission reader and focused evidence in its existing consumer map. Include
+  the added audited targets and directly coupled unknown-target rejection cases
+  in that same task; no independent parser or duplicate permissive target list.
 - Preserve any previously observed invalid artifact and its evidence. If an
   immutable generation was externally observed, either formally admit it as a
   protected historical failure or create a successor generation; never repair

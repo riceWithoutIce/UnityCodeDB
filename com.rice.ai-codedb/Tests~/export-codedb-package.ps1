@@ -23,8 +23,12 @@ function Invoke-PackageClosureValidator {
         [Parameter(Mandatory = $true)][string]$Label
     )
     Assert-Export (Test-Path -LiteralPath $ValidatorPath -PathType Leaf) "$Label validator is missing from the Package."
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $ValidatorPath -PackageRoot $PackagePath
+    $validationOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ValidatorPath -PackageRoot $PackagePath)
+    $validationOutput | Write-Output
     if ($LASTEXITCODE -ne 0) { throw "$Label closure validation failed with exit code $LASTEXITCODE." }
+    Assert-Export ([bool]($validationOutput -match '^\[PRODUCTION_PAYLOAD_ADMISSION\] PASS ')) "$Label production admission PASS is missing."
+    Assert-Export ([bool]($validationOutput -match '^\[PACKAGE_BYTE_CLOSURE\] PASS ')) "$Label byte closure PASS is missing."
+    Write-Output ("[PACKAGE_EXPORT_GATE] PASS package={0} byte_closure=PASS production_admission=PASS" -f $Label)
 }
 
 function New-DeterministicPackageZip {

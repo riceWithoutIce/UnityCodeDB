@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")]
+    [ValidateSet("ValidatePayload", "DryRun", "Probe", "Verify", "Upgrade", "Redeploy", "Sync", "Remove", "RemoveIntegration", "RemoveIntegrationPreflight", "UninstallPreflight", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")]
     [string]$Action = "DryRun",
 
     [Parameter(Mandatory = $true)]
@@ -143,6 +143,9 @@ foreach ($allowedTarget in @(
     "AIWork/codedb/codedb-mcp.runtime.example.toml",
     "AIWork/codedb/codedbignore.example",
     "AIWork/codedb/coordinator/codedb-watch-coordinator.mjs",
+    "AIWork/codedb/native/win-x64/build-manifest.json",
+    "AIWork/codedb/native/win-x64/codedb-daemon-launch.exe",
+    "AIWork/codedb/shared/codedb-daemon-launch.mjs",
     "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
     "AIWork/codedb/shared/codedb-strict-json.ps1",
     "AIWork/codedb/shared/codedb-instance-manifest-contract.ps1",
@@ -173,6 +176,9 @@ foreach ($generationTarget in @(
     "codedbignore.example",
     "coordinator/codedb-watch-coordinator.mjs",
     "generation-manifest.json",
+    "native/win-x64/build-manifest.json",
+    "native/win-x64/codedb-daemon-launch.exe",
+    "shared/codedb-daemon-launch.mjs",
     "scripts/build-codedb-project-text-adapter.ps1",
     "scripts/check-codedb-project-freshness.ps1",
     "scripts/clear-codedb-project-index.ps1",
@@ -11631,6 +11637,17 @@ function Invoke-Remove {
 . (Join-Path $PSScriptRoot "codedb-instance-engine.ps1")
 
 try {
+    # Package admission uses a caller-owned logical projection only. It returns
+    # before Unity markers, project state, prerequisites, locks or runtime work.
+    if ($Action -eq "ValidatePayload") {
+        $projectionRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+        if ([string]::IsNullOrWhiteSpace($PayloadRoot)) {
+            $PayloadRoot = Join-Path ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))) "Payload~"
+        }
+        $payload = Read-PayloadManifest -Root $PayloadRoot -ProjectRoot $projectionRoot
+        Write-Output ("[PRODUCTION_PAYLOAD_ADMISSION] PASS file_count={0} runtime_contract_hash={1}" -f $payload.Files.Count, $payload.RuntimeContractSha256)
+        exit 0
+    }
     if ($ConfirmedProjectMutation -and $Action -notin @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install", "ReconcileHistoricalUnknown")) {
         Throw-MaterializerError -Message "Project mutation confirmation is valid only for Redeploy, Sync, Remove, RemoveIntegration, Repair, Reinstall, Uninstall, Install, or ReconcileHistoricalUnknown." -ExitCode 4
     }

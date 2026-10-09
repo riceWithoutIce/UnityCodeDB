@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)][string]$PackageRoot = (Join-Path $PSScriptRoot ".."),
+    [string]$AdmissionProjectRoot = '',
     [switch]$RepairCanonicalMetadata,
     [string]$SuccessorGenerationId = ''
 )
@@ -298,6 +299,15 @@ if ($RepairCanonicalMetadata) {
     Write-CanonicalJson -Path $runtimeIdentityFixturePath -Value $runtimeIdentityFixture
 }
 
+# Run the actual materializer reader before the release metadata projections.
+# This logical root is never created and is never an installed consumer project.
+if ([string]::IsNullOrWhiteSpace($AdmissionProjectRoot)) {
+    $AdmissionProjectRoot = Join-Path $root 'Tests~/.payload-admission-projection'
+}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'Tools~/materialize-codedb-host-payload.ps1') `
+    -Action ValidatePayload -ProjectRoot $AdmissionProjectRoot -PayloadRoot $payloadRoot
+Assert-Closure ($LASTEXITCODE -eq 0) "Production payload admission failed with exit code $LASTEXITCODE."
+
 Assert-EqualValue $package.name $payload.managed_by "Package owner"
 Assert-EqualValue $package.version $payload.package_version "Package version"
 Assert-EqualValue $payload.schema_version 1 "Payload schema"
@@ -390,4 +400,5 @@ if ($mismatches.Count -gt 0) {
     throw (($mismatches | Select-Object -First 20) -join "`n")
 }
 
-Write-Output ("[PACKAGE_CLOSURE] PASS source_count={0} mismatch_count=0 generation_hash={1} host_current_hash={2} runtime_contract_hash={3}" -f $sourceCount, $generationHash, $hostHash, $runtimeContractHash)
+Write-Output ("[PACKAGE_BYTE_CLOSURE] PASS source_count={0} mismatch_count=0 generation_hash={1} host_current_hash={2} runtime_contract_hash={3}" -f $sourceCount, $generationHash, $hostHash, $runtimeContractHash)
+Write-Output '[PACKAGE_CLOSURE] PASS byte_closure=PASS production_admission=PASS'
