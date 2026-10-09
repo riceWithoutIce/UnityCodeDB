@@ -324,7 +324,7 @@ namespace Rice.AI.Codedb.Editor
                 || value(marker, "action_id") != actionId || !IsLowerHex64(stageId)
                 || !AICodedbSupervisorProtocol.IsManagerActionId(stateId)
                 || !AICodedbSupervisorProtocol.IsManagerActionId(instanceId)
-                || !string.Equals(value(marker, "project_root"), current.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || !AICodedbPaths.AreSameAbsoluteProjectRoot(value(marker, "project_root"), current.ProjectRoot)
                 || value(marker, "project_key") != AICodedbPaths.GetManagerActionProjectKey(current)
                 || value(marker, "package_key") != AICodedbPaths.GetManagerActionPackageKey(original)
                 || value(marker, "command_outcome") != "failed_or_unknown"
@@ -382,7 +382,7 @@ namespace Rice.AI.Codedb.Editor
                 || value(intent, "retained_instance_id") != instanceId
                 || value(intent, "retained_generation_id") != value(marker, "retained_generation_id")
                 || value(intent, "project_identity") != "sha256:" + value(marker, "project_key")
-                || !string.Equals(value(intent, "project_root"), current.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                || !AICodedbPaths.AreSameAbsoluteProjectRoot(value(intent, "project_root"), current.ProjectRoot)
                 || !IsLowerHex64(value(intent, "authority_fingerprint")))
                 throw new InvalidOperationException("Failed candidate intent identity is invalid.");
             var instanceRelative = "AIWork/.runtime/codedb/instances/" + instanceId;
@@ -484,7 +484,7 @@ namespace Rice.AI.Codedb.Editor
             if (AICodedbStrictJson.GetRequiredInt32(desired, "schema_version", label) != 1
                 || text(desired, "managed_by") != "com.rice.ai-codedb"
                 || text(desired, "project_identity") != text(intent, "project_identity")
-                || !string.Equals(text(desired, "project_root"), context.ProjectRoot, StringComparison.OrdinalIgnoreCase))
+                || !AICodedbPaths.AreSameAbsoluteProjectRoot(text(desired, "project_root"), context.ProjectRoot))
                 throw new InvalidOperationException("Retained candidate desired state identity conflicts.");
             if (text(desired, "desired_state") == "UNINSTALLED")
             {
@@ -558,7 +558,7 @@ namespace Rice.AI.Codedb.Editor
                 if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
                     || text(record, "managed_by") != "com.rice.ai-codedb"
                     || text(record, "project_identity") != text(intent, "project_identity")
-                    || !string.Equals(text(record, "project_root"), context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || !AICodedbPaths.AreSameAbsoluteProjectRoot(text(record, "project_root"), context.ProjectRoot)
                     || text(record, "runtime_contract_sha256") != text(instance, "runtime_contract_sha256"))
                     throw new InvalidOperationException("Retained candidate fresh activation context conflicts.");
             foreach (var evidence in new[] {

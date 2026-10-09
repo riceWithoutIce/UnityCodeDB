@@ -791,6 +791,12 @@ closure alone does not prove that a runtime consumer can read the record.
   from the actual call chain, not just filenames, the write allowlist or
   language-local tests. Shared decoding entry points may be grouped once when
   their caller bindings are demonstrated.
+- For filesystem identity fields, distinguish original serialized bytes from
+  path identity comparison. Freeze accepted path representations and reject
+  relative or different-root identities; project the same comparison semantics
+  across the affected languages. Normalize in memory only, preserving original
+  records and byte-hash authentication. Include a production-writer-to-real-reader
+  check; language-local PASS is not cross-language contract closure.
 - Planner freezes that map and a coherent write/evidence scope. Coder closes
   the affected writers/readers and reports their bindings. Verifier checks the
   frozen map and attributable evidence, not a new whole-product audit. A

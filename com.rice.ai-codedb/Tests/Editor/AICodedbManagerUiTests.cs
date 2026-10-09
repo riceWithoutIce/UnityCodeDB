@@ -1406,6 +1406,32 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void RetainedProjectRootIdentity_AcceptsOnlySameFullyQualifiedPlatformRoot()
+        {
+            if (Path.DirectorySeparatorChar != '\\')
+            {
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "/project/"), Is.True);
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "/PROJECT"), Is.False);
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "project"), Is.False);
+                return;
+            }
+            const string root = "G:/RiceProject/Retained";
+            foreach (var equivalent in new[] { "G:\\RiceProject\\Retained", "g:/riceproject/retained/",
+                "G:\\RiceProject/Retained\\" })
+            {
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, equivalent), Is.True, equivalent);
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(equivalent, root), Is.True, equivalent);
+            }
+            foreach (var refused in new[] { "G:/RiceProject/Different", "RiceProject/Retained",
+                "G:RiceProject/Retained", "/RiceProject/Retained", "\\RiceProject\\Retained",
+                "G::/RiceProject/Retained", "G:/RiceProject/Retained?", "\\\\server", "" })
+            {
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, refused), Is.False, refused);
+                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(refused, root), Is.False, refused);
+            }
+        }
+
+        [Test]
         public void ManagerActionJournal_ActualPowerShellRetainedEffectsProofPreservesFailedOutcomeAndReleasesSession()
         {
             // This input is emitted by the actual confirmed Uninstall production
@@ -1439,22 +1465,68 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(restored.IsRecovering, Is.False);
             Assert.That(restored.Result.FailedCandidateEffectsRetained, Is.True);
             Assert.That(restored.Result.OutputDrainIncomplete, Is.True);
+            // Exercise the actual emitted marker/intent/desired chain without
+            // rewriting its authenticated bytes for representation differences.
+            foreach (var root in new[] { field("project_root").Replace('/', '\\'),
+                field("project_root").Replace('\\', '/').ToUpperInvariant() + "/",
+                field("project_root").Replace('\\', '/') + "\\" })
+            {
+                var equivalent = new AICodedbEditorExecutionContext(context.Platform,
+                    root, context.PackageRoot, context.ProjectDisplayName);
+                var same = AICodedbManagerActionJournal.Read(equivalent);
+                Assert.That(same.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty), same.Detail);
+                Assert.That(same.HistoricalResult.FailedCandidateEffectsRetained, Is.True);
+            }
+            var marker = AICodedbStrictJson.ParseObject(File.ReadAllText(markerPath), "actual emitted marker");
+            var stateId = AICodedbStrictJson.GetRequiredString(marker, "removal_state_id", "actual emitted marker");
+            var intentPath = Path.Combine(context.ProjectRoot,
+                "AIWork/.runtime/codedb/control/removal-intents/" + stateId + ".json");
+            var desiredPath = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/control/desired-state.json");
+            var intentBytes = File.ReadAllBytes(intentPath);
+            var desiredBytes = File.ReadAllBytes(desiredPath);
             try
             {
                 var original = File.ReadAllText(markerPath);
                 foreach (var hashName in new[] { "admission_sha256", "terminal_sha256", "removal_intent_sha256" })
                 {
-                    var marker = AICodedbStrictJson.ParseObject(original, "actual emitted marker");
-                    var hash = AICodedbStrictJson.GetRequiredString(marker, hashName, "actual emitted marker");
+                    var record = AICodedbStrictJson.ParseObject(original, "actual emitted marker");
+                    var hash = AICodedbStrictJson.GetRequiredString(record, hashName, "actual emitted marker");
                     File.WriteAllText(markerPath, original.Replace(hash, new string('0', 64)));
                     var refused = AICodedbManagerActionJournal.Read(context);
                     Assert.That(refused.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict), hashName);
                     File.WriteAllBytes(markerPath, markerBytes);
                 }
+                foreach (var recordPath in new[] { markerPath, intentPath, desiredPath })
+                foreach (var refusedRoot in new[] { context.ProjectRoot + "-different", "relative-project",
+                    "G:relative-project", "\\current-drive-project" })
+                {
+                    var text = File.ReadAllText(recordPath);
+                    var record = AICodedbStrictJson.ParseObject(text, "actual emitted root fault");
+                    record["project_root"] = refusedRoot;
+                    File.WriteAllText(recordPath, SerializeObject(record));
+                    Assert.That(File.ReadAllText(recordPath), Is.Not.EqualTo(text), "root fault must change bytes");
+                    if (recordPath != markerPath)
+                    {
+                        var hashName = recordPath == intentPath ? "removal_intent_sha256" : "desired_state_sha256";
+                        var oldHash = AICodedbStrictJson.GetRequiredString(marker, hashName, "actual emitted marker");
+                        using var sha = System.Security.Cryptography.SHA256.Create();
+                        var newHash = BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(recordPath)))
+                            .Replace("-", "").ToLowerInvariant();
+                        File.WriteAllText(markerPath, original.Replace(oldHash, newHash));
+                    }
+                    var refused = AICodedbManagerActionJournal.Read(context);
+                    Assert.That(refused.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict),
+                        recordPath + " / " + refusedRoot);
+                    File.WriteAllBytes(markerPath, markerBytes);
+                    File.WriteAllBytes(intentPath, intentBytes);
+                    File.WriteAllBytes(desiredPath, desiredBytes);
+                }
             }
             finally
             {
                 File.WriteAllBytes(markerPath, markerBytes);
+                File.WriteAllBytes(intentPath, intentBytes);
+                File.WriteAllBytes(desiredPath, desiredBytes);
                 Assert.That(File.ReadAllBytes(terminalPath), Is.EqualTo(terminalBytes));
                 AICodedbManagerActionSession.ClearCompleted();
             }

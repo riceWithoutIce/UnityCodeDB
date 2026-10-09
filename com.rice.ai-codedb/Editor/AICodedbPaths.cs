@@ -521,6 +521,51 @@ namespace Rice.AI.Codedb.Editor
             return Path.GetFullPath(path).Replace('\\', '/');
         }
 
+        // Serialized project identities must already be absolute. In particular,
+        // GetFullPath must never supply a missing drive or current directory.
+        internal static bool AreSameAbsoluteProjectRoot(string left, string right)
+        {
+            var windows = Path.DirectorySeparatorChar == '\\';
+            bool IsAbsolute(string path)
+            {
+                if (string.IsNullOrWhiteSpace(path) || path.IndexOf('\0') >= 0)
+                    return false;
+                if (!windows)
+                    return path[0] == '/' && path.IndexOf('\\') < 0;
+
+                var native = path.Replace('/', '\\');
+                if (native.IndexOfAny(new[] { '<', '>', '"', '|', '?', '*' }) >= 0)
+                    return false;
+                foreach (var character in native)
+                    if (character < 32)
+                        return false;
+                if (native.Length >= 3 && ((native[0] >= 'A' && native[0] <= 'Z')
+                        || (native[0] >= 'a' && native[0] <= 'z'))
+                    && native[1] == ':' && native[2] == '\\')
+                    return native.IndexOf(':', 2) < 0;
+                if (!native.StartsWith("\\\\", StringComparison.Ordinal) || native.IndexOf(':') >= 0)
+                    return false;
+                var parts = native.Substring(2).Split('\\');
+                return parts.Length >= 2 && !string.IsNullOrWhiteSpace(parts[0])
+                    && !string.IsNullOrWhiteSpace(parts[1])
+                    && parts[0] != "." && parts[0] != ".."
+                    && parts[1] != "." && parts[1] != "..";
+            }
+
+            if (!IsAbsolute(left) || !IsAbsolute(right))
+                return false;
+            try
+            {
+                return string.Equals(NormalizePath(left).TrimEnd('/'), NormalizePath(right).TrimEnd('/'),
+                    windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            }
+            catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException
+                || exception is PathTooLongException || exception is System.Security.SecurityException)
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// Resolves the physical package root selected by Unity Package Manager.
         /// </summary>
