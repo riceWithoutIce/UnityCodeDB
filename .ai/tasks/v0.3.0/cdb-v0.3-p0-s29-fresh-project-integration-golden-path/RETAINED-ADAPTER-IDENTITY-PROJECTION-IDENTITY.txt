@@ -1,0 +1,2 @@
+3cdf6ac436264ff391acafd77999b8aa62966f5295b7481cb0c004ee3afcf6a7  com.rice.ai-codedb/Tests/Editor/OwnerIdentityV2Status.json
+3c75c21de8af64c89a56afafc256a7c5cd762ec73f002995a5b26115d0b28cb6  .artifacts/tests/s29-adapter/project-successor.ps1
