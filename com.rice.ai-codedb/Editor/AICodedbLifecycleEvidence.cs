@@ -1005,7 +1005,10 @@ namespace Rice.AI.Codedb.Editor
         internal static void RecordShutdownDisposition(AICodedbSupervisorCommandResponse response)
         {
             GetCounter().RecordShutdownDisposition(response);
-            EmitWorkerCheckpoint("shutdown_completed");
+            // QueueOwnedSupervisorShutdown observes this continuation on the
+            // ThreadPool. Unity may already have destroyed MonoManager by the
+            // time the Supervisor responds, so this boundary must remain a
+            // counter-only update and must not call Debug.Log/SessionState.
         }
 
         internal static void RecordEditorQuittingBoundary(
