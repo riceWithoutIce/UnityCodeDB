@@ -542,16 +542,15 @@ namespace Rice.AI.Codedb.Editor
             var instancePath = RetainedProjectPath(context, selected.InstanceRelativePath + "/instance.json");
             var instance = AICodedbStrictJson.ReadObject(instancePath, 131072, label);
             var origin = AICodedbStrictJson.RequireObject(instance["originating_action"], label);
-            var contract = AICodedbStrictJson.RequireObject(instance["control_contract"], label);
-            var id = text(contract, "id");
-            foreach (var character in id)
-                if (!char.IsLetterOrDigit(character) && character != '-' && character != '_' && character != '.')
-                    throw new InvalidOperationException("Retained candidate control contract path is invalid.");
-            if (id.Length == 0 || id == "." || id == ".." || text(origin, "action") != "INSTALL"
+            // Instance manifests carry generation identity; the Package runtime
+            // contract is the existing authority for control namespace/hash.
+            // Do not require producer fields which instance.json never owns.
+            var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
+            var contract = runtimeContract.ControlContract;
+            if (text(origin, "action") != "INSTALL"
                 || text(instance, "state") != "READY" || text(origin, "action_id") == text(marker, "action_id"))
                 throw new InvalidOperationException("Retained candidate fresh INSTALL origin is invalid.");
-            var version = AICodedbStrictJson.GetRequiredInt32(contract, "version", label);
-            var root = "AIWork/.runtime/codedb/control/contracts/" + id + "/v" + version.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var root = Path.GetDirectoryName(contract.NamespaceRelativePath).Replace('\\', '/');
             var activation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/activation.json"), 65536, label);
             var operation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/operation.json"), 1048576, label);
             if (text(activation, "publication_phase") != "COMMITTED" || text(operation, "phase") != "COMMITTED"
@@ -561,12 +560,19 @@ namespace Rice.AI.Codedb.Editor
                 || text(operation, "activation_epoch") != selected.ActivationEpoch)
                 throw new InvalidOperationException("Retained candidate fresh activation is not committed INSTALL authority.");
             foreach (var record in new[] { activation, operation })
+            {
+                var declaredContract = AICodedbStrictJson.RequireObject(record["control_contract"], label);
                 if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
                     || text(record, "managed_by") != "com.rice.ai-codedb"
                     || text(record, "project_identity") != text(intent, "project_identity")
                     || !AICodedbPaths.AreSameAbsoluteProjectRoot(text(record, "project_root"), context.ProjectRoot)
-                    || text(record, "runtime_contract_sha256") != text(instance, "runtime_contract_sha256"))
+                    || text(record, "runtime_contract_sha256") != runtimeContract.Sha256
+                    || text(declaredContract, "id") != contract.Id
+                    || AICodedbStrictJson.GetRequiredInt32(declaredContract, "version", label) != contract.Version
+                    || AICodedbStrictJson.GetRequiredInt32(declaredContract, "schema_version", label) != contract.SchemaVersion
+                    || text(declaredContract, "sha256") != contract.Sha256)
                     throw new InvalidOperationException("Retained candidate fresh activation context conflicts.");
+            }
             foreach (var evidence in new[] {
                 AICodedbStrictJson.RequireObject(operation["candidate"], label),
                 AICodedbStrictJson.RequireObject(activation["candidate"], label),
@@ -577,11 +583,21 @@ namespace Rice.AI.Codedb.Editor
                     || text(evidence, "generation_manifest_sha256") != text(instance, "generation_manifest_sha256"))
                     throw new InvalidOperationException("Retained candidate fresh activation selection conflicts.");
             var wrapperPath = RetainedProjectPath(context, "AIWork/codedb/wrapper/codedb-project-wrapper.mjs");
-            var canonical = RetainedFileHash(RetainedProjectPath(context,
-                "AIWork/.runtime/codedb/host/generations/" + selected.GenerationId + "/wrapper/codedb-project-wrapper.mjs"));
+            var canonical = runtimeContract.GetExpectedStableWrapperSha256(new AICodedbRuntimeIdentity(
+                selected.PackageVersion, selected.PayloadVersion, selected.PayloadSequence,
+                selected.GenerationId, selected.BootstrapProtocol));
             if (RetainedFileHash(wrapperPath) != canonical)
                 throw new InvalidOperationException("Retained candidate fresh wrapper handoff bytes conflict.");
-            if (text(intent, "retained_wrapper_sha256") != canonical)
+            ValidateRetainedFreshWrapperMutation(operation, canonical, text(intent, "retained_wrapper_sha256"));
+        }
+
+        internal static void ValidateRetainedFreshWrapperMutation(
+            Dictionary<string, object> operation, string canonical, string retainedWrapperHash)
+        {
+            const string label = "retained candidate wrapper handoff";
+            Func<Dictionary<string, object>, string, string> text =
+                (record, field) => AICodedbStrictJson.GetRequiredString(record, field, label);
+            if (retainedWrapperHash != canonical)
             {
                 Dictionary<string, object> wrapperMutation = null;
                 foreach (var raw in AICodedbStrictJson.GetRequiredArray(operation, "mutations", label))
@@ -593,9 +609,10 @@ namespace Rice.AI.Codedb.Editor
                 }
                 if (wrapperMutation == null || text(wrapperMutation, "mutation") != "write"
                     || text(wrapperMutation, "desired_sha256") != canonical
-                    || text(wrapperMutation, "pre_image_sha256") != text(intent, "retained_wrapper_sha256")
+                    || (AICodedbStrictJson.GetRequiredNullableString(wrapperMutation, "pre_image_sha256", label)
+                        ?? string.Empty) != retainedWrapperHash
                     || AICodedbStrictJson.GetRequiredBoolean(wrapperMutation, "existed_before", label)
-                        != !string.IsNullOrEmpty(text(intent, "retained_wrapper_sha256")))
+                        != !string.IsNullOrEmpty(retainedWrapperHash))
                     throw new InvalidOperationException("Retained candidate committed wrapper mutation is unbound.");
             }
         }
@@ -996,6 +1013,11 @@ namespace Rice.AI.Codedb.Editor
                            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
                 {
                     var read = Read(index.Context);
+                    if (read.State == AICodedbManagerActionIndexState.Conflict)
+                    {
+                        detail = "The completed action index could not be authenticated: " + read.Detail;
+                        return false;
+                    }
                     if (read.State != AICodedbManagerActionIndexState.Pending
                         || !string.Equals(read.Index.ActionId, index.ActionId, StringComparison.Ordinal)
                         || !string.Equals(read.Index.Context.PackageRoot, index.Context.PackageRoot,

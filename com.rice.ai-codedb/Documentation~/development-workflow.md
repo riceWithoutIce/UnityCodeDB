@@ -216,6 +216,13 @@ creation/rebinding; those retain their existing explicit gates.
 3. Planner waits for the terminal child result without busy polling, duplicate
    dispatch, or concurrent edits. Planner then performs one bounded result and
    identity admission.
+   For task-scoped children, dispatch is not completion: Planner remains active
+   through the authorized child stages, consumes returned questions or blockers,
+   and uses bounded waits/status checks to confirm terminal completion. Do not
+   end the parent turn merely because a child was dispatched. A user-owned
+   decision or human validation gate may still require a handoff; waiting does
+   not authorize extra scope or automatic repairs. This monitoring requirement
+   does not change the separate durable-session dispatch policy.
 4. Only after Coder has stopped and the snapshot is stable may Planner spawn at
    most one Verifier child. The Verifier receives the frozen task, result,
    identity, and declared review claims as fresh minimal context; it is not

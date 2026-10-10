@@ -1356,17 +1356,27 @@ namespace Rice.AI.Codedb.Editor
                         "materialize",
                         "Upgrade",
                         cancellationToken);
-                    productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, retirementResult);
+                    // Retirement output describes historical effects, not the
+                    // selected instance's readiness. Re-observe through the
+                    // same read-only Supervisor route and retain its identity
+                    // binding/freshness; never pin the pre-retirement Ready.
+                    if (cancellationToken.IsCancellationRequested || !canContinue())
+                        return workerResult;
+                    AICodedbCommandResult readinessResult;
+                    productStatus = ObserveProductAfterRetirement(
+                        integrationStatus, retirementResult,
+                        () => RunSupervisorCommand(context, "materialize", "Probe", cancellationToken),
+                        out readinessResult);
                     if (productStatus.State == AICodedbProductState.Ready)
                         productStatus = WithRemovalPreflight(
                             context, productStatus, currentInstance, canContinue, cancellationToken, true);
-                    productStatus = RememberLifecycleProductStatus(productStatus, retirementResult);
+                    productStatus = RememberLifecycleProductStatus(productStatus, readinessResult);
                     workerResult.ProductState = productStatus.State;
                     if (productStatus.State == AICodedbProductState.Ready)
                         RefreshEditorLeaseForIntegrationState(context);
-                    else
+                    if (!retirementResult.Succeeded)
                         workerResult.Warning =
-                            $"CodeDB automatic retired-instance convergence failed: {retirementResult.GetSummary()} {retirementResult.StandardError}".Trim();
+                            $"CodeDB historical cleanup remains pending: {retirementResult.GetSummary()} {retirementResult.StandardError}".Trim();
                     return workerResult;
                 }
                 if (convergencePlan == AICodedbCurrentInstanceConvergencePlan.Deploy)
@@ -1467,6 +1477,25 @@ namespace Rice.AI.Codedb.Editor
                 workerResult.Warning, productStatus.Command,
                 productStatus.AttentionReason, productStatus.DiagnosticDetail), hostResult);
             return workerResult;
+        }
+
+        internal static AICodedbProductStatus ObserveProductAfterRetirement(
+            AICodedbProjectIntegrationStatus integrationStatus,
+            AICodedbCommandResult retirementResult,
+            Func<AICodedbCommandResult> observeReadiness,
+            out AICodedbCommandResult readinessResult)
+        {
+            readinessResult = observeReadiness();
+            var observed = AICodedbProductStatusBuilder.Build(integrationStatus, readinessResult);
+            var cleanupDetail = "Historical cleanup was " + integrationStatus.CleanupState
+                + " before the attempt; its current disposition is not a readiness result. "
+                + "Historical cleanup: " + (retirementResult == null
+                ? "attempt outcome unavailable."
+                : retirementResult.GetSummary() + " " + retirementResult.StandardError);
+            return new AICodedbProductStatus(observed.State, observed.Prerequisite,
+                observed.Installed, observed.Configured, observed.McpAvailable,
+                observed.Detail, observed.Command, observed.AttentionReason,
+                (observed.DiagnosticDetail + " " + cleanupDetail).Trim(), observed.RemovalPreflightPassed);
         }
 
         private static AICodedbProductStatus WithRemovalPreflight(

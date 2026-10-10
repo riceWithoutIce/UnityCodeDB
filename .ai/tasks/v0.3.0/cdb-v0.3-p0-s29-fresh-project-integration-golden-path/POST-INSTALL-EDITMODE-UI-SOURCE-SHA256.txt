@@ -1,0 +1,8 @@
+Baseline HEAD: b8a143214076445b3435507782132366eb1418d2
+Frozen Coder snapshot: 2026-10-10, post-install EditMode UI; no commit/export.
+b37597ba78caaa823b94933a14a385389e20747db03ba05cb1754f67a215ee17  com.rice.ai-codedb/Editor/AICodedbActivityPanel.cs
+d8eb3f3045959e90423863d728f850c84eab46b3ed5e8f96f0d292ef3bb2bd09  com.rice.ai-codedb/Editor/AICodedbStatusSnapshot.cs
+515c2ba97009e5e8c2417e3ac17b1e5e21a06c5e4b4b1957fa25f374a65507cf  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+7c3e0e493cb1db0c5a2006addc04ee2be06e006528d00b69704276d895117994  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+c284867857eff38742c90fc5ac995458d9231f069f64f6a8466fa3bac2175a65  com.rice.ai-codedb/Editor/AICodedbManagerActionJournal.cs
+2649743bd09f2c80dc1ba14c6ee42d5f41624b88ee62a60647bfb8c95bc08553  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs

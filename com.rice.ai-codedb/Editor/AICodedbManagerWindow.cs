@@ -503,6 +503,8 @@ namespace Rice.AI.Codedb.Editor
                 + ", original Package " + (session.HasOriginalContext ? session.Context.PackageRoot : "unavailable")
                 + ") " + commandOutcome + " Current product status is independent."
                 + " New project changes remain blocked until execution safety is proved."
+                + (string.IsNullOrEmpty(session.DurableIndexReleaseDetail) ? string.Empty
+                    : "\nAction index: " + session.DurableIndexReleaseDetail)
                 + (string.IsNullOrEmpty(warning) ? string.Empty : "\n" + warning);
         }
 
@@ -526,8 +528,7 @@ namespace Rice.AI.Codedb.Editor
                     && string.Equals(outcome.Result.ActionId, session.ActionId, StringComparison.Ordinal)
                     && await Task.Run(() =>
                     {
-                        session.TryReleaseDurableIndex(outcome.Result, out var _);
-                        return true;
+                        return session.TryReleaseDurableIndex(outcome.Result, out var _);
                     })
                     && session.TryCompleteRecovery(outcome.Result,
                         EditorApplication.timeSinceStartup))
@@ -539,7 +540,8 @@ namespace Rice.AI.Codedb.Editor
                 {
                     session.SetRecoveryDetail(outcome.State == AICodedbManagerActionRecoveryState.Terminal
                                               || outcome.State == AICodedbManagerActionRecoveryState.PreEffectRefusal
-                        ? "Authenticated command evidence exists, but the project action index could not be released."
+                        ? "Authenticated command evidence exists, but the project action index could not be released. "
+                            + session.DurableIndexReleaseDetail
                         : outcome.Detail);
                 }
                 Repaint();
@@ -870,11 +872,11 @@ namespace Rice.AI.Codedb.Editor
                     return TryGetCachedReadySnapshot(_executionContext)
                            ?? AICodedbStatusSnapshot.CreateCachedReady(
                                _executionContext.ProjectDisplayName,
-                               GetCachedCoordinatorFailureCategory());
+                               GetCachedCoordinatorFailureCategory(), true);
                 case AICodedbProductState.MissingPrerequisite:
                     return AICodedbStatusSnapshot.CreateCachedMissingPrerequisite(
                         _executionContext.ProjectDisplayName,
-                        GetCachedCoordinatorFailureCategory());
+                        GetCachedCoordinatorFailureCategory(), true);
                 default:
                     return null;
             }
@@ -3607,6 +3609,17 @@ namespace Rice.AI.Codedb.Editor
         }
 
         internal bool TryReleaseDurableIndex(AICodedbCommandResult result, out string detail)
+        {
+            var released = TryReleaseDurableIndexCore(result, out detail);
+            DurableIndexReleased = released;
+            DurableIndexReleaseDetail = released ? "The exact action index was released." : detail;
+            return released;
+        }
+
+        internal bool? DurableIndexReleased { get; private set; }
+        internal string DurableIndexReleaseDetail { get; private set; } = string.Empty;
+
+        private bool TryReleaseDurableIndexCore(AICodedbCommandResult result, out string detail)
         {
             _durableIndexRetained = true;
             if (result == null || !string.Equals(result.ActionId, ActionId, StringComparison.Ordinal)

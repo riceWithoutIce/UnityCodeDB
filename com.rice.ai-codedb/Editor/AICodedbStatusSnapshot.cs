@@ -163,7 +163,8 @@ namespace Rice.AI.Codedb.Editor
             bool hasCachedProductStatus,
             bool statusRefreshInFlight,
             AICodedbCoordinatorFailureCategory coordinatorFailureCategory,
-            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure terminalFailure)
+            AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure terminalFailure,
+            bool playModeSuspended = false)
         {
             _context = default(AICodedbEditorExecutionContext);
             var productState = displayState;
@@ -206,9 +207,13 @@ namespace Rice.AI.Codedb.Editor
                             ? AICodedbProductLayerState.Blocked
                     : AICodedbProductLayerState.Pending;
             var fallbackDetail = cachedReady
-                ? "The last verified Ready result is retained while Play mode is active; live checks resume after Play."
+                ? playModeSuspended
+                    ? "The last verified Ready result is retained while Play mode is active; live checks resume after Play."
+                    : "The last verified Ready observation is cached; reading this display does not perform a new check."
                 : cachedMissingPrerequisite
-                    ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
+                    ? playModeSuspended
+                        ? "CodeDB dependencies were not configured before Play mode; live checks resume after Play."
+                        : "The last observed prerequisite result is cached; reading this display does not perform a new check."
                 : cachedUninstalled
                     ? "CodeDB is uninstalled from this project; live checks resume after installation."
                 : cachedNotIntegrated
@@ -276,14 +281,17 @@ namespace Rice.AI.Codedb.Editor
                 ? AICodedbStatusItem.Inactive(
                     "Current instance",
                     "Last verified",
-                    "Live instance checks resume after Play mode.")
+                    playModeSuspended ? "Live instance checks resume after Play mode." : fallbackDetail)
                 : CachedUnknown("Current instance", showChecking, detail);
             CoordinatorFailure = CreateCoordinatorFailureStatus(coordinatorFailureCategory);
             Cleanup = cachedReady
                 ? AICodedbStatusItem.Inactive(
                     "Background cleanup",
                     "Not checked",
-                    "Live cleanup checks resume after Play mode.")
+                    playModeSuspended ? "Live cleanup checks resume after Play mode."
+                        : string.IsNullOrWhiteSpace(ProductStatus.DiagnosticDetail)
+                            ? "Historical cleanup is not evaluated by this cached readiness display."
+                            : ProductStatus.DiagnosticDetail + " Current cleanup is not rechecked by this cached display.")
                 : CachedUnknown("Background cleanup", showChecking, detail);
             ControlContractMigration = CreateControlContractMigrationStatus(ProductStatus);
             RuntimeRootRelativePath = runtimeRelativePath;
@@ -400,7 +408,9 @@ namespace Rice.AI.Codedb.Editor
             OverallDescription = retainedFailure != null
                 ? retainedFailure.DisplayDetail
                 : cachedReady
-                ? "CodeDB was Ready before Play mode. Live checks resume when Play ends."
+                ? playModeSuspended
+                    ? "CodeDB was Ready before Play mode. Live checks resume when Play ends."
+                    : fallbackDetail
                 : productState == AICodedbProductState.Starting && !showChecking
                     ? detail
                     : CreateOverallDescription(ProductStatus);
@@ -447,12 +457,14 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusSnapshot CreateCachedReady(
             string projectDisplayName,
             AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
-                AICodedbCoordinatorFailureCategory.NotEvaluated)
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            bool playModeSuspended = false)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
                 AICodedbProductState.Ready,
-                coordinatorFailureCategory);
+                default(AICodedbProductStatus), false, false,
+                coordinatorFailureCategory, null, playModeSuspended);
         }
 
         /// <summary>
@@ -462,12 +474,14 @@ namespace Rice.AI.Codedb.Editor
         internal static AICodedbStatusSnapshot CreateCachedMissingPrerequisite(
             string projectDisplayName,
             AICodedbCoordinatorFailureCategory coordinatorFailureCategory =
-                AICodedbCoordinatorFailureCategory.NotEvaluated)
+                AICodedbCoordinatorFailureCategory.NotEvaluated,
+            bool playModeSuspended = false)
         {
             return new AICodedbStatusSnapshot(
                 projectDisplayName,
                 AICodedbProductState.MissingPrerequisite,
-                coordinatorFailureCategory);
+                default(AICodedbProductStatus), false, false,
+                coordinatorFailureCategory, null, playModeSuspended);
         }
 
         /// <summary>

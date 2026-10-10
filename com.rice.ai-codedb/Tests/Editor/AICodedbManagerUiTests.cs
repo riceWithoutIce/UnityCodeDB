@@ -15,6 +15,52 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        [Test]
+        public void ManagerActionJournal_SuccessWithCleanupPendingReleasesExactIndexAndRetainsTrace()
+        {
+            AICodedbTestWorkspace.Run(workspace => {
+                using var sessions = new ManagerActionSessionFixture(workspace);
+                var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "Pending cleanup success");
+                using var fixture = new ManagerReceiptFixture(workspace, context, false);
+                var output = ManagerReceiptFixture.CommandOutput("INSTALL", "COMPLETE", "PENDING", "instance_activation")
+                    .Replace("\"FAILED\"", "\"INSTALLED\"").Replace("\"exit_code\":6", "\"exit_code\":0");
+                fixture.Add("Install", output, true, 0);
+                var read = AICodedbManagerActionJournal.Read(context);
+                AICodedbManagerActionSession.RestoreDurable(context, read, 1d);
+                var session = AICodedbManagerActionSession.CurrentFor(context);
+                var recovered = AICodedbProcessRunner.RecoverManagerAction(context, fixture.ActionId);
+                Assert.That(recovered.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal), recovered.Detail);
+                Assert.That(session.TryReleaseDurableIndex(recovered.Result, out var detail), Is.True, detail);
+                Assert.That(session.DurableIndexReleased, Is.True);
+                Assert.That(session.DurableIndexReleaseDetail, Does.Contain("exact action index"));
+                Assert.That(session.TryCompleteRecovery(recovered.Result, 2d), Is.True);
+                Assert.That(session.IsRecovering, Is.False);
+                Assert.That(AICodedbManagerActionJournal.Read(context).State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+            });
+        }
+
+        [Test]
+        public void ManagerActionSession_ReleaseFailureRetainsSpecificAuthenticationDetail()
+        {
+            AICodedbTestWorkspace.Run(workspace => {
+                using var sessions = new ManagerActionSessionFixture(workspace);
+                var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "Release conflict");
+                using var fixture = new ManagerReceiptFixture(workspace, context, false);
+                fixture.Add("Install", fixture.InstallOutput);
+                AICodedbManagerActionSession.RestoreDurable(context, AICodedbManagerActionJournal.Read(context), 1d);
+                var session = AICodedbManagerActionSession.CurrentFor(context);
+                var recovered = AICodedbProcessRunner.RecoverManagerAction(context, fixture.ActionId);
+                File.WriteAllText(AICodedbPaths.GetManagerActionIndexPath(context, fixture.ActionId), "{}");
+                Assert.That(session.TryReleaseDurableIndex(recovered.Result, out var detail), Is.False);
+                Assert.That(session.DurableIndexReleased, Is.False);
+                Assert.That(session.DurableIndexReleaseDetail, Is.EqualTo(detail));
+                Assert.That(detail, Does.Contain("could not be authenticated"));
+                Assert.That(detail, Does.Contain("action_id"));
+            });
+        }
+
         private sealed class ManagerReceiptFixture : IDisposable
         {
             private readonly string _root;
@@ -3192,8 +3238,80 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(snapshot.HostPayloadStatus.State, Is.EqualTo(AICodedbHostPayloadState.Current));
             Assert.That(snapshot.HostGenerationSelection.State, Is.EqualTo(AICodedbHostGenerationState.Current));
             Assert.That(snapshot.OverallTitle, Is.EqualTo("FixtureProject · Ready"));
-            Assert.That(snapshot.OverallDescription, Does.Contain("before Play mode"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("cached"));
+            Assert.That(snapshot.OverallDescription, Does.Not.Contain("Play"));
+            Assert.That(snapshot.CurrentInstance.Detail, Does.Not.Contain("Play"));
+            Assert.That(snapshot.Cleanup.Detail, Does.Not.Contain("Play"));
+            var suspended = AICodedbStatusSnapshot.CreateCachedReady("FixtureProject",
+                playModeSuspended: true);
+            Assert.That(suspended.OverallDescription, Does.Contain("before Play mode"));
+            Assert.That(suspended.CurrentInstance.Detail, Does.Contain("after Play mode"));
         }
+
+        [Test]
+        public void CachedEditModeProductStatus_DoesNotClaimPlayOrNewVerification()
+        {
+            var status = new AICodedbProductStatus(AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                "Authenticated observed readiness.");
+            var snapshot = AICodedbStatusSnapshot.CreateCachedStatus("FixtureProject", status);
+            Assert.That(snapshot.OverallDescription, Does.Contain("cached"));
+            Assert.That(snapshot.OverallDescription, Does.Contain("does not perform a new check"));
+            Assert.That(snapshot.OverallDescription, Does.Not.Contain("Play"));
+            Assert.That(snapshot.ProductStatus, Is.EqualTo(status));
+        }
+
+        [TestCase(0)]
+        [TestCase(6)]
+        public void LifecycleRetirement_UsesNewReadinessObservationInsteadOfCleanupOutcome(int cleanupExit)
+        {
+            var integration = new AICodedbProjectIntegrationStatus(AICodedbProjectIntegrationState.Installed,
+                AICodedbProjectCleanupState.Pending, "state", "Historical cleanup pending.");
+            var cleanup = new AICodedbCommandResult(cleanupExit, "[CLEANUP_STATE] PENDING", "", false);
+            var probe = new AICodedbCommandResult(0,
+                "[PRODUCT_LAYER PREREQUISITE] CURRENT\n[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                + "[PRODUCT_LAYER CONFIGURED] CURRENT\n[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n[PRODUCT_STATE] READY", "", false);
+            var calls = 0;
+            var status = AICodedbEditorLifecycle.ObserveProductAfterRetirement(integration, cleanup,
+                () => { calls++; return probe; }, out var observed);
+            Assert.That(calls, Is.EqualTo(1));
+            Assert.That(observed, Is.SameAs(probe));
+            Assert.That(status.IsReady, Is.True);
+            Assert.That(status.DiagnosticDetail, Does.Contain("Historical cleanup:"));
+            var cached = AICodedbStatusSnapshot.CreateCachedStatus("FixtureProject", status);
+            Assert.That(cached.Cleanup.Detail, Does.Contain("Historical cleanup was Pending"));
+            Assert.That(cached.ProductStatus.IsReady, Is.True);
+            // The classification helper is not an authentication bypass: the
+            // production publication boundary rejects missing Supervisor proof.
+            Assert.That(AICodedbEditorLifecycle.BindProductStatusToSupervisorObservation(
+                status, observed, null, out _).IsReady, Is.False);
+            var unavailable = new AICodedbCommandResult(4,
+                "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE\n[PRODUCT_STATE] NEEDS_ATTENTION", "MCP unavailable", false);
+            var failed = AICodedbEditorLifecycle.ObserveProductAfterRetirement(integration, cleanup,
+                () => unavailable, out observed);
+            Assert.That(failed.IsReady, Is.False);
+            Assert.That(failed.McpAvailable, Is.EqualTo(AICodedbProductLayerState.Unavailable));
+            Assert.That(observed, Is.SameAs(unavailable));
+        }
+
+        [Test]
+        public void RetainedFreshWrapperHandoff_AcceptsProducerNullAndRejectsUnboundPreimage()
+        {
+            var canonical = new string('a', 64);
+            var mutation = new Dictionary<string, object> {
+                ["target"] = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs", ["mutation"] = "write",
+                ["desired_sha256"] = canonical, ["existed_before"] = false, ["pre_image_sha256"] = null };
+            var operation = new Dictionary<string, object> { ["mutations"] = new List<object> { mutation } };
+            Assert.DoesNotThrow(() => AICodedbManagerActionJournal.ValidateRetainedFreshWrapperMutation(operation, canonical, ""));
+            mutation["existed_before"] = true;
+            Assert.Throws<InvalidOperationException>(() => AICodedbManagerActionJournal.ValidateRetainedFreshWrapperMutation(operation, canonical, ""));
+            mutation["pre_image_sha256"] = new string('b', 64);
+            Assert.DoesNotThrow(() => AICodedbManagerActionJournal.ValidateRetainedFreshWrapperMutation(operation, canonical, new string('b', 64)));
+            mutation["pre_image_sha256"] = new string('c', 64);
+            Assert.Throws<InvalidOperationException>(() => AICodedbManagerActionJournal.ValidateRetainedFreshWrapperMutation(operation, canonical, new string('b', 64)));
+        }
+
 
         [Test]
         public void CachedMissingPrerequisiteSnapshot_KeepsExplicitUserStateDuringPlay()
@@ -4437,11 +4555,29 @@ namespace Rice.AI.Codedb.Editor.Tests
             var presentation = status.BuildPresentation(11d);
 
             Assert.That(presentation.HasProgress, Is.True);
+            Assert.That(presentation.IsIndeterminateProgress, Is.False);
             Assert.That(presentation.ProgressValue, Is.EqualTo(1f / 3f).Within(0.0001f));
             Assert.That(presentation.ProgressLabel, Is.EqualTo("Stage 2 of 6: Downloading the Provider package and signature"));
             Assert.That(presentation.Detail, Is.EqualTo(presentation.ProgressLabel));
             Assert.That(status.UpdateProgressLine("[PROVIDER_STAGE] invalid"), Is.False);
             Assert.That(status.BuildPresentation(12d).ProgressLabel, Is.EqualTo(presentation.ProgressLabel));
+        }
+
+        [TestCase("Install CodeDB")]
+        [TestCase("Uninstall CodeDB")]
+        public void UserActionStatus_NoStageOutputKeepsIndeterminateActivityUntilTerminal(string title)
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Start(title, 1d);
+            Assert.That(status.UpdateProgressLine("[CONFIRMED] Project mutation confirmed."), Is.False);
+            var running = status.BuildPresentation(2d);
+            Assert.That(running.IsIndeterminateProgress, Is.True);
+            Assert.That(running.HasProgress, Is.False);
+            Assert.That(running.IsVisible, Is.False, "Progress belongs in Activity, not the header.");
+            status.Complete(new AICodedbCommandResult(0, "", "", false), AICodedbProductState.Starting, false, 3d);
+            var terminal = status.BuildPresentation(4d);
+            Assert.That(terminal.IsIndeterminateProgress, Is.False);
+            Assert.That(terminal.HasProgress, Is.False);
         }
 
         [Test]

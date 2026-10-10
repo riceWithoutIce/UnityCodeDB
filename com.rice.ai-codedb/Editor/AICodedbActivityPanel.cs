@@ -145,15 +145,26 @@ namespace Rice.AI.Codedb.Editor
                 {
                     EditorGUILayout.LabelField(userAction.Detail, EditorStyles.wordWrappedMiniLabel);
                 }
-                if (userAction.HasProgress)
+                if (userAction.HasProgress || userAction.IsIndeterminateProgress)
                 {
-                    EditorGUILayout.LabelField(userAction.ProgressLabel, EditorStyles.miniLabel);
+                    if (userAction.HasProgress)
+                        EditorGUILayout.LabelField(userAction.ProgressLabel, EditorStyles.miniLabel);
                     var progressRect = GUILayoutUtility.GetRect(
                         GUIContent.none,
                         GUIStyle.none,
                         GUILayout.Height(7f),
                         GUILayout.ExpandWidth(true));
-                    EditorGUI.ProgressBar(progressRect, userAction.ProgressValue, string.Empty);
+                    if (userAction.HasProgress)
+                        EditorGUI.ProgressBar(progressRect, userAction.ProgressValue, string.Empty);
+                    else
+                    {
+                        // Activity-only motion conveys work, never a measured percentage.
+                        EditorGUI.DrawRect(progressRect, new Color(0.25f, 0.25f, 0.25f, 0.35f));
+                        var segmentWidth = progressRect.width * 0.25f;
+                        var phase = (float)(EditorApplication.timeSinceStartup % 1.5d / 1.5d);
+                        EditorGUI.DrawRect(new Rect(progressRect.x + phase * (progressRect.width - segmentWidth),
+                            progressRect.y, segmentWidth, progressRect.height), new Color(0.35f, 0.65f, 0.95f, 0.85f));
+                    }
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -410,6 +421,7 @@ namespace Rice.AI.Codedb.Editor
         internal string ButtonLabel { get; }
         internal string NotificationText { get; }
         internal bool HasProgress { get; }
+        internal bool IsIndeterminateProgress => IsRunning && !HasProgress;
         internal float ProgressValue { get; }
         internal string ProgressLabel { get; }
 
