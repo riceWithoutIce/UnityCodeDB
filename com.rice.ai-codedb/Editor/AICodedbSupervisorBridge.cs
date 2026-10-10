@@ -382,6 +382,7 @@ namespace Rice.AI.Codedb.Editor
         internal long EventSequence { get; }
         internal bool OneShotFallbackAuthorized { get; }
         internal bool HasOperationEvidence { get; }
+        internal bool TimedOut { get; }
 
         internal AICodedbSupervisorCommandResponse(
             bool succeeded,
@@ -394,7 +395,8 @@ namespace Rice.AI.Codedb.Editor
             string eventName,
             long eventSequence,
             bool oneShotFallbackAuthorized = false,
-            bool hasOperationEvidence = false)
+            bool hasOperationEvidence = false,
+            bool timedOut = false)
         {
             Succeeded = succeeded;
             ExitCode = exitCode;
@@ -407,6 +409,7 @@ namespace Rice.AI.Codedb.Editor
             EventSequence = eventSequence;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
             HasOperationEvidence = hasOperationEvidence;
+            TimedOut = timedOut;
         }
 
         internal AICodedbCommandResult ToCommandResult()
@@ -418,10 +421,11 @@ namespace Rice.AI.Codedb.Editor
                 ExitCode,
                 StandardOutput,
                 error,
-                false,
+                TimedOut,
                 0,
                 OneShotFallbackAuthorized,
-                !string.Equals(ErrorCode, "SUPERVISOR_OUTCOME_UNCONFIRMED",
+                !TimedOut
+                && !string.Equals(ErrorCode, "SUPERVISOR_OUTCOME_UNCONFIRMED",
                     StringComparison.Ordinal));
         }
     }
@@ -2001,6 +2005,12 @@ namespace Rice.AI.Codedb.Editor
                 var standardError = result == null
                     ? error
                     : AICodedbStrictJson.GetOptionalNullableString(result, "stderr", "CodeDB Supervisor command result") ?? error;
+                var timedOut = result != null
+                    && AICodedbStrictJson.GetOptionalBoolean(
+                        result,
+                        "timed_out",
+                        "CodeDB Supervisor command result",
+                        false);
                 AICodedbSupervisorSnapshot snapshot = null;
                 string eventName = string.Empty;
                 long eventSequence = 0;
@@ -2072,7 +2082,8 @@ namespace Rice.AI.Codedb.Editor
                     eventName,
                     eventSequence,
                     false,
-                    !string.IsNullOrWhiteSpace(operationId));
+                    !string.IsNullOrWhiteSpace(operationId),
+                    timedOut);
             }
             catch (OperationCanceledException)
             {
@@ -2092,6 +2103,24 @@ namespace Rice.AI.Codedb.Editor
                     AICodedbSupervisorSnapshot.Blocked("INVALID_SUPERVISOR_EVIDENCE", exception.Message),
                     string.Empty,
                     0);
+            }
+            catch (TimeoutException exception)
+            {
+                var uncertain = requestDispatched
+                    && AICodedbSupervisorProtocol.IsManagerActionId(managerActionId);
+                return new AICodedbSupervisorCommandResponse(
+                    false,
+                    124,
+                    uncertain ? "SUPERVISOR_OUTCOME_UNCONFIRMED" : "SUPERVISOR_IPC_TIMEOUT",
+                    exception.Message,
+                    string.Empty,
+                    exception.Message,
+                    AICodedbSupervisorSnapshot.Degraded("SUPERVISOR_IPC_TIMEOUT", exception.Message),
+                    string.Empty,
+                    0,
+                    false,
+                    false,
+                    true);
             }
             catch (Exception exception)
             {

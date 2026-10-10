@@ -462,7 +462,8 @@ namespace Rice.AI.Codedb.Editor
         None,
         ControlContractReinstallRequired,
         InstanceIdentityReinstallRequired,
-        ControlContractInvalidOrAmbiguous
+        ControlContractInvalidOrAmbiguous,
+        ControlContractAuthenticationUnavailable
     }
 
     internal readonly struct AICodedbMaterializerCommandStatus

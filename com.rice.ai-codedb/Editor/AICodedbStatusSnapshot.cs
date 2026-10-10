@@ -770,6 +770,13 @@ namespace Rice.AI.Codedb.Editor
                             ? "CodeDB could not safely identify its control state. No project changes were made."
                             : status.Detail;
                     }
+                    if (status.AttentionReason
+                        == AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable)
+                    {
+                        return string.IsNullOrWhiteSpace(status.Detail)
+                            ? "CodeDB is waiting for live Supervisor authentication. Retry the status check before making changes."
+                            : status.Detail;
+                    }
                     return "CodeDB could not finish setup for this project. Review diagnostics before choosing a recovery action.";
             }
         }
@@ -796,6 +803,11 @@ namespace Rice.AI.Codedb.Editor
                     return AICodedbStatusItem.Error(
                         "Control contract migration",
                         "Review required",
+                        diagnostic);
+                case AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable:
+                    return AICodedbStatusItem.Warning(
+                        "Control contract authentication",
+                        "Retry required",
                         diagnostic);
                 default:
                     return AICodedbStatusItem.Inactive(

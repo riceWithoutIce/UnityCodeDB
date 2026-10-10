@@ -22,6 +22,8 @@ namespace Rice.AI.Codedb.Editor
         internal const int ConcurrentUpgradeStatusReadAttempts = 12;
         internal const int ConcurrentUpgradeRetryDelayMilliseconds = 250;
         internal const int MaximumCurrentInstanceAvailabilityRecoveryAttempts = 3;
+        internal const int MaximumControlAuthenticationAttempts = 3;
+        internal const int ControlAuthenticationRetryDelayMilliseconds = 250;
         // Lifecycle maintenance is best-effort. A Play/domain-reload boundary
         // must never inherit a user-sized (10 minute) watcher transaction.
         internal const int LifecycleMaintenanceTimeoutMilliseconds = 15000;
@@ -938,6 +940,7 @@ namespace Rice.AI.Codedb.Editor
 
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
             AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FullStatus);
+            var recoveredControlAuthentication = false;
             var migrationStatus = AICodedbControlContractMigrationStore.Read(
                 context.ProjectRoot,
                 context.PackageRoot);
@@ -949,6 +952,24 @@ namespace Rice.AI.Codedb.Editor
                 PublishLifecycleStatusCache(null, AICodedbProductStatusBuilder.Build(integrationStatus, null),
                     true, default(AICodedbSupervisorSnapshot), default(AICodedbTerminalConvergenceFailure));
                 return LifecycleReconcileResult.WithState(AICodedbProductState.NotIntegrated);
+            }
+            if (migrationStatus.IsTransientAuthenticationFailure
+                && integrationStatus.IsValid && !integrationStatus.IsUninstalled)
+            {
+                // Authentication uncertainty never admits start, mutation, or a
+                // new lease. Retry the full classifier against the same context.
+                Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                migrationStatus = RetryControlContractAuthentication(
+                    migrationStatus,
+                    () => AICodedbControlContractMigrationStore.Read(context.ProjectRoot, context.PackageRoot),
+                    status => RememberLifecycleProductStatus(status, null),
+                    canContinue,
+                    cancellationToken);
+                if (migrationStatus.IsTransientAuthenticationFailure)
+                    return LifecycleReconcileResult.WithState(AICodedbProductState.NeedsAttention);
+                recoveredControlAuthentication = true;
+                integrationStatus = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot, migrationStatus);
             }
             var currentInstance = AICodedbCurrentInstanceStore.Read(
                 context.ProjectRoot,
@@ -1225,7 +1246,9 @@ namespace Rice.AI.Codedb.Editor
 
             Interlocked.Exchange(ref _scheduledMigrationAdmissionBlocked, 0);
             Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 1);
-            if (!force && !BackendNeedsReconcile(context, previousProductState))
+            if (!force
+                && !recoveredControlAuthentication
+                && !BackendNeedsReconcile(context, previousProductState))
             {
                 AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
                     AICodedbPostAdmissionDisposition.BackendReconcileNotRequired);
@@ -1595,6 +1618,49 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        internal static AICodedbControlContractMigrationStatus RetryControlContractAuthentication(
+            AICodedbControlContractMigrationStatus status,
+            Func<AICodedbControlContractMigrationStatus> read,
+            Action<AICodedbProductStatus> publish,
+            Func<bool> canContinue,
+            CancellationToken cancellationToken)
+        {
+            // The initial classifier call counts as attempt one. A new
+            // reconcile may try again, but this observation cannot stay Starting
+            // indefinitely and never manufactures a Ready timestamp.
+            for (var attempt = 1; status.IsTransientAuthenticationFailure; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!canContinue()) throw new OperationCanceledException();
+                var exhausted = attempt >= MaximumControlAuthenticationAttempts;
+                publish(CreateControlAuthenticationStatus(status, exhausted));
+                if (exhausted) return status;
+                if (cancellationToken.WaitHandle.WaitOne(ControlAuthenticationRetryDelayMilliseconds))
+                    cancellationToken.ThrowIfCancellationRequested();
+                if (!canContinue()) throw new OperationCanceledException();
+                status = read();
+            }
+            return status;
+        }
+
+        private static AICodedbProductStatus CreateControlAuthenticationStatus(
+            AICodedbControlContractMigrationStatus migrationStatus,
+            bool exhausted)
+        {
+            return new AICodedbProductStatus(
+                exhausted ? AICodedbProductState.NeedsAttention : AICodedbProductState.Starting,
+                AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Unavailable,
+                exhausted
+                    ? "CodeDB Supervisor authentication failed after three attempts. Automatic start and changes remain blocked; retry the status check."
+                    : "CodeDB is retrying live Supervisor authentication. Automatic start and changes remain blocked.",
+                default(AICodedbMaterializerCommandStatus),
+                AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable,
+                migrationStatus.DiagnosticDetail);
+        }
+
         internal static bool TryResolveControlContractMigrationBlock(
             AICodedbProjectIntegrationStatus integrationStatus,
             AICodedbControlContractMigrationStatus migrationStatus,
@@ -1629,6 +1695,12 @@ namespace Rice.AI.Codedb.Editor
             if (integrationStatus.IsUninstalled || !integrationStatus.IsValid)
             {
                 productStatus = AICodedbProductStatusBuilder.Build(integrationStatus, null);
+                return true;
+            }
+
+            if (migrationStatus.IsTransientAuthenticationFailure)
+            {
+                productStatus = CreateControlAuthenticationStatus(migrationStatus, true);
                 return true;
             }
 
@@ -3417,6 +3489,7 @@ namespace Rice.AI.Codedb.Editor
             if (productStatus.State != AICodedbProductState.NeedsAttention
                 || result == null
                 || result.TimedOut
+                || productStatus.AttentionReason == AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable
                 || !IsAuthenticatedTerminalObservation(supervisorSnapshot))
                 return false;
 

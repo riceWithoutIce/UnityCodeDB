@@ -180,7 +180,8 @@ namespace Rice.AI.Codedb.Editor
         Current,
         CompatibleStale,
         ObsoleteReinstallRequired,
-        InvalidOrAmbiguous
+        InvalidOrAmbiguous,
+        TransientAuthenticationUnavailable
     }
 
     internal readonly struct AICodedbControlContractMigrationStatus
@@ -197,7 +198,11 @@ namespace Rice.AI.Codedb.Editor
 
         internal bool BlocksAutomaticStart =>
             State == AICodedbControlContractMigrationState.ObsoleteReinstallRequired
-            || State == AICodedbControlContractMigrationState.InvalidOrAmbiguous;
+            || State == AICodedbControlContractMigrationState.InvalidOrAmbiguous
+            || State == AICodedbControlContractMigrationState.TransientAuthenticationUnavailable;
+
+        internal bool IsTransientAuthenticationFailure =>
+            State == AICodedbControlContractMigrationState.TransientAuthenticationUnavailable;
 
         internal bool IsUsableForAutomaticStart =>
             State == AICodedbControlContractMigrationState.Missing
@@ -328,7 +333,8 @@ namespace Rice.AI.Codedb.Editor
 
         internal static AICodedbControlContractMigrationStatus Read(
             string projectRoot,
-            string packageRoot)
+            string packageRoot,
+            Func<string, string, CancellationToken, string> sendPipeRequest = null)
         {
             AICodedbPackageRuntimeContract runtimeContract;
             AICodedbControlContractIdentity contract;
@@ -365,7 +371,8 @@ namespace Rice.AI.Codedb.Editor
                     currentPath,
                     contract,
                     false,
-                    runtimeContract);
+                    runtimeContract,
+                    sendPipeRequest);
                 if (current.Kind == NamespaceEvidenceKind.Invalid)
                     return Invalid(contract, projectRoot, current.Diagnostic);
 
@@ -389,13 +396,25 @@ namespace Rice.AI.Codedb.Editor
                 var olderAuthorityCount =
                     (versionedV1.Kind == NamespaceEvidenceKind.Obsolete ? 1 : 0)
                     + (legacy.Kind == NamespaceEvidenceKind.Obsolete ? 1 : 0);
-                if ((current.Kind == NamespaceEvidenceKind.Current && olderAuthorityCount > 0)
+                if (((current.Kind == NamespaceEvidenceKind.Current
+                      || current.Kind == NamespaceEvidenceKind.TransientUnavailable) && olderAuthorityCount > 0)
                     || olderAuthorityCount > 1)
                 {
                     return Invalid(
                         contract,
                         projectRoot,
                         "Multiple Supervisor control authorities are present; explicit removal cannot select one safely.");
+                }
+
+                if (current.Kind == NamespaceEvidenceKind.TransientUnavailable)
+                {
+                    return new AICodedbControlContractMigrationStatus(
+                        AICodedbControlContractMigrationState.TransientAuthenticationUnavailable,
+                        contract,
+                        currentPath,
+                        legacyPath,
+                        "Live CodeDB Supervisor authentication is temporarily unavailable.",
+                        current.Diagnostic);
                 }
 
                 if (current.Kind == NamespaceEvidenceKind.Current)
@@ -1174,7 +1193,13 @@ namespace Rice.AI.Codedb.Editor
             Missing,
             Current,
             Obsolete,
-            Invalid
+            Invalid,
+            TransientUnavailable
+        }
+
+        private sealed class ControlAuthenticationUnavailableException : Exception
+        {
+            internal ControlAuthenticationUnavailableException(string message) : base(message) { }
         }
 
         private readonly struct NamespaceEvidence
@@ -1200,7 +1225,8 @@ namespace Rice.AI.Codedb.Editor
             string namespacePath,
             AICodedbControlContractIdentity contract,
             bool legacy,
-            AICodedbPackageRuntimeContract runtimeContract)
+            AICodedbPackageRuntimeContract runtimeContract,
+            Func<string, string, CancellationToken, string> sendPipeRequest = null)
         {
             var statePath = Path.Combine(namespacePath, "supervisor-state.json");
             var lockPath = Path.Combine(namespacePath, "supervisor.lock");
@@ -1254,7 +1280,8 @@ namespace Rice.AI.Codedb.Editor
                         namespacePath,
                         runtimeContract,
                         state,
-                        owner);
+                        owner,
+                        sendPipeRequest);
                     return new NamespaceEvidence(
                         NamespaceEvidenceKind.Current,
                         ownerAlive,
@@ -1265,6 +1292,13 @@ namespace Rice.AI.Codedb.Editor
 
                 throw new InvalidOperationException(
                     "Supervisor control evidence does not identify the current Package contract.");
+            }
+            catch (ControlAuthenticationUnavailableException exception)
+            {
+                return new NamespaceEvidence(
+                    NamespaceEvidenceKind.TransientUnavailable,
+                    false,
+                    exception.Message);
             }
             catch (Exception exception)
             {
@@ -1288,7 +1322,8 @@ namespace Rice.AI.Codedb.Editor
             string namespacePath,
             AICodedbPackageRuntimeContract runtimeContract,
             Dictionary<string, object> state,
-            Dictionary<string, object> owner)
+            Dictionary<string, object> owner,
+            Func<string, string, CancellationToken, string> sendPipeRequest)
         {
             if (state == null || owner == null)
                 throw new InvalidOperationException(
@@ -1332,7 +1367,8 @@ namespace Rice.AI.Codedb.Editor
                 namespacePath,
                 runtimeContract,
                 selection,
-                state);
+                state,
+                sendPipeRequest);
             return true;
         }
 
@@ -1614,7 +1650,8 @@ namespace Rice.AI.Codedb.Editor
             string namespacePath,
             AICodedbPackageRuntimeContract runtimeContract,
             AICodedbCurrentInstanceStatus selection,
-            Dictionary<string, object> state)
+            Dictionary<string, object> state,
+            Func<string, string, CancellationToken, string> sendPipeRequest)
         {
             const string label = "Authenticated Supervisor status";
             var pipeValue = AICodedbStrictJson.GetRequiredString(state, "pipe_name", "Supervisor state");
@@ -1630,14 +1667,22 @@ namespace Rice.AI.Codedb.Editor
                     "Supervisor pipe identity is not the canonical Package-derived pipe.");
             }
 
-            var responseLine = AICodedbSupervisorBridge.SendPipeRequest(
-                pipeName,
-                AICodedbSupervisorProtocol.BuildStatusRequest(
-                    authToken,
-                    Guid.NewGuid().ToString("N")),
-                CancellationToken.None);
-            if (string.IsNullOrWhiteSpace(responseLine))
-                throw new InvalidOperationException("Authenticated Supervisor pipe returned no status.");
+            string responseLine;
+            try
+            {
+                responseLine = (sendPipeRequest ?? AICodedbSupervisorBridge.SendPipeRequest)(
+                    pipeName,
+                    AICodedbSupervisorProtocol.BuildStatusRequest(authToken, Guid.NewGuid().ToString("N")),
+                    CancellationToken.None);
+                if (string.IsNullOrWhiteSpace(responseLine))
+                    throw new IOException("Authenticated Supervisor pipe returned no status.");
+            }
+            catch (Exception exception) when (exception is TimeoutException || exception is IOException)
+            {
+                // Only a transport failure after the disk/process/pipe checks is
+                // transient. Malformed or foreign responses remain invalid.
+                throw new ControlAuthenticationUnavailableException(exception.Message);
+            }
 
             var response = AICodedbStrictJson.ParseObject(responseLine, label);
             if (!AICodedbStrictJson.GetRequiredBoolean(response, "ok", label))

@@ -5394,6 +5394,79 @@ namespace Rice.AI.Codedb.Editor.Tests
                 "A valid UNINSTALLED state must not be rejected for lacking an Editor lease.");
         }
 
+        [TestCase(true)]
+        [TestCase(false)]
+        public void ControlAuthenticationRetry_PublishesBoundedRecoveryWithoutAdmittingProbe(bool recover)
+        {
+            var transient = CreateMigrationStatus(AICodedbControlContractMigrationState.TransientAuthenticationUnavailable);
+            var reads = 1;
+            var published = new List<AICodedbProductStatus>();
+            var result = AICodedbEditorLifecycle.RetryControlContractAuthentication(
+                transient,
+                () => { reads++; return recover ? CreateMigrationStatus(AICodedbControlContractMigrationState.Current) : transient; },
+                published.Add,
+                () => true,
+                CancellationToken.None);
+
+            Assert.That(reads, Is.EqualTo(recover ? 2 : AICodedbEditorLifecycle.MaximumControlAuthenticationAttempts));
+            Assert.That(published[0].State, Is.EqualTo(AICodedbProductState.Starting));
+            Assert.That(published.TrueForAll(s => s.State != AICodedbProductState.Ready), Is.True);
+            Assert.That(result.IsUsableForAutomaticStart, Is.EqualTo(recover));
+            if (!recover)
+            {
+                Assert.That(published[published.Count - 1].State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+                Assert.That(published[published.Count - 1].Detail, Does.Contain("three attempts"));
+                Assert.That(published[published.Count - 1].AttentionReason,
+                    Is.EqualTo(AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable));
+                var probes = 0;
+                AICodedbProductStatus blocked;
+                AICodedbCommandResult admission;
+                Assert.That(AICodedbEditorLifecycle.TryResolveControlContractMigrationBlock(
+                    CreateIntegrationStatus(AICodedbProjectIntegrationState.Installed), transient,
+                    () => { probes++; return ReadyResult(); }, out blocked, out admission), Is.True);
+                Assert.That(probes, Is.Zero);
+                Assert.That(admission, Is.Null);
+                AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+                Assert.That(AICodedbEditorLifecycle.TryCreateTerminalConvergenceFailure(
+                    blocked, ReadyResult(), CreateTerminalObservation(ReadPackageRuntimeContract(), 84,
+                        AICodedbSupervisorReadinessState.CoreReady, "070d3698a9c745b2aac8c13790823658"), out failure), Is.False);
+            }
+        }
+
+        [Test]
+        public void ControlAuthenticationRetry_CancellationAndInvalidEvidenceStopRetries()
+        {
+            var transient = CreateMigrationStatus(AICodedbControlContractMigrationState.TransientAuthenticationUnavailable);
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var reads = 0;
+                Assert.Throws<OperationCanceledException>(() => AICodedbEditorLifecycle.RetryControlContractAuthentication(
+                    transient, () => { reads++; return transient; }, _ => cancellation.Cancel(), () => true, cancellation.Token));
+                Assert.That(reads, Is.Zero);
+            }
+            var invalid = CreateMigrationStatus(AICodedbControlContractMigrationState.InvalidOrAmbiguous);
+            var attempts = 0;
+            var result = AICodedbEditorLifecycle.RetryControlContractAuthentication(
+                transient, () => { attempts++; return invalid; }, _ => { }, () => true, CancellationToken.None);
+            Assert.That(attempts, Is.EqualTo(1));
+            Assert.That(result.State, Is.EqualTo(AICodedbControlContractMigrationState.InvalidOrAmbiguous));
+            Assert.That(result.BlocksAutomaticStart, Is.True);
+        }
+
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void SupervisorResponse_TimeoutProvenanceSurvivesConversion(bool uncertain)
+        {
+            var response = new AICodedbSupervisorCommandResponse(false, 124,
+                uncertain ? "SUPERVISOR_OUTCOME_UNCONFIRMED" : "SUPERVISOR_IPC_TIMEOUT",
+                "timeout", "", "", null, "", 0, false, false, true);
+            var result = response.ToCommandResult();
+            Assert.That(result.TimedOut, Is.True);
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.HasAuthoritativeTerminalEvidence, Is.False);
+        }
+
         private static AICodedbControlContractMigrationStatus CreateMigrationStatus(
             AICodedbControlContractMigrationState state)
         {

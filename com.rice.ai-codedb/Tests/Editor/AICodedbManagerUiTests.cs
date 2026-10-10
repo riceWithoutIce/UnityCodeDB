@@ -3761,6 +3761,76 @@ namespace Rice.AI.Codedb.Editor.Tests
             AssertInvalid(status);
         }
 
+        [TestCase("timeout")]
+        [TestCase("io")]
+        [TestCase("empty")]
+        [TestCase("malformed")]
+        [TestCase("foreign")]
+        [TestCase("success")]
+        public void Read_ClassifiesLiveTransportSeparatelyFromInvalidAuthority(string outcome)
+        {
+            var fixture = CreateCurrentEvidence();
+            using (var process = System.Diagnostics.Process.GetCurrentProcess())
+            {
+                foreach (var document in new[] { fixture.State, fixture.Lock })
+                {
+                    document["supervisor_pid"] = process.Id;
+                    var owner = (Dictionary<string, object>)document["owner_evidence"];
+                    owner["pid"] = process.Id;
+                    owner["process_start_identity"] = (process.StartTime.ToUniversalTime().Ticks / 10L * 10L).ToString(CultureInfo.InvariantCulture);
+                    owner["executable_path"] = process.MainModule.FileName;
+                }
+            }
+            PublishEvidence(fixture);
+            var response = CreateAuthenticatedResponse(fixture);
+            if (outcome == "foreign") response["owner_epoch"] = "foreign-owner";
+            var requests = 0;
+            var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot,
+                (pipe, request, token) =>
+                {
+                    requests++;
+                    if (outcome == "timeout") throw new TimeoutException("The Supervisor IPC request timed out.");
+                    if (outcome == "io") throw new IOException("pipe unavailable");
+                    if (outcome == "empty") return "";
+                    if (outcome == "malformed") return "{";
+                    return SerializeObject(new Dictionary<string, object> { { "ok", true }, { "status", response } });
+                });
+            Assert.That(requests, Is.EqualTo(1), status.DiagnosticDetail);
+            var transient = outcome == "timeout" || outcome == "io" || outcome == "empty";
+            Assert.That(status.State, Is.EqualTo(transient
+                ? AICodedbControlContractMigrationState.TransientAuthenticationUnavailable
+                : outcome == "success" ? AICodedbControlContractMigrationState.Current
+                    : AICodedbControlContractMigrationState.InvalidOrAmbiguous), status.DiagnosticDetail);
+            Assert.That(status.BlocksAutomaticStart, Is.EqualTo(outcome != "success"));
+            Assert.That(status.IsUsableForAutomaticStart, Is.EqualTo(outcome == "success"));
+        }
+
+        private Dictionary<string, object> CreateAuthenticatedResponse(EvidenceFixture fixture)
+        {
+            var response = CloneDocument(fixture.State);
+            response["schema_version"] = AICodedbSupervisorProtocol.CoordinatorStateSchemaVersion;
+            response["supervisor_schema_version"] = AICodedbSupervisorProtocol.SupervisorStateSchemaVersion;
+            var owner = (Dictionary<string, object>)fixture.State["owner_evidence"];
+            foreach (var field in new[] { "process_start_identity", "executable_path", "argv_sha256", "command_line_sha256" })
+                response[field] = owner[field];
+            var observation = new Dictionary<string, object>();
+            foreach (var field in new[] { "project_identity", "runtime", "selected_instance_id", "selected_generation_id",
+                "target_generation_id", "runtime_contract_sha256", "generation_disposition", "owner_identity_version",
+                "activation_epoch", "lifecycle_id", "supervisor_id", "owner_epoch", "supervisor_pid" })
+                observation[field] = fixture.State[field];
+            observation["schema_version"] = AICodedbSupervisorProtocol.OperationalReadinessSchemaVersion;
+            observation["observation_id"] = Guid.NewGuid().ToString("N");
+            observation["revision"] = 84;
+            observation["observed_at_utc"] = DateTime.UtcNow.ToString("o");
+            observation["state"] = "core_ready";
+            observation["reason_code"] = "COORDINATOR_OPERATIONAL";
+            observation["detail"] = "synthetic authenticated CoreReady";
+            observation["coordinator_failure_category"] = "NONE";
+            observation["project_root"] = fixture.State["root"];
+            response["operational_readiness"] = observation;
+            return response;
+        }
+
         private sealed class EvidenceFixture
         {
             internal string RuntimePath;
