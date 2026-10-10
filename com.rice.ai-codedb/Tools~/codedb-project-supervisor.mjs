@@ -1789,6 +1789,7 @@ function publicStatus(
         ?? state.coordinator_failure_category),
     operational_readiness: operationalReadiness ?? null,
     provider_state: coordinatorStatus?.provider_state ?? "starting",
+    provider_start_phase: coordinatorStatus?.provider_start_phase ?? null,
     provider_ready_at_utc: coordinatorStatus?.provider_ready_at_utc ?? null,
     adapter_enabled: coordinatorStatus?.adapter_enabled === true,
     adapter_state: coordinatorStatus?.adapter_state ?? "disabled",
@@ -1939,12 +1940,19 @@ async function ensureCoordinator(context, operation = null) {
         ? "LAUNCH_FAILED"
         : result.evidenceFailed
           ? "UNKNOWN_FAILURE"
-          : "NONZERO_EXIT";
+          : coordinatorReadinessTimeout(result)
+            ? "STARTUP_TIMEOUT"
+            : "NONZERO_EXIT";
     throw createCoordinatorFailure(
       result.stderr || result.stdout || `Coordinator start failed with exit code ${result.code}.`,
       category);
   }
   return { exit_code: 0, action: "started", output: result.stdout };
+}
+
+function coordinatorReadinessTimeout(result) {
+  const output = `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`;
+  return /Timed out after \d+ ms waiting for coordinator readiness\./i.test(output);
 }
 
 function createCoordinatorFailure(message, category) {

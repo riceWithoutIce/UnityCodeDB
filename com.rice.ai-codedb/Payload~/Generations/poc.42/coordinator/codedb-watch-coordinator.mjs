@@ -564,7 +564,31 @@ async function runStart(rawOptions) {
     }
     await delay(100);
   }
+  await stopOwnedCoordinatorAfterStartTimeout(context, lifecycleId);
   throw new Error(`Timed out after ${context.startupTimeoutMs} ms waiting for coordinator readiness.`);
+}
+
+async function stopOwnedCoordinatorAfterStartTimeout(context, lifecycleId) {
+  // Only clean up the daemon admitted by this start attempt.  Re-read and
+  // authenticate its status before sending Stop so a late timeout cannot stop
+  // a coordinator that replaced it or belongs to another lifecycle.
+  try {
+    const live = await requestCoordinator(context, "status", IPC_TIMEOUT_MS);
+    if (!live?.ok || live.status?.lifecycle_id !== lifecycleId) {
+      return false;
+    }
+    assertStatusMatchesContext(live.status, context, "Timed-out coordinator");
+    const stopped = await requestCoordinator(
+      context,
+      "stop",
+      IPC_TIMEOUT_MS,
+      { expectedLifecycleId: lifecycleId });
+    return stopped?.ok === true;
+  } catch {
+    // A lost/unverifiable coordinator is left for the existing stale-owner
+    // recovery path; never remove foreign state on an unauthenticated timeout.
+    return false;
+  }
 }
 
 function assertAttachAllowed(status, context, lifecycleId) {
@@ -1436,6 +1460,7 @@ async function runOwnedDaemon(context) {
 
   const launchProvider = async () => {
     daemonState.provider_state = "starting";
+    daemonState.provider_start_phase = "initialize";
     daemonState.last_error = null;
     persistState();
     const child = spawn(context.provider, ["--config", context.config, "mcp", context.root], {
@@ -1473,6 +1498,8 @@ async function runOwnedDaemon(context) {
       throw new Error("Provider initialize did not return server information.");
     }
     providerRpc.notify("notifications/initialized", {});
+    daemonState.provider_start_phase = "tools/list";
+    persistState();
     const tools = await providerRpc.request("tools/list", {}, PROVIDER_REQUEST_TIMEOUT_MS);
     const toolNames = (tools?.tools ?? []).map((tool) => tool.name);
     if (!toolNames.includes("codedb_text_search")) {
@@ -1480,6 +1507,7 @@ async function runOwnedDaemon(context) {
     }
     hasBeenReady = true;
     daemonState.provider_state = "ready";
+    daemonState.provider_start_phase = "ready";
     daemonState.provider_ready_at_utc = new Date().toISOString();
     daemonState.last_event = "provider_ready";
     persistState();
@@ -1545,6 +1573,7 @@ function createDaemonState(context, recovery, lifecycle) {
     exclusive_lifecycle: context.exclusiveLifecycle,
     provider_pid: null,
     provider_state: "starting",
+    provider_start_phase: "initialize",
     restart_count: 0,
     orphan_cleanup_count: recovery.orphanCleanupCount ?? 0,
     root: context.root,
@@ -2295,6 +2324,7 @@ function sanitizeStatus(state) {
     exclusive_lifecycle: state.exclusive_lifecycle === true,
     provider_pid: state.provider_pid,
     provider_state: state.provider_state,
+    provider_start_phase: state.provider_start_phase ?? null,
     restart_count: state.restart_count,
     orphan_cleanup_count: state.orphan_cleanup_count,
     root: state.root,

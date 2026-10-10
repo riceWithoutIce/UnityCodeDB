@@ -220,6 +220,7 @@ function createFixture(selected = TARGET) {
     generation_id: selected.generationId,
     lifecycle_id: lifecycleId,
     provider_state: "ready",
+    provider_start_phase: "ready",
     provider_ready_at_utc: new Date().toISOString(),
     adapter_enabled: false,
     adapter_state: "disabled",
@@ -350,6 +351,7 @@ function installAdditionalFixtureInstance(fixture, identity) {
     generation_id: identity.generationId,
     lifecycle_id: fixture.lifecycleId,
     provider_state: "ready",
+    provider_start_phase: "ready",
     provider_ready_at_utc: new Date().toISOString(),
     adapter_enabled: false,
     adapter_state: "disabled",
@@ -479,7 +481,12 @@ function writeRecoveredOperationMaterializer(
   ].join("\r\n"));
 }
 
-function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materializerCounterPath, failureGatePath) {
+function writeCoordinatorReadmissionFixture(
+  fixture,
+  startCounterPath,
+  materializerCounterPath,
+  failureGatePath,
+  failureMessage = "synthetic coordinator start failure") {
   const quote = (value) => String(value).replace(/'/g, "''");
   const scriptQuote = (value) => JSON.stringify(String(value));
   const coordinatorScriptContent = [
@@ -491,7 +498,7 @@ function writeCoordinatorReadmissionFixture(fixture, startCounterPath, materiali
     "fs.writeFileSync(counterPath, String(count + 1), 'utf8');",
     "if (fs.existsSync(failureGatePath)) {",
     "  fs.rmSync(failureGatePath, { force: true });",
-    "  process.stderr.write('synthetic coordinator start failure');",
+    `  process.stderr.write(${scriptQuote(failureMessage)});`,
     "  process.exit(4);",
     "}",
     "fs.writeFileSync(readyPath, 'ready', 'utf8');",
@@ -881,6 +888,7 @@ async function verifyHappyPath(selected, expectedDisposition) {
       { command: "status" });
     assert.equal(status.ok, true);
     assert.equal(status.status.readiness_state, "core_ready");
+    assert.equal(status.status.provider_start_phase, "ready");
     assert.equal(status.status.supervisor_schema_version, 3);
     assert.equal(status.status.operational_readiness.schema_version, 1);
     assert.equal(status.status.operational_readiness.state, "core_ready");
@@ -1757,6 +1765,43 @@ async function verifyCoordinatorOfflineRetirement() {
   }
 }
 
+async function verifyCoordinatorReadinessTimeoutClassification() {
+  const fixture = createFixture(TARGET);
+  const startCounterPath = path.join(fixture.root, "coordinator-timeout-start-count.txt");
+  const materializerCounterPath = path.join(fixture.root, "coordinator-timeout-materializer-count.txt");
+  const failureGatePath = path.join(fixture.root, "coordinator-timeout-gate.txt");
+  try {
+    fixture.coordinatorReadyPath = path.join(fixture.root, "coordinator-timeout-ready.marker");
+    write(failureGatePath, "timeout-first\n");
+    writeCoordinatorReadmissionFixture(
+      fixture,
+      startCounterPath,
+      materializerCounterPath,
+      failureGatePath,
+      "[ERROR] Timed out after 30000 ms waiting for coordinator readiness.");
+    await startCoordinator(fixture);
+    const started = await runSupervisor(fixture, "start");
+    assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+    const statePath = path.join(fixture.runtime, "supervisor-state.json");
+    assert.equal(await waitForPath(statePath), true);
+    const classified = await waitForCondition(() => {
+      try {
+        return JSON.parse(fs.readFileSync(statePath, "utf8")).coordinator_failure_category === "STARTUP_TIMEOUT";
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(classified, true, `Coordinator readiness timeout was not classified: ${fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : "missing state"}`);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(state.coordinator_failure_category, "STARTUP_TIMEOUT");
+    assert.equal(state.operational_readiness.coordinator_failure_category, "STARTUP_TIMEOUT");
+    assert.equal(state.operational_readiness.reason_code, "COORDINATOR_START_FAILED");
+    assert.equal(fs.readFileSync(startCounterPath, "utf8"), "1");
+  } finally {
+    await cleanupFixture(fixture);
+  }
+}
+
 async function verifyCoordinatorReadmissionBeforeMaterializer() {
   const fixture = createFixture(TARGET);
   const startCounterPath = path.join(fixture.root, "coordinator-start-count.txt");
@@ -2346,9 +2391,15 @@ async function main() {
   }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "coordinator-readmission") {
     await verifyCoordinatorReadmissionBeforeMaterializer();
+    await verifyCoordinatorReadinessTimeoutClassification();
     await verifyRecordedChildAlreadyAbsentUsesAuthoritativeVerifier();
     await verifyRecordedChildAlreadyAbsentFailsClosed();
     console.log("[PASS] Supervisor coordinator re-admission and persisted-child recovery preserve authoritative operation evidence.");
+    return;
+  }
+  if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "coordinator-readiness-timeout") {
+    await verifyCoordinatorReadinessTimeoutClassification();
+    console.log("[PASS] Coordinator readiness timeout output is classified as STARTUP_TIMEOUT.");
     return;
   }
   if (process.env.RICE_CODEDB_SUPERVISOR_TEST_FILTER === "recorded-child-absent") {
@@ -2369,6 +2420,7 @@ async function main() {
   await verifyMissingChildEvidenceBlocksBlindRetry();
   await verifyRecordedChildAlreadyAbsentFailsClosed();
   await verifyCoordinatorOfflineRetirement();
+  await verifyCoordinatorReadinessTimeoutClassification();
   await verifyActivationHandoff();
   await verifySyntheticContractTargetBump();
 
