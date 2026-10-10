@@ -667,7 +667,7 @@
                   {
                       "source":  "Generations/poc.42/generation-manifest.json",
                       "target":  "AIWork/.runtime/codedb/host/generations/poc.42/generation-manifest.json",
-                      "sha256":  "2273266950bcd2867416821472285e217b64acdaae2fcf397712e8ab8defe026"
+                      "sha256":  "944fab7055368870ab3a1fb4c5940e1d4b1ebe6b772a7e52d1bef728272af27f"
                   },
                   {
                       "source":  "Generations/poc.42/native/win-x64/build-manifest.json",
@@ -797,7 +797,7 @@
                   {
                       "source":  "host-current.json",
                       "target":  "AIWork/.runtime/codedb/host/current.json",
-                      "sha256":  "3bd992ea2245d50fa927d39bddc6cd7f8e74420d696596b8436b2da928c1a870"
+                      "sha256":  "1c03e579c69cbecc1909ea54c1cd5a05497c07d0ab38aea7817941149b0559af"
                   },
                   {
                       "source":  "AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1",

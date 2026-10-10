@@ -17,7 +17,7 @@
                   },
                   {
                       "path":  "coordinator/codedb-watch-coordinator.mjs",
-                      "sha256":  "5a61242e336fac40ac5ce94729d71c676272f65510993481c80a0ee71651ed00"
+                      "sha256":  "928a58b3e181417b4e70e6b8d23fe90da43147e50319f113b185674ee26baa09"
                   },
                   {
                       "path":  "native/win-x64/build-manifest.json",

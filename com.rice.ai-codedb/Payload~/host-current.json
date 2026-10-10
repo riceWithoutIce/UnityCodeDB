@@ -6,6 +6,6 @@
     "payload_sequence":  42,
     "generation_id":  "poc.42",
     "generation_relative_path":  "AIWork/.runtime/codedb/host/generations/poc.42",
-    "generation_manifest_sha256":  "2273266950bcd2867416821472285e217b64acdaae2fcf397712e8ab8defe026",
+    "generation_manifest_sha256":  "944fab7055368870ab3a1fb4c5940e1d4b1ebe6b772a7e52d1bef728272af27f",
     "bootstrap_protocol":  1
 }
