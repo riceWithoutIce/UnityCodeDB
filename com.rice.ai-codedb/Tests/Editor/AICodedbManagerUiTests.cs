@@ -2860,6 +2860,37 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ResolvePrimaryAction_ExposesFreshInstallForAuthenticatedPackageMismatch()
+        {
+            var status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Blocked,
+                "Package generation requires setup.");
+
+            Assert.That(
+                AICodedbManagerWindow.ResolvePrimaryAction(status, false, false, true),
+                Is.True);
+            Assert.That(
+                AICodedbManagerWindow.ResolvePrimaryAction(status, false, true, true),
+                Is.False);
+        }
+
+        [TestCase("UPGRADE", "READY", "fresh-install", "retained-install")]
+        [TestCase("REINSTALL", "READY", "fresh-install", "retained-install")]
+        [TestCase("INSTALL", "READY", "same-action", "same-action")]
+        public void RetainedPackageMismatch_RejectsNonFreshInstallOrigins(
+            string action, string state, string actionId, string retainedActionId)
+        {
+            Assert.That(
+                AICodedbManagerActionJournal.IsAuthenticatedFreshInstallOrigin(
+                    action, state, actionId, retainedActionId),
+                Is.False);
+        }
+
+        [Test]
         public void Build_CombinesValidatedCommandResultWithReadiness()
         {
             const string command =

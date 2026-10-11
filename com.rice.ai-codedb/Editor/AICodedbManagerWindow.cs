@@ -1471,10 +1471,16 @@ namespace Rice.AI.Codedb.Editor
                                          || IsUninstallAvailable(
                                              removalStatus,
                                              _statusSnapshot.IsProjectUninstalled);
+            var freshInstallRecoveryAvailable = IsFreshInstallRecoveryAvailable(
+                _statusSnapshot.ProductStatus,
+                _statusSnapshot.HostPayloadStatus,
+                AICodedbManagerActionSession.CurrentFor(_executionContext),
+                _executionContext);
             var primaryAction = ResolvePrimaryAction(
                 removalStatus,
                 removalActionAvailable,
-                _userActionInFlight)
+                _userActionInFlight,
+                freshInstallRecoveryAvailable)
                     || ResolveProviderInstallAction(
                         _statusSnapshot.ProductStatus,
                         _userActionInFlight)
@@ -2148,6 +2154,12 @@ namespace Rice.AI.Codedb.Editor
                     return "Install CodeDB";
                 case AICodedbProductState.NeedsAttention:
                 {
+                    if (IsFreshInstallRecoveryAvailable(
+                            _statusSnapshot.ProductStatus,
+                            _statusSnapshot.HostPayloadStatus,
+                            AICodedbManagerActionSession.CurrentFor(_executionContext),
+                            _executionContext))
+                        return "Install CodeDB";
                     var removalStatus = GetRemovalPresentationStatus();
                     if (IsRemoveIntegrationMenuAvailable(removalStatus))
                         return "Remove CodeDB Integration";
@@ -2178,7 +2190,13 @@ namespace Rice.AI.Codedb.Editor
                 return;
             }
 
-            if (_statusSnapshot != null && (_statusSnapshot.IsProjectUninstalled || _statusSnapshot.IsProjectNotIntegrated))
+            if (_statusSnapshot != null && IsFreshInstallRecoveryAvailable(
+                    _statusSnapshot.ProductStatus,
+                    _statusSnapshot.HostPayloadStatus,
+                    AICodedbManagerActionSession.CurrentFor(_executionContext),
+                    _executionContext))
+                RunInstallCodeDBWithConfirmation();
+            else if (_statusSnapshot != null && (_statusSnapshot.IsProjectUninstalled || _statusSnapshot.IsProjectNotIntegrated))
                 RunInstallCodeDBWithConfirmation();
             else if (_statusSnapshot != null &&
                      IsRemoveIntegrationMenuAvailable(GetRemovalPresentationStatus()))
@@ -2372,14 +2390,46 @@ namespace Rice.AI.Codedb.Editor
             bool recoveryAvailable,
             bool actionInFlight)
         {
+            return ResolvePrimaryAction(productStatus, recoveryAvailable, actionInFlight, false);
+        }
+
+        internal static bool ResolvePrimaryAction(
+            AICodedbProductStatus productStatus,
+            bool recoveryAvailable,
+            bool actionInFlight,
+            bool freshInstallRecoveryAvailable)
+        {
             if (actionInFlight)
                 return false;
             if (productStatus.State == AICodedbProductState.Uninstalled || productStatus.State == AICodedbProductState.NotIntegrated)
+                return true;
+            if (freshInstallRecoveryAvailable && productStatus.State == AICodedbProductState.NeedsAttention)
                 return true;
             if (!recoveryAvailable || productStatus.State != AICodedbProductState.NeedsAttention)
                 return false;
             return IsRemoveIntegrationMenuAvailable(productStatus)
                    || IsUninstallAvailable(productStatus, false);
+        }
+
+        internal static bool IsFreshInstallRecoveryAvailable(
+            AICodedbProductStatus productStatus,
+            AICodedbHostPayloadStatus hostPayloadStatus,
+            AICodedbManagerActionSession historicalSession,
+            AICodedbEditorExecutionContext currentContext)
+        {
+            if (historicalSession == null
+                || historicalSession.IsRecovering
+                || !historicalSession.HasOriginalContext
+                || historicalSession.Result == null
+                || !historicalSession.Result.FailedCandidateEffectsRetained
+                || productStatus.State != AICodedbProductState.NeedsAttention
+                || productStatus.AttentionReason != AICodedbProductAttentionReason.None
+                || hostPayloadStatus.State != AICodedbHostPayloadState.SetupRequired)
+                return false;
+            return !string.Equals(
+                AICodedbPaths.GetManagerActionPackageKey(currentContext),
+                AICodedbPaths.GetManagerActionPackageKey(historicalSession.Context),
+                StringComparison.Ordinal);
         }
 
         internal static bool ResolveProviderInstallAction(

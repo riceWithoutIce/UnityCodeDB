@@ -441,7 +441,18 @@ namespace Rice.AI.Codedb.Editor
                             queue.Enqueue(relative + "/" + Path.GetFileName(child));
                 }
             }
-            ValidateRetainedCurrentState(current, marker, intent, instanceId);
+            // A retained candidate belongs to the Package that originally
+            // admitted it.  When Unity has since switched to a different
+            // canonical Package, validating the old candidate's activation
+            // contract against the new Package would manufacture a conflict
+            // even though all historical receipts/effects remain intact.
+            // Keep the historical proof strict, but let the caller establish
+            // the explicit package-mismatch recovery boundary.
+            var packageMismatch = !string.Equals(
+                value(marker, "package_key"),
+                AICodedbPaths.GetManagerActionPackageKey(current),
+                StringComparison.Ordinal);
+            ValidateRetainedCurrentState(current, marker, intent, instanceId, packageMismatch);
             var result = new AICodedbCommandResult(
                 AICodedbStrictJson.GetRequiredInt32(terminal, "exit_code", label),
                 value(terminal, "stdout"), value(terminal, "stderr"),
@@ -480,7 +491,8 @@ namespace Rice.AI.Codedb.Editor
         }
 
         private static void ValidateRetainedCurrentState(AICodedbEditorExecutionContext context,
-            Dictionary<string, object> marker, Dictionary<string, object> intent, string retainedId)
+            Dictionary<string, object> marker, Dictionary<string, object> intent, string retainedId,
+            bool packageMismatch)
         {
             const string label = "retained candidate current state";
             Func<Dictionary<string, object>, string, string> text =
@@ -547,9 +559,16 @@ namespace Rice.AI.Codedb.Editor
             // Do not require producer fields which instance.json never owns.
             var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
             var contract = runtimeContract.ControlContract;
-            if (text(origin, "action") != "INSTALL"
-                || text(instance, "state") != "READY" || text(origin, "action_id") == text(marker, "action_id"))
+            if (!IsAuthenticatedFreshInstallOrigin(
+                    text(origin, "action"), text(instance, "state"),
+                    text(origin, "action_id"), text(marker, "action_id")))
                 throw new InvalidOperationException("Retained candidate fresh INSTALL origin is invalid.");
+            // The selected instance and its originating action remain
+            // authenticated above even across a Package switch. Only the
+            // old Package-owned activation contract and wrapper handoff are
+            // incomparable with the current canonical Package.
+            if (packageMismatch)
+                return;
             var root = Path.GetDirectoryName(contract.NamespaceRelativePath).Replace('\\', '/');
             var activation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/activation.json"), 65536, label);
             var operation = AICodedbStrictJson.ReadObject(RetainedProjectPath(context, root + "/operation.json"), 1048576, label);
@@ -589,6 +608,15 @@ namespace Rice.AI.Codedb.Editor
             if (RetainedFileHash(wrapperPath) != canonical)
                 throw new InvalidOperationException("Retained candidate fresh wrapper handoff bytes conflict.");
             ValidateRetainedFreshWrapperMutation(operation, canonical, text(intent, "retained_wrapper_sha256"));
+        }
+
+        internal static bool IsAuthenticatedFreshInstallOrigin(
+            string action, string state, string actionId, string retainedActionId)
+        {
+            return string.Equals(action, "INSTALL", StringComparison.Ordinal)
+                && string.Equals(state, "READY", StringComparison.Ordinal)
+                && !string.IsNullOrEmpty(actionId)
+                && !string.Equals(actionId, retainedActionId, StringComparison.Ordinal);
         }
 
         internal static void ValidateRetainedFreshWrapperMutation(
