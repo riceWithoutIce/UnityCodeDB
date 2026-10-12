@@ -907,7 +907,7 @@ namespace Rice.AI.Codedb.Editor
             AICodedbEditorExecutionContext context, IEnumerable<string> knownActionIds)
         {
             var instancesRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
-            AssertPath(instancesRoot);
+            AssertProjectPath(context, instancesRoot);
             if (!Directory.Exists(instancesRoot))
                 return string.Empty;
             var known = new HashSet<string>(knownActionIds ?? Array.Empty<string>(), StringComparer.Ordinal);
@@ -916,12 +916,12 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException("The project has too many CodeDB instance candidates.");
             foreach (var entry in entries)
             {
-                AssertPath(entry);
+                AssertProjectPath(context, entry);
                 var instanceId = Path.GetFileName(entry);
                 if (!IsInstancePhysicalKey(instanceId))
                     throw new InvalidOperationException("A CodeDB instance candidate directory is invalid.");
                 var manifestPath = Path.Combine(entry, "instance.json");
-                AssertPath(manifestPath);
+                AssertProjectPath(context, manifestPath);
                 if (!File.Exists(manifestPath))
                     throw new InvalidOperationException("A CodeDB instance candidate has no manifest.");
                 const string label = "CodeDB instance candidate";
@@ -1202,10 +1202,25 @@ namespace Rice.AI.Codedb.Editor
 
         private static void AssertPath(string path)
         {
-            var root = AICodedbPaths.GetManagerActionsRoot().TrimEnd('/', '\\');
+            AssertPathWithinRoot(path, AICodedbPaths.GetManagerActionsRoot(),
+                "Manager action index escapes its user-local root.",
+                "Manager action index traverses a reparse point.");
+        }
+
+        private static void AssertProjectPath(AICodedbEditorExecutionContext context, string path)
+        {
+            AssertPathWithinRoot(path, context.ProjectRoot,
+                "Manager action candidate escapes the Unity project root.",
+                "Manager action candidate traverses a reparse point.");
+        }
+
+        private static void AssertPathWithinRoot(
+            string path, string root, string escapeMessage, string reparseMessage)
+        {
+            root = AICodedbPaths.NormalizePath(root).TrimEnd('/', '\\');
             var normalized = AICodedbPaths.NormalizePath(path);
             if (!normalized.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Manager action index escapes its user-local root.");
+                throw new InvalidOperationException(escapeMessage);
             var volume = Path.GetPathRoot(normalized);
             var current = volume;
             foreach (var segment in normalized.Substring(volume.Length).TrimStart('/', '\\')
@@ -1214,7 +1229,7 @@ namespace Rice.AI.Codedb.Editor
                 current = Path.Combine(current, segment);
                 if (!File.Exists(current) && !Directory.Exists(current)) break;
                 if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-                    throw new InvalidOperationException("Manager action index traverses a reparse point.");
+                    throw new InvalidOperationException(reparseMessage);
             }
         }
 

@@ -1,0 +1,2 @@
+59c24572f0a80311dd290318d7fce50436601ffa0cbea054bbddf6d572a004aa  com.rice.ai-codedb/Editor/AICodedbManagerActionJournal.cs
+07b4fdd66d921c267686966c037226878c60030075ed40c574d2a50145707f9d  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
