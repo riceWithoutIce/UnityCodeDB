@@ -50,6 +50,10 @@ param(
 
     [switch]$RetainedOptionalFlatOnly,
 
+    [switch]$RetainedDispositionOnly,
+
+    [string]$CanonicalPayloadRoot,
+
     [string]$RetainedFixtureRoot,
 
     [switch]$FailedPreparationInterruptionOnly,
@@ -130,9 +134,9 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     # unchanged. Unlike Phase B, no authority reader is replaced by a seam.
     $familyClock = [Diagnostics.Stopwatch]::StartNew()
     $tag = [guid]::NewGuid().ToString('N')
-    $fixtureContainer = if ($RetainedOptionalFlatOnly) {
+    $fixtureContainer = if ($RetainedOptionalFlatOnly -or $RetainedDispositionOnly) {
         $parent = if ($RetainedFixtureRoot) { [IO.Path]::GetFullPath($RetainedFixtureRoot) } else {
-            Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.artifacts/tests/s29-optional-flat'
+            Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.artifacts/tests/s29-retained-disposition'
         }
         if (-not [IO.Path]::IsPathRooted($parent)) { throw 'Optional flat fixture parent must be absolute.' }
         Join-Path $parent ('r-' + $tag.Substring(0,8))
@@ -141,6 +145,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     } else { Join-Path ([IO.Path]::GetTempPath()) ('codedb-s28-integration-' + $tag) }
     $fixtureRoot = Join-Path $fixtureContainer 'installed'
     $integrationPackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $integrationPayloadRoot = if ($CanonicalPayloadRoot) { [IO.Path]::GetFullPath($CanonicalPayloadRoot) } else { Join-Path $integrationPackageRoot 'Payload~' }
     $definitionBodies = @{}
     $definitionPreamble = New-Object System.Collections.Generic.List[string]
     $caseCount = 0
@@ -213,7 +218,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
     function Copy-PhaseCCanonicalClosure {
         param([string]$Root)
         New-Item -ItemType Directory -Force -Path $Root | Out-Null
-        $manifest = Read-PayloadManifest -Root (Join-Path $integrationPackageRoot 'Payload~') -ProjectRoot $Root
+        $manifest = Read-PayloadManifest -Root $integrationPayloadRoot -ProjectRoot $Root
         foreach ($file in $manifest.Files) {
             if ($file.Target.StartsWith($script:GenerationTargetPrefix, [StringComparison]::Ordinal) -or $file.Target -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' -or
                 $file.Target.StartsWith('AIWork/codedb/shared/', [StringComparison]::Ordinal)) {
@@ -278,10 +283,10 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
 
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     try {
-        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-strict-json.ps1')
-        Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
-        if ($RetainedOptionalFlatOnly) {
-            Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Payload~\AIWork\codedb\shared\codedb-text-adapter-output-contract.ps1')
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPayloadRoot 'AIWork\codedb\shared\codedb-strict-json.ps1')
+        Import-PhaseCDefinitions -Path (Join-Path $integrationPayloadRoot 'AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
+        if ($RetainedOptionalFlatOnly -or $RetainedDispositionOnly) {
+            Import-PhaseCDefinitions -Path (Join-Path $integrationPayloadRoot 'AIWork\codedb\shared\codedb-text-adapter-output-contract.ps1')
         }
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\materialize-codedb-host-payload.ps1')
         Import-PhaseCDefinitions -Path (Join-Path $integrationPackageRoot 'Tools~\codedb-instance-engine.ps1')
@@ -309,11 +314,11 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
                 $script:PhaseCCaseCount = 0
                 if ($FailedPreparationRecovery -or $FailedPreparationInterruption) {
                     if ($FailedPreparationRecovery) {
-                        foreach ($wrapperMode in $(if($global:RetainedOptionalFlatOnly){@('ABSENT')}elseif($global:RetainedCandidateRecoveryOnly){@('CURRENT')}else{@('CURRENT','ABSENT','OLD')})) {
+                        foreach ($wrapperMode in $(if($global:RetainedOptionalFlatOnly -or $global:RetainedDispositionOnly){@('ABSENT')}elseif($global:RetainedCandidateRecoveryOnly){@('CURRENT')}else{@('CURRENT','ABSENT','OLD')})) {
                             Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode $wrapperMode
                         }
                     }
-                    if(-not $global:RetainedCandidateRecoveryOnly){Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode OLD -InterruptBeforeCommit}
+                    if(-not $global:RetainedCandidateRecoveryOnly -and -not $global:RetainedDispositionOnly){Invoke-FailedPreparationRecoveryCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies -WrapperMode OLD -InterruptBeforeCommit}
                 } else {
                     Invoke-FirstInstallAttributionCases -Container $fixtureContainer -PackageRoot $integrationPackageRoot -Definitions $definitionBodies
                 }
@@ -446,7 +451,7 @@ function Invoke-NextChangeAdmissionIntegrationScenarios {
         Write-Host ("[PASS] NextChangeAdmissionIntegrationOnly; cases=" + $script:PhaseCCaseCount + "; native_children=0; elapsed_ms=" + $familyClock.ElapsedMilliseconds + "; canonical generation=" + $manifest.GenerationId)
     } finally {
         $resolved = [IO.Path]::GetFullPath($fixtureContainer)
-        if($RetainedOptionalFlatOnly) {
+        if($RetainedOptionalFlatOnly -or $RetainedDispositionOnly) {
             $expected = [IO.Path]::GetFullPath((Join-Path $parent ('r-' + $tag.Substring(0,8))))
             if ($resolved -cne $expected) { throw 'Optional flat fixture evidence root is not owned.' }
             Write-Host "[RETAINED_FIXTURE_EVIDENCE] $resolved"
@@ -830,7 +835,7 @@ function Invoke-FailedPreparationRecoveryCases {
     }
     $root = Join-Path $Container ('failed-preparation-' + $WrapperMode + '-' + [string]$InterruptBeforeCommit)
     foreach ($marker in @('Assets', 'Packages', 'ProjectSettings')) { New-Item -ItemType Directory -Force -Path (Join-Path $root $marker) | Out-Null }
-    $manifest = Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
+    $manifest = Read-PayloadManifest -Root $(if ($global:RetainedDispositionOnly) { $global:RetainedDispositionPayloadRoot } else { Join-Path $PackageRoot 'Payload~' }) -ProjectRoot $root
     $old = @($manifest.BootstrapTransitions | Sort-Object SourcePayloadSequence -Descending)[0]
     $oldSource = Join-Path $manifest.Root ('Generations/' + $old.SourceGenerationId)
     $generationRelative = 'AIWork/.runtime/codedb/host/generations/' + $old.SourceGenerationId
@@ -923,6 +928,65 @@ function Invoke-FailedPreparationRecoveryCases {
     Assert-PhaseC -Condition ($intent.Document.retained_wrapper_sha256 -ceq $originalWrapperHash -and @($intent.Document.retained_effects | Where-Object { $_.relative_path -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' }).Count -eq 0) -Label ('actual-wrapper-observation-separated-' + $WrapperMode)
     Assert-PhaseC -Condition (@(Get-InstanceRemovalIntents -Manifest $manifest -ProjectRoot $root).Count -eq 1 -and (Test-Path -LiteralPath $leasePath)) -Label 'actual-intent-consumer-retains-lease-and-candidate'
     $intentBytes = [IO.File]::ReadAllBytes($intent.Path)
+    if ($global:RetainedDispositionOnly) {
+        $before = Get-FailedFixtureDigest -Root $root
+        $observed = Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot
+        Assert-PhaseC -Condition ($observed.state -ceq 'SAFE' -and $observed.install_eligible -and $observed.instance_ids.Count -eq 1 -and $observed.instance_ids[0] -ceq $id) -Label 'owner-observation-inert-orphan-independent-of-action-history'
+        Assert-PhaseC -Condition ($before -ceq (Get-FailedFixtureDigest -Root $root)) -Label 'observation-does-not-write-or-cleanup'
+        Write-PhaseCRecord -Path (Join-Path $Container 'safe-observation.json') -Document $observed
+        Write-PhaseCRecord -Path (Join-Path $Container 'observation-context.json') -Document @{ project_root = $root; package_root = $PackageRoot; instance_id = $id; original_action_id = $historicId }
+        $missingIntent = [IO.File]::ReadAllBytes($intent.Path)
+        try {
+            Remove-Item -LiteralPath $intent.Path
+            $bad = Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot
+            Assert-PhaseC -Condition ($bad.state -ceq 'BLOCKED' -and $bad.instance_ids.Count -eq 0) -Label 'no-intent-unbound-effects-blocked'
+        } finally { [IO.File]::WriteAllBytes($intent.Path, $missingIntent) }
+        $foreignCandidateRoot = Join-Path $root ($script:InstancesRelativePath + '/' + ('a' * 32))
+        New-Item -ItemType Directory -Path $foreignCandidateRoot | Out-Null
+        try {
+            $bad = Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot
+            Assert-PhaseC -Condition ($bad.state -ceq 'BLOCKED' -and $bad.instance_ids.Count -eq 0) -Label 'mixed-safe-and-unresolved-candidate-blocked'
+        } finally { Remove-Item -LiteralPath $foreignCandidateRoot }
+        $leaseRoot = Join-Path (Join-Path $root ($script:InstancesRelativePath + '/' + $id)) 'watch/lifecycle/editor-leases'
+        $leasePath = Join-Path $leaseRoot '11111111111111111111111111111111.json'
+        Write-PhaseCRecord -Path $leasePath -Document @{ schema_version = 1; managed_by = $script:ManagedBy; session_id = '11111111111111111111111111111111'; editor_pid = 424242; process_start_ticks = '1'; project_root = $root; project_identity = Get-MaterializerProjectIdentity -ProjectRoot $root }
+        $script:FailedHolder = [pscustomobject]@{ Alive = $true; StartTicks = '1' }
+        Assert-PhaseC -Condition ((Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot).state -ceq 'BLOCKED') -Label 'live-holder-blocked'
+        $script:FailedHolder = [pscustomobject]@{ Alive = $false; StartTicks = $null }
+        Remove-Item -LiteralPath $leasePath -Force
+        $original = [IO.File]::ReadAllBytes($intent.Path)
+        try {
+            foreach ($fault in @('project', 'instance', 'effect', 'fingerprint')) {
+                $d = ConvertFrom-StrictJsonText -Text ([Text.Encoding]::UTF8.GetString($original)) -Label 'fixture intent'
+                switch ($fault) {
+                    'project' { $d.project_identity = '0' * 64 }
+                    'instance' { $d.retained_instance_id = '0' * 32 }
+                    'effect' { ($d.retained_effects | Where-Object kind -ceq FILE | Select-Object -First 1).sha256 = '0' * 64 }
+                    'fingerprint' { $d.authority_fingerprint = '0' * 64 }
+                }
+                Write-PhaseCRecord -Path $intent.Path -Document $d
+                $bad = Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot
+                Assert-PhaseC -Condition ($bad.state -ceq 'BLOCKED' -and $bad.instance_ids.Count -eq 0 -and -not $bad.install_eligible) -Label ('no-partial-grant-' + $fault)
+            }
+        } finally { [IO.File]::WriteAllBytes($intent.Path, $original) }
+        $duplicateId = [guid]::NewGuid().ToString('N')
+        $duplicate = ConvertFrom-StrictJsonText -Text ([Text.Encoding]::UTF8.GetString($original)) -Label 'fixture duplicate'
+        $duplicate.state_id = $duplicateId; $duplicate.operation_id = $duplicateId
+        $duplicate.authority_fingerprint = Get-FailedPreparationFingerprint -Document $duplicate
+        $duplicatePath = Join-Path $root ($script:InstanceRemovalIntentsRelativePath + '/' + $duplicateId + '.json')
+        Write-PhaseCRecord -Path $duplicatePath -Document $duplicate
+        Assert-PhaseC -Condition ((Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot).state -ceq 'BLOCKED') -Label 'duplicate-retained-authority-blocked'
+        Remove-Item -LiteralPath $duplicatePath
+        $desiredPath = Join-Path $root $script:InstanceDesiredStateRelativePath
+        $desiredBytes = [IO.File]::ReadAllBytes($desiredPath)
+        try {
+            Write-PhaseCDesired -Root $root -State INSTALLED -Cleanup PENDING -StateId $desired.StateId
+            $installedObservation = Get-InstanceRetainedEffectsObservation -Manifest $manifest -ProjectRoot $root -PackageRoot $PackageRoot
+            Assert-PhaseC -Condition ($installedObservation.state -ceq 'SAFE' -and -not $installedObservation.install_eligible) -Label 'safe-retention-does-not-authorize-installed-generation-Install'
+            Write-PhaseCRecord -Path (Join-Path $Container 'installed-observation.json') -Document $installedObservation
+        } finally { [IO.File]::WriteAllBytes($desiredPath, $desiredBytes) }
+        return
+    }
     if($global:RetainedCandidateRecoveryOnly) {
         Invoke-RetainedCandidateRecoveryCase -ProjectRoot $root -PackageRoot $PackageRoot -Manifest $manifest -OldIntent $intent
         return
@@ -1003,10 +1067,12 @@ function Invoke-FailedPreparationRecoveryCases {
     Remove-Item -LiteralPath $v1path
 }
 
-if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly) {
+if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly -or $RetainedDispositionOnly) {
+    $global:RetainedDispositionOnly = [bool]$RetainedDispositionOnly
+    $global:RetainedDispositionPayloadRoot = $CanonicalPayloadRoot
     $global:RetainedOptionalFlatOnly=[bool]$RetainedOptionalFlatOnly
     $global:RetainedCandidateRecoveryOnly=[bool]($RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly)
-    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:($FailedPreparationRecoveryOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly) -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
+    Invoke-NextChangeAdmissionIntegrationScenarios -FirstInstallAttribution:$FirstInstallAttributionOnly -InstanceManifestContract:$InstanceManifestContractOnly -FailedPreparationRecovery:($FailedPreparationRecoveryOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly -or $RetainedDispositionOnly) -FailedPreparationInterruption:$FailedPreparationInterruptionOnly
     return
 }
 

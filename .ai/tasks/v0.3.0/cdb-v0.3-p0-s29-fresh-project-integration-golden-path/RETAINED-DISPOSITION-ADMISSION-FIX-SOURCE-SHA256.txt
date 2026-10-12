@@ -1,0 +1,10 @@
+base_commit=b76957a9dbcae9b00eff73775a97c4e8f33ae785
+snapshot=retained-disposition-admission-f1-f2-fix-2026-10-12
+3f80ec13a8820d89a39a9766daf3fe733c4d1ceb230e93ec0af99c4b76768141  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+4631d189a59fc490049831815a736daf18fe367c84072f9ac05c4a99467ff810  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+4e1a80e935c7b881f66d44a3b801a2e4f83390d133a3673258f5b240274059cc  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+df2b34783992ffa6473dcb85c71e6072c30b999ca13a42cbffde7b43e8050c61  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+ac0352cd91bed3c2848a1d935bfbb585caca9d43a932b06852c4a4378a384e04  com.rice.ai-codedb/Editor/AICodedbManagerActionJournal.cs
+6e35d32727116d86df69786aeba686be33abde6b674cd36dbd1b7906b970bd69  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+d599a155ae69548927779c37a6336bc1d0f23495df14716797a4f71fbacdd44c  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+f8749ce0de53da2a2a8650e127c4cae7983b3f8df1ada87d5334f8600743e935  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1

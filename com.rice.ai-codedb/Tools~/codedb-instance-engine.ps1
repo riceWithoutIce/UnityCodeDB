@@ -3362,6 +3362,43 @@ function Assert-InstanceNextChangeAdmission {
     return $fingerprint
 }
 
+function Get-InstanceRetainedEffectsObservation {
+    # Observation only. The confirmed change revalidates under its existing lock.
+    param($Manifest, [string]$ProjectRoot, [string]$PackageRoot)
+    $ids = @()
+    try {
+        $intents = @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)
+        $bound = @{}
+        foreach ($intent in $intents) {
+            if ($bound.ContainsKey($intent.InstanceId)) { throw 'Retained candidate binding is duplicated.' }
+            $bound[$intent.InstanceId] = $true
+            if ($intent.Document.schema_version -eq 2) {
+                $retained = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $intent.InstanceRoot -AllowProvisioning -FailedPreparation
+                $holders = Get-InstanceRetirementHolderEvidence -Evidence $retained -ProjectRoot $ProjectRoot
+                if (-not $holders.Clear) { throw 'Retained failed candidate holder is live or ambiguous.' }
+                $ids += $intent.InstanceId
+            }
+        }
+        $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+        $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
+        foreach ($selected in @($current, $lkg)) {
+            if ($null -ne $selected -and $selected.InstanceId -cin $ids) { throw 'Retained failed candidate is selected.' }
+        }
+        try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+        catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+        if ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING')) {
+            throw 'Activation ownership is pending; retained effects cannot authorize a new operation.'
+        }
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+        $installEligible = $desired.DesiredState -eq 'UNINSTALLED' -or (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot)
+        $operationDetail = if ($installEligible) { 'Existing Install preconditions are present; confirmed dispatch still revalidates.' } else { 'Retained effects are safe, but existing Install requires first-install or explicit UNINSTALLED state. Installed generation migration remains a separate route.' }
+        return [ordered]@{ state = 'SAFE'; project_root = $ProjectRoot; package_root = $PackageRoot; instance_ids = @($ids | Sort-Object); detail = 'Current retained effects are independently validated; original command outcomes are unchanged.'; install_eligible = [bool]$installEligible; operation_detail = $operationDetail }
+    } catch {
+        return [ordered]@{ state = 'BLOCKED'; project_root = $ProjectRoot; package_root = $PackageRoot; instance_ids = @(); detail = $_.Exception.Message; install_eligible = $false; operation_detail = 'Relevant effects remain unresolved; no new operation is authorized by this observation.' }
+    }
+}
+
 function Assert-InstancePreflight {
     param(
         [Parameter(Mandatory = $true)]$Manifest,

@@ -661,6 +661,65 @@ namespace Rice.AI.Codedb.Editor
         }
     }
 
+    // A transient backend observation, never command outcome or mutation permission.
+    internal sealed class AICodedbRetainedEffectsObservation
+    {
+        internal bool Safe { get; }
+        internal string Detail { get; }
+        internal HashSet<string> InstanceIds { get; }
+        internal bool InstallEligible { get; }
+        internal string OperationDetail { get; }
+        internal AICodedbEditorExecutionContext Context { get; }
+
+        private AICodedbRetainedEffectsObservation(bool safe, string detail,
+            HashSet<string> instanceIds, AICodedbEditorExecutionContext context,
+            bool installEligible, string operationDetail)
+        {
+            Safe = safe; Detail = detail; InstanceIds = instanceIds; Context = context;
+            InstallEligible = installEligible; OperationDetail = operationDetail;
+        }
+
+        internal static AICodedbRetainedEffectsObservation Parse(
+            AICodedbCommandResult result, AICodedbEditorExecutionContext context)
+        {
+            const string prefix = "[RETAINED_EFFECTS]";
+            if (result == null || !result.Succeeded || result.OutputDrainIncomplete) return null;
+            string json = null;
+            foreach (var raw in (result.StandardOutput ?? string.Empty).Split('\n'))
+            {
+                var line = raw.Trim();
+                if (!line.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                if (json != null || line.Length > 16384) return null;
+                json = line.Substring(prefix.Length).Trim();
+            }
+            if (json == null) return null;
+            try
+            {
+                const string label = "retained effects observation";
+                var record = AICodedbStrictJson.ParseObject(json, label);
+                if (record.Count != 7) return null;
+                var state = AICodedbStrictJson.GetRequiredString(record, "state", label);
+                if (state != "SAFE" && state != "BLOCKED") return null;
+                var observed = new AICodedbEditorExecutionContext(context.Platform,
+                    AICodedbStrictJson.GetRequiredString(record, "project_root", label),
+                    AICodedbStrictJson.GetRequiredString(record, "package_root", label), context.ProjectDisplayName);
+                if (!string.Equals(observed.ProjectRoot, context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(observed.PackageRoot, context.PackageRoot, StringComparison.OrdinalIgnoreCase))
+                    return null;
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var id in AICodedbStrictJson.GetRequiredStringArray(record, "instance_ids", label))
+                    if (!Regex.IsMatch(id, "\\A[0-9a-f]{32}\\z") || !ids.Add(id) || ids.Count > 256) return null;
+                if (state == "BLOCKED" && ids.Count != 0) return null;
+                var installEligible = AICodedbStrictJson.GetRequiredBoolean(record, "install_eligible", label);
+                if (state == "BLOCKED" && installEligible) return null;
+                return new AICodedbRetainedEffectsObservation(state == "SAFE",
+                    AICodedbStrictJson.GetRequiredString(record, "detail", label), ids, context,
+                    installEligible, AICodedbStrictJson.GetRequiredString(record, "operation_detail", label));
+            }
+            catch (Exception) { return null; }
+        }
+    }
+
     internal readonly struct AICodedbProductStatus
     {
         internal AICodedbProductState State { get; }

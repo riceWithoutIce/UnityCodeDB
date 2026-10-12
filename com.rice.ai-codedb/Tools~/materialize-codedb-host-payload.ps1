@@ -11954,6 +11954,10 @@ try {
         $PayloadRoot = Join-Path $packageRoot "Payload~"
     }
     $payload = Read-PayloadManifest -Root $PayloadRoot -ProjectRoot $projectRootPath
+    if ($Action -eq 'DryRun') {
+        $observation = Get-InstanceRetainedEffectsObservation -Manifest $payload -ProjectRoot $projectRootPath -PackageRoot ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
+        Write-Host ('[RETAINED_EFFECTS] ' + ($observation | ConvertTo-Json -Depth 8 -Compress))
+    }
     if ($Action -in @("Redeploy", "Sync", "Remove", "RemoveIntegration", "Repair", "Reinstall", "Uninstall", "Install")) {
         Assert-MutationConfirmation -Root $projectRootPath -Manifest $payload -MutationAction $Action
     }

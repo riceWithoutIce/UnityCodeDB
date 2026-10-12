@@ -1126,6 +1126,253 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ManagerRetainedDisposition_ProductionObservationReachesJournalSessionAndUi()
+        {
+            var evidence = Environment.GetEnvironmentVariable("CODEDB_RETAINED_OBSERVATION_FIXTURE");
+            if (string.IsNullOrEmpty(evidence))
+                Assert.Ignore("Requires the isolated RetainedDispositionOnly production fixture.");
+            var recorded = AICodedbStrictJson.ReadObject(Path.Combine(evidence, "observation-context.json"),
+                16384, "isolated observation context");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                AICodedbStrictJson.GetRequiredString(recorded, "project_root", "context"),
+                AICodedbStrictJson.GetRequiredString(recorded, "package_root", "context"), "Isolated retention");
+            var output = "[RETAINED_EFFECTS] " + AICodedbControlContractMigrationClassifierTests.SerializeObject(
+                AICodedbStrictJson.ReadObject(Path.Combine(evidence, "safe-observation.json"), 16384, "backend emitted observation"));
+            var parsed = AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output, "", false, 1), context);
+            Assert.That(parsed, Is.Not.Null);
+            Assert.That(parsed.Safe, Is.True);
+            Assert.That(parsed.InstallEligible, Is.True);
+            Assert.That(AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output + "\n" + output, "", false, 1), context), Is.Null);
+            Assert.That(AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(1, output, "", false, 1), context), Is.Null);
+            Assert.That(AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output, "", false, 1, outputDrainIncomplete: true), context), Is.Null);
+            var foreign = new AICodedbEditorExecutionContext(context.Platform, context.ProjectRoot,
+                context.PackageRoot + "-foreign", context.ProjectDisplayName);
+            Assert.That(AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output, "", false, 1), foreign), Is.Null);
+            var priorLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+            var local = Path.Combine(evidence, "isolated-reader-local-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(local);
+            try
+            {
+                Environment.SetEnvironmentVariable("LOCALAPPDATA", local);
+                Assert.That(AICodedbManagerActionJournal.Read(context).State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                var read = AICodedbManagerActionJournal.Read(context, parsed);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                Assert.That(read.HistoricalWarning, Does.Contain("original action attribution remains unavailable"));
+                Assert.That(read.Index, Is.Null);
+                var product = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Pending,
+                    AICodedbProductLayerState.Unavailable, "Generation not Ready");
+                var host = new AICodedbHostPayloadStatus(AICodedbHostPayloadState.SetupRequired,
+                    AICodedbStatusState.Warning, "setup", "setup");
+                Assert.That(AICodedbManagerWindow.IsFreshInstallRecoveryAvailable(product, host, null, context, parsed), Is.True);
+                var installed = AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0,
+                    "[RETAINED_EFFECTS] " + AICodedbControlContractMigrationClassifierTests.SerializeObject(
+                        AICodedbStrictJson.ReadObject(Path.Combine(evidence, "installed-observation.json"), 16384, "backend installed observation")), "", false, 1), context);
+                Assert.That(installed.Safe, Is.True);
+                Assert.That(AICodedbManagerWindow.IsFreshInstallRecoveryAvailable(product, host, null, context, installed), Is.False);
+                Assert.That(installed.OperationDetail, Does.Contain("migration"));
+                var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+                var oldId = Guid.NewGuid().ToString("N");
+                var foreignId = Guid.NewGuid().ToString("N");
+                SessionState.SetString(key, oldId + "|Install CodeDB|" + context.PackageRoot);
+                var stale = AICodedbManagerActionSession.CurrentFor(context);
+                Assert.That(stale.IsRecovering, Is.True);
+                var aggregate = new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
+                    historicalActionIds: new[] { oldId, Guid.NewGuid().ToString("N") }, effectsObservation: parsed);
+                AICodedbManagerActionSession.RestoreDurable(context, aggregate, 1d);
+                Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.Null);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+                SessionState.SetString(key, foreignId + "|Host Payload Sync|" + context.PackageRoot);
+                var foreignOwner = AICodedbManagerActionSession.CurrentFor(context);
+                AICodedbManagerActionSession.RestoreDurable(context, aggregate, 2d);
+                Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.SameAs(foreignOwner));
+                Assert.That(AICodedbManagerWindow.IsFreshInstallRecoveryAvailable(product, host, foreignOwner, context, parsed), Is.False);
+                // Preserve a foreign owner; only its explicit matching evidence
+                // is permitted to resolve test state for teardown.
+                AICodedbManagerActionSession.RestoreDurable(context, new AICodedbManagerActionIndexRead(
+                    AICodedbManagerActionIndexState.Empty, historicalActionIds: new[] { foreignId }, effectsObservation: parsed), 3d);
+                Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.Null);
+            }
+            finally { Environment.SetEnvironmentVariable("LOCALAPPDATA", priorLocal); }
+        }
+
+        [Test]
+        public void ManagerRetainedDisposition_TwoFailedReceiptsAggregateWithoutRepresentative()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var first = new ManagerReceiptFixture(workspace, session.Context, false);
+                first.Add("Install", first.InstallOutput);
+                MoveManagerReceiptFixtureToLegacy(first);
+                using var second = new ManagerReceiptFixture(workspace, session.Context, false);
+                second.Add("Install", second.InstallOutput);
+                MoveManagerReceiptFixtureToLegacy(second);
+                var read = AICodedbManagerActionJournal.Read(session.Context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty), read.Detail);
+                Assert.That(read.HistoricalActionIds, Does.Contain(first.ActionId).And.Contain(second.ActionId));
+                Assert.That(read.HistoricalActionIds.Length, Is.EqualTo(2));
+                Assert.That(read.Index, Is.Null);
+                Assert.That(read.HistoricalResult, Is.Null);
+                Assert.That(read.HistoricalWarning, Does.Contain(first.ActionId).And.Contain(second.ActionId));
+            });
+        }
+
+        private static AICodedbRetainedEffectsObservation ReadRetainedFixObservation(
+            out AICodedbEditorExecutionContext context)
+        {
+            var evidence = Environment.GetEnvironmentVariable("CODEDB_RETAINED_OBSERVATION_FIXTURE");
+            if (string.IsNullOrEmpty(evidence))
+                Assert.Ignore("Requires the isolated production RetainedDispositionOnly output.");
+            var record = AICodedbStrictJson.ReadObject(Path.Combine(evidence, "observation-context.json"),
+                16384, "retained fix context");
+            context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                AICodedbStrictJson.GetRequiredString(record, "project_root", "context"),
+                AICodedbStrictJson.GetRequiredString(record, "package_root", "context"), "Retained fix");
+            var output = "[RETAINED_EFFECTS] " + AICodedbControlContractMigrationClassifierTests.SerializeObject(
+                AICodedbStrictJson.ReadObject(Path.Combine(evidence, "safe-observation.json"), 16384, "owner output"));
+            var observation = AICodedbRetainedEffectsObservation.Parse(
+                new AICodedbCommandResult(0, output, "", false, 1), context);
+            Assert.That(observation, Is.Not.Null);
+            Assert.That(observation.Safe, Is.True);
+            return observation;
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ManagerRetainedDisposition_ActualAdmissionPublishesExactOwnerAndRelease(bool refusal)
+        {
+            var observation = ReadRetainedFixObservation(out var context);
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var isolation = new ManagerActionSessionFixture(workspace);
+                using var receiptRoot = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
+                var pendingKey = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+                try
+                {
+                    Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                        Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                    Assert.That(AICodedbManagerActionSession.TryStart("Install CodeDB", context, 1d, out var session), Is.True);
+                    var index = session.DurableIndex;
+                    Assert.That(AICodedbManagerActionJournal.TryAdmit(index, out var detail, observation), Is.True, detail);
+                    session.MarkDurableAdmitted();
+                    var indexPath = AICodedbPaths.GetManagerActionIndexPath(context, index.ActionId);
+                    Assert.That(File.Exists(indexPath), Is.True);
+                    AICodedbProcessRunner.ValidateActionManifest(context, index.ActionId);
+                    var published = AICodedbManagerActionJournal.Read(context, observation);
+                    Assert.That(published.State, Is.EqualTo(AICodedbManagerActionIndexState.Pending), published.Detail);
+                    Assert.That(published.Index.ActionId, Is.EqualTo(index.ActionId));
+                    var other = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"), index.Title,
+                        index.EffectClass, index.AuthorizationSource, context);
+                    Assert.That(AICodedbManagerActionJournal.TryAdmit(other, out _, observation), Is.False);
+                    Assert.That(AICodedbManagerActionJournal.TryRelease(other,
+                        AICodedbManagerActionEvidenceKind.CommandTerminal, out _), Is.False);
+                    Assert.That(File.Exists(indexPath), Is.True);
+                    var result = new AICodedbCommandResult(refusal ? 4 : 0, "", "", false,
+                        actionId: index.ActionId, authoritativeTerminalEvidence: !refusal,
+                        terminalForManagerAction: !refusal, managerActionEvidenceKind: refusal
+                            ? AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                            : AICodedbManagerActionEvidenceKind.CommandTerminal);
+                    Assert.That(session.TryReleaseDurableIndex(result, out detail), Is.True, detail);
+                    Assert.That(File.Exists(indexPath), Is.False);
+                    var marker = Path.Combine(Path.GetDirectoryName(indexPath), "resolved-action-" + index.ActionId + ".json");
+                    Assert.That(File.Exists(marker), Is.True);
+                    Assert.That(AICodedbManagerActionJournal.Read(context).State,
+                        Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                    // Releasing an exact completed command creates no resource
+                    // permit: fresh unresolved observation still refuses admission.
+                    Assert.That(AICodedbManagerActionJournal.TryAdmit(other, out _), Is.False);
+                    Assert.That(File.Exists(AICodedbPaths.GetManagerActionIndexPath(context, other.ActionId)), Is.False);
+                    var foreignContext = new AICodedbEditorExecutionContext(context.Platform,
+                        context.ProjectRoot, context.PackageRoot + "-foreign", context.ProjectDisplayName);
+                    var foreign = new AICodedbManagerActionIndex(Guid.NewGuid().ToString("N"), index.Title,
+                        index.EffectClass, index.AuthorizationSource, foreignContext);
+                    Assert.That(AICodedbManagerActionJournal.TryAdmit(foreign, out _, observation), Is.False);
+                }
+                finally { SessionState.EraseString(pendingKey); }
+            });
+        }
+
+        [Test]
+        public void ManagerRetainedDisposition_WindowAttachmentClearsOnlyHistoricalProjection()
+        {
+            var observation = ReadRetainedFixObservation(out var context);
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var isolation = new ManagerActionSessionFixture(workspace);
+                using var receiptRoot = AICodedbPaths.UseManagerActionsRootForTests(workspace.Root);
+                var pendingKey = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var type = typeof(AICodedbManagerWindow);
+                // Only native allocation/rendering is omitted. Invoke the real
+                // Window attachment, label and callback-selection bodies.
+                var window = (AICodedbManagerWindow)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+                type.GetField("_executionContext", flags).SetValue(window, context);
+                var snapshot = AICodedbStatusSnapshot.CreateCachedState("Retained fix", AICodedbProductState.Uninstalled);
+                type.GetField("_statusSnapshot", flags).SetValue(window, snapshot);
+                type.GetField("_retainedEffectsObservation", flags).SetValue(window, observation);
+                var attach = type.GetMethod("AttachCurrentActionSession", flags);
+                var callback = type.GetMethod("GetPrimaryActionCallback", flags);
+                var label = type.GetMethod("GetPrimaryActionLabel", flags);
+                var inFlight = type.GetField("_userActionInFlight", flags);
+                var status = type.GetField("_userActionStatus", flags);
+                var currentField = typeof(AICodedbManagerActionSession).GetField("_current",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                try
+                {
+                    var oldId = Guid.NewGuid().ToString("N");
+                    SessionState.SetString(pendingKey, oldId + "|Install CodeDB|" + context.PackageRoot);
+                    var old = AICodedbManagerActionSession.CurrentFor(context);
+                    attach.Invoke(window, null);
+                    Assert.That(inFlight.GetValue(window), Is.EqualTo(true));
+                    Assert.That(status.GetValue(window), Is.SameAs(old.Status));
+                    Assert.That(callback.Invoke(window, new object[] { snapshot.ProductStatus, false, true }), Is.Null);
+                    var originalOutcome = new AICodedbCommandResult(6, "old command failed", "", false);
+                    type.GetField("_lastResult", flags).SetValue(window, originalOutcome);
+                    var safeRead = AICodedbManagerActionJournal.Read(context, observation);
+                    Assert.That(safeRead.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                    // Attribute this synthetic stale history explicitly; owner
+                    // observation does not invent original action association.
+                    var aggregate = new AICodedbManagerActionIndexRead(safeRead.State,
+                        historicalActionIds: new[] { oldId }, effectsObservation: safeRead.EffectsObservation);
+                    AICodedbManagerActionSession.RestoreDurable(context, aggregate, 2d);
+                    Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.Null);
+                    attach.Invoke(window, null);
+                    var idleStatus = status.GetValue(window);
+                    Assert.That(inFlight.GetValue(window), Is.EqualTo(false));
+                    Assert.That(idleStatus, Is.Not.SameAs(old.Status));
+                    Assert.That(label.Invoke(window, null), Is.EqualTo("Install CodeDB"));
+                    Assert.That(callback.Invoke(window, new object[] { snapshot.ProductStatus, false, true }), Is.Not.Null);
+                    Assert.That(type.GetField("_lastResult", flags).GetValue(window), Is.SameAs(originalOutcome));
+                    attach.Invoke(window, null);
+                    Assert.That(status.GetValue(window), Is.SameAs(idleStatus));
+                    Assert.That(inFlight.GetValue(window), Is.EqualTo(false));
+                    Assert.That(AICodedbManagerActionSession.TryStart("Install CodeDB", context, 3d, out var running), Is.True);
+                    type.GetField("_lastResult", flags).SetValue(window, null);
+                    attach.Invoke(window, null);
+                    AICodedbManagerActionSession.RestoreDurable(context, aggregate, 4d);
+                    attach.Invoke(window, null);
+                    Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.SameAs(running));
+                    Assert.That(inFlight.GetValue(window), Is.EqualTo(true));
+                    Assert.That(status.GetValue(window), Is.SameAs(running.Status));
+                    Assert.That(callback.Invoke(window, new object[] { snapshot.ProductStatus, false, true }), Is.Null);
+                    running.AbortBeforeAdmission();
+                    var foreignId = Guid.NewGuid().ToString("N");
+                    SessionState.SetString(pendingKey, foreignId + "|Host Payload Sync|" + context.PackageRoot);
+                    var foreign = AICodedbManagerActionSession.CurrentFor(context);
+                    attach.Invoke(window, null);
+                    AICodedbManagerActionSession.RestoreDurable(context, aggregate, 5d);
+                    attach.Invoke(window, null);
+                    Assert.That(AICodedbManagerActionSession.CurrentFor(context), Is.SameAs(foreign));
+                    Assert.That(inFlight.GetValue(window), Is.EqualTo(true));
+                    Assert.That(status.GetValue(window), Is.SameAs(foreign.Status));
+                    Assert.That(callback.Invoke(window, new object[] { snapshot.ProductStatus, false, true }), Is.Null);
+                }
+                finally { SessionState.EraseString(pendingKey); currentField.SetValue(null, null); }
+            });
+        }
+
+        [Test]
         public void ManagerActionSession_DurableRetainedResultClearsPendingAfterDomainReload()
         {
             AICodedbTestWorkspace.Run(workspace =>
@@ -2127,9 +2374,17 @@ namespace Rice.AI.Codedb.Editor.Tests
                 var read = AICodedbManagerActionJournal.Read(fixture.Context);
                 Assert.That(read.State, Is.EqualTo(legacy
                     ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Pending), read.Detail);
-                Assert.That(read.Index, Is.Not.Null);
-                Assert.That(read.Index.ActionId, Is.EqualTo(fixture.ActionId));
-                if (legacy) Assert.That(read.HistoricalResult, Is.Not.Null);
+                if (legacy)
+                {
+                    Assert.That(read.Index, Is.Null);
+                    Assert.That(read.HistoricalResult, Is.Null);
+                    Assert.That(read.HistoricalActionIds, Does.Contain(fixture.ActionId));
+                }
+                else
+                {
+                    Assert.That(read.Index, Is.Not.Null);
+                    Assert.That(read.Index.ActionId, Is.EqualTo(fixture.ActionId));
+                }
             });
         }
 

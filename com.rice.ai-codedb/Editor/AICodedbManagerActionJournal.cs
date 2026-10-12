@@ -44,11 +44,14 @@ namespace Rice.AI.Codedb.Editor
         internal bool IsLegacyReceipt { get; }
         internal string HistoricalWarning { get; }
         internal AICodedbCommandResult HistoricalResult { get; }
+        internal string[] HistoricalActionIds { get; }
+        internal AICodedbRetainedEffectsObservation EffectsObservation { get; }
 
         internal AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState state,
             AICodedbManagerActionIndex index = null, string detail = null,
             string actionId = null, bool isLegacyReceipt = false,
-            string historicalWarning = null, AICodedbCommandResult historicalResult = null)
+            string historicalWarning = null, AICodedbCommandResult historicalResult = null,
+            string[] historicalActionIds = null, AICodedbRetainedEffectsObservation effectsObservation = null)
         {
             State = state;
             Index = index;
@@ -57,6 +60,8 @@ namespace Rice.AI.Codedb.Editor
             IsLegacyReceipt = isLegacyReceipt;
             HistoricalWarning = historicalWarning ?? string.Empty;
             HistoricalResult = historicalResult;
+            HistoricalActionIds = historicalActionIds ?? Array.Empty<string>();
+            EffectsObservation = effectsObservation;
         }
     }
 
@@ -88,15 +93,28 @@ namespace Rice.AI.Codedb.Editor
             internal string WriterStartTicks;
         }
 
-        internal static AICodedbManagerActionIndexRead Read(AICodedbEditorExecutionContext context)
+        internal static AICodedbManagerActionIndexRead Read(AICodedbEditorExecutionContext context,
+            AICodedbRetainedEffectsObservation effectsObservation = null)
+        {
+            return ReadCore(context, effectsObservation, true);
+        }
+
+        private static AICodedbManagerActionIndexRead ReadCore(AICodedbEditorExecutionContext context,
+            AICodedbRetainedEffectsObservation effectsObservation, bool inspectCandidateEffects)
         {
             var candidateId = string.Empty;
             try
             {
                 var directory = AICodedbPaths.GetManagerActionIndexDirectory(context);
                 AssertPath(directory);
+                if (effectsObservation != null && (!string.Equals(effectsObservation.Context.ProjectRoot,
+                        context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(effectsObservation.Context.PackageRoot,
+                        context.PackageRoot, StringComparison.OrdinalIgnoreCase)))
+                    effectsObservation = null;
                 if (!Directory.Exists(directory))
-                    return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty);
+                    return inspectCandidateEffects ? ReadEffectsOnly(context, effectsObservation)
+                        : new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty);
                 var files = Directory.GetFiles(directory);
                 var path = string.Empty;
                 var resolved = new Dictionary<string, ResolvedMarker>(StringComparer.Ordinal);
@@ -134,7 +152,8 @@ namespace Rice.AI.Codedb.Editor
                     path = file;
                 }
                 if (path.Length == 0)
-                    return ReadLegacyPending(context, directory, resolved);
+                    return ReadLegacyPending(context, directory, resolved, effectsObservation: effectsObservation,
+                        inspectCandidateEffects: inspectCandidateEffects);
                 candidateId = ParseActionIdFromFilename(Path.GetFileName(path), "current-action-");
                 var record = AICodedbStrictJson.ReadObject(path, MaximumBytes,
                     "CodeDB Manager action index");
@@ -184,8 +203,15 @@ namespace Rice.AI.Codedb.Editor
                 {
                     var currentRetainedIndex = new AICodedbManagerActionIndex(
                         actionId, title, effect, authority, previousContext, storageLayout);
+                    var allHistory = ReadLegacyPending(context, directory, resolved,
+                        new[] { actionId }, effectsObservation, inspectCandidateEffects);
+                    if (allHistory.State != AICodedbManagerActionIndexState.Empty)
+                        return allHistory;
                     var orphanCandidate = FindUnownedProvisioningCandidate(
-                        context, new HashSet<string>(resolved.Keys, StringComparer.Ordinal) { actionId });
+                        context, new HashSet<string>(resolved.Keys, StringComparer.Ordinal) { actionId },
+                        effectsObservation, inspectCandidateEffects);
+                    if (effectsObservation != null && !effectsObservation.Safe)
+                        orphanCandidate = effectsObservation.Detail;
                     if (!string.IsNullOrEmpty(orphanCandidate))
                         return new AICodedbManagerActionIndexRead(
                             AICodedbManagerActionIndexState.Conflict,
@@ -199,11 +225,12 @@ namespace Rice.AI.Codedb.Editor
                     return new AICodedbManagerActionIndexRead(
                         AICodedbManagerActionIndexState.Empty,
                         currentRetainedIndex,
-                        historicalWarning: "Original INSTALL remains failed/unknown; its candidate effects are inert and retained.",
-                        historicalResult: closure.OriginalResult);
+                        historicalWarning: allHistory.HistoricalWarning,
+                        historicalResult: closure.OriginalResult,
+                        historicalActionIds: allHistory.HistoricalActionIds, effectsObservation: effectsObservation);
                 }
                 var history = ReadLegacyPending(context, directory, resolved,
-                    new[] { actionId });
+                    new[] { actionId }, effectsObservation, inspectCandidateEffects);
                 var currentIndex = new AICodedbManagerActionIndex(
                     actionId, title, effect, authority, previousContext, storageLayout);
                 if (history.State == AICodedbManagerActionIndexState.Conflict)
@@ -673,7 +700,9 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbManagerActionIndexRead ReadLegacyPending(
             AICodedbEditorExecutionContext context, string directory,
             Dictionary<string, ResolvedMarker> resolved,
-            IEnumerable<string> additionalKnownActionIds = null)
+            IEnumerable<string> additionalKnownActionIds = null,
+            AICodedbRetainedEffectsObservation effectsObservation = null,
+            bool inspectCandidateEffects = true)
         {
             AICodedbManagerActionIndex pending = null;
             var matchedHistorical = new HashSet<string>(StringComparer.Ordinal);
@@ -685,7 +714,7 @@ namespace Rice.AI.Codedb.Editor
                         knownActionIds.Add(additionalActionId);
             AICodedbManagerActionIndex failedInstallIndex = null;
             AICodedbCommandResult failedInstallResult = null;
-            var failedInstallCount = 0;
+            var historicalActionIds = new HashSet<string>(StringComparer.Ordinal);
             var packageDirectories = Directory.GetDirectories(directory);
             if (packageDirectories.Length > 64)
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Conflict,
@@ -760,7 +789,7 @@ namespace Rice.AI.Codedb.Editor
                         {
                             if (marker.RetainedEffects)
                             {
-                                failedInstallCount++;
+                                historicalActionIds.Add(actionId);
                                 failedInstallIndex = new AICodedbManagerActionIndex(actionId, "Install CodeDB",
                                     "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
                                     marker.Context, marker.StorageLayout);
@@ -803,7 +832,7 @@ namespace Rice.AI.Codedb.Editor
                         if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
                             && AICodedbActions.HasFailedInstallPendingEffects(outcome.Result))
                         {
-                            failedInstallCount++;
+                            historicalActionIds.Add(actionId);
                             failedInstallIndex = new AICodedbManagerActionIndex(actionId,
                                 "Install CodeDB", "ConfirmedProjectMutation",
                                 AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"), original, null);
@@ -841,7 +870,7 @@ namespace Rice.AI.Codedb.Editor
                     var marker = closure.Value;
                     if (marker.RetainedEffects)
                     {
-                        failedInstallCount++;
+                        historicalActionIds.Add(closure.Key);
                         failedInstallIndex = new AICodedbManagerActionIndex(closure.Key, "Install CodeDB",
                             "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
                             marker.Context, marker.StorageLayout);
@@ -863,7 +892,7 @@ namespace Rice.AI.Codedb.Editor
                     if (outcome.State == AICodedbManagerActionRecoveryState.Terminal
                         && AICodedbActions.HasFailedInstallPendingEffects(outcome.Result))
                     {
-                        failedInstallCount++;
+                        historicalActionIds.Add(closure.Key);
                         failedInstallIndex = new AICodedbManagerActionIndex(closure.Key, "Install CodeDB",
                             "ConfirmedProjectMutation", AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
                             marker.Context, marker.StorageLayout);
@@ -879,7 +908,10 @@ namespace Rice.AI.Codedb.Editor
                         null, "A historical unknown-action marker has no matching original receipt.",
                         closure.Key);
             }
-            var orphanCandidate = FindUnownedProvisioningCandidate(context, knownActionIds);
+            var orphanCandidate = FindUnownedProvisioningCandidate(context, knownActionIds,
+                effectsObservation, inspectCandidateEffects);
+            if (effectsObservation != null && !effectsObservation.Safe)
+                orphanCandidate = effectsObservation.Detail;
             if (!string.IsNullOrEmpty(orphanCandidate))
             {
                 var warning = string.Join("\n", retainedUnknown);
@@ -894,18 +926,35 @@ namespace Rice.AI.Codedb.Editor
                     historicalResult: failedInstallResult);
             }
             var historicalWarning = string.Join("\n", retainedUnknown);
+            if (effectsObservation != null && effectsObservation.Safe && effectsObservation.InstanceIds.Count != 0)
+                historicalWarning += "\nIndependently validated retained candidates are historical effects; original failed/unknown results are unchanged. " + effectsObservation.OperationDetail;
+            var historicalIds = new List<string>(historicalActionIds).ToArray();
             return pending == null
                 ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
-                    failedInstallCount == 1 ? failedInstallIndex : null,
                     historicalWarning: historicalWarning,
-                    historicalResult: failedInstallCount == 1 ? failedInstallResult : null)
+                    historicalActionIds: historicalIds, effectsObservation: effectsObservation)
                 : new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
                     pending, isLegacyReceipt: true, historicalWarning: historicalWarning);
         }
 
-        private static string FindUnownedProvisioningCandidate(
-            AICodedbEditorExecutionContext context, IEnumerable<string> knownActionIds)
+        private static AICodedbManagerActionIndexRead ReadEffectsOnly(
+            AICodedbEditorExecutionContext context, AICodedbRetainedEffectsObservation observation)
         {
+            var orphan = FindUnownedProvisioningCandidate(context, Array.Empty<string>(), observation);
+            if (observation != null && !observation.Safe) orphan = observation.Detail;
+            return new AICodedbManagerActionIndexRead(string.IsNullOrEmpty(orphan)
+                ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Conflict,
+                detail: orphan, effectsObservation: observation,
+                historicalWarning: observation != null && observation.Safe && observation.InstanceIds.Count != 0
+                    ? "Independently validated retained candidates are historical effects; original action attribution remains unavailable. " + observation.OperationDetail : null);
+        }
+
+        private static string FindUnownedProvisioningCandidate(
+            AICodedbEditorExecutionContext context, IEnumerable<string> knownActionIds,
+            AICodedbRetainedEffectsObservation effectsObservation = null,
+            bool inspectCandidateEffects = true)
+        {
+            if (!inspectCandidateEffects) return string.Empty;
             var instancesRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
             AssertProjectPath(context, instancesRoot);
             if (!Directory.Exists(instancesRoot))
@@ -928,6 +977,9 @@ namespace Rice.AI.Codedb.Editor
                 var manifest = AICodedbStrictJson.ReadObject(manifestPath, 131072, label);
                 var state = AICodedbStrictJson.GetRequiredString(manifest, "state", label);
                 if (!string.Equals(state, "PROVISIONING", StringComparison.Ordinal))
+                    continue;
+                if (effectsObservation != null && effectsObservation.Safe
+                    && effectsObservation.InstanceIds.Contains(instanceId))
                     continue;
                 var origin = AICodedbStrictJson.RequireObject(manifest["originating_action"], label);
                 var actionId = AICodedbStrictJson.GetRequiredString(origin, "action_id", label);
@@ -1009,7 +1061,8 @@ namespace Rice.AI.Codedb.Editor
                     .Replace("-", string.Empty).ToLowerInvariant();
         }
 
-        internal static bool TryAdmit(AICodedbManagerActionIndex index, out string detail)
+        internal static bool TryAdmit(AICodedbManagerActionIndex index, out string detail,
+            AICodedbRetainedEffectsObservation effectsObservation = null)
         {
             detail = string.Empty;
             try
@@ -1030,7 +1083,7 @@ namespace Rice.AI.Codedb.Editor
                 using (new FileStream(lockPath,
                            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
                 {
-                    var existing = Read(index.Context);
+                    var existing = Read(index.Context, effectsObservation);
                     if (existing.State != AICodedbManagerActionIndexState.Empty)
                     {
                         detail = "A project-stable Manager action index already exists; a second owner was blocked.";
@@ -1077,7 +1130,7 @@ namespace Rice.AI.Codedb.Editor
                 {
                     if (File.Exists(temp)) File.Delete(temp);
                 }
-                var read = Read(index.Context);
+                var read = Read(index.Context, effectsObservation);
                 if (read.State != AICodedbManagerActionIndexState.Pending
                     || !string.Equals(read.Index.ActionId, index.ActionId, StringComparison.Ordinal))
                     throw new InvalidOperationException("The published Manager action index failed identity verification.");
@@ -1103,7 +1156,11 @@ namespace Rice.AI.Codedb.Editor
                 AssertPath(lockPath);
                 using (new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
                 {
-                    var read = Read(index.Context);
+                    // Releasing this exact authenticated action is about its
+                    // command disposition, not admission of another effect.
+                    // No resource classification or reusable permit is cached;
+                    // every subsequent admission still re-observes all effects.
+                    var read = ReadCore(index.Context, null, false);
                     if (read.State != AICodedbManagerActionIndexState.Empty || read.Index == null
                         || read.Index.ActionId != index.ActionId || read.HistoricalResult == null
                         || !read.HistoricalResult.FailedCandidateEffectsRetained)
@@ -1134,7 +1191,10 @@ namespace Rice.AI.Codedb.Editor
                 using (new FileStream(lockPath,
                            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
                 {
-                    var read = Read(index.Context);
+                    // Exact terminal/refusal release authenticates ownership and
+                    // history independently of current candidate resources.
+                    // It cannot authorize a subsequent project operation.
+                    var read = ReadCore(index.Context, null, false);
                     if (read.State == AICodedbManagerActionIndexState.Conflict)
                     {
                         detail = "The completed action index could not be authenticated: " + read.Detail;

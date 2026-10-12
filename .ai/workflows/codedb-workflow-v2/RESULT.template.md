@@ -4,7 +4,7 @@
 
 - Status: COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.4
+- Workflow revision: 2.6
 - Actual execution mode/profile/model/reasoning:
 - Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
 - Frozen identity:
@@ -38,6 +38,10 @@
 - Next notification:
 - Next action:
 - Human decision or authorization required:
+
+For an already authorized next review stage, record that continuation rather
+than request another start approval. Source acceptance, review-findings
+disposition and any ungranted risk-boundary action remain human decisions.
 
 Keep this consolidated result within the workflow's default `16 KiB` limit.
 Do not append command transcripts or create one checkpoint per correction.

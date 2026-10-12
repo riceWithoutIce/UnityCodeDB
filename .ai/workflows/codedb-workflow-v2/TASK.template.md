@@ -5,7 +5,7 @@
 - Product:
 - Version:
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.4
+- Workflow revision: 2.6
 - Status: READY
 - Planner:
 - Coder:
@@ -36,6 +36,8 @@
 ## Execution Envelope
 
 - Mode: CONTINUOUS_WITHIN_SCOPE
+- Approved stages and user grant: <stages, attributable approval and exclusions>
+- Delivery authorization: NONE | <explicit actions, targets, prerequisites and stop conditions>
 - Coder actions:
 - Evidence scenarios:
 - L0 tests:
@@ -82,6 +84,12 @@
 
 The task authorizes the complete envelope, not individual commands. Execution
 mode changes transport and continuity only; it never widens scope or authority.
+Record actual user grants; the template itself grants no permission. Already
+authorized stages continue without another start approval. Return review
+findings together for User disposition; an approved bounded FIX includes its
+declared repair and targeted repair review. Source ACCEPT does not grant
+delivery, Unity or real operations. A concrete group of delivery actions needs
+explicit authorization for the named actions and targets.
 `FAST_SUBAGENT` is depth one and single writer: Coder must stop before a
 Verifier child starts, and neither child may delegate recursively. A
 task-local zero-retry or first-failure stop is valid only for an explicitly

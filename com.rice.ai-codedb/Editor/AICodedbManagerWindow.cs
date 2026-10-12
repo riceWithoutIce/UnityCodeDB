@@ -109,6 +109,8 @@ namespace Rice.AI.Codedb.Editor
         private bool _watcherStatusLoaded;
         private bool _watcherRefreshScheduled;
         private bool _hostStatusRefreshInFlight;
+        private AICodedbRetainedEffectsObservation _retainedEffectsObservation;
+        private AICodedbManagerActionSession _attachedActionSession;
         private int _hostStatusRefreshGeneration;
         private int _windowStatusGeneration;
         private CancellationTokenSource _windowStatusCancellation;
@@ -446,8 +448,22 @@ namespace Rice.AI.Codedb.Editor
         {
             var session = AICodedbManagerActionSession.CurrentFor(_executionContext);
             if (session == null)
+            {
+                if (_attachedActionSession != null && !_attachedActionSession.IsRunning
+                    && string.Equals(_attachedActionSession.Context.ProjectRoot,
+                        _executionContext.ProjectRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    // The durable aggregate cleared this Window's historical
+                    // session. Clear only its stale projection; preserve results
+                    // and any foreign/running static owner.
+                    _userActionInFlight = false;
+                    _userActionStatus = new AICodedbUserActionStatus();
+                    _attachedActionSession = null;
+                }
                 return;
+            }
 
+            _attachedActionSession = session;
             _userActionStatus = session.Status;
             _userActionInFlight = session.IsRunning || session.IsRecovering;
             var displayedResult = AICodedbManagerActionSession.SelectDisplayResult(session.Result, session.InitialCommandResult);
@@ -465,7 +481,9 @@ namespace Rice.AI.Codedb.Editor
             var generation = _windowStatusGeneration;
             var restored = await Task.Run(() =>
             {
-                var read = AICodedbManagerActionJournal.Read(context);
+                var observation = AICodedbRetainedEffectsObservation.Parse(
+                    AICodedbHostPayloadMaterializer.ReadStatus(context), context);
+                var read = AICodedbManagerActionJournal.Read(context, observation);
                 AICodedbManagerStatusBoundary boundary = null;
                 try { boundary = AICodedbManagerStatusBoundary.Capture(context); }
                 catch (Exception) { /* Incomplete Package evidence cannot authorize Ready. */ }
@@ -477,11 +495,33 @@ namespace Rice.AI.Codedb.Editor
             var read = restored.Item1;
             _statusBoundary = restored.Item2;
             _historicalActionWarning = read.HistoricalWarning;
+            _retainedEffectsObservation = read.State == AICodedbManagerActionIndexState.Empty
+                ? read.EffectsObservation : null;
             AICodedbManagerActionSession.RestoreDurable(context, read,
                 EditorApplication.timeSinceStartup);
             AttachCurrentActionSession();
             TryApplyCachedLifecycleStatus();
             Repaint();
+        }
+
+        private async Task RefreshRetainedEffectsAsync(AICodedbEditorExecutionContext context,
+            int generation, CancellationToken cancellationToken)
+        {
+            _retainedEffectsObservation = null;
+            var read = await Task.Run(() =>
+            {
+                var observation = AICodedbRetainedEffectsObservation.Parse(
+                    AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken), context);
+                return AICodedbManagerActionJournal.Read(context, observation);
+            }, cancellationToken);
+            if (this == null || cancellationToken.IsCancellationRequested
+                || generation != _windowStatusGeneration
+                || !IsSameStatusContext(_executionContext, context)) return;
+            _historicalActionWarning = read.HistoricalWarning;
+            _retainedEffectsObservation = read.State == AICodedbManagerActionIndexState.Empty
+                ? read.EffectsObservation : null;
+            AICodedbManagerActionSession.RestoreDurable(context, read, EditorApplication.timeSinceStartup);
+            AttachCurrentActionSession();
         }
 
         private string GetHistoricalActionWarning()
@@ -640,6 +680,7 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 ApplyStatusSnapshot(snapshot, true, false);
+                await RefreshRetainedEffectsAsync(context, windowStatusGeneration, cancellationToken);
                 disposition = AICodedbManagerStatusRefreshDisposition.Completed;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -800,6 +841,7 @@ namespace Rice.AI.Codedb.Editor
                 }
 
                 ApplyStatusSnapshot(snapshot, true, false);
+                await RefreshRetainedEffectsAsync(context, windowStatusGeneration, cancellationToken);
                 _transientStatusRefreshPending = false;
                 _transientStatusRefreshAttempts = 0;
                 Repaint();
@@ -1475,17 +1517,9 @@ namespace Rice.AI.Codedb.Editor
                 _statusSnapshot.ProductStatus,
                 _statusSnapshot.HostPayloadStatus,
                 AICodedbManagerActionSession.CurrentFor(_executionContext),
-                _executionContext);
-            var primaryAction = ResolvePrimaryAction(
-                removalStatus,
-                removalActionAvailable,
-                _userActionInFlight,
-                freshInstallRecoveryAvailable)
-                    || ResolveProviderInstallAction(
-                        _statusSnapshot.ProductStatus,
-                        _userActionInFlight)
-                    ? (Action)RunPrimaryAction
-                    : null;
+                _executionContext, _retainedEffectsObservation);
+            var primaryAction = GetPrimaryActionCallback(removalStatus,
+                removalActionAvailable, freshInstallRecoveryAvailable);
             AICodedbSectionView.DrawBanner(
                 GetOverviewStatusTitle(),
                 GetOverviewStatusDescription(),
@@ -1498,6 +1532,21 @@ namespace Rice.AI.Codedb.Editor
                 "Diagnostics",
                 "Optional technical details",
                 DrawOverviewTechnicalDetails);
+        }
+
+        private Action GetPrimaryActionCallback(AICodedbProductStatus removalStatus,
+            bool removalActionAvailable, bool freshInstallRecoveryAvailable)
+        {
+            return ResolvePrimaryAction(
+                removalStatus,
+                removalActionAvailable,
+                _userActionInFlight,
+                freshInstallRecoveryAvailable)
+                    || ResolveProviderInstallAction(
+                        _statusSnapshot.ProductStatus,
+                        _userActionInFlight)
+                    ? (Action)RunPrimaryAction
+                    : null;
         }
 
         private void DrawOverviewTechnicalDetails()
@@ -2158,7 +2207,7 @@ namespace Rice.AI.Codedb.Editor
                             _statusSnapshot.ProductStatus,
                             _statusSnapshot.HostPayloadStatus,
                             AICodedbManagerActionSession.CurrentFor(_executionContext),
-                            _executionContext))
+                            _executionContext, _retainedEffectsObservation))
                         return "Install CodeDB";
                     var removalStatus = GetRemovalPresentationStatus();
                     if (IsRemoveIntegrationMenuAvailable(removalStatus))
@@ -2194,7 +2243,7 @@ namespace Rice.AI.Codedb.Editor
                     _statusSnapshot.ProductStatus,
                     _statusSnapshot.HostPayloadStatus,
                     AICodedbManagerActionSession.CurrentFor(_executionContext),
-                    _executionContext))
+                    _executionContext, _retainedEffectsObservation))
                 RunInstallCodeDBWithConfirmation();
             else if (_statusSnapshot != null && (_statusSnapshot.IsProjectUninstalled || _statusSnapshot.IsProjectNotIntegrated))
                 RunInstallCodeDBWithConfirmation();
@@ -2415,21 +2464,20 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus productStatus,
             AICodedbHostPayloadStatus hostPayloadStatus,
             AICodedbManagerActionSession historicalSession,
-            AICodedbEditorExecutionContext currentContext)
+            AICodedbEditorExecutionContext currentContext,
+            AICodedbRetainedEffectsObservation effectsObservation = null)
         {
-            if (historicalSession == null
-                || historicalSession.IsRecovering
-                || !historicalSession.HasOriginalContext
-                || historicalSession.Result == null
-                || !historicalSession.Result.FailedCandidateEffectsRetained
+            if ((historicalSession != null && (historicalSession.IsRecovering || historicalSession.IsRunning))
+                || effectsObservation == null || !effectsObservation.Safe
+                || !effectsObservation.InstallEligible
                 || productStatus.State != AICodedbProductState.NeedsAttention
                 || productStatus.AttentionReason != AICodedbProductAttentionReason.None
                 || hostPayloadStatus.State != AICodedbHostPayloadState.SetupRequired)
                 return false;
-            return !string.Equals(
-                AICodedbPaths.GetManagerActionPackageKey(currentContext),
-                AICodedbPaths.GetManagerActionPackageKey(historicalSession.Context),
-                StringComparison.Ordinal);
+            return string.Equals(effectsObservation.Context.ProjectRoot, currentContext.ProjectRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                && string.Equals(effectsObservation.Context.PackageRoot, currentContext.PackageRoot,
+                    StringComparison.OrdinalIgnoreCase);
         }
 
         internal static bool ResolveProviderInstallAction(
@@ -2831,7 +2879,11 @@ namespace Rice.AI.Codedb.Editor
                 var durableIndex = session.DurableIndex;
                 var admission = await Task.Run(() =>
                 {
-                    var admitted = AICodedbManagerActionJournal.TryAdmit(durableIndex, out var detail);
+                    // Fresh read-only evidence for this dispatch; no UI-cached
+                    // classification is passed as a reusable write permit.
+                    var effects = AICodedbRetainedEffectsObservation.Parse(
+                        AICodedbHostPayloadMaterializer.ReadStatus(durableIndex.Context), durableIndex.Context);
+                    var admitted = AICodedbManagerActionJournal.TryAdmit(durableIndex, out var detail, effects);
                     return new { Admitted = admitted, Detail = detail };
                 });
                 if (!admission.Admitted)
@@ -3590,6 +3642,26 @@ namespace Rice.AI.Codedb.Editor
                     return;
                 if (read.State == AICodedbManagerActionIndexState.Empty)
                 {
+                    if (read.EffectsObservation != null && read.EffectsObservation.Safe
+                        && _current != null && !_current.IsRunning
+                        && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot,
+                            StringComparison.OrdinalIgnoreCase)
+                        && (_current.IsEvidenceConflict && string.IsNullOrEmpty(_current.ActionId)
+                            || Array.IndexOf(read.HistoricalActionIds, _current.ActionId) >= 0))
+                    {
+                        ClearSupersededPending(currentContext, _current.ActionId);
+                        // No representative command result is manufactured for
+                        // an aggregate. History remains in the journal warning.
+                        _current = null;
+                    }
+                    if (read.EffectsObservation != null && read.EffectsObservation.Safe && _current == null)
+                    {
+                        var pendingId = ReadPendingActionId(currentContext);
+                        if (Array.IndexOf(read.HistoricalActionIds, pendingId) >= 0)
+                            ClearSupersededPending(currentContext, pendingId);
+                    }
+                    if (read.EffectsObservation != null)
+                        return; // observations never manufacture or select a historical command session
                     if (read.HistoricalResult != null && read.Index != null
                         && (_current == null || (!_current.IsRunning
                             && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot,

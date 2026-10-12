@@ -1,8 +1,9 @@
-# Development Workflow v2.4
+# Development Workflow v2.6
 
 Status: active project workflow (`codedb-workflow-v2`).
 
-Revision `2.4` adds a pre-freeze Package path-provenance gate. Revision `2.3`
+Revision `2.6` removes repeated confirmation between already authorized stages
+while preserving human decisions at risk boundaries. Revision `2.4` adds a pre-freeze Package path-provenance gate. Revision `2.3`
 added the Package Release Closure Gate on top of the Package Identity Authority
 Gate and hybrid execution-mode routing. The stable workflow ID and existing
 task directories remain `codedb-workflow-v2`; do not rewrite frozen tasks
@@ -73,6 +74,46 @@ implementation.
 
 ## Dispatch Protocol
 
+### Authorized Stage Continuation And Risk Boundaries
+
+The user approved this clarification on `2026-10-12`: simplify repeated
+confirmation inside an authorized envelope; retain risk-boundary confirmation.
+Model speed or capability does not change scope, evidence requirements,
+delegation authority, side effects, attempt budgets, or acceptance rights.
+
+Record the approved stages and the attributable user grant in the task's
+execution envelope. Once authorized, continue those stages without asking
+again whether to start the next declared stage or execute its contained
+commands. A task card records authority; writing it does not create authority.
+Applicable delegation and session-mode rules still apply.
+
+| Transition | Continuation or human decision |
+| --- | --- |
+| Authorized diagnosis -> implementation -> focused evidence -> consolidated result | Continue inside the frozen objective, allowlist, evidence and budgets. |
+| Stable Coder result -> already authorized read-only Verifier | Planner checks snapshot admission and dispatches review without another stage approval; Coder must have stopped. |
+| Verifier returns findings | Return findings together to User; User decides ACCEPT, FIX, DEFER or STOP. Verifier does not assign repairs or interrupt development. |
+| User approves a bounded FIX | Continue the declared same-scope repair and targeted repair review without another start confirmation; review only original findings and nearest regressions. |
+| Source acceptance or next independent deliverable | Obtain the user's disposition; source acceptance does not authorize delivery or real-environment execution. |
+| Scope, architecture, evidence class, protected state or side-effect authority must expand | Stop the dependent path and obtain explicit authorization before crossing the boundary. |
+
+Known risk boundaries include real Unity or external-environment execution,
+external process control, actual Install/Uninstall/removal/configuration,
+history or candidate cleanup, generation migration, commit, export, project
+reference switching, push and publication. These require explicit bounded
+authorization identifying the actions, targets, prerequisites and stop
+conditions. A user may authorize a concrete group of delivery actions in one
+grant; continue only the named actions after their prerequisites pass. This
+avoids repeated confirmation without merging their evidence or risk boundaries.
+Unlisted actions, a changed target or an expanded side effect need a new grant.
+
+"Continue", passing tests, source ACCEPT and agreement with this workflow do
+not imply unlisted permissions. A brief approval may confirm a concrete pending
+proposal; bind it to that proposal's scope. Existing narrower task-local grants
+remain narrower, and historical tasks are not rewritten or retroactively given
+new authority. Missing prerequisites or exhausted budgets still require the
+existing stop/handoff behavior. Task-scoped parents remain active through
+terminal child completion; durable sessions retain their separate dispatch rules.
+
 When a management session dispatches work to a Code session, the two sessions
 have distinct responsibilities:
 
@@ -104,8 +145,9 @@ Implementation completion, a passing focused test, or writing a `RESULT` does
 not authorize a commit. A Code session may propose a commit by stating the
 exact files or hunks, message, and expected scope in its `RESULT` or
 `CHECKPOINT`, but it must leave the worktree uncommitted until a human
-explicitly initiates that exact commit operation. Push and publish remain
-separate human-gated operations.
+explicitly initiates that exact commit operation, individually or in a bounded
+group of named actions. Push and publish each retain explicit authorization;
+neither is inferred from permission for a local commit.
 
 ## Session Profile Routing
 
@@ -227,9 +269,14 @@ creation/rebinding; those retain their existing explicit gates.
    most one Verifier child. The Verifier receives the frozen task, result,
    identity, and declared review claims as fresh minimal context; it is not
    spawned by Coder and does not inherit authority from Coder's conclusions.
+   When this review stage and delegation are already authorized, do not request
+   another confirmation merely to start it.
 5. The Verifier is read-only for implementation/test paths and owns only the
    declared `VERIFICATION.md`. It does not spawn agents or dispatch repairs.
-6. Planner/User decides `ACCEPT`, `FIX`, `DEFER`, or `STOP`. A same-task FIX may
+6. Planner returns the consolidated findings to User for `ACCEPT`, `FIX`,
+   `DEFER`, or `STOP`. Once User approves a bounded FIX, Planner continues its
+   declared repair and targeted repair review without another stage approval.
+   A same-task FIX may
    reuse the stopped Coder child when the platform supports it and the envelope
    remains unchanged; otherwise Planner requests the next authorized route.
 
@@ -370,7 +417,7 @@ The minimum `TASK.md` shape is:
 - Product:
 - Version:
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.1
+- Workflow revision: 2.6
 - Status: READY | DOING | COMPLETE | PARTIAL | BLOCKED | DEFERRED | ROUTE_REASSESSMENT_REQUIRED
 - Planner:
 - Coder:
@@ -395,6 +442,8 @@ The minimum `TASK.md` shape is:
 
 ## Execution Envelope
 - Mode: CONTINUOUS_WITHIN_SCOPE
+- Approved stages and user grant: <stages, attributable approval and exclusions>
+- Delivery authorization: NONE | <explicit actions, targets, prerequisites and stop conditions>
 - Coder actions:
 - Evidence scenarios:
 - L0 tests:
@@ -480,7 +529,7 @@ an acknowledgement or a plan in place of executing that envelope.
 | Parser, escaping, quoting, path, marker, command-loading, or evidence-expression error before the intended assertion starts | Correct mechanically and continue within the mechanical-correction budget. | No |
 | Fixture or assertion drift caused by the accepted design and inside the test allowlist | Correct the directly coupled assertion family, then continue the declared evidence scenario. | No |
 | Product or contract defect inside the accepted outcome and change allowlist | Diagnose, repair, and run only its adjacent declared evidence within the semantic-repair budget. | No |
-| Stable declared evidence passes | Write one consolidated terminal `RESULT.md`. | Yes |
+| Stable declared evidence passes | Write one consolidated terminal `RESULT.md`; Planner admits the snapshot and continues an already authorized review. | Planner handoff; no repeated stage approval |
 | Objective, architecture, change allowlist, evidence class, side-effect authority, or protected state must expand | Preserve the stable snapshot and request a route decision before crossing the boundary. | Yes |
 | A human-owned environment or external prerequisite is absent, evidence is unavailable/corrupt, or an authorized external attempt is exhausted | Stop the affected path and report the exact prerequisite or evidence gap. | Yes |
 | Structural escalation threshold or active-time budget is reached | Start no new investigation, repair, or test; consolidate the current causal evidence and return `ROUTE_REASSESSMENT_REQUIRED` or the applicable terminal status. | Yes |
@@ -1178,17 +1227,20 @@ separate tasks unless the current task explicitly declares them in scope.
 Unexecuted gates remain `BLOCKED` or `DEFERRED`; focused tests do not close
 them.
 
-Commit, push, and publish are separate human-gated `HANDOFF` actions:
+Commit, export, project reference switching, push and publish retain explicit
+human authorization. A concrete proposal may group named delivery actions;
+approval applies only to that group and never grants an unlisted real operation
+or release action. For each authorized action:
 
 1. Recheck status, ownership, and focused evidence with commands restricted to
    the authorized files; do not produce a full repository diff.
 2. The Code session may present a proposal for the exact operation, including
    commit scope and message when applicable.
-3. A human explicitly initiates and authorizes the exact operation. A session
-   may execute it only as the direct response to that request; otherwise it
-   waits for the human to perform it.
-4. Perform only the authorized operation and verify the resulting commit or
-   remote state.
+3. A human explicitly initiates and authorizes the exact operation or a bounded
+   group containing it. Record that grant before execution; do not repeat the
+   approval question while the action and its prerequisites remain unchanged.
+4. Perform only the authorized action and verify its resulting commit, artifact,
+   reference or remote state before proceeding to the next named action.
 
 ## Version Overlays
 
@@ -1204,7 +1256,6 @@ runtime or migration slice.
 
 Changes to this workflow are themselves a process decision: discuss and freeze
 the change before applying it to an active implementation task.
-
 For changed physical storage layouts, include full consumer-path length and
 publication suffixes in the same contract/evidence map. A writable parent or
 short-path probe does not prove deepest consumer operations work. Test and

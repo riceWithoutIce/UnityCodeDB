@@ -4,7 +4,7 @@
 
 - Verdict: PASS | FAIL | BLOCKED | DEFERRED
 - Workflow: codedb-workflow-v2
-- Workflow revision: 2.4
+- Workflow revision: 2.6
 - Review mode: GUARDED | RELEASE | <explicit request>
 - Actual execution mode/profile/model/reasoning:
 - Delegation authorization used: NOT_APPLICABLE | TASK_SPECIFIC | STANDING_WORKFLOW
@@ -41,3 +41,6 @@
 Verification is read-only and claim-bounded. Do not audit the repository,
 rerun unchanged Coder tests, widen coverage, contact Coder, or turn theoretical
 hardening into a blocker. Report all material in-scope findings once.
+Return findings for User disposition. After User approves a bounded FIX,
+Planner continues the declared repair and targeted repair review without
+another start approval. Do not infer delivery authority from source acceptance.
