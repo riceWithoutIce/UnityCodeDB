@@ -1,7 +1,7 @@
 # S29 retained-disposition refactor — review disposition
 
 Date: 2026-10-12.
-Status: USER_SOURCE_ACCEPTED / DELIVERY_NOT_AUTHORIZED.
+Status: USER_SOURCE_ACCEPTED / REFERENCE_SWITCH_COMPLETE / HUMAN_GATE_PENDING.
 
 ## Original stages (historical snapshot)
 
@@ -116,3 +116,11 @@ by focused human Unity validation. None of those actions is authorized by this
 acceptance record. Actual installed-generation mismatch remains a separate
 deferred route; S29/release remain PARTIAL. Original failed review and all
 result/hash records are preserved.
+
+## Subsequent delivery disposition
+
+User explicitly authorized commit -> exact export -> project reference switch ->
+human Unity validation. Source commit 74c4db0 and its exact ZIP passed closure;
+S29 manifest/lock now select the matching extracted review Package. See
+RETAINED-DISPOSITION-DELIVERY-GRANT.md and RETAINED-DISPOSITION-DELIVERY-RESULT.md.
+The focused human checklist is ready; native Unity and release remain unproved.

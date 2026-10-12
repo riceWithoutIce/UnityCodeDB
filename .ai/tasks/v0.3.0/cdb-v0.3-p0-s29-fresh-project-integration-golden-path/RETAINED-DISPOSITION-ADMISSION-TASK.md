@@ -5,7 +5,7 @@
 - Product: UnityCodeDB
 - Version: v0.3.0 / existing S29
 - Workflow: codedb-workflow-v2, revision 2.4
-- Status: USER_SOURCE_ACCEPTED / DELIVERY_NOT_AUTHORIZED
+- Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_GATE_PENDING
 - Planner: current parent
 - Coder: /root/retained_disposition_coder; task-specific source stage
 - Verifier: /root/retained_disposition_verifier; independent read-only stage
@@ -180,9 +180,11 @@ authorized by this clarification; installed-generation handoff stays deferred.
   ProcessRunner unchanged. Both Coder and Verifier are terminal/stopped.
 - Accepted identity: RETAINED-DISPOSITION-ADMISSION-FIX-SOURCE-SHA256.txt,
   based on b76957a9dbcae9b00eff73775a97c4e8f33ae785. Original evidence preserved.
-- Next notification: User for alignment of the bounded delivery stage.
-- Next action: align local commit, exact export/closure, project reference switch
-  and subsequent focused human Unity validation before execution.
-- Human authorization required: delivery, live gates or expansion. Source
-  acceptance does not grant Unity, commit, export or reference switching.
+- Next notification: User for focused human Unity validation.
+- Next action: use RETAINED-DISPOSITION-HUMAN-CHECKLIST.md on the already switched
+  exact 74c4db0 Package. Do not repeat export or reference switch.
+- Delivery grant: user's explicit commit -> exact export -> reference switch ->
+  human Unity request; recorded in RETAINED-DISPOSITION-DELIVERY-GRANT.md.
+  Local source commit, both package closure gates and reference switch complete.
+  Human controls Unity; parent only performs subsequent bounded read-only checks.
   Actual installed-generation mismatch stays deferred; S29/release PARTIAL.
