@@ -3591,10 +3591,13 @@ namespace Rice.AI.Codedb.Editor
                 if (read.State == AICodedbManagerActionIndexState.Empty)
                 {
                     if (read.HistoricalResult != null && read.Index != null
-                        && (_current == null || (_current.IsRecovering
-                            && string.Equals(_current.ActionId, read.Index.ActionId, StringComparison.Ordinal)
-                            && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot, StringComparison.OrdinalIgnoreCase))))
+                        && (_current == null || (!_current.IsRunning
+                            && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot,
+                                StringComparison.OrdinalIgnoreCase))))
                     {
+                        // A durable retained result is the source of truth after a
+                        // reload. Replace any stale recovering SessionState action
+                        // for this project, even when its action id is different.
                         _current = new AICodedbManagerActionSession(read.Index.Title,
                             read.Index.Context, now, read.Index.ActionId, true);
                         _current.StorageLayout = read.Index.StorageLayout;

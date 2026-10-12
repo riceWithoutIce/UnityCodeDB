@@ -181,16 +181,41 @@ namespace Rice.AI.Codedb.Editor
                 // Display history is independent of this current index. Reading it
                 // never changes the disposition or permits a second owner.
                 if (closure != null && closure.RetainedEffects)
-                    return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
-                        new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext, storageLayout),
+                {
+                    var currentRetainedIndex = new AICodedbManagerActionIndex(
+                        actionId, title, effect, authority, previousContext, storageLayout);
+                    var orphanCandidate = FindUnownedProvisioningCandidate(
+                        context, new HashSet<string>(resolved.Keys, StringComparer.Ordinal) { actionId });
+                    if (!string.IsNullOrEmpty(orphanCandidate))
+                        return new AICodedbManagerActionIndexRead(
+                            AICodedbManagerActionIndexState.Conflict,
+                            currentRetainedIndex,
+                            "Historical candidate ownership is ambiguous: " + orphanCandidate
+                                + " has no matching Manager action journal marker or terminal closure. "
+                                + "New project changes remain blocked until that candidate is explicitly reconciled.",
+                            actionId,
+                            historicalWarning: "Original INSTALL remains failed/unknown; its candidate effects are inert and retained.",
+                            historicalResult: closure.OriginalResult);
+                    return new AICodedbManagerActionIndexRead(
+                        AICodedbManagerActionIndexState.Empty,
+                        currentRetainedIndex,
                         historicalWarning: "Original INSTALL remains failed/unknown; its candidate effects are inert and retained.",
                         historicalResult: closure.OriginalResult);
-                var history = ReadLegacyPending(context, directory, resolved);
+                }
+                var history = ReadLegacyPending(context, directory, resolved,
+                    new[] { actionId });
+                var currentIndex = new AICodedbManagerActionIndex(
+                    actionId, title, effect, authority, previousContext, storageLayout);
+                if (history.State == AICodedbManagerActionIndexState.Conflict)
+                    return new AICodedbManagerActionIndexRead(
+                        AICodedbManagerActionIndexState.Conflict,
+                        currentIndex,
+                        "Retained action history could not be verified: " + history.Detail,
+                        actionId,
+                        historicalWarning: history.HistoricalWarning,
+                        historicalResult: history.HistoricalResult);
                 return new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Pending,
-                    new AICodedbManagerActionIndex(actionId, title, effect, authority, previousContext, storageLayout),
-                    historicalWarning: history.State == AICodedbManagerActionIndexState.Conflict
-                        ? "Retained action history could not be verified: " + history.Detail
-                        : history.HistoricalWarning);
+                    currentIndex, historicalWarning: history.HistoricalWarning);
             }
             catch (Exception exception)
             {
@@ -647,11 +672,17 @@ namespace Rice.AI.Codedb.Editor
 
         private static AICodedbManagerActionIndexRead ReadLegacyPending(
             AICodedbEditorExecutionContext context, string directory,
-            Dictionary<string, ResolvedMarker> resolved)
+            Dictionary<string, ResolvedMarker> resolved,
+            IEnumerable<string> additionalKnownActionIds = null)
         {
             AICodedbManagerActionIndex pending = null;
             var matchedHistorical = new HashSet<string>(StringComparer.Ordinal);
             var retainedUnknown = new List<string>();
+            var knownActionIds = new HashSet<string>(resolved.Keys, StringComparer.Ordinal);
+            if (additionalKnownActionIds != null)
+                foreach (var additionalActionId in additionalKnownActionIds)
+                    if (AICodedbSupervisorProtocol.IsManagerActionId(additionalActionId))
+                        knownActionIds.Add(additionalActionId);
             AICodedbManagerActionIndex failedInstallIndex = null;
             AICodedbCommandResult failedInstallResult = null;
             var failedInstallCount = 0;
@@ -671,6 +702,7 @@ namespace Rice.AI.Codedb.Editor
                 {
                     AssertPath(actionDirectory);
                     var actionId = Path.GetFileName(actionDirectory);
+                    knownActionIds.Add(actionId);
                     if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId)))
                         throw new InvalidOperationException("Conflicting compact and legacy action locations exist.");
                     if (++actionsSeen > 4096 || !AICodedbSupervisorProtocol.IsManagerActionId(actionId))
@@ -847,6 +879,20 @@ namespace Rice.AI.Codedb.Editor
                         null, "A historical unknown-action marker has no matching original receipt.",
                         closure.Key);
             }
+            var orphanCandidate = FindUnownedProvisioningCandidate(context, knownActionIds);
+            if (!string.IsNullOrEmpty(orphanCandidate))
+            {
+                var warning = string.Join("\n", retainedUnknown);
+                return new AICodedbManagerActionIndexRead(
+                    AICodedbManagerActionIndexState.Conflict,
+                    failedInstallIndex,
+                    "Historical candidate ownership is ambiguous: " + orphanCandidate
+                        + " has no matching Manager action journal marker or terminal closure. "
+                        + "New project changes remain blocked until that candidate is explicitly reconciled.",
+                    failedInstallIndex?.ActionId,
+                    historicalWarning: warning,
+                    historicalResult: failedInstallResult);
+            }
             var historicalWarning = string.Join("\n", retainedUnknown);
             return pending == null
                 ? new AICodedbManagerActionIndexRead(AICodedbManagerActionIndexState.Empty,
@@ -857,9 +903,57 @@ namespace Rice.AI.Codedb.Editor
                     pending, isLegacyReceipt: true, historicalWarning: historicalWarning);
         }
 
+        private static string FindUnownedProvisioningCandidate(
+            AICodedbEditorExecutionContext context, IEnumerable<string> knownActionIds)
+        {
+            var instancesRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
+            AssertPath(instancesRoot);
+            if (!Directory.Exists(instancesRoot))
+                return string.Empty;
+            var known = new HashSet<string>(knownActionIds ?? Array.Empty<string>(), StringComparer.Ordinal);
+            var entries = Directory.GetDirectories(instancesRoot);
+            if (entries.Length > 256)
+                throw new InvalidOperationException("The project has too many CodeDB instance candidates.");
+            foreach (var entry in entries)
+            {
+                AssertPath(entry);
+                var instanceId = Path.GetFileName(entry);
+                if (!IsInstancePhysicalKey(instanceId))
+                    throw new InvalidOperationException("A CodeDB instance candidate directory is invalid.");
+                var manifestPath = Path.Combine(entry, "instance.json");
+                AssertPath(manifestPath);
+                if (!File.Exists(manifestPath))
+                    throw new InvalidOperationException("A CodeDB instance candidate has no manifest.");
+                const string label = "CodeDB instance candidate";
+                var manifest = AICodedbStrictJson.ReadObject(manifestPath, 131072, label);
+                var state = AICodedbStrictJson.GetRequiredString(manifest, "state", label);
+                if (!string.Equals(state, "PROVISIONING", StringComparison.Ordinal))
+                    continue;
+                var origin = AICodedbStrictJson.RequireObject(manifest["originating_action"], label);
+                var actionId = AICodedbStrictJson.GetRequiredString(origin, "action_id", label);
+                var action = AICodedbStrictJson.GetRequiredString(origin, "action", label);
+                if (!string.Equals(action, "INSTALL", StringComparison.Ordinal)
+                    || !AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                    return instanceId + " (invalid INSTALL origin)";
+                if (!known.Contains(actionId))
+                    return instanceId + " (originating action " + actionId + ")";
+            }
+            return string.Empty;
+        }
+
         private static bool IsPhysicalKey(string value)
         {
             if (value == null || value.Length != 24) return false;
+            foreach (var character in value)
+                if (!((character >= '0' && character <= '9')
+                      || (character >= 'a' && character <= 'f')))
+                    return false;
+            return true;
+        }
+
+        private static bool IsInstancePhysicalKey(string value)
+        {
+            if (value == null || value.Length != 32) return false;
             foreach (var character in value)
                 if (!((character >= '0' && character <= '9')
                       || (character >= 'a' && character <= 'f')))

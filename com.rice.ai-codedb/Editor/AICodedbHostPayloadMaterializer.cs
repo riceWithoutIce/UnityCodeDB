@@ -320,9 +320,16 @@ namespace Rice.AI.Codedb.Editor
             if (IsMutation(action))
             {
                 // Resolve once, before ProcessRunner hashes admitted arguments.
-                // A pre-admission Supervisor fallback has no server operation.
                 var operationId = Guid.NewGuid().ToString("N");
                 var actionId = AICodedbPaths.CurrentActionId;
+                if ((action == AICodedbHostPayloadAction.Install
+                     || action == AICodedbHostPayloadAction.Reinstall)
+                    && !AICodedbSupervisorProtocol.IsManagerActionId(actionId))
+                {
+                    throw new ArgumentException(
+                        "Install and Reinstall require a valid Manager action id for candidate attribution.",
+                        nameof(action));
+                }
                 arguments.Add("-OriginatingActionId");
                 arguments.Add(string.IsNullOrEmpty(actionId) ? operationId : actionId);
                 arguments.Add("-OriginatingOperationId");

@@ -710,8 +710,11 @@ namespace Rice.AI.Codedb.Editor.Tests
             });
         }
 
-        [Test]
-        public void DirectInstallArguments_BindActualActionBeforeAdmission()
+        [TestCase(AICodedbHostPayloadAction.Install, true)]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, true)]
+        [TestCase(AICodedbHostPayloadAction.Upgrade, false)]
+        public void DirectCandidateArguments_BindActualActionBeforeAdmission(
+            AICodedbHostPayloadAction action, bool confirmedProjectMutation)
         {
             var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
                 Path.Combine(Path.GetTempPath(), "codedb-s29-identity"),
@@ -720,12 +723,54 @@ namespace Rice.AI.Codedb.Editor.Tests
             using (AICodedbPaths.UseActionContext(context, actionId))
             {
                 var arguments = AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
-                    AICodedbHostPayloadAction.Install, true, context.ProjectRoot);
+                    action, confirmedProjectMutation, context.ProjectRoot);
                 Assert.That(arguments[Array.IndexOf(arguments, "-OriginatingActionId") + 1], Is.EqualTo(actionId));
                 var operationId = arguments[Array.IndexOf(arguments, "-OriginatingOperationId") + 1];
                 Assert.That(operationId, Does.Match("^[0-9a-f]{32}$"));
                 Assert.That(operationId, Is.Not.EqualTo(actionId));
                 Assert.That(Array.FindAll(arguments, value => value == "-OriginatingOperationId").Length, Is.EqualTo(1));
+            }
+        }
+
+        [TestCase(AICodedbHostPayloadAction.Install, "")]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, "")]
+        [TestCase(AICodedbHostPayloadAction.Install, "invalid")]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, "invalid")]
+        [TestCase(AICodedbHostPayloadAction.Install, "ABCDEF0123456789ABCDEF0123456789")]
+        [TestCase(AICodedbHostPayloadAction.Reinstall, "ABCDEF0123456789ABCDEF0123456789")]
+        public void CandidateArguments_RequireManagerActionAttribution(
+            AICodedbHostPayloadAction action, string actionId)
+        {
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-s29-missing-action"),
+                Path.Combine(Path.GetTempPath(), "codedb-s29-package"), "s29");
+            using (AICodedbPaths.UseActionContext(context, actionId))
+            {
+                var exception = Assert.Throws<ArgumentException>(() =>
+                    AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
+                        action, true, context.ProjectRoot));
+                Assert.That(exception.Message, Does.Contain("valid Manager action id"));
+            }
+        }
+
+        [Test]
+        public void LifecycleUpgradeArguments_PreserveDirectBootstrapAttribution()
+        {
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(Path.GetTempPath(), "codedb-s29-lifecycle-upgrade"),
+                Path.Combine(Path.GetTempPath(), "codedb-s29-package"), "s29");
+            var managerActionId = Guid.NewGuid().ToString("N");
+            using (AICodedbPaths.UseActionContext(context, managerActionId))
+            using (AICodedbEditorLifecycle.UseLifecycleExecutionContext(context))
+            {
+                Assert.That(AICodedbPaths.CurrentActionId, Is.Empty);
+                var arguments = AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
+                    AICodedbHostPayloadAction.Upgrade, false, context.ProjectRoot);
+                var operationId = arguments[Array.IndexOf(arguments, "-OriginatingOperationId") + 1];
+                Assert.That(operationId, Does.Match("^[0-9a-f]{32}$"));
+                Assert.That(operationId, Is.Not.EqualTo(managerActionId));
+                Assert.That(arguments[Array.IndexOf(arguments, "-OriginatingActionId") + 1],
+                    Is.EqualTo(operationId));
             }
         }
 
@@ -1019,6 +1064,50 @@ namespace Rice.AI.Codedb.Editor.Tests
                     Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty);
                     Assert.That(AICodedbManagerActionSession.TryStart(
                         "Host Payload Sync", context, 2d, out _), Is.False);
+                }
+                finally
+                {
+                    workspace.CaptureCleanup(() =>
+                    {
+                        AICodedbManagerActionSession.ClearCompleted();
+                        SessionState.SetString(key, string.Empty);
+                    });
+                }
+            });
+        }
+
+        [Test]
+        public void ManagerActionSession_DurableRetainedResultReplacesStaleRecoveringSession()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var fixture = new ManagerActionSessionFixture(workspace);
+                var context = fixture.Context;
+                var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+                var staleId = Guid.NewGuid().ToString("N");
+                var retainedId = Guid.NewGuid().ToString("N");
+                SessionState.SetString(key, staleId + "|Install CodeDB|" + context.PackageRoot);
+                try
+                {
+                    var stale = AICodedbManagerActionSession.CurrentFor(context);
+                    Assert.That(stale, Is.Not.Null);
+                    Assert.That(stale.IsRecovering, Is.True);
+                    var index = new AICodedbManagerActionIndex(retainedId, "Install CodeDB",
+                        "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission",
+                        new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                            context.ProjectRoot, context.PackageRoot + "-old", context.ProjectDisplayName));
+                    var result = new AICodedbCommandResult(6, string.Empty, "candidate retained", false,
+                        1, false, false, retainedId, false,
+                        AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained);
+                    var read = new AICodedbManagerActionIndexRead(
+                        AICodedbManagerActionIndexState.Empty, index,
+                        historicalResult: result);
+                    AICodedbManagerActionSession.RestoreDurable(context, read, 2d);
+                    var restored = AICodedbManagerActionSession.CurrentFor(context);
+                    Assert.That(restored, Is.Not.Null);
+                    Assert.That(restored.ActionId, Is.EqualTo(retainedId));
+                    Assert.That(restored.IsRecovering, Is.False);
+                    Assert.That(restored.Result, Is.SameAs(result));
                 }
                 finally
                 {
@@ -1531,6 +1620,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(same.HistoricalResult.FailedCandidateEffectsRetained, Is.True);
             }
             var marker = AICodedbStrictJson.ParseObject(File.ReadAllText(markerPath), "actual emitted marker");
+            AssertRetainedCurrentIndexRejectsUnownedInstance(workspace, context, marker);
             var stateId = AICodedbStrictJson.GetRequiredString(marker, "removal_state_id", "actual emitted marker");
             var intentPath = Path.Combine(context.ProjectRoot,
                 "AIWork/.runtime/codedb/control/removal-intents/" + stateId + ".json");
@@ -1676,6 +1766,58 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbManagerActionSession.ClearCompleted();
             }
             });
+        }
+
+        private static void AssertRetainedCurrentIndexRejectsUnownedInstance(AICodedbTestWorkspace workspace,
+            AICodedbEditorExecutionContext context, Dictionary<string, object> marker)
+        {
+            var actionId = AICodedbStrictJson.GetRequiredString(marker, "action_id", "actual retained marker");
+            var indexPath = AICodedbPaths.GetManagerActionIndexPath(context, actionId);
+            workspace.ValidateCleanupTarget(indexPath);
+            var originalIndex = File.Exists(indexPath) ? File.ReadAllBytes(indexPath) : null;
+            var orphanId = Guid.NewGuid().ToString("N");
+            var orphanRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances", orphanId);
+            workspace.ValidateCleanupTarget(orphanRoot);
+            Assert.That(Directory.Exists(orphanRoot), Is.False);
+            try
+            {
+                // Recreate the index retained by an interrupted boundary while
+                // preserving the actual producer marker, receipts and effects.
+                var index = new Dictionary<string, object>
+                {
+                    ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                    ["state"] = "pending", ["action_id"] = actionId, ["title"] = "Install CodeDB",
+                    ["effect_class"] = "ConfirmedProjectMutation",
+                    ["authorization_source"] = AICodedbManagerActionSession.ClassifyAuthority("Install CodeDB"),
+                    ["project_key"] = AICodedbPaths.GetManagerActionProjectKey(context),
+                    ["package_key"] = AICodedbPaths.GetManagerActionPackageKey(context),
+                    ["project_root"] = context.ProjectRoot, ["package_root"] = context.PackageRoot
+                };
+                if (marker.TryGetValue("storage_layout", out var layout)) index["storage_layout"] = layout;
+                File.WriteAllText(indexPath, AICodedbControlContractMigrationClassifierTests.SerializeObject(index));
+                var retained = AICodedbManagerActionJournal.Read(context);
+                Assert.That(retained.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty), retained.Detail);
+                Assert.That(retained.Index.ActionId, Is.EqualTo(actionId));
+                Assert.That(retained.HistoricalResult.FailedCandidateEffectsRetained, Is.True);
+
+                WriteManagerInstanceFixture(context, orphanId, "PROVISIONING", Guid.NewGuid().ToString("N"));
+                var blocked = AICodedbManagerActionJournal.Read(context);
+                Assert.That(blocked.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(blocked.Detail, Does.Contain("Historical candidate ownership is ambiguous").And.Contain(orphanId));
+                Assert.That(blocked.HistoricalResult.FailedCandidateEffectsRetained, Is.True);
+            }
+            finally
+            {
+                workspace.CaptureCleanup(() =>
+                {
+                    if (Directory.Exists(orphanRoot)) workspace.DeleteOwnedTree(orphanRoot);
+                });
+                workspace.CaptureCleanup(() =>
+                {
+                    if (originalIndex == null) File.Delete(indexPath);
+                    else File.WriteAllBytes(indexPath, originalIndex);
+                });
+            }
         }
 
         private static string RunProductionOptionalFlatProof(string script, AICodedbTestWorkspace workspace)
@@ -1856,6 +1998,160 @@ namespace Rice.AI.Codedb.Editor.Tests
                 Assert.That(AICodedbProcessRunner.RecoverManagerAction(fixture.Context, fixture.ActionId).State,
                     Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
             });
+        }
+
+        [Test]
+        public void ManagerActionJournal_UnownedProvisioningCandidateBlocksHistoryRecovery()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                fixture.Add("Install", fixture.InstallOutput);
+                MoveManagerReceiptFixtureToLegacy(fixture);
+                var orphanId = new string('a', 32);
+                var orphanRoot = Path.Combine(fixture.Context.ProjectRoot,
+                    "AIWork/.runtime/codedb/instances", orphanId);
+                Directory.CreateDirectory(orphanRoot);
+                File.WriteAllText(Path.Combine(orphanRoot, "instance.json"),
+                    AICodedbControlContractMigrationClassifierTests.SerializeObject(
+                        new Dictionary<string, object>
+                        {
+                            ["schema_version"] = 1,
+                            ["managed_by"] = "com.rice.ai-codedb",
+                            ["state"] = "PROVISIONING",
+                            ["originating_action"] = new Dictionary<string, object>
+                            {
+                                ["action"] = "INSTALL",
+                                ["action_id"] = Guid.NewGuid().ToString("N")
+                            }
+                        }));
+                var read = AICodedbManagerActionJournal.Read(fixture.Context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(read.Detail, Does.Contain("Historical candidate ownership is ambiguous"));
+                Assert.That(read.Detail, Does.Contain(orphanId));
+            });
+        }
+
+        [Test]
+        public void ManagerActionJournal_CurrentIndexWithUnownedCandidateStaysConflict()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                var orphanId = new string('b', 32);
+                var orphanRoot = Path.Combine(fixture.Context.ProjectRoot,
+                    "AIWork/.runtime/codedb/instances", orphanId);
+                Directory.CreateDirectory(orphanRoot);
+                File.WriteAllText(Path.Combine(orphanRoot, "instance.json"),
+                    AICodedbControlContractMigrationClassifierTests.SerializeObject(
+                        new Dictionary<string, object>
+                        {
+                            ["schema_version"] = 1,
+                            ["managed_by"] = "com.rice.ai-codedb",
+                            ["state"] = "PROVISIONING",
+                            ["originating_action"] = new Dictionary<string, object>
+                            {
+                                ["action"] = "INSTALL",
+                                ["action_id"] = Guid.NewGuid().ToString("N")
+                            }
+                        }));
+                var read = AICodedbManagerActionJournal.Read(fixture.Context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(read.Detail, Does.Contain("Historical candidate ownership is ambiguous"));
+                Assert.That(read.Detail, Does.Contain(orphanId));
+            });
+        }
+
+        [TestCase("READY", false)]
+        [TestCase("PROVISIONING", false)]
+        [TestCase("READY", true)]
+        [TestCase("PROVISIONING", true)]
+        public void ManagerActionJournal_ValidInstanceIdsPreserveCurrentAndLegacyAdmission(
+            string state, bool legacy)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                fixture.Add("Install", fixture.InstallOutput);
+                if (legacy) MoveManagerReceiptFixtureToLegacy(fixture);
+                WriteManagerInstanceFixture(fixture.Context, new string('c', 32), state, fixture.ActionId);
+
+                var read = AICodedbManagerActionJournal.Read(fixture.Context);
+                Assert.That(read.State, Is.EqualTo(legacy
+                    ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Pending), read.Detail);
+                Assert.That(read.Index, Is.Not.Null);
+                Assert.That(read.Index.ActionId, Is.EqualTo(fixture.ActionId));
+                if (legacy) Assert.That(read.HistoricalResult, Is.Not.Null);
+            });
+        }
+
+        [TestCase(24, 'a')]
+        [TestCase(32, 'A')]
+        [TestCase(32, 'g')]
+        public void ManagerActionJournal_InvalidInstanceDirectoryStillFailsClosed(int length, char character)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var session = new ManagerActionSessionFixture(workspace);
+                using var fixture = new ManagerReceiptFixture(workspace, session.Context, false);
+                WriteManagerInstanceFixture(fixture.Context, new string(character, length), "READY", fixture.ActionId);
+
+                var read = AICodedbManagerActionJournal.Read(fixture.Context);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(read.Detail, Does.Contain("instance candidate directory is invalid"));
+            });
+        }
+
+        private static void MoveManagerReceiptFixtureToLegacy(ManagerReceiptFixture fixture)
+        {
+            var compactRoot = AICodedbPaths.GetManagerActionReceiptRoot(fixture.Context, fixture.ActionId);
+            var legacyRoot = AICodedbPaths.GetManagerActionReceiptRoot(fixture.Context, fixture.ActionId, null);
+            Assert.That(Path.GetFileName(Path.GetDirectoryName(legacyRoot)), Has.Length.EqualTo(24));
+            Directory.CreateDirectory(Path.GetDirectoryName(legacyRoot));
+            Directory.Move(compactRoot, legacyRoot);
+            foreach (var path in Directory.GetFiles(legacyRoot, "*.json", SearchOption.AllDirectories))
+            {
+                var record = AICodedbStrictJson.ReadObject(path, 1048576, "legacy fixture");
+                record.Remove("storage_layout");
+                if (Path.GetFileName(path) == "action.json")
+                {
+                    File.Delete(path);
+                    continue;
+                }
+                var stageId = AICodedbStrictJson.GetRequiredString(record, "stage_id", "legacy fixture");
+                var filename = Path.GetFileName(path);
+                var kind = Path.GetFileNameWithoutExtension(filename.Substring(filename.IndexOf('.') + 1));
+                var destination = AICodedbPaths.GetManagerStageReceiptPath(legacyRoot, stageId,
+                    kind, null);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                File.WriteAllText(destination, AICodedbControlContractMigrationClassifierTests.SerializeObject(record));
+                File.Delete(path);
+            }
+            File.Delete(AICodedbPaths.GetManagerActionIndexPath(fixture.Context, fixture.ActionId));
+        }
+
+        private static string WriteManagerInstanceFixture(AICodedbEditorExecutionContext context,
+            string instanceId, string state, string actionId)
+        {
+            var root = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances", instanceId);
+            Directory.CreateDirectory(root);
+            File.WriteAllText(Path.Combine(root, "instance.json"),
+                AICodedbControlContractMigrationClassifierTests.SerializeObject(new Dictionary<string, object>
+                {
+                    ["schema_version"] = 1,
+                    ["managed_by"] = "com.rice.ai-codedb",
+                    ["instance_id"] = instanceId,
+                    ["instance_relative_path"] = "AIWork/.runtime/codedb/instances/" + instanceId,
+                    ["state"] = state,
+                    ["originating_action"] = new Dictionary<string, object>
+                    {
+                        ["action"] = "INSTALL", ["action_id"] = actionId
+                    }
+                }));
+            return root;
         }
 
         [TestCase(false)]
