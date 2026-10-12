@@ -1108,6 +1108,51 @@ namespace Rice.AI.Codedb.Editor.Tests
                     Assert.That(restored.ActionId, Is.EqualTo(retainedId));
                     Assert.That(restored.IsRecovering, Is.False);
                     Assert.That(restored.Result, Is.SameAs(result));
+                    Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+                    var reread = AICodedbManagerActionSession.CurrentFor(context);
+                    Assert.That(reread, Is.SameAs(restored));
+                    Assert.That(reread.ActionId, Is.EqualTo(retainedId));
+                    Assert.That(reread.IsRecovering, Is.False);
+                }
+                finally
+                {
+                    workspace.CaptureCleanup(() =>
+                    {
+                        AICodedbManagerActionSession.ClearCompleted();
+                        SessionState.SetString(key, string.Empty);
+                    });
+                }
+            });
+        }
+
+        [Test]
+        public void ManagerActionSession_DurableRetainedResultClearsPendingAfterDomainReload()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using var fixture = new ManagerActionSessionFixture(workspace);
+                var context = fixture.Context;
+                var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+                var staleId = Guid.NewGuid().ToString("N");
+                var retainedId = Guid.NewGuid().ToString("N");
+                SessionState.SetString(key, staleId + "|Install CodeDB|" + context.PackageRoot);
+                try
+                {
+                    var index = new AICodedbManagerActionIndex(retainedId, "Install CodeDB",
+                        "ConfirmedProjectMutation", "UserConfirmationAndBackendAdmission",
+                        new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                            context.ProjectRoot, context.PackageRoot + "-old", context.ProjectDisplayName));
+                    var result = new AICodedbCommandResult(6, string.Empty, "candidate retained", false,
+                        1, false, false, retainedId, false,
+                        AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained);
+                    var read = new AICodedbManagerActionIndexRead(
+                        AICodedbManagerActionIndexState.Empty, index,
+                        historicalResult: result);
+                    AICodedbManagerActionSession.RestoreDurable(context, read, 2d);
+                    var restored = AICodedbManagerActionSession.CurrentFor(context);
+                    Assert.That(restored.ActionId, Is.EqualTo(retainedId));
+                    Assert.That(restored.IsRecovering, Is.False);
+                    Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
                 }
                 finally
                 {

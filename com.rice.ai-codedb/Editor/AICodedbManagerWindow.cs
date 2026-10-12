@@ -3595,13 +3595,23 @@ namespace Rice.AI.Codedb.Editor
                             && string.Equals(_current.Context.ProjectRoot, currentContext.ProjectRoot,
                                 StringComparison.OrdinalIgnoreCase))))
                     {
+                        var superseded = _current;
+                        var supersededActionId = superseded != null && superseded.IsRecovering
+                            ? superseded.ActionId
+                            : ReadPendingActionId(currentContext);
                         // A durable retained result is the source of truth after a
                         // reload. Replace any stale recovering SessionState action
                         // for this project, even when its action id is different.
                         _current = new AICodedbManagerActionSession(read.Index.Title,
                             read.Index.Context, now, read.Index.ActionId, true);
                         _current.StorageLayout = read.Index.StorageLayout;
-                        _current.TryCompleteRecovery(read.HistoricalResult, now);
+                        if (_current.TryCompleteRecovery(read.HistoricalResult, now)
+                            && AICodedbSupervisorProtocol.IsManagerActionId(supersededActionId)
+                            && !string.Equals(supersededActionId, _current.ActionId,
+                                StringComparison.Ordinal)
+                            && (superseded == null || string.Equals(superseded.Context.ProjectRoot,
+                                currentContext.ProjectRoot, StringComparison.OrdinalIgnoreCase)))
+                            ClearSupersededPending(currentContext, supersededActionId);
                     }
                     return;
                 }
@@ -3917,6 +3927,25 @@ namespace Rice.AI.Codedb.Editor
                 context.ProjectRoot, parts[2], context.ProjectDisplayName);
             _current = new AICodedbManagerActionSession(
                 parts[1], originalContext, now, parts[0], true);
+        }
+
+        private static void ClearSupersededPending(
+            AICodedbEditorExecutionContext context, string supersededActionId)
+        {
+            if (!AICodedbSupervisorProtocol.IsManagerActionId(supersededActionId))
+                return;
+            var key = PendingKey(context);
+            var pending = SessionState.GetString(key, string.Empty);
+            if (pending.StartsWith(supersededActionId + "|", StringComparison.Ordinal))
+                SessionState.SetString(key, string.Empty);
+        }
+
+        private static string ReadPendingActionId(AICodedbEditorExecutionContext context)
+        {
+            var pending = SessionState.GetString(PendingKey(context), string.Empty);
+            var parts = pending.Split(new[] { '|' }, 3);
+            return parts.Length == 3 && AICodedbSupervisorProtocol.IsManagerActionId(parts[0])
+                ? parts[0] : string.Empty;
         }
 
         private static string PendingKey(AICodedbEditorExecutionContext context)
