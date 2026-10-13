@@ -152,12 +152,11 @@ namespace Rice.AI.Codedb.Editor
             return Run(AICodedbHostPayloadAction.Remove, true);
         }
 
-        internal static Task<AICodedbCommandResult> RunRemoveIntegrationAsync()
+        internal static Task<AICodedbCommandResult> RunRemoveIntegrationAsync(
+            AICodedbEditorExecutionContext context, string removalPreflightHandoff)
         {
-            return RunAsync(
-                AICodedbHostPayloadAction.RemoveIntegration,
-                true,
-                MutationTimeoutMilliseconds);
+            return RunAsync(context, AICodedbHostPayloadAction.RemoveIntegration, true,
+                MutationTimeoutMilliseconds, removalPreflightHandoff);
         }
 
         internal static AICodedbCommandResult ReadRemoveIntegrationPreflight(
@@ -199,15 +198,44 @@ namespace Rice.AI.Codedb.Editor
             if (result == null || !result.Succeeded)
                 return false;
             var matches = 0;
+            var handoffMatches = 0;
             foreach (var line in (result.StandardOutput ?? string.Empty).Split('\n'))
             {
-                if (!line.Trim().StartsWith("[REMOVAL_PREFLIGHT]", StringComparison.Ordinal))
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("[REMOVAL_PREFLIGHT_HANDOFF] ", StringComparison.Ordinal))
+                {
+                    if (string.IsNullOrWhiteSpace(trimmed.Substring("[REMOVAL_PREFLIGHT_HANDOFF] ".Length)))
+                        return false;
+                    handoffMatches++;
                     continue;
-                if (!string.Equals(line.Trim(), "[REMOVAL_PREFLIGHT] AVAILABLE", StringComparison.Ordinal))
+                }
+                if (!trimmed.StartsWith("[REMOVAL_PREFLIGHT]", StringComparison.Ordinal))
+                    continue;
+                if (!string.Equals(trimmed, "[REMOVAL_PREFLIGHT] AVAILABLE", StringComparison.Ordinal))
                     return false;
                 matches++;
             }
-            return matches == 1;
+            return matches == 1 && handoffMatches == 1;
+        }
+
+        internal static string ReadRemovalPreflightHandoff(AICodedbCommandResult result)
+        {
+            if (result == null || !result.Succeeded)
+                return null;
+            string handoff = null;
+            var available = 0;
+            foreach (var raw in (result.StandardOutput ?? string.Empty).Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line == "[REMOVAL_PREFLIGHT] AVAILABLE") available++;
+                const string prefix = "[REMOVAL_PREFLIGHT_HANDOFF] ";
+                if (line.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    if (handoff != null) return null;
+                    handoff = line.Substring(prefix.Length).Trim();
+                }
+            }
+            return available == 1 && !string.IsNullOrWhiteSpace(handoff) ? handoff : null;
         }
 
         internal static AICodedbCommandResult RunUninstall()
@@ -315,6 +343,15 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             string projectRoot)
         {
+            return BuildRuntimeScriptArguments(action, confirmedProjectMutation, projectRoot, null);
+        }
+
+        internal static string[] BuildRuntimeScriptArguments(
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            string projectRoot,
+            string removalPreflightHandoff)
+        {
             var arguments = new List<string>(
                 BuildScriptArguments(action, confirmedProjectMutation, projectRoot));
             if (IsMutation(action))
@@ -334,6 +371,13 @@ namespace Rice.AI.Codedb.Editor
                 arguments.Add(string.IsNullOrEmpty(actionId) ? operationId : actionId);
                 arguments.Add("-OriginatingOperationId");
                 arguments.Add(operationId);
+            }
+            if (action == AICodedbHostPayloadAction.RemoveIntegration)
+            {
+                if (string.IsNullOrWhiteSpace(removalPreflightHandoff))
+                    throw new ArgumentException("RemoveIntegration requires an authenticated preflight handoff.", nameof(removalPreflightHandoff));
+                arguments.Add("-RemovalPreflightHandoff");
+                arguments.Add(removalPreflightHandoff);
             }
             if (RequiresCandidateLeaseHandoff(action)
                 && AICodedbEditorLifecycle.TryGetCurrentEditorLeaseIdentity(
@@ -410,23 +454,30 @@ namespace Rice.AI.Codedb.Editor
             bool confirmedProjectMutation,
             int timeoutMilliseconds)
         {
-            return RunAsync(
-                AICodedbPaths.CaptureExecutionContext(),
-                action,
-                confirmedProjectMutation,
-                timeoutMilliseconds);
+            return RunAsync(AICodedbPaths.CaptureExecutionContext(), action, confirmedProjectMutation, timeoutMilliseconds, null);
         }
 
         private static Task<AICodedbCommandResult> RunAsync(
             AICodedbEditorExecutionContext context,
             AICodedbHostPayloadAction action,
             bool confirmedProjectMutation,
-            int timeoutMilliseconds)
+            int timeoutMilliseconds,
+            string removalPreflightHandoff)
+        {
+            return RunAsyncCore(context, action, confirmedProjectMutation, timeoutMilliseconds, removalPreflightHandoff);
+        }
+
+        private static Task<AICodedbCommandResult> RunAsyncCore(
+            AICodedbEditorExecutionContext context,
+            AICodedbHostPayloadAction action,
+            bool confirmedProjectMutation,
+            int timeoutMilliseconds,
+            string removalPreflightHandoff)
         {
             string[] arguments;
             try
             {
-                arguments = BuildRuntimeScriptArguments(action, confirmedProjectMutation, context.ProjectRoot);
+                arguments = BuildRuntimeScriptArguments(action, confirmedProjectMutation, context.ProjectRoot, removalPreflightHandoff);
             }
             catch (ArgumentException exception)
             {

@@ -1,0 +1,5 @@
+7ee8ab147cd593028f68f0efe384308379a830d469831bd88b1bcaccc926e159  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+fceddf844adc38cbdea89893a551d497ee7197d5b411633c82d51742847acede  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+162d4a4c1c9fa0aaa144d74c12f877a8952e1fc26657a08a41ab32adb1d3ca38  com.rice.ai-codedb/Tests~/test-codedb-package-release-closure.ps1
+3edfb9bf1506dfe9ff8b9eb1df6aa4e3a14917fd0b750ec15e923687d0428eb4  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+9f368e6f675243d8391d1df272423f40afa0e000c6412d23169ffcf662689323  com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1

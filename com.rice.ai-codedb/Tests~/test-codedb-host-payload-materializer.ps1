@@ -52,6 +52,10 @@ param(
 
     [switch]$RetainedDispositionOnly,
 
+    [switch]$GenerationAlignmentOnly,
+
+    [string]$PredecessorPackageRoot,
+
     [string]$CanonicalPayloadRoot,
 
     [string]$RetainedFixtureRoot,
@@ -1065,6 +1069,127 @@ function Invoke-FailedPreparationRecoveryCases {
     Write-PhaseCRecord -Path $v1path -Document $v1
     Assert-PhaseC -Condition ((Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $root -StateId $v1id).Document.schema_version -eq 1) -Label 'emitted-installed-v1-reader-compatible'
     Remove-Item -LiteralPath $v1path
+}
+
+function Invoke-GenerationAlignmentCases {
+    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot)
+    function Check { param([bool]$Condition, [string]$Label); if (-not $Condition) { throw "Alignment assertion: $Label" }; $script:Cases++; Write-Host "[OK] $Label" }
+    function Reject { param([scriptblock]$Body, [string]$Label); $rejected=$false; try { & $Body | Out-Null } catch { $rejected=$true; Write-Host ('[REFUSAL] '+$Label+': '+$_.Exception.Message) }; Check $rejected $Label }
+    function Record { param([string]$Path, $Value); Assert-PathInside -Path $Path -Root $Container -Label 'alignment fixture'; [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent)); [IO.File]::WriteAllText($Path,(ConvertTo-InstanceJsonText -Value $Value),[Text.UTF8Encoding]::new($false)) }
+    function Digest { param([string]$Path); $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/'); $rows=@(Get-ChildItem -LiteralPath $full -File -Recurse -Force | Sort-Object FullName | ForEach-Object { $relative=$_.FullName.Substring($full.Length+1).Replace('\','/'); "$relative|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" }); return Get-TextSha256 -Text ($rows -join "`n") }
+    function Fault { param([string]$Path,[scriptblock]$Change,[scriptblock]$Read,[string]$Label); $bytes=[IO.File]::ReadAllBytes($Path); try { $d=(Read-BoundedJsonDocument -Path $Path -Label 'alignment fault' -MaximumBytes 1048576).Document; & $Change $d; Record $Path $d; Reject $Read $Label } finally { [IO.File]::WriteAllBytes($Path,$bytes) } }
+    function script:Get-MaterializerMachinePrerequisiteStatus { param($Manifest); return [pscustomobject]@{Current=$true;State='CURRENT';ReasonCode='FIXTURE_CURRENT';Detail='Synthetic prerequisite';NextAction='';NodePath='';NodeVersion='fixture';ProviderVersion='fixture';ProviderRoot='';ProviderManifestPath='';ProviderExecutablePath=''} }
+    function script:Get-MaterializerProcessIdentity { param([int]$ProcessId); if ($ProcessId -ne 424242) { throw 'Unexpected process observation in synthetic alignment' }; return $script:Holder }
+    function script:Invoke-BoundedNativeProcessWithFileOutput { throw 'Native execution forbidden in generation alignment' }
+    $script:Cases=0; $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+    $root=Join-Path $Container 'project'; [void][IO.Directory]::CreateDirectory($root)
+    foreach ($marker in @('Assets','Packages','ProjectSettings')) { [void][IO.Directory]::CreateDirectory((Join-Path $root $marker)) }
+    $script:GenerationId=''; $old=Read-PayloadManifest -Root (Join-Path $PredecessorRoot 'Payload~') -ProjectRoot $root
+    $script:PocFixture=$true; $script:Action='Install'
+    Invoke-InstanceConvergence -Manifest $old -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+    $selected=Get-ValidatedCurrentInstance -Manifest $old -ProjectRoot $root
+    $oldState=Get-InstanceActivationContractState -Manifest $old -ProjectRoot $root
+    Check ($oldState.Operation.Phase -ceq 'COMMITTED' -and $oldState.Operation.Action -ceq 'INSTALL') 'original42 committed production activation'
+    $oldGenerationHash=Get-FileSha256 -Path (Join-Path $selected.Generation.GenerationRoot 'generation-manifest.json')
+    $oldInstanceHash=Get-FileSha256 -Path $selected.ManifestPath
+    $namespace=Join-Path $root ($script:InstanceControlRelativePath+'/contracts/v0.3-control/v2/supervisor')
+    $owner=[ordered]@{schema_version=3;evidence_schema_version=1;managed_by=$script:ManagedBy;role='project-local-supervisor';root=$root;project_identity=Get-MaterializerProjectIdentity -ProjectRoot $root;runtime=$namespace;control_contract_id=$old.ControlContract.Id;control_contract_version=2;control_contract_schema_version=1;control_contract_sha256=$old.ControlContract.Sha256;control_namespace=$namespace;owner_identity_version=2;activation_epoch=$selected.ActivationEpoch;pipe_name=Get-RemoveIntegrationExpectedPipeName -ProjectRoot $root -NamespacePath $namespace;generation_id=$old.GenerationId;target_generation_id=$old.GenerationId;selected_generation_id=$old.GenerationId;selected_instance_id=$selected.InstanceId;runtime_contract_sha256=$old.RuntimeContractSha256;supervisor_protocol_version=3;generation_disposition='CURRENT';lifecycle_id='alignment-lifecycle';supervisor_id='alignment-supervisor';owner_epoch='alignment-owner';owner_evidence=[ordered]@{schema_version=1;pid=424242;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64)};supervisor_pid=424242;publication_phase='listening';owner_started_at_utc='2026-09-15T00:00:00.0000000Z'}
+    $state=[ordered]@{}; foreach ($key in $owner.Keys) {$state[$key]=$owner[$key]}; $state.protocol_version=1; $state.auth_token='d'*64; $state.desired_state='enabled';$state.editor_demand='online';$state.readiness_state='core_ready';$state.reason_code='COORDINATOR_OPERATIONAL';$state.detail='synthetic';$state.last_event='provider_ready';$state.last_event_detail=''
+    $statePath=Join-Path $namespace 'supervisor-state.json';$ownerPath=Join-Path $namespace 'supervisor.lock'; Record $statePath $state; Record $ownerPath $owner
+    $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
+    $read={Get-RemoveIntegrationAuthority -Manifest $manifest -ProjectRoot $root}
+    $authority=& $read
+    $handoffPlan=Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+    $handoff=New-RemoveIntegrationPreflightHandoff -Authority $authority -ConfigPlan $handoffPlan -ProjectRoot $root
+    $handoffBody=Assert-RemoveIntegrationPreflightHandoff -Token $handoff -Authority $authority -ConfigPlan $handoffPlan -ProjectRoot $root
+    Check ($handoffBody.schema_version -eq 1) 'CLI preflight handoff producer/consumer roundtrip'
+    $tamperedHandoff = $handoff.Substring(0, $handoff.Length - 1) + $(if ($handoff[$handoff.Length - 1] -ceq '0') { '1' } else { '0' })
+    Reject {Assert-RemoveIntegrationPreflightHandoff -Token $tamperedHandoff -Authority $authority -ConfigPlan $handoffPlan -ProjectRoot $root} 'CLI preflight handoff integrity refusal'
+    Check ($authority.Selection.GenerationId -ceq 'poc.42' -and $authority.ActivationState.Context.RuntimeContractSha256 -ceq $old.RuntimeContractSha256 -and $manifest.GenerationId -ceq 'poc.43') 'preflight historical Package authority with successor43'
+    $null=Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+    Check ($old.RuntimeContractSha256 -cne $manifest.RuntimeContractSha256) 'distinct historical runtime contract'
+    Reject {Get-CurrentProjectRemovalAuthority -Manifest $manifest -ProjectRoot $root} 'ordinary Uninstall remains current-strict'
+    Reject {Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root} 'generic next-change current activation remains strict'
+    $fingerprint=Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root -HistoricalRemoval
+    $transition=@($manifest.BootstrapTransitions|Where-Object SourceGenerationId -ceq 'poc.42')[0]
+    $hash=$transition.SourceRuntimeContractSha256
+    try {
+        foreach($bad in @($null,('0'*64))) {$transition.SourceRuntimeContractSha256=$bad;Reject $read 'absent or wrong historical runtime authority'}
+    } finally {$transition.SourceRuntimeContractSha256=$hash}
+    $transitions=$manifest.BootstrapTransitions
+    try {$manifest.BootstrapTransitions=@($transitions|Where-Object SourceGenerationId -cne 'poc.42');Reject $read 'undeclared predecessor'} finally {$manifest.BootstrapTransitions=$transitions}
+    Fault $ownerPath {param($d)$d.owner_epoch='foreign-owner'} $read 'ambiguous owner fingerprint'
+    Fault $statePath {param($d)$d.root=(Join-Path $Container 'foreign')} $read 'foreign owner project'
+    Fault $statePath {param($d)$d.target_generation_id='poc.43'} $read 'wrong historical target'
+    Fault $statePath {param($d)$d.activation_epoch='0'*32} $read 'wrong owner epoch'
+    Fault $selected.SelectionPath {param($d)$d.activation_epoch='0'*32} $read 'wrong selection epoch'
+    Fault $selected.SelectionPath {param($d)$d.generation_id='poc.43'} $read 'wrong selected generation'
+    Fault $selected.ManifestPath {param($d)$d.generation_manifest_sha256='0'*64} $read 'wrong instance hash'
+    Fault $oldState.Context.Paths.OperationPath {param($d)$d.operation_id='0'*32} $read 'wrong activation operation'
+    Fault $oldState.Context.Paths.ActivationPath {param($d)$d.runtime_contract_sha256='0'*64} $read 'wrong historical activation hash'
+    $paths=@($statePath,$ownerPath,$oldState.Context.Paths.ActivationPath,$oldState.Context.Paths.OperationPath);$backups=@($paths|ForEach-Object {,[IO.File]::ReadAllBytes($_)})
+    try {foreach($path in $paths){$d=(Read-BoundedJsonDocument -Path $path -Label 'correlated fault' -MaximumBytes 1048576).Document;$d.runtime_contract_sha256='0'*64;Record $path $d};Reject $read 'correlated self-declared hash tampering'} finally {for($i=0;$i -lt $paths.Count;$i++){[IO.File]::WriteAllBytes($paths[$i],$backups[$i])}}
+    foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='1'},[pscustomobject]@{Alive=$true;StartTicks=$null})) {$script:Holder=$holder;Reject $read 'live or unverifiable Supervisor holder'}
+    $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+    $configPath=Join-Path $root '.codex/config.toml';$configBytes=[IO.File]::ReadAllBytes($configPath)
+    try {[IO.File]::WriteAllText($configPath,'[mcp_servers.codedb');Reject {Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))} 'invalid managed configuration'} finally {[IO.File]::WriteAllBytes($configPath,$configBytes)}
+    # A valid timestamp-only historical record drift must change the captured
+    # admission fingerprint, even though the authority remains independently valid.
+    $desiredPath=Get-InstanceProjectPath -ProjectRoot $root -RelativePath $script:InstanceDesiredStateRelativePath -Label 'alignment desired state'
+    Fault $desiredPath {param($d)$d.state_id=('0'*32)} {Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root -HistoricalRemoval -ExpectedFingerprint $fingerprint} 'desired state changed after preflight'
+    Reject { Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff '' } 'durable removal direct entry requires handoff'
+    $handoffParts = $handoff.Split('.')
+    $expiredBody = ConvertFrom-StrictJsonText -Text ([Text.UTF8Encoding]::new($false).GetString((ConvertFrom-Base64Url -Text $handoffParts[0]))) -Label 'expired handoff fixture'
+    $expiredBody.expires_at_utc = [DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o')
+    $expiredBytes = [Text.UTF8Encoding]::new($false).GetBytes(($expiredBody | ConvertTo-Json -Compress -Depth 8))
+    $expiredHandoff = (ConvertTo-Base64Url -Bytes $expiredBytes) + '.' + (Get-BytesSha256 -Bytes $expiredBytes)
+    Reject { Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $expiredHandoff } 'durable removal direct entry rejects expired handoff'
+    Fault $statePath {param($d)$d.owner_epoch='durable-entry-drift'} { Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $handoff } 'durable removal direct entry rejects authority drift'
+    $configBefore = [IO.File]::ReadAllBytes($configPath)
+    try {
+        [IO.File]::AppendAllText($configPath, "`n", [Text.UTF8Encoding]::new($false))
+        Reject { Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $handoff } 'durable removal direct entry rejects configuration drift'
+    } finally { [IO.File]::WriteAllBytes($configPath, $configBefore) }
+    $script:Action='RemoveIntegration';$script:RequestedExitCode=0
+    Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $handoff
+    $desired=Get-InstanceDesiredState -ProjectRoot $root
+    $intent=Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $root -StateId $desired.StateId
+    Check ($desired.DesiredState -ceq 'UNINSTALLED' -and $desired.CleanupState -ceq 'PENDING' -and $intent.InstanceId -ceq $selected.InstanceId) 'actual RemoveIntegration emits authenticated retained intent'
+    Check ((Get-FileSha256 -Path $selected.ManifestPath) -ceq $oldInstanceHash -and (Get-FileSha256 -Path (Join-Path $selected.Generation.GenerationRoot 'generation-manifest.json')) -ceq $oldGenerationHash) 'original42 retained immutable bytes'
+    $uninstalledBefore = Digest -Path $root
+    Reject { Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $handoff } 'UNINSTALLED direct entry rejects absent authority before cleanup'
+    Check ($uninstalledBefore -ceq (Digest -Path $root)) 'UNINSTALLED no-authority rejection is read-only'
+    $script:Action='Install';$script:RequestedExitCode=0
+    Invoke-InstanceConvergence -Manifest $manifest -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+    $fresh=Get-ValidatedCurrentInstance -Manifest $manifest -ProjectRoot $root
+    Check ($fresh.InstanceId -cne $selected.InstanceId -and $fresh.Generation.GenerationId -ceq 'poc.43') 'production fresh Install publishes distinct successor instance'
+    Check ((Get-InstanceActivationContractState -Manifest $manifest -ProjectRoot $root).Context.RuntimeContractSha256 -ceq $manifest.RuntimeContractSha256) 'fresh activation uses successor runtime contract'
+    Check ((Get-FileSha256 -Path (Join-Path $selected.Generation.GenerationRoot 'generation-manifest.json')) -ceq $oldGenerationHash) 'fresh publication does not overwrite predecessor generation'
+    Write-Output ('[GENERATION_ALIGNMENT] PASS cases='+$script:Cases+' native_children=0 PocFixture=true external_process_observation=synthetic')
+}
+
+if ($GenerationAlignmentOnly) {
+    if (-not $CanonicalPayloadRoot -or -not $PredecessorPackageRoot -or -not $RetainedFixtureRoot) {throw 'Alignment requires explicit candidate, predecessor and owned fixture roots.'}
+    $packageRoot=Split-Path ([IO.Path]::GetFullPath($CanonicalPayloadRoot)) -Parent
+    $parent=[IO.Path]::GetFullPath($RetainedFixtureRoot)
+    $checkout=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    # The explicit checkout owns fixture persistence; extracted candidate paths
+    # are read-only production inputs, never the default test scratch authority.
+    if ($parent.IndexOf('/.artifacts/tests/s29-generation-alignment',[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\s29-generation-alignment',[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
+    $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
+    [void][IO.Directory]::CreateDirectory($container)
+    $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot)')
+    foreach($path in @((Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-strict-json.ps1'),(Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-instance-manifest-contract.ps1'),(Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'),(Join-Path $packageRoot 'Tools~/codedb-instance-engine.ps1'))) {
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);if($errors.Count){throw 'Alignment production parse failed'}
+        if($null -ne $ast.ParamBlock){foreach($parameter in $ast.ParamBlock.Parameters){$value=if($null -eq $parameter.DefaultValue){'$null'}else{$parameter.DefaultValue.Extent.Text};$parts.Add('$script:'+$parameter.Name.VariablePath.UserPath+' = '+$value)}}
+        $beforeFunctions=$true
+        foreach($statement in $ast.EndBlock.Statements){if($statement -is [Management.Automation.Language.FunctionDefinitionAst]){$beforeFunctions=$false;$parts.Add($statement.Extent.Text)}elseif($beforeFunctions -and (($statement -is [Management.Automation.Language.AssignmentStatementAst] -and $statement.Left.Extent.Text.StartsWith('$script:')) -or $statement -is [Management.Automation.Language.ForEachStatementAst])){$parts.Add($statement.Extent.Text)}}
+    }
+    $parts.Add('function Invoke-GenerationAlignmentCases {'+(Get-Command Invoke-GenerationAlignmentCases).ScriptBlock.ToString()+'}')
+    $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot
+    try {& $module {Invoke-GenerationAlignmentCases -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot}} finally {Remove-Module $module -ErrorAction SilentlyContinue}
+    Write-Output ('[PRESERVED_FIXTURE] '+$container)
+    return
 }
 
 if ($NextChangeAdmissionIntegrationOnly -or $FirstInstallAttributionOnly -or $InstanceManifestContractOnly -or $FailedPreparationRecoveryOnly -or $FailedPreparationInterruptionOnly -or $RetainedCandidateRecoveryOnly -or $RetainedOptionalFlatOnly -or $RetainedDispositionOnly) {

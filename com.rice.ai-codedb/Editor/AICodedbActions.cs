@@ -294,7 +294,16 @@ namespace Rice.AI.Codedb.Editor
                     "The current project or control-contract state no longer admits integration removal. Refresh the Manager before trying again.");
             }
 
-            var result = await AICodedbHostPayloadMaterializer.RunRemoveIntegrationAsync();
+            var preflightResult = await Task.Run(() =>
+                AICodedbHostPayloadMaterializer.ReadRemoveIntegrationPreflight(
+                    context, CancellationToken.None));
+            var handoff = AICodedbHostPayloadMaterializer.ReadRemovalPreflightHandoff(preflightResult);
+            if (string.IsNullOrWhiteSpace(handoff))
+            {
+                return RemoveIntegrationAdmissionRejected(
+                    "The removal preflight handoff was missing or invalid; no removal was started.");
+            }
+            var result = await AICodedbHostPayloadMaterializer.RunRemoveIntegrationAsync(context, handoff);
             if (result != null && result.Succeeded)
                 AICodedbEditorLifecycle.RequestReconcile();
             return result ?? RemoveIntegrationAdmissionRejected(

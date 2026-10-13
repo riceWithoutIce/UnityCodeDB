@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $false)][string]$PackageRoot = (Join-Path $PSScriptRoot ".."),
     [string]$AdmissionProjectRoot = '',
     [switch]$RepairCanonicalMetadata,
-    [string]$SuccessorGenerationId = ''
+    [string]$SuccessorGenerationId = '',
+    [string]$PredecessorPackageRoot = ''
 )
 
 Set-StrictMode -Version Latest
@@ -176,6 +177,26 @@ function New-CanonicalSuccessorGeneration {
     $coordinator = ConvertTo-NativeLaunchProjection -Text ([IO.File]::ReadAllText((Join-Path $priorRoot 'coordinator\codedb-watch-coordinator.mjs')))
     & (Join-Path $Root 'Tools~/build-codedb-daemon-launch.ps1') -PackageRoot $Root -VerifyOnly | Out-Host
     $oldGenerationId = [string]$Payload.generation_id
+    $predecessorPayload = $Payload
+    $predecessorRoot = $priorRoot
+    $predecessorRuntimeHash = Get-Sha256 -Path (Join-Path $payloadRoot 'payload-manifest.json')
+    if (-not [string]::IsNullOrWhiteSpace($PredecessorPackageRoot)) {
+        $predecessorPackage = [IO.Path]::GetFullPath($PredecessorPackageRoot)
+        Assert-Closure ($predecessorPackage -cne $Root) 'Independent predecessor Package must not be the successor projection.'
+        # Validate both inputs with the full existing byte/admission gate before
+        # writing a new generation. Never repair or reserialize predecessor.
+        foreach ($inputRoot in @($Root, $predecessorPackage)) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -PackageRoot $inputRoot -AdmissionProjectRoot $AdmissionProjectRoot | Out-Host
+            Assert-Closure ($LASTEXITCODE -eq 0) 'Independent canonical input admission failed.'
+        }
+        $predecessorPayloadPath = Join-Path $predecessorPackage 'Payload~/payload-manifest.json'
+        $predecessorPayload = Read-JsonObject -Path $predecessorPayloadPath
+        foreach ($field in @('package_version', 'payload_version', 'payload_sequence', 'generation_id', 'bootstrap_protocol')) {
+            Assert-EqualValue $predecessorPayload.$field $Payload.$field "Independent predecessor $field"
+        }
+        $predecessorRoot = Join-Path $predecessorPackage ('Payload~/Generations/' + $oldGenerationId)
+        $predecessorRuntimeHash = Get-Sha256 -Path $predecessorPayloadPath
+    }
     # Read the existing marker compatibility constants from their production authority.
     $tokens = $null; $errors = $null
     $materializer = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Tools~\materialize-codedb-host-payload.ps1'), [ref]$tokens, [ref]$errors)
@@ -190,7 +211,7 @@ function New-CanonicalSuccessorGeneration {
     $leaseVersion = [regex]::Matches($markerWriter[0].Extent.Text, '(?m)^\s*generation_lease_version = ([0-9]+)\s*$')
     Assert-Closure ($markerWriter.Count -eq 1 -and $leaseVersion.Count -eq 1) 'Canonical generation lease version is not one integer constant.'
     $versions.GenerationLeaseVersion = [int]$leaseVersion[0].Groups[1].Value
-    $flat = @($Payload.files | Where-Object { ([string]$_.target).StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) })
+    $flat = @($predecessorPayload.files | Where-Object { ([string]$_.target).StartsWith('AIWork/codedb/', [StringComparison]::Ordinal) })
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($line in @("schema_version=$($versions.MarkerSchemaVersion)", "managed_by=$($Payload.managed_by)", "package_version=$($Payload.package_version)",
         "payload_version=$($Payload.payload_version)", "payload_sequence=$($Payload.payload_sequence)",
@@ -214,6 +235,7 @@ function New-CanonicalSuccessorGeneration {
         source_marker_schema_version = $versions.MarkerSchemaVersion; source_host_use_gate_version = $versions.HostUseGateVersion
         source_generation_lease_version = $versions.GenerationLeaseVersion; source_flat_file_count = $flat.Count
         source_flat_closure_sha256 = $flatHash; source_stable_wrapper_sha256 = [string]$oldWrapper[0].sha256
+        source_runtime_contract_sha256 = $predecessorRuntimeHash
     }
     New-Item -ItemType Directory -Path $nextRoot | Out-Null
     foreach ($file in $sourceFiles) {
@@ -240,8 +262,24 @@ function New-CanonicalSuccessorGeneration {
     foreach ($relative in $paths) { $generationFiles.Add([ordered]@{ path = $relative; sha256 = Get-Sha256 -Path (Join-Path $nextRoot $relative) }) }
     $Generation.files = $generationFiles.ToArray()
     Write-CanonicalJson -Path (Join-Path $nextRoot 'generation-manifest.json') -Value $Generation
+    if ($predecessorRoot -cne $priorRoot) {
+        # Successor has consumed the corrected source; retain the original
+        # immutable predecessor bytes independently under its historical ID.
+        $historicalFiles = @(Get-ChildItem -LiteralPath $predecessorRoot -Recurse -File)
+        foreach ($file in $historicalFiles) {
+            $relative = $file.FullName.Substring($predecessorRoot.Length + 1)
+            $target = Join-Path $priorRoot $relative
+            Copy-Item -LiteralPath $file.FullName -Destination $target
+            Assert-EqualValue (Get-Sha256 -Path $target) (Get-Sha256 -Path $file.FullName) "Preserved predecessor $relative"
+        }
+        Assert-Closure (@(Get-ChildItem -LiteralPath $priorRoot -Recurse -File).Count -eq $historicalFiles.Count) 'Preserved predecessor contains extra files.'
+    }
     $Payload.generation_id = $Identity; $Payload.payload_version = $Identity; $Payload.payload_sequence = $sequence
     $Payload.bootstrap_transitions = @($Payload.bootstrap_transitions) + @($transition)
+    $historicalTargets = @(Get-ChildItem -LiteralPath $priorRoot -Recurse -File | ForEach-Object {
+        'AIWork/.runtime/codedb/host/generations/' + $oldGenerationId + '/' + $_.FullName.Substring($priorRoot.Length + 1).Replace('\', '/')
+    })
+    $Payload.retired_targets = @(@($Payload.retired_targets) + $historicalTargets | Sort-Object -Unique)
     $HostCurrent.generation_id = $Identity; $HostCurrent.payload_version = $Identity; $HostCurrent.payload_sequence = $sequence
     $HostCurrent.generation_relative_path = 'AIWork/.runtime/codedb/host/generations/' + $Identity
     $allFiles = [Collections.Generic.List[object]]::new()

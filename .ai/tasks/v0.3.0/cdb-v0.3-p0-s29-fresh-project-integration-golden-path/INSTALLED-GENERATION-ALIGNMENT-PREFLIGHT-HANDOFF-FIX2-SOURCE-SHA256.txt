@@ -1,0 +1,5 @@
+70ce751c2a0044855f28132611d01dc84ec59c0aec0835833eff524a4a550758  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+111c92202b586de960ffa392710e0f9b2e24dedfdf37f683778a394082b41cf4  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+c229d9778f07154d8dbb74ddf5e431ecf5fe82c29d8e5f7d0e4efea3dab70b3f  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+9afd83bf12e6e2cdde38cc1630686fc9beb020bf745b6322544a4ec5fc2371e0  com.rice.ai-codedb/Editor/AICodedbActions.cs
+a072bf1564b3189b766e6cacb9a23c88d79b27363d37b814c09dfa1a749013b7  com.rice.ai-codedb/Tests/Editor/AICodedbHostPayloadMaterializerPreflightHandoffTests.cs

@@ -3293,7 +3293,8 @@ function Assert-InstanceNextChangeAdmission {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [AllowNull()]$Candidate,
         [AllowNull()]$FailedPreparationAuthority,
-        [AllowNull()][string]$ExpectedFingerprint
+        [AllowNull()][string]$ExpectedFingerprint,
+        [switch]$HistoricalRemoval
     )
 
     $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
@@ -3321,8 +3322,13 @@ function Assert-InstanceNextChangeAdmission {
         $intent = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $desired.StateId
         if ($null -ne $intent) { $bound[[string]$intent.Document.retained_instance_id] = [string]$intent.Document.retained_instance_manifest_sha256 }
     }
-    try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
-    catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+    if ($HistoricalRemoval -and $null -ne $current) {
+        $selection = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 2
+        $contract = Get-RemoveIntegrationActivationState -Manifest $Manifest -AuthorityKind VERSIONED_V2 -OwnerIdentityVersion 2 -ProjectRoot $ProjectRoot -Selection $selection
+    } else {
+        try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+        catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+    }
     if ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING')) {
         $bound[[string]$contract.Operation.Candidate.instance_id] = [string]$contract.Operation.Candidate.instance_manifest_sha256
     }
@@ -3355,6 +3361,7 @@ function Assert-InstanceNextChangeAdmission {
         [string]$desired.CleanupState, [string]$desired.StateId,
         $(if ($null -eq $current) { '' } else { $current.InstanceId + ':' + $current.ManifestSha256 }),
         $(if ($null -eq $lkg) { '' } else { $lkg.InstanceId + ':' + $lkg.ManifestSha256 })
+        $(if (-not $HistoricalRemoval -or $null -eq $contract) { '' } else { $contract.Activation.Sha256 + ':' + $contract.Operation.Sha256 })
     ) -join "`n")
     if (-not [string]::IsNullOrEmpty($ExpectedFingerprint) -and $fingerprint -cne $ExpectedFingerprint) {
         throw 'Next project change refused: desired state or selection changed after preflight.'
@@ -3616,6 +3623,7 @@ function Get-InstanceGenerationPackageIdentity {
             GenerationManifestSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target ($generationTargetPrefix + "generation-manifest.json")
             WorkerSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target ($generationTargetPrefix + $workerRelativePath)
             StableWrapperSha256 = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target "AIWork/codedb/wrapper/codedb-project-wrapper.mjs"
+            RuntimeContractSha256 = [string]$Manifest.RuntimeContractSha256
         }
     }
 
@@ -3669,6 +3677,7 @@ function Get-InstanceGenerationPackageIdentity {
         GenerationManifestSha256 = Get-FileSha256 -Path $packageGenerationManifestPath
         WorkerSha256 = Get-FileSha256 -Path $packageWorkerPath
         StableWrapperSha256 = [string]$matches[0].SourceStableWrapperSha256
+        RuntimeContractSha256 = $(if ($null -eq $matches[0].PSObject.Properties['SourceRuntimeContractSha256']) { $null } else { $matches[0].SourceRuntimeContractSha256 })
     }
 }
 

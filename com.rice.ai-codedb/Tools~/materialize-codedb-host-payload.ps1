@@ -23,6 +23,9 @@ param(
 
     [switch]$ConfirmedProjectMutation,
 
+    [AllowEmptyString()]
+    [string]$RemovalPreflightHandoff = "",
+
     [ValidatePattern('^[0-9a-f]{32}$')]
     [string]$HistoricalActionId,
 
@@ -879,6 +882,67 @@ function Get-BytesSha256 {
     }
 }
 
+function ConvertTo-Base64Url {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    return [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+}
+
+function ConvertFrom-Base64Url {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    if ($Text -notmatch '^[A-Za-z0-9_-]+$') { throw 'Removal preflight handoff encoding is invalid.' }
+    $base64 = $Text.Replace('-','+').Replace('_','/')
+    switch ($base64.Length % 4) { 0 {} 2 { $base64 += '==' } 3 { $base64 += '=' } default { throw 'Removal preflight handoff padding is invalid.' } }
+    try { return [Convert]::FromBase64String($base64) } catch { throw 'Removal preflight handoff is not valid base64.' }
+}
+
+function New-RemoveIntegrationPreflightHandoff {
+    param([Parameter(Mandatory = $true)]$Authority, [Parameter(Mandatory = $true)]$ConfigPlan, [Parameter(Mandatory = $true)][string]$ProjectRoot)
+    $now = [DateTimeOffset]::UtcNow
+    $body = [ordered]@{
+        schema_version = [int64]1
+        project_identity = (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot)
+        instance_id = [string]$Authority.Selection.InstanceId
+        generation_id = [string]$Authority.Selection.GenerationId
+        generation_manifest_sha256 = [string]$Authority.Selection.GenerationManifestSha256
+        activation_epoch = [string]$Authority.Selection.ActivationEpoch
+        runtime_contract_sha256 = [string]$Authority.RuntimeContractSha256
+        owner_fingerprint = [string]$Authority.OwnerFingerprint
+        config_sha256 = Get-BytesSha256 -Bytes ([byte[]]$ConfigPlan.OriginalBytes)
+        created_at_utc = $now.ToString('o')
+        expires_at_utc = $now.AddSeconds(120).ToString('o')
+        nonce = [guid]::NewGuid().ToString('N')
+    }
+    $text = ($body | ConvertTo-Json -Compress -Depth 8)
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($text)
+    return (ConvertTo-Base64Url -Bytes $bytes) + '.' + (Get-BytesSha256 -Bytes $bytes)
+}
+
+function Assert-RemoveIntegrationPreflightHandoff {
+    param([Parameter(Mandatory = $true)][string]$Token, [Parameter(Mandatory = $true)]$Authority, [Parameter(Mandatory = $true)]$ConfigPlan, [Parameter(Mandatory = $true)][string]$ProjectRoot)
+    $parts = $Token.Split('.')
+    if ($parts.Count -ne 2 -or $parts[1] -notmatch '^[0-9a-f]{64}$') { throw 'Removal preflight handoff token is malformed.' }
+    $bytes = ConvertFrom-Base64Url -Text $parts[0]
+    if ((Get-BytesSha256 -Bytes $bytes) -cne $parts[1]) { throw 'Removal preflight handoff token integrity is invalid.' }
+    try {
+        $body = ConvertFrom-StrictJsonText -Text ([Text.UTF8Encoding]::new($false).GetString($bytes)) -Label 'removal preflight handoff'
+    } catch {
+        throw 'Removal preflight handoff payload is invalid.'
+    }
+    $now = [DateTimeOffset]::UtcNow; [DateTimeOffset]$expires = [DateTimeOffset]::MinValue
+    if ((Get-RequiredJsonInt32 -Object $body -Name 'schema_version' -Label 'removal preflight handoff') -ne 1 -or
+        -not [DateTimeOffset]::TryParse((Get-RequiredJsonString -Object $body -Name 'expires_at_utc' -Label 'removal preflight handoff'), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$expires) -or $expires -le $now -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'project_identity' -Label 'removal preflight handoff'), (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'instance_id' -Label 'removal preflight handoff'), [string]$Authority.Selection.InstanceId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'generation_id' -Label 'removal preflight handoff'), [string]$Authority.Selection.GenerationId, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'generation_manifest_sha256' -Label 'removal preflight handoff'), [string]$Authority.Selection.GenerationManifestSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'activation_epoch' -Label 'removal preflight handoff'), [string]$Authority.Selection.ActivationEpoch, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'runtime_contract_sha256' -Label 'removal preflight handoff'), [string]$Authority.RuntimeContractSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'owner_fingerprint' -Label 'removal preflight handoff'), [string]$Authority.OwnerFingerprint, [StringComparison]::Ordinal) -or
+        -not [string]::Equals((Get-RequiredJsonString -Object $body -Name 'config_sha256' -Label 'removal preflight handoff'), (Get-BytesSha256 -Bytes ([byte[]]$ConfigPlan.OriginalBytes)), [StringComparison]::OrdinalIgnoreCase) -or
+        (Get-RequiredJsonString -Object $body -Name 'nonce' -Label 'removal preflight handoff') -notmatch '^[0-9a-f]{32}$') { throw 'Removal preflight handoff does not match current historical authority.' }
+    return $body
+}
+
 function Get-PayloadContentIdentitySha256 {
     param([Parameter(Mandatory = $true)]$Manifest)
 
@@ -1249,6 +1313,13 @@ function Read-PayloadManifest {
         $sourceFlatFileCount = Get-RequiredJsonInt32 -Object $entry -Name "source_flat_file_count" -Label "payload bootstrap transition"
         $sourceFlatClosureSha256 = (Get-RequiredJsonString -Object $entry -Name "source_flat_closure_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
         $sourceStableWrapperSha256 = (Get-RequiredJsonString -Object $entry -Name "source_stable_wrapper_sha256" -Label "payload bootstrap transition").ToLowerInvariant()
+        $sourceRuntimeContractSha256 = $null
+        if ($null -ne $entry.PSObject.Properties['source_runtime_contract_sha256']) {
+            $sourceRuntimeContractSha256 = Get-RequiredJsonString -Object $entry -Name 'source_runtime_contract_sha256' -Label 'payload bootstrap transition'
+            if ($sourceRuntimeContractSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                Throw-MaterializerError -Message 'Payload predecessor runtime contract hash is invalid.' -ExitCode 2
+            }
+        }
         $transitionKey = "$sourcePackageVersion|$sourcePayloadVersion|$sourcePayloadSequence|$sourceGenerationId|$sourceBootstrapProtocol"
         if ($sourceTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$' -or
             [string]::IsNullOrWhiteSpace($sourcePackageVersion) -or
@@ -1279,6 +1350,7 @@ function Read-PayloadManifest {
             SourceFlatFileCount = $sourceFlatFileCount
             SourceFlatClosureSha256 = $sourceFlatClosureSha256
             SourceStableWrapperSha256 = $sourceStableWrapperSha256
+            SourceRuntimeContractSha256 = $sourceRuntimeContractSha256
         })
     }
     $retiredTargetMap = @{}
@@ -10474,12 +10546,13 @@ function Assert-RemoveIntegrationOwnerRecord {
         }
     }
     if ($Kind -eq "VERSIONED_V2") {
+        $historicalContext = Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
         $activationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $Label
         if ((Get-RequiredJsonInt32 -Object $Document -Name "owner_identity_version" -Label $Label) -ne 2 -or
             $activationEpoch -cnotmatch '^[0-9a-f]{32}$' -or
             -not [string]::Equals($activationEpoch, $Selection.ActivationEpoch, [StringComparison]::Ordinal) -or
-            -not [string]::Equals($targetGenerationId, $Manifest.TargetGenerationId, [StringComparison]::Ordinal) -or
-            -not [string]::Equals($runtimeContractSha256, $Manifest.RuntimeContractSha256, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($targetGenerationId, $historicalContext.TargetGenerationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($runtimeContractSha256, $historicalContext.RuntimeContractSha256, [StringComparison]::Ordinal) -or
             (Get-RequiredJsonInt32 -Object $Document -Name "supervisor_protocol_version" -Label $Label) -ne 3) {
             throw "$Label does not match the Owner Identity v2 Package contract."
         }
@@ -10729,6 +10802,7 @@ function Get-RemoveIntegrationAuthority {
     }
 
     $activationState = Get-RemoveIntegrationActivationState `
+        -Manifest $Manifest `
         -AuthorityKind $authority.Kind `
         -OwnerIdentityVersion $authority.OwnerIdentityVersion `
         -ProjectRoot $ProjectRoot `
@@ -10751,8 +10825,29 @@ function Get-RemoveIntegrationAuthority {
     }
 }
 
+function Get-RemoveIntegrationRuntimeContext {
+    param([Parameter(Mandatory = $true)]$Manifest, [Parameter(Mandatory = $true)]$Selection)
+    # Selection has already authenticated the project and complete installed
+    # closure. Resolve runtime authority from the same exact Package tuple.
+    $identity = Get-InstanceGenerationPackageIdentity -Manifest $Manifest -InstanceManifest $Selection.Instance.Manifest
+    $runtimeHash = [string]$identity.RuntimeContractSha256
+    if ($runtimeHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Historical v2 removal requires a Package-declared predecessor runtime contract hash.'
+    }
+    if ($identity.GenerationManifestSha256 -cne $Selection.GenerationManifestSha256) {
+        throw 'Historical runtime authority does not match selected generation closure.'
+    }
+    return [pscustomobject]@{
+        ControlContract = $Manifest.ControlContract
+        RuntimeContractSha256 = $runtimeHash
+        TargetGenerationId = $identity.GenerationId
+        TargetGenerationManifestSha256 = $identity.GenerationManifestSha256
+    }
+}
+
 function Get-RemoveIntegrationActivationState {
     param(
+        [AllowNull()]$Manifest,
         [Parameter(Mandatory = $true)][ValidateSet("VERSIONED_V1", "VERSIONED_V2", "LEGACY_FIXED")][string]$AuthorityKind,
         [Parameter(Mandatory = $true)][ValidateSet(1, 2)][int]$OwnerIdentityVersion,
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -10787,6 +10882,10 @@ function Get-RemoveIntegrationActivationState {
         TargetGenerationId = $Selection.GenerationId
         TargetGenerationManifestSha256 = $Selection.GenerationManifestSha256
     }
+    if ($OwnerIdentityVersion -eq 2) {
+        if ($null -eq $Manifest) { throw 'Historical v2 activation requires Package runtime authority.' }
+        $trustedManifest = Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
+    }
     $state = Get-InstanceActivationContractState -Manifest $trustedManifest -ProjectRoot $ProjectRoot -AllowLegacyV1CommittedOperation:$AllowLegacyV1CommittedOperation
     if ($null -eq $state) {
         if ($OwnerIdentityVersion -eq 2) {
@@ -10796,6 +10895,11 @@ function Get-RemoveIntegrationActivationState {
     }
     if ($state.Operation.Phase -cne "COMMITTED" -or $state.Activation.Phase -cne "COMMITTED") {
         throw "Remove CodeDB Integration requires committed activation evidence."
+    }
+    if ($OwnerIdentityVersion -eq 2 -and
+        ($state.Activation.Attempt.ActivationEpoch -cne $Selection.ActivationEpoch -or
+         $state.Operation.Attempt.ActivationEpoch -cne $Selection.ActivationEpoch)) {
+        throw 'Committed historical activation epoch does not match selection.'
     }
     $selectionEvidence = New-InstanceActivationEvidence `
         -InstanceId $Selection.InstanceId `
@@ -11417,8 +11521,22 @@ function Invoke-ReconcileHistoricalUnknown {
 function Invoke-RemoveIntegration {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)][string]$ProjectRoot
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowEmptyString()][string]$PreflightHandoff = ''
     )
+
+    # Durable callers must carry the same authenticated handoff that admitted
+    # the action. Resolve and validate it before any failed-candidate recovery,
+    # lock recovery, or empty-directory cleanup can mutate the project.
+    $entryAuthority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+    if ($null -eq $entryAuthority) {
+        throw 'RemoveIntegration preflight handoff cannot be validated because no authenticated removable authority is present; no cleanup or recovery was started.'
+    }
+    if ([string]::IsNullOrWhiteSpace($PreflightHandoff)) {
+        throw 'RemoveIntegration requires the authenticated removal preflight handoff.'
+    }
+    $entryConfigPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+    $null = Assert-RemoveIntegrationPreflightHandoff -Token $PreflightHandoff -Authority $entryAuthority -ConfigPlan $entryConfigPlan -ProjectRoot $ProjectRoot
 
     $selectionPath = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceCurrentRelativePath -Label 'removal selection'
     if (-not (Test-Path -LiteralPath $selectionPath) -and (Get-InstanceDesiredState -ProjectRoot $ProjectRoot).DesiredState -ceq 'INSTALLED') {
@@ -11433,7 +11551,13 @@ function Invoke-RemoveIntegration {
     Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
-        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $preMutationAuthority = Get-RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+        if ($null -eq $preMutationAuthority) {
+            throw 'RemoveIntegration preflight authority disappeared before mutation; no cleanup or recovery was started.'
+        }
+        $preMutationConfigPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+        $null = Assert-RemoveIntegrationPreflightHandoff -Token $PreflightHandoff -Authority $preMutationAuthority -ConfigPlan $preMutationConfigPlan -ProjectRoot $ProjectRoot
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval
         $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($desiredBefore.Present -and -not $desiredBefore.Legacy -and
@@ -11452,7 +11576,7 @@ function Invoke-RemoveIntegration {
             return
         }
 
-        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval
         $operationId = [guid]::NewGuid().ToString("N")
         $operationRoot = Get-InstanceProjectPath `
             -ProjectRoot $ProjectRoot `
@@ -11497,7 +11621,7 @@ function Invoke-RemoveIntegration {
 
         $expectedFingerprint = [string]$authority.OwnerFingerprint
         $verifyBeforeMutation = {
-            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint
+            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint -HistoricalRemoval
             $currentAuthority = Get-RemoveIntegrationAuthority `
                 -Manifest $Manifest `
                 -ProjectRoot $ProjectRoot `
@@ -11988,7 +12112,7 @@ try {
                 exit 0
             }
             "RemoveIntegration" {
-                Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
+                Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath -PreflightHandoff $RemovalPreflightHandoff
                 Write-MaterializerCommandResult -ExitCode 0
                 exit 0
             }
@@ -12146,7 +12270,11 @@ try {
             Invoke-Remove -Manifest $payload -ProjectRoot $projectRootPath -TargetRoot $targetRoot -MarkerPath $markerPath
         }
         "RemoveIntegration" {
-            Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath
+            $authority = Get-RemoveIntegrationAuthority -Manifest $payload -ProjectRoot $projectRootPath
+            $configPlan = Get-RepairMcpConfigPlan -ProjectRoot $projectRootPath -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+            if ([string]::IsNullOrWhiteSpace($RemovalPreflightHandoff)) { throw 'RemoveIntegration requires the authenticated removal preflight handoff.' }
+            $null = Assert-RemoveIntegrationPreflightHandoff -Token $RemovalPreflightHandoff -Authority $authority -ConfigPlan $configPlan -ProjectRoot $projectRootPath
+            Invoke-RemoveIntegration -Manifest $payload -ProjectRoot $projectRootPath -PreflightHandoff $RemovalPreflightHandoff
         }
         "ReconcileHistoricalUnknown" {
             Invoke-ReconcileHistoricalUnknown -Manifest $payload -ProjectRoot $projectRootPath
@@ -12159,6 +12287,7 @@ try {
                 }
                 $null = Get-RepairMcpConfigPlan -ProjectRoot $projectRootPath -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString("N"))
                 Write-Host "[REMOVAL_PREFLIGHT] AVAILABLE"
+                Write-Host ("[REMOVAL_PREFLIGHT_HANDOFF] " + (New-RemoveIntegrationPreflightHandoff -Authority $authority -ConfigPlan (Get-RepairMcpConfigPlan -ProjectRoot $projectRootPath -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N')) ) -ProjectRoot $projectRootPath))
             } catch {
                 Write-Host "[REMOVAL_PREFLIGHT] BLOCKED"
                 Throw-MaterializerError -Message "Removal preflight requires review. $($_.Exception.Message)" -ExitCode 4
