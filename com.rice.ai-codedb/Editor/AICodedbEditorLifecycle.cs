@@ -975,6 +975,35 @@ namespace Rice.AI.Codedb.Editor
                 context.ProjectRoot,
                 context.PackageRoot);
             AICodedbLifecycleEvidence.RecordCurrentInstanceState(currentInstance.State);
+            // Historical selections must be handled even with an existing
+            // lease, before lease admission or the no-reconcile fast path.
+            AICodedbProductStatus historicalStatus;
+            AICodedbCommandResult historicalPrerequisiteResult;
+            if (TryRouteHistoricalRemoval(
+                    integrationStatus, migrationStatus, currentInstance,
+                    () => RememberHostStatusResult(
+                        AICodedbHostPayloadMaterializer.ReadStatus(context, cancellationToken)),
+                    status => WithRemovalPreflight(
+                        context, status, currentInstance, canContinue, cancellationToken),
+                    () =>
+                    {
+                        Interlocked.Exchange(ref _automaticSupervisorStartAllowed, 0);
+                        Interlocked.Exchange(ref _leasePrerequisiteCurrent, 0);
+                        Interlocked.Exchange(ref _currentInstanceAvailabilityRecoveryAttempts, 0);
+                        DeleteEditorLease();
+                    },
+                    canContinue, cancellationToken,
+                    out historicalStatus, out historicalPrerequisiteResult))
+            {
+                if (cancellationToken.IsCancellationRequested || !canContinue())
+                    return null;
+                AICodedbLifecycleEvidence.RecordCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceConvergencePlan.Blocked);
+                AICodedbLifecycleEvidence.RecordPostAdmissionDisposition(
+                    AICodedbPostAdmissionDisposition.ConvergenceBlocked);
+                RememberLifecycleProductStatus(historicalStatus, historicalPrerequisiteResult);
+                return LifecycleReconcileResult.WithState(historicalStatus.State);
+            }
             var retainedInstanceRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
             if (!integrationStatus.IsUninstalled && ShouldBlockUnselectedInstanceConvergence(
                     currentInstance.State, Directory.Exists(retainedInstanceRoot) || File.Exists(retainedInstanceRoot)))
@@ -1500,6 +1529,61 @@ namespace Rice.AI.Codedb.Editor
                 workerResult.Warning, productStatus.Command,
                 productStatus.AttentionReason, productStatus.DiagnosticDetail), hostResult);
             return workerResult;
+        }
+
+        internal static bool TryRouteHistoricalRemoval(
+            AICodedbProjectIntegrationStatus integration,
+            AICodedbControlContractMigrationStatus migration,
+            AICodedbCurrentInstanceStatus selected,
+            Func<AICodedbCommandResult> readPrerequisite,
+            Func<AICodedbProductStatus, AICodedbProductStatus> removalPreflight,
+            Action blockOperationalAdmission,
+            Func<bool> canContinue,
+            CancellationToken cancellationToken,
+            out AICodedbProductStatus status,
+            out AICodedbCommandResult prerequisiteResult)
+        {
+            status = default(AICodedbProductStatus);
+            prerequisiteResult = null;
+            if (!selected.IsTrustedPrevious
+                || integration.State != AICodedbProjectIntegrationState.Installed
+                || !migration.IsUsableForAutomaticStart)
+                return false;
+
+            // This route never grants bootstrap eligibility or a lease.
+            // Delegates are the existing worker boundaries, not new permits.
+            blockOperationalAdmission();
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return true;
+            prerequisiteResult = readPrerequisite();
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return true;
+            var observed = AICodedbProductStatusBuilder.Build(integration, prerequisiteResult);
+            AICodedbProductLayerState prerequisite;
+            var trustworthy = TryReadTrustworthyPrerequisiteEvidence(
+                prerequisiteResult, observed, out prerequisite);
+            if (!trustworthy || prerequisite != AICodedbProductLayerState.Current)
+            {
+                status = trustworthy && prerequisite == AICodedbProductLayerState.Missing
+                    ? observed
+                    : new AICodedbProductStatus(
+                        AICodedbProductState.NeedsAttention,
+                        AICodedbProductLayerState.Blocked, AICodedbProductLayerState.Blocked,
+                        AICodedbProductLayerState.Blocked, AICodedbProductLayerState.Blocked,
+                        "CodeDB could not verify prerequisites for historical instance removal.",
+                        observed.Command, AICodedbProductAttentionReason.None, selected.Detail);
+                return true;
+            }
+
+            status = new AICodedbProductStatus(
+                AICodedbProductState.NeedsAttention, prerequisite,
+                AICodedbProductLayerState.Blocked, AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Unavailable,
+                "CodeDB previous-v2 identity is retained for diagnostics only. Remove CodeDB Integration, then reinstall the current Package.",
+                observed.Command, AICodedbProductAttentionReason.InstanceIdentityReinstallRequired,
+                selected.Detail);
+            status = removalPreflight(status);
+            return true;
         }
 
         internal static AICodedbProductStatus ObserveProductAfterRetirement(
@@ -2152,7 +2236,7 @@ namespace Rice.AI.Codedb.Editor
             if (!currentInstance.Present)
                 return true;
             if (currentInstance.IsTrustedPrevious)
-                return true;
+                return false;
             if (!currentInstance.IsCurrent)
                 return false;
             return ShouldRunInstalledInstanceConvergence(
@@ -2213,8 +2297,7 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus productStatus,
             AICodedbProjectCleanupState cleanupState)
         {
-            if (currentInstanceState == AICodedbCurrentInstanceState.Missing
-                || currentInstanceState == AICodedbCurrentInstanceState.TrustedPrevious)
+            if (currentInstanceState == AICodedbCurrentInstanceState.Missing)
                 return AICodedbCurrentInstanceConvergencePlan.Deploy;
             if (currentInstanceState != AICodedbCurrentInstanceState.Current)
                 return AICodedbCurrentInstanceConvergencePlan.Blocked;

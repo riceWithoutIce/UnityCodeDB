@@ -1835,27 +1835,36 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void RetainedProjectRootIdentity_AcceptsOnlySameFullyQualifiedPlatformRoot()
         {
-            if (Path.DirectorySeparatorChar != '\\')
+            AICodedbTestWorkspace.Run(workspace =>
             {
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "/project/"), Is.True);
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "/PROJECT"), Is.False);
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot("/project", "project"), Is.False);
-                return;
-            }
-            const string root = "G:/RiceProject/Retained";
-            foreach (var equivalent in new[] { "G:\\RiceProject\\Retained", "g:/riceproject/retained/",
-                "G:\\RiceProject/Retained\\" })
-            {
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, equivalent), Is.True, equivalent);
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(equivalent, root), Is.True, equivalent);
-            }
-            foreach (var refused in new[] { "G:/RiceProject/Different", "RiceProject/Retained",
-                "G:RiceProject/Retained", "/RiceProject/Retained", "\\RiceProject\\Retained",
-                "G::/RiceProject/Retained", "G:/RiceProject/Retained?", "\\\\server", "" })
-            {
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, refused), Is.False, refused);
-                Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(refused, root), Is.False, refused);
-            }
+                var root = Path.Combine(workspace.ProjectRoot, "Retained").Replace('\\', '/');
+                if (Path.DirectorySeparatorChar != '\\')
+                {
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, root + "/"), Is.True);
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, root.ToUpperInvariant()), Is.False);
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, Path.GetFileName(root)), Is.False);
+                    return;
+                }
+                foreach (var equivalent in new[] { root, root.Replace('/', '\\'),
+                    root.ToLowerInvariant() + "/", root.Replace('/', '\\') + "/" })
+                {
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, equivalent), Is.True, equivalent);
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(equivalent, root), Is.True, equivalent);
+                }
+                var refusedRoots = new List<string> { root + "-different", Path.GetFileName(root),
+                    root.Insert(1, ":"), root + "?", "\\\\" + Path.GetFileName(root), "" };
+                if (root.Length > 2 && root[1] == ':')
+                {
+                    refusedRoots.Add(root.Remove(2, 1));
+                    refusedRoots.Add(root.Substring(2));
+                    refusedRoots.Add(root.Substring(2).Replace('/', '\\'));
+                }
+                foreach (var refused in refusedRoots)
+                {
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(root, refused), Is.False, refused);
+                    Assert.That(AICodedbPaths.AreSameAbsoluteProjectRoot(refused, root), Is.False, refused);
+                }
+            });
         }
 
         [Test]

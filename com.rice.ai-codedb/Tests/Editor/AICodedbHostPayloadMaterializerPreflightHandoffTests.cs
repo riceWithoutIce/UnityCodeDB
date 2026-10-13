@@ -36,11 +36,14 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void RemovalIntegrationArguments_RequireHandoff()
         {
-            Assert.Throws<System.ArgumentException>(() =>
-                AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
-                    AICodedbHostPayloadAction.RemoveIntegration,
-                    true,
-                    "G:/fixture/project"));
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                Assert.Throws<System.ArgumentException>(() =>
+                    AICodedbHostPayloadMaterializer.BuildRuntimeScriptArguments(
+                        AICodedbHostPayloadAction.RemoveIntegration,
+                        true,
+                        workspace.ProjectRoot));
+            });
         }
     }
 }

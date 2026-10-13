@@ -54,6 +54,8 @@ param(
 
     [switch]$GenerationAlignmentOnly,
 
+    [switch]$HistoricalProbeOnly,
+
     [string]$PredecessorPackageRoot,
 
     [string]$CanonicalPayloadRoot,
@@ -67,6 +69,37 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($HistoricalProbeOnly) {
+    if (-not $CanonicalPayloadRoot -or -not $RetainedFixtureRoot) { throw 'Historical Probe requires explicit immutable Payload and owned output roots.' }
+    $root = [IO.Path]::GetFullPath($RetainedFixtureRoot)
+    if ($root.IndexOf('\.artifacts\tests\s29-historical-handoff-capability\', [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+        $root.IndexOf('/.artifacts/tests/s29-historical-handoff-capability/', [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw 'Historical Probe output escapes its declared test family.' }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'The test owner must allocate its output root first.' }
+    $package = Split-Path ([IO.Path]::GetFullPath($CanonicalPayloadRoot)) -Parent
+    $engine = Join-Path $package 'Tools~/codedb-instance-engine.ps1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($engine, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw 'Historical Probe production parse failed.' }
+    $producer = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-InstanceProductStatus' }, $true))
+    if ($producer.Count -ne 1) { throw 'Historical Probe producer cardinality is invalid.' }
+    $module = New-Module -ScriptBlock ([scriptblock]::Create($producer[0].Extent.Text))
+    try {
+        $output = @('[PRODUCT_LAYER PREREQUISITE] CURRENT') + @(& $module {
+            # Only external prerequisite/selection boundaries are synthetic;
+            # the actual immutable-overlay producer body and output are unchanged.
+            function Get-InstanceDesiredState { param($ProjectRoot); [pscustomobject]@{ DesiredState='INSTALLED'; CleanupState='PENDING' } }
+            function Get-ValidatedCurrentInstance { param($Manifest,$ProjectRoot,[switch]$AllowMissing); [pscustomobject]@{ GenerationDisposition='TRUSTED_PREVIOUS'; InstanceId=('a'*32); Generation=[pscustomobject]@{GenerationId='poc.42'} } }
+            $script:MachinePrerequisiteStatus = [pscustomobject]@{Current=$true;Detail='isolated prerequisite'}
+            Write-InstanceProductStatus -Manifest @{} -ProjectRoot 'isolated-owned-project' 6>&1
+        })
+        $text = (@($output | ForEach-Object { [string]$_ }) -join "`n") + "`n"
+        if (-not $text.Contains('[INSTANCE] TRUSTED_PREVIOUS') -or -not $text.Contains('controlled removal and reinstall') -or $text.Contains('ready for automatic handoff') -or $text.Contains('[PRODUCT_STATE] READY')) { throw 'Historical Probe producer contract failed.' }
+        [IO.File]::WriteAllText((Join-Path $root 'probe-output.txt'), $text, [Text.UTF8Encoding]::new($false))
+        '[HISTORICAL_PROBE] PASS production writer; prerequisite/selection boundaries synthetic; native_children=0'
+    } finally { Remove-Module $module -ErrorAction SilentlyContinue }
+    return
+}
 
 if (@($CommandResultSemanticsOnly, $RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $FailedPreparationRecoveryOnly, $FailedPreparationInterruptionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
@@ -10583,13 +10616,15 @@ function Invoke-PriorGenerationUpgradeScenarios {
     Write-Host "[OK] Real v0.2.4 flat/runtime state converged through an isolated poc.35 instance; candidate and activation failures retained the old selection, live/unknown owners were never stopped, and retirement completed idempotently after drain."
 
     # A selected immutable instance from an exact Package-declared transition is
-    # a valid automatic handoff source. Its live leases and generation remain
-    # byte-exact until they drain; an undeclared identity still fails closed.
+    # Historical identity is retained for diagnostics/removal only. Automatic
+    # handoff is deliberately deferred until a separately authenticated v2
+    # capability exists; this fixture must remain byte-exact and unmodified.
     $trustedPrevious = Install-TrustedPreviousInstanceFixture
     $trustedDryRun = Invoke-Materializer -Action "DryRun" -PayloadRoot $canonicalPayloadRoot
     Assert-Result -Result $trustedDryRun -ExitCode 0 -Label "Package-declared previous instance DryRun"
     Assert-True -Condition ($trustedDryRun.Text.Contains("[PRODUCT_LAYER PREREQUISITE] CURRENT")) -Message "Trusted-previous DryRun did not prove the current prerequisite."
     Assert-True -Condition ($trustedDryRun.Text.Contains("[INSTANCE] TRUSTED_PREVIOUS")) -Message "Trusted-previous DryRun did not identify the retained instance."
+    Assert-True -Condition ($trustedDryRun.Text.Contains("controlled removal and reinstall") -and -not $trustedDryRun.Text.Contains("ready for automatic handoff")) -Message "Trusted-previous DryRun still promises automatic handoff."
     Assert-True -Condition ($trustedDryRun.Text.Contains("[PRODUCT_STATE] NEEDS_ATTENTION")) -Message "Trusted-previous DryRun did not retain the handoff-needed product state."
     Assert-Equal `
         -Actual (Get-FileHash -LiteralPath $trustedPrevious.StableWrapperPath -Algorithm SHA256).Hash.ToLowerInvariant() `
@@ -10599,28 +10634,10 @@ function Invoke-PriorGenerationUpgradeScenarios {
     $previousGenerationSnapshot = Get-FileSnapshot -Root $trustedPrevious.GenerationRoot
     $previousInstanceLeaseBytes = Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath
     $previousGenerationLeaseBytes = Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath
-    $trustedUpgrade = Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot
-    Assert-Result -Result $trustedUpgrade -ExitCode 0 -Label "Package-declared previous instance Upgrade"
-    Assert-StructuredCommandResult -Result $trustedUpgrade -Action "UPGRADE" -Outcome "UPGRADED" -CleanupState "PENDING" -Label "Package-declared previous instance Upgrade" -RequiredNextActionText "authenticated holders"
-    $trustedCurrent = Get-TestCurrentInstanceSelection
-    Assert-True -Condition (-not [string]::Equals([string]$trustedCurrent.Selection.instance_id, $trustedPrevious.InstanceId, [StringComparison]::Ordinal)) -Message "Previous-instance Upgrade did not activate a new immutable instance."
-    Assert-TestStableInstanceWrapper
-    Assert-TestCandidateHostSelection -Label "Package-declared previous instance Upgrade"
-    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.InstanceRoot) -Expected $previousInstanceSnapshot -Message "Previous-instance Upgrade changed the retained instance closure."
-    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.GenerationRoot) -Expected $previousGenerationSnapshot -Message "Previous-instance Upgrade changed the retained generation closure."
-    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath) -Expected $previousInstanceLeaseBytes -Message "Previous-instance Upgrade changed its live instance lease."
-    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath) -Expected $previousGenerationLeaseBytes -Message "Previous-instance Upgrade changed its live generation lease."
-    Assert-True -Condition (-not $trustedUpgrade.Text.Contains("[STOPPING]")) -Message "Previous-instance Upgrade attempted to stop a retained MCP owner."
-
-    Remove-Item -LiteralPath $trustedPrevious.InstanceLeasePath -Force
-    Remove-Item -LiteralPath $trustedPrevious.GenerationLeasePath -Force
-    $trustedDrain = Invoke-WithTestSupervisorOperationalReadiness `
-        -CurrentInstance $trustedCurrent `
-        -Operation { Invoke-Materializer -Action "Upgrade" -PayloadRoot $canonicalPayloadRoot }
-    Assert-Result -Result $trustedDrain -ExitCode 0 -Label "Package-declared previous instance drain"
-    Assert-StructuredCommandResult -Result $trustedDrain -Action "UPGRADE" -Outcome "CONVERGED" -CleanupState "COMPLETE" -Label "Package-declared previous instance drain"
-    Assert-True -Condition (-not (Test-Path -LiteralPath $trustedPrevious.InstanceRoot)) -Message "Drained previous instance was not retired."
-    Assert-True -Condition (-not (Test-Path -LiteralPath $trustedPrevious.GenerationRoot)) -Message "Drained previous generation was not retired."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.InstanceRoot) -Expected $previousInstanceSnapshot -Message "Historical previous fixture changed during diagnostic observation."
+    Assert-Equal -Actual (Get-FileSnapshot -Root $trustedPrevious.GenerationRoot) -Expected $previousGenerationSnapshot -Message "Historical previous generation changed during diagnostic observation."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.InstanceLeasePath) -Expected $previousInstanceLeaseBytes -Message "Historical previous instance lease changed during diagnostic observation."
+    Assert-Equal -Actual (Get-ByteSnapshot -Path $trustedPrevious.GenerationLeasePath) -Expected $previousGenerationLeaseBytes -Message "Historical previous generation lease changed during diagnostic observation."
 
     $forgedWrapper = Install-TrustedPreviousInstanceFixture
     Write-Utf8File -Path $forgedWrapper.StableWrapperPath -Content "forged stable wrapper`n"

@@ -276,7 +276,9 @@ namespace Rice.AI.Codedb.Editor
         internal bool Present => State != AICodedbCurrentInstanceState.Missing;
         internal bool IsCurrent => State == AICodedbCurrentInstanceState.Current;
         internal bool IsTrustedPrevious => State == AICodedbCurrentInstanceState.TrustedPrevious;
-        internal bool CanPublishEditorLease => IsCurrent || IsTrustedPrevious;
+        // A Package-declared previous generation is historical evidence only.
+        // It cannot publish an operational lease for a different runtime.
+        internal bool CanPublishEditorLease => IsCurrent;
         internal string InstanceId { get; }
         internal string InstanceRelativePath { get; }
         internal string InstanceRoot { get; }
@@ -607,7 +609,7 @@ namespace Rice.AI.Codedb.Editor
                         ? "The selected CodeDB instance is authenticated Owner Identity v1 evidence. Remove CodeDB Integration, then reinstall the Package."
                         : state == AICodedbCurrentInstanceState.Current
                             ? "The selected CodeDB instance identity and generation closure are current."
-                            : "The selected CodeDB instance is an exact Package-declared previous generation and is ready for automatic handoff.",
+                            : "The selected CodeDB instance is an exact Package-declared previous generation. Remove CodeDB Integration, then reinstall the Package; automatic handoff is unavailable.",
                     ownerIdentityVersion,
                     activationEpoch);
             }

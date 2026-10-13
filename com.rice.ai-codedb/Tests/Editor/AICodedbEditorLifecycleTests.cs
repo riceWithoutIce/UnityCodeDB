@@ -157,6 +157,138 @@ namespace Rice.AI.Codedb.Editor.Tests
         private const string Poc33WrapperSourcePath = "com.rice.ai-codedb/Payload~/AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
         private string _projectRoot;
 
+        [TestCase(false, true)]
+        [TestCase(false, false)]
+        [TestCase(true, true)]
+        [TestCase(true, false)]
+        public void HistoricalRemovalRouting_ColdRepeatedAndExistingLease(bool existingLease, bool preflightPassed)
+        {
+            var lease = existingLease;
+            var events = new List<string>();
+            var integration = HistoricalIntegration(AICodedbProjectIntegrationState.Installed);
+            var selected = HistoricalSelection(AICodedbCurrentInstanceState.TrustedPrevious);
+            var prerequisite = Result("[PRODUCT_LAYER PREREQUISITE] CURRENT\n[PRODUCT_STATE] NEEDS_ATTENTION");
+            var preflight = new AICodedbCommandResult(preflightPassed ? 0 : 4,
+                preflightPassed ? "[REMOVAL_PREFLIGHT] AVAILABLE\n[REMOVAL_PREFLIGHT_HANDOFF] fixture.binding\n" : "[REMOVAL_PREFLIGHT] UNAVAILABLE\n",
+                string.Empty, false);
+            for (var pass = 0; pass < 2; pass++)
+            {
+                events.Clear();
+                AICodedbProductStatus status;
+                AICodedbCommandResult observed;
+                Assert.That(AICodedbEditorLifecycle.TryRouteHistoricalRemoval(
+                    integration, HistoricalMigration(AICodedbControlContractMigrationState.Current), selected,
+                    () => { events.Add("prerequisite"); Assert.That(lease, Is.False); return prerequisite; },
+                    product =>
+                    {
+                        events.Add("preflight");
+                        return new AICodedbProductStatus(product.State, product.Prerequisite,
+                            product.Installed, product.Configured, product.McpAvailable,
+                            product.Detail, product.Command, product.AttentionReason, product.DiagnosticDetail,
+                            AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(preflight));
+                    },
+                    () => { events.Add("block"); lease = false; },
+                    () => true, CancellationToken.None, out status, out observed), Is.True);
+                Assert.That(events, Is.EqualTo(new[] { "block", "prerequisite", "preflight" }));
+                Assert.That(status.RequiresReinstall, Is.True);
+                Assert.That(status.RemovalPreflightPassed, Is.EqualTo(preflightPassed));
+                Assert.That(status.IsReady, Is.False);
+                Assert.That(observed, Is.SameAs(prerequisite));
+                Assert.That(selected.CanPublishEditorLease, Is.False);
+                Assert.That(AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(selected.State, status),
+                    Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
+            }
+        }
+
+        [TestCase(AICodedbCurrentInstanceState.Current, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.Missing, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.Missing)]
+        [TestCase(AICodedbCurrentInstanceState.Invalid, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.ObsoleteReinstallRequired, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Uninstalled, AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Invalid, AICodedbControlContractMigrationState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.InvalidOrAmbiguous)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.TransientAuthenticationUnavailable)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
+        public void HistoricalRemovalRouting_PreservesEarlierGuards(
+            AICodedbCurrentInstanceState state, AICodedbProjectIntegrationState integration,
+            AICodedbControlContractMigrationState migration)
+        {
+            var calls = 0;
+            AICodedbProductStatus status;
+            AICodedbCommandResult result;
+            Assert.That(AICodedbEditorLifecycle.TryRouteHistoricalRemoval(
+                HistoricalIntegration(integration), HistoricalMigration(migration), HistoricalSelection(state),
+                () => { calls++; return null; }, p => { calls++; return p; }, () => calls++,
+                () => true, CancellationToken.None, out status, out result), Is.False);
+            Assert.That(calls, Is.Zero);
+            Assert.That(status.RemovalPreflightPassed, Is.False);
+        }
+
+        [TestCase("missing")]
+        [TestCase("absent")]
+        [TestCase("duplicate")]
+        [TestCase("timeout")]
+        [TestCase("failed")]
+        [TestCase("cancel-before")]
+        [TestCase("cancel-after")]
+        [TestCase("stale-context")]
+        public void HistoricalRemovalRouting_RejectsUntrustedPrerequisiteAndCancellation(string kind)
+        {
+            var preflightCalls = 0;
+            var prerequisiteCalls = 0;
+            var cancellation = new CancellationTokenSource();
+            if (kind == "cancel-before") cancellation.Cancel();
+            AICodedbProductStatus status;
+            AICodedbCommandResult result;
+            Assert.That(AICodedbEditorLifecycle.TryRouteHistoricalRemoval(
+                HistoricalIntegration(AICodedbProjectIntegrationState.Installed),
+                HistoricalMigration(AICodedbControlContractMigrationState.CompatibleStale),
+                HistoricalSelection(AICodedbCurrentInstanceState.TrustedPrevious),
+                () =>
+                {
+                    prerequisiteCalls++;
+                    if (kind == "cancel-after") cancellation.Cancel();
+                    if (kind == "absent") return null;
+                    return new AICodedbCommandResult(kind == "failed" ? 5 : 0,
+                        kind == "missing" ? "[PRODUCT_LAYER PREREQUISITE] MISSING\n[PRODUCT_STATE] MISSING_PREREQUISITE"
+                        : kind == "duplicate" ? "[PRODUCT_LAYER PREREQUISITE] CURRENT\n[PRODUCT_LAYER PREREQUISITE] CURRENT"
+                        : "[PRODUCT_LAYER PREREQUISITE] CURRENT", string.Empty, kind == "timeout");
+                }, p => { preflightCalls++; return p; }, () => { }, () => kind != "stale-context",
+                cancellation.Token, out status, out result), Is.True);
+            Assert.That(preflightCalls, Is.Zero);
+            Assert.That(status.RemovalPreflightPassed, Is.False);
+            Assert.That(status.IsReady, Is.False);
+            if (kind == "missing") Assert.That(status.State, Is.EqualTo(AICodedbProductState.MissingPrerequisite));
+            if (kind == "cancel-before" || kind == "stale-context") Assert.That(prerequisiteCalls, Is.Zero);
+            cancellation.Dispose();
+        }
+
+        [Test]
+        public void HistoricalRemovalRouting_ConsumesProductionProbeBytes()
+        {
+            var path = Environment.GetEnvironmentVariable("RICE_HH01_PROBE_OUTPUT");
+            Assert.That(path, Is.Not.Null.And.Not.Empty, "The focused batch requires production Probe bytes.");
+            var output = File.ReadAllText(path);
+            var status = AICodedbProductStatusBuilder.Build(
+                HistoricalIntegration(AICodedbProjectIntegrationState.Installed), Result(output));
+            Assert.That(status.State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+            Assert.That(status.Prerequisite, Is.EqualTo(AICodedbProductLayerState.Current));
+            Assert.That(status.IsReady, Is.False);
+            Assert.That(status.RemovalPreflightPassed, Is.False);
+            Assert.That(output, Does.Contain("controlled removal and reinstall"));
+            Assert.That(output, Does.Not.Contain("ready for automatic handoff"));
+        }
+
+        private static AICodedbProjectIntegrationStatus HistoricalIntegration(AICodedbProjectIntegrationState state)
+            => new AICodedbProjectIntegrationStatus(state, AICodedbProjectCleanupState.Complete, "fixture", "fixture");
+
+        private static AICodedbControlContractMigrationStatus HistoricalMigration(AICodedbControlContractMigrationState state)
+            => new AICodedbControlContractMigrationStatus(state, default(AICodedbControlContractIdentity), "", "", "fixture", "fixture");
+
+        private static AICodedbCurrentInstanceStatus HistoricalSelection(AICodedbCurrentInstanceState state)
+            => new AICodedbCurrentInstanceStatus(state, new string('a', 32), "instance", "instance", "generation",
+                "previous", "fixture", "fixture", 42, 1, "authenticated test selection", 2, new string('b', 32));
+
         [SetUp]
         public void SetUp()
         {
@@ -3715,7 +3847,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void CurrentInstanceStore_TrustedPoc33PlansAutomaticPoc34Handoff()
+        public void CurrentInstanceStore_TrustedPoc33RequiresControlledRemoval()
         {
             InstallPackageDeclaredPreviousInstance("poc.33");
             var before = GetProjectSnapshot(_projectRoot);
@@ -3738,19 +3870,19 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbCurrentInstanceState.TrustedPrevious));
             Assert.That(status.IsTrustedPrevious, Is.True);
-            Assert.That(status.CanPublishEditorLease, Is.True);
+            Assert.That(status.CanPublishEditorLease, Is.False);
             Assert.That(
                 status.EditorLeaseRelativePath,
-                Is.EqualTo(status.InstanceRelativePath + "/watch/lifecycle/editor-leases"));
+                Is.Empty);
             Assert.That(
                 AICodedbEditorLifecycle.ShouldPublishEditorLeaseForInstance(
                     AICodedbProjectIntegrationStateStore.Read(_projectRoot),
                     status),
-                Is.True);
+                Is.False);
             Assert.That(status.GenerationId, Is.EqualTo("poc.33"));
             Assert.That(status.PayloadSequence, Is.EqualTo(33));
             Assert.That(selection.State, Is.EqualTo(AICodedbHostGenerationState.Previous));
-            Assert.That(plan, Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Deploy));
+            Assert.That(plan, Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Blocked));
             Assert.That(GetProjectSnapshot(_projectRoot), Is.EqualTo(before), "Classification must be read-only.");
         }
 

@@ -5425,7 +5425,7 @@ function Write-InstanceProductStatus {
         Write-Host "[PRODUCT_LAYER CONFIGURED] PENDING"
         Write-Host "[PRODUCT_LAYER MCP_AVAILABLE] UNAVAILABLE"
         Write-Host "[PRODUCT_STATE] NEEDS_ATTENTION"
-        Write-Host "[INSTANCE] TRUSTED_PREVIOUS - $($current.InstanceId) generation $($current.Generation.GenerationId) is ready for automatic handoff."
+        Write-Host "[INSTANCE] TRUSTED_PREVIOUS - $($current.InstanceId) generation $($current.Generation.GenerationId) requires controlled removal and reinstall; automatic handoff is unavailable."
         Write-Host "[CLEANUP_STATE] PENDING"
         if ($RequireReady) {
             Throw-MaterializerError -Message "Current instance availability probe requires handoff from the trusted previous generation." -ExitCode 5

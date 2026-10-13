@@ -178,7 +178,9 @@ exit $LASTEXITCODE
         foreach ($equivalent in @($projectRoot.Replace('\','/'), ($projectRoot.ToUpperInvariant()+'\'))) {
             Assert-Entry (Test-RetainedAbsoluteProjectRootIdentity $equivalent $projectRoot) 'absolute-root-slash-case-trailing-equivalence'
         }
-        foreach ($invalid in @('relative/project', ($projectRoot.Substring(0,2)+'relative'), '\relative', '/relative', 'G:/bad?root', ('G:/bad'+[char]0+'root'), '\\server', (Join-Path $fixtureContainer 'other'))) {
+        $invalidQuestionRoot = Join-Path $fixtureContainer 'bad?root'
+        $invalidNulRoot = (Join-Path $fixtureContainer 'bad') + [char]0 + 'root'
+        foreach ($invalid in @('relative/project', ($projectRoot.Substring(0,2)+'relative'), '\relative', '/relative', $invalidQuestionRoot, $invalidNulRoot, '\\server', (Join-Path $fixtureContainer 'other'))) {
             Assert-Entry (-not (Test-RetainedAbsoluteProjectRootIdentity $invalid $projectRoot) -and -not (Test-RetainedAbsoluteProjectRootIdentity $projectRoot $invalid)) 'incomplete-malformed-or-different-root-rejected-both-operands'
         }
         $originalAdmission=[IO.File]::ReadAllBytes($fixture.AdmissionPath)
