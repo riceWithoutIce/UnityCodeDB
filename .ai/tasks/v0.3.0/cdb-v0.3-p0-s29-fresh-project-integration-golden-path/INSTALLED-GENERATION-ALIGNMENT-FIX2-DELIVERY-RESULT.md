@@ -1,7 +1,14 @@
 # S29 generation alignment FIX2 — delivery result
 
 Date: 2026-10-13.
-Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
+Status: REFERENCE_SWITCH_COMPLETE / HUMAN_COMPILE_FAILED.
+
+Subsequent human report on 2026-10-13: exact Package compilation failed with
+CS7036 in RunUpgradeAsync at AICodedbHostPayloadMaterializer.cs(107,20).
+Read-only source/hash/log checks confirm a missing fifth argument, not delivery
+drift. See FIX2-HUMAN-COMPILE-FAILURE.md with this document's prefix. The
+delivery-time NOT_RUN observations below are preserved historically; current
+human compilation is FAIL and dependent acceptance is stopped.
 
 The user approved the exact grouped delivery in FIX2-DELIVERY-PREPARATION.md.
 Local source commit, exact export verification and two-file S29 reference

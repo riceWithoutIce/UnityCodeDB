@@ -1,6 +1,10 @@
 # S29 generation alignment FIX2 — human Unity checklist
 
-Date: 2026-10-13. Status: HUMAN_UNITY_PENDING.
+Date: 2026-10-13. Status: HUMAN_COMPILE_FAILED / DEPENDENT_ACCEPTANCE_STOPPED.
+
+The human reported CS7036 in this exact Package. Preserve the failed artifact;
+do not continue the steps below until a repaired exact Package is separately
+delivered. See INSTALLED-GENERATION-ALIGNMENT-FIX2-HUMAN-COMPILE-FAILURE.md.
 
 This checklist is bound to source commit
 `d127a45eafa62f04f25a4b578839e6056e46299a` and the exact Package:

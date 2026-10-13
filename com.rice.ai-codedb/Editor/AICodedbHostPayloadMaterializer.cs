@@ -108,7 +108,8 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbPaths.CaptureExecutionContext(),
                 AICodedbHostPayloadAction.Upgrade,
                 false,
-                MutationTimeoutMilliseconds);
+                MutationTimeoutMilliseconds,
+                null);
         }
 
         internal static AICodedbCommandResult RunUpgrade(AICodedbEditorExecutionContext context)
