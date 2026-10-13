@@ -1,6 +1,6 @@
 # S29 Upgrade async call-site compile repair — result
 
-Date: 2026-10-13. Status: SOURCE_ACCEPTED / DELIVERY_PREPARED.
+Date: 2026-10-13. Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
 Verdict: PASS_WITH_LIMITS.
 
 ## Authority and frozen scope
@@ -82,21 +82,36 @@ runner-a2.log, runner-a3.log, handoff-run.log, mono-runner.log,
 handoff-mono-run.log, compiler response files and result.json under the isolated
 directory above. Failed source/ZIP and previous review records remain intact.
 
+## Delivery completed
+
+The user approved the exact grouped delivery. Local source commit:
+`34b3a65c8c3f136ccb052ba52bb10a8476676546`.
+The exact Package is
+`G:/RiceProgram/UnityCodeDB/.artifacts/s29-upgrade-callsite-fix-34b3a65/review/com.rice.ai-codedb`.
+ZIP SHA256 is
+`6f83c71255c2c2c5479f7183b80bf6acce52a825f94cce1672b140dcb79bccaf`;
+617 files and 13,055,586 uncompressed bytes. Commit-stage and exact ZIP
+passed production admission, 60-file byte closure with zero mismatches and
+native VerifyOnly. Compared with the frozen d127a45 inventory, 616 files are
+byte-identical and the only changed product file is the accepted
+`Editor/AICodedbHostPayloadMaterializer.cs` repair.
+
+S29 references now point to the new exact Package. Backup:
+`.backups/s29-upgrade-callsite-fix-34b3a65`.
+Only `Packages/manifest.json` and `Packages/packages-lock.json` changed;
+replacement count is one each, JSON parsing passed. After hashes are
+`manifest.json` `9adea12c24219aea55d06364dbb38346b418079746e59c05c37fcb7efd8fbc09`
+and `packages-lock.json`
+`507a4db713e10748a63d7a694729649f5550b2e2e42cd449d86a74636d9982d6`.
+Final protection passed: 9 non-Package protected roots, 28 unrelated dirty
+files, 616 original artifact files, and both reference preimages unchanged.
+
+The human checklist is
+INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-HUMAN-CHECKLIST.md.
+
 ## Remaining gates
 
-User replied `同意授权` after this source result was returned, accepting the
-single-file repair and authorizing delivery preparation. The exact new group
-is in INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-DELIVERY-PREPARATION.md.
-No independent Verifier result is claimed.
-No source/evidence commit, new export or S29 reference switch was performed.
-The human project still selects the failed d127a45 Package, so it is expected
-to keep showing CS7036 until a separately approved exact delivery occurs.
-Repaired-package human compilation, focused EditMode, Manager/tabs/normal
-close, real Remove/Install and release acceptance remain unrun.
-
-After source acceptance, the concrete next delivery is the single repaired
-source plus its bounded task/evidence records, a new exact commit-derived
-artifact with unchanged accepted generation projection, and a backed-up
-two-file S29 reference switch after human Unity closure. That sequence requires
-its own exact grouped approval. Do not patch the failed Package in place or
-regenerate Payload. S29/release remain PARTIAL.
+No independent Verifier result is claimed. Repaired-package human compilation,
+focused EditMode, Manager/tabs/normal close, real Remove/Install and release
+acceptance remain unrun. Do not patch either Package in place or regenerate
+Payload. S29/release remain PARTIAL.

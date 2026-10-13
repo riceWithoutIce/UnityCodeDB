@@ -1,10 +1,11 @@
 # S29 Upgrade call-site fix — exact delivery preparation
 
-Date: 2026-10-13. Status: DELIVERY_AUTHORIZED / EXECUTION_ACTIVE.
+Date: 2026-10-13. Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
 
-User replied `批准` to the exact grouped delivery on 2026-10-13. Execute the
-six steps below without repeated approval, subject to their preconditions and
-stop rules. No real Remove/Install or Unity automation is authorized.
+User replied `批准` to the exact grouped delivery on 2026-10-13. The source
+commit, exact export, reference switch and checklist preparation are complete.
+See the delivery result for final hashes. No real Remove/Install or Unity
+automation was authorized.
 
 After the completed single-file repair and its focused evidence were returned,
 the user replied `同意授权`. Record source acceptance and preparation authority
