@@ -1,7 +1,12 @@
 # S29 generation alignment FIX2 — delivery preparation
 
 Date: 2026-10-13.
-Status: SOURCE_ACCEPTED / DELIVERY_AUTHORIZED / EXECUTION_ACTIVE.
+Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
+
+The authorized grouped sequence has completed through source commit, exact
+export, two-file S29 reference switch and human checklist preparation. See
+INSTALLED-GENERATION-ALIGNMENT-FIX2-DELIVERY-RESULT.md for final evidence.
+The preparation-time observations below remain historical preimages.
 
 User explicitly replied `批准` on 2026-10-13 to the exact grouped
 commit -> exact export checks -> S29 reference switch -> human Unity checklist

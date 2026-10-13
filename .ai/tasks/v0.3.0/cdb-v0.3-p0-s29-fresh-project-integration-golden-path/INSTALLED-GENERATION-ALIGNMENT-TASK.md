@@ -4,7 +4,7 @@
 
 - Product/version: UnityCodeDB v0.3.0 / existing S29.
 - Workflow: codedb-workflow-v2 revision 2.6.
-- Status: DELIVERY_AUTHORIZED / EXACT_COMMIT_EXPORT_SWITCH_ACTIVE.
+- Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
 - Planner: current parent; Coder: /root/retained_disposition_coder;
   Verifier: /root/retained_disposition_verifier, after stable Coder termination.
 - Review mode: GUARDED; independent historical-removal/identity review required.
@@ -160,11 +160,14 @@ completion of each child, as the user requires. No model override is proposed.
   identity, predecessor closure, handoff enforcement, three removal gates,
   ordinary strictness and direct consumer compatibility pass within their
   stated evidence limits. Protected OwnerIdentity drift remains preserved.
-- Next notification: return the exact prepared delivery scope to User.
-- Next action: User replied `批准` to FIX2-DELIVERY-PREPARATION.md's exact
-  grouped sequence on 2026-10-13. Execute its bounded local commit, export,
-  reference switch and human checklist steps after their preconditions pass;
-  real Remove/Install remains a further separate gate.
+- Next notification: provide the exact delivered Package and bounded human
+  checklist to User. Source commit is d127a45eafa62f04f25a4b578839e6056e46299a;
+  exact export and S29 reference switch passed under the grouped approval.
+- Next action: human compilation, three dedicated handoff EditMode methods,
+  Manager open/close/tabs and normal Unity close, then parent read-only
+  attribution. See FIX2-HUMAN-CHECKLIST.md and FIX2-DELIVERY-RESULT.md with the
+  INSTALLED-GENERATION-ALIGNMENT prefix. Real Remove/Install remains a separate
+  gate; do not repeat commit/export/reference switching.
 - Human authorization required: expanded schema/reader/architecture scope,
   later source disposition or real/delivery operations only.
 
