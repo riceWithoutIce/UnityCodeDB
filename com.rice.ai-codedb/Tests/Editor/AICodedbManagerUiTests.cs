@@ -1126,6 +1126,83 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ManagerVersionTransition_ProductionObservationKeepsIdentityAndSafetySeparate()
+        {
+            var evidence = Environment.GetEnvironmentVariable("CODEDB_VERSION_OBSERVATION_FIXTURE");
+            if (string.IsNullOrEmpty(evidence))
+                Assert.Ignore("Requires the isolated VersionTransitionObservationOnly production fixture.");
+            var recorded = AICodedbStrictJson.ReadObject(Path.Combine(evidence, "observation-context.json"),
+                16384, "version observation context");
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                AICodedbStrictJson.GetRequiredString(recorded, "project_root", "context"),
+                AICodedbStrictJson.GetRequiredString(recorded, "package_root", "context"), "Isolated version transition");
+            var actionId = AICodedbStrictJson.GetRequiredString(recorded, "action_id", "context");
+            var output = File.ReadAllText(Path.Combine(evidence, "safe-observation-output.txt"));
+            var parsed = AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output, "", false, 1), context);
+            Assert.That(parsed, Is.Not.Null);
+            Assert.That(parsed.Safe, Is.True);
+            Assert.That(parsed.InstallEligible, Is.False);
+            Assert.That(parsed.Detail, Does.Contain("predecessor ownership"));
+            var foreign = new AICodedbEditorExecutionContext(context.Platform, context.ProjectRoot,
+                context.PackageRoot + "-foreign", context.ProjectDisplayName);
+            Assert.That(AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0, output, "", false, 1), foreign), Is.Null);
+            var blocked = AICodedbRetainedEffectsObservation.Parse(new AICodedbCommandResult(0,
+                File.ReadAllText(Path.Combine(evidence, "blocked-observation-output.txt")), "", false, 1), context);
+            Assert.That(blocked, Is.Not.Null);
+            Assert.That(blocked.Safe, Is.False);
+            var priorLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+            var local = Path.Combine(evidence, "isolated-consumer-" + Guid.NewGuid().ToString("N"));
+            var currentField = typeof(AICodedbManagerActionSession).GetField("_current",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            var priorSession = currentField.GetValue(null);
+            var key = "Rice.AI.Codedb.Manager.PendingAction." + context.ProjectRoot;
+            var priorPending = SessionState.GetString(key, string.Empty);
+            try
+            {
+                Environment.SetEnvironmentVariable("LOCALAPPDATA", local);
+                Directory.CreateDirectory(AICodedbPaths.GetManagerActionIndexDirectory(context));
+                currentField.SetValue(null, null);
+                var read = AICodedbManagerActionJournal.Read(context, parsed);
+                Assert.That(read.State, Is.EqualTo(AICodedbManagerActionIndexState.Empty), read.Detail);
+                Assert.That(read.Index, Is.Null);
+                Assert.That(read.HistoricalResult, Is.Null);
+                Assert.That(read.HistoricalWarning, Does.Contain("original failed/unknown results are unchanged"));
+                var unsafeRead = AICodedbManagerActionJournal.Read(context, blocked);
+                Assert.That(unsafeRead.State, Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                Assert.That(unsafeRead.Detail, Does.Contain(blocked.Detail));
+                Assert.That(unsafeRead.Detail, Does.Not.Contain("has no matching Manager action journal"));
+                Assert.That(AICodedbManagerActionJournal.Read(foreign, parsed).State,
+                    Is.EqualTo(AICodedbManagerActionIndexState.Conflict));
+                AICodedbManagerActionSession.RestoreDurable(context, unsafeRead, 1d);
+                var conflict = (AICodedbManagerActionSession)currentField.GetValue(null);
+                Assert.That(conflict.IsEvidenceConflict, Is.True);
+                Assert.That(conflict.IsRecovering, Is.True);
+                Assert.That(conflict.Result, Is.Null);
+                AICodedbManagerActionSession.RestoreDurable(context, read, 2d);
+                Assert.That(currentField.GetValue(null), Is.Null);
+                SessionState.SetString(key, actionId + "|Install CodeDB|" + context.PackageRoot);
+                AICodedbManagerActionSession.RestoreDurable(context, read, 3d);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Not.Empty,
+                    "historical identity cannot clear an unattributed pending action");
+                var product = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Pending,
+                    AICodedbProductLayerState.Unavailable, "Historical generation requires migration");
+                var host = new AICodedbHostPayloadStatus(AICodedbHostPayloadState.RedeployRequired,
+                    AICodedbStatusState.Warning, "migration", "migration");
+                Assert.That(AICodedbManagerWindow.IsFreshInstallRecoveryAvailable(product, host, null, context, parsed), Is.False);
+                Assert.That(product.IsReady, Is.False);
+                Assert.That(Directory.GetFiles(AICodedbPaths.GetManagerActionIndexDirectory(context)), Is.Empty,
+                    "observation and session restoration do not release or create an index");
+            }
+            finally
+            {
+                currentField.SetValue(null, priorSession);
+                SessionState.SetString(key, priorPending);
+                Environment.SetEnvironmentVariable("LOCALAPPDATA", priorLocal);
+            }
+        }
+
+        [Test]
         public void ManagerRetainedDisposition_ProductionObservationReachesJournalSessionAndUi()
         {
             var evidence = Environment.GetEnvironmentVariable("CODEDB_RETAINED_OBSERVATION_FIXTURE");

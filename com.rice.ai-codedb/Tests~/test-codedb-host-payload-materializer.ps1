@@ -54,6 +54,8 @@ param(
 
     [switch]$GenerationAlignmentOnly,
 
+    [switch]$VersionTransitionObservationOnly,
+
     [switch]$HistoricalProbeOnly,
 
     [string]$PredecessorPackageRoot,
@@ -1104,6 +1106,85 @@ function Invoke-FailedPreparationRecoveryCases {
     Remove-Item -LiteralPath $v1path
 }
 
+function Invoke-VersionTransitionObservationCases {
+    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot)
+    # Existing production-function extraction and PocFixture are the only seams.
+    # No real project, native child, live IPC or authority reader is substituted.
+    function Check { param([bool]$Condition,[string]$Label); if(-not $Condition){throw "Version observation assertion: $Label"};$script:Cases++;Write-Host "[OK] $Label" }
+    function Record { param([string]$Path,$Value);Assert-PathInside -Path $Path -Root $Container -Label 'version observation fixture';[void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent));[IO.File]::WriteAllText($Path,(ConvertTo-InstanceJsonText -Value $Value),[Text.UTF8Encoding]::new($false)) }
+    function Emit { param([string]$Path,$observation);$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PackageRoot 'Tools~/materialize-codedb-host-payload.ps1'),[ref]$tokens,[ref]$errors);$statement=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.PipelineAst] -and $node.Extent.Text.StartsWith("Write-Host ('[RETAINED_EFFECTS] '",[StringComparison]::Ordinal)},$true));if($statement.Count -ne 1){throw 'Production observation emitter is ambiguous'};$output=& ([scriptblock]::Create($statement[0].Extent.Text)) 6>&1;[IO.File]::WriteAllText($Path,[string]$output,[Text.UTF8Encoding]::new($false)) }
+    function Observe { param($Authority=$manifest);Get-InstanceRetainedEffectsObservation -Manifest $Authority -ProjectRoot $root -PackageRoot $PackageRoot }
+    function Blocked { param([string]$Label);$result=Observe;Check ($result.state -ceq 'BLOCKED' -and -not $result.install_eligible -and $result.instance_ids.Count -eq 0) $Label;Write-Host ('[REFUSAL] '+$Label+': '+$result.detail);return $result }
+    function Fault { param([string]$Path,[scriptblock]$Change,[string]$Label);$bytes=[IO.File]::ReadAllBytes($Path);try{$doc=(Read-BoundedJsonDocument -Path $Path -Label 'version observation fault' -MaximumBytes 1048576).Document;& $Change $doc;Record $Path $doc;$null=Blocked $Label}finally{[IO.File]::WriteAllBytes($Path,$bytes)} }
+    function Digest { param([string]$Path);$full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/');$rows=@(Get-ChildItem -LiteralPath $full -Recurse -File -Force|Sort-Object FullName|ForEach-Object{$_.FullName.Substring($full.Length+1)+'|'+(Get-FileSha256 -Path $_.FullName)});Get-TextSha256 -Text ($rows -join "`n") }
+    function script:Get-MaterializerMachinePrerequisiteStatus { param($Manifest);[pscustomobject]@{Current=$true;State='CURRENT';ReasonCode='FIXTURE_CURRENT';Detail='Synthetic prerequisite';NextAction='';NodePath='';NodeVersion='fixture';ProviderVersion='fixture';ProviderRoot='';ProviderManifestPath='';ProviderExecutablePath=''} }
+    function script:Get-MaterializerProcessIdentity { param([int]$ProcessId);if($ProcessId -ne 424242){throw 'Process outside isolated version observation'};return $script:Holder }
+    function script:Invoke-BoundedNativeProcessWithFileOutput { throw 'Native execution forbidden in version observation' }
+    $script:Cases=0;$script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+    $root=Join-Path $Container 'project';foreach($marker in @('Assets','Packages','ProjectSettings')){[void][IO.Directory]::CreateDirectory((Join-Path $root $marker))}
+    $script:GenerationId='';$old=Read-PayloadManifest -Root (Join-Path $PredecessorRoot 'Payload~') -ProjectRoot $root
+    $script:PocFixture=$true;$script:Action='Install'
+    Invoke-InstanceConvergence -Manifest $old -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+    $selected=Get-ValidatedCurrentInstance -Manifest $old -ProjectRoot $root
+    $oldState=Get-InstanceActivationContractState -Manifest $old -ProjectRoot $root
+    Check ($oldState.Operation.Phase -ceq 'COMMITTED' -and $selected.GenerationDisposition -ceq 'CURRENT') 'original42 production selected and committed'
+    $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
+    Check ($old.GenerationId -ceq 'poc.42' -and $manifest.GenerationId -ceq 'poc.43' -and $old.RuntimeContractSha256 -cne $manifest.RuntimeContractSha256) 'exact distinct predecessor42 target43'
+    # Produce a failed predecessor candidate and intent from real serializers,
+    # retaining the original42 generation and shared wrapper without rewriting.
+    $id=[guid]::NewGuid().ToString('N');$candidateRoot=Join-Path $root ($script:InstancesRelativePath+'/'+$id)
+    foreach($directory in $script:InstanceAllowedDirectories){[void][IO.Directory]::CreateDirectory((Join-Path $candidateRoot $directory))}
+    $actionId=[guid]::NewGuid().ToString('N')
+    $targetPrefix=$script:GenerationTargetPrefix
+    try {
+        $script:GenerationTargetPrefix='AIWork/.runtime/codedb/host/generations/'+$old.GenerationId+'/'
+        $candidateDoc=New-InstanceManifestDocument -Manifest $old -ProjectRoot $root -InstanceId $id -State PROVISIONING -CreatedAtUtc ([DateTime]::UtcNow.ToString('o')) -OriginatingAction ([ordered]@{action='INSTALL';action_id=$actionId;operation_id=$actionId})
+    } finally { $script:GenerationTargetPrefix=$targetPrefix }
+    $candidatePath=Write-InstanceManifest -InstanceRoot $candidateRoot -Document $candidateDoc
+    $sessionId=[guid]::NewGuid().ToString('N');$leasePath=Join-Path $candidateRoot ('watch/lifecycle/editor-leases/'+$sessionId+'.json')
+    Record $leasePath ([ordered]@{schema_version=1;managed_by=$script:ManagedBy;session_id=$sessionId;editor_pid=424242;process_start_ticks='123';project_root=$root;project_identity=Get-MaterializerProjectIdentity -ProjectRoot $root;last_heartbeat_utc=[DateTime]::UtcNow.ToString('o')})
+    $retained=Get-ValidatedRetiredInstance -ProjectRoot $root -Manifest $manifest -InstanceRoot $candidateRoot -AllowProvisioning -FailedPreparation
+    $authority=[pscustomobject]@{Evidence=$retained;Effects=@(Get-FailedPreparationEffects -ProjectRoot $root -InstanceId $id -GenerationId $old.GenerationId -Manifest $manifest -Generation $retained.Generation);WrapperSha256=Get-FileSha256 -Path (Join-Path $root 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs')}
+    $intentId=[guid]::NewGuid().ToString('N');$intentPath=Join-Path $root ($script:InstanceRemovalIntentsRelativePath+'/'+$intentId+'.json')
+    Record $intentPath (New-FailedPreparationRemovalIntentDocument -ProjectRoot $root -StateId $intentId -Authority $authority)
+    $before=Digest $root
+    $historical=Observe
+    Check ($historical.state -ceq 'SAFE' -and -not $historical.install_eligible -and $historical.instance_ids.Count -eq 1 -and $historical.instance_ids[0] -ceq $id) 'selected42 target43 retained effects SAFE without Install'
+    Check ($historical.detail.Contains('predecessor ownership') -and $historical.operation_detail.Contains('migration')) 'historical identity distinguishes readiness and mutation'
+    $current=Observe $old
+    Check ($current.state -ceq 'SAFE' -and -not $current.install_eligible -and $current.instance_ids[0] -ceq $id) 'same-version CURRENT retained control'
+    $refused=$false;try{$null=Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root}catch{$refused=$true;Write-Host ('[REFUSAL] ordinary next-change: '+$_.Exception.Message)}
+    Check $refused 'ordinary next-change remains target-strict'
+    $transition=@($manifest.BootstrapTransitions|Where-Object SourceGenerationId -ceq $old.GenerationId)[0];$runtime=$transition.SourceRuntimeContractSha256
+    try{foreach($bad in @($null,('0'*64))){$transition.SourceRuntimeContractSha256=$bad;$null=Blocked 'missing or wrong Package runtime authority'}}finally{$transition.SourceRuntimeContractSha256=$runtime}
+    $transitions=$manifest.BootstrapTransitions;try{$manifest.BootstrapTransitions=@($transitions|Where-Object SourceGenerationId -cne $old.GenerationId);$null=Blocked 'undeclared predecessor'}finally{$manifest.BootstrapTransitions=$transitions}
+    Fault $selected.SelectionPath {param($d)$d.project_identity='sha256:'+('0'*64)} 'foreign selected project'
+    Fault $selected.SelectionPath {param($d)$d.generation_id='poc.43'} 'wrong selected generation'
+    Fault $selected.SelectionPath {param($d)$d.activation_epoch='0'*32} 'wrong selected epoch'
+    Fault $oldState.Context.Paths.OperationPath {param($d)$d.operation_id='0'*32} 'wrong paired operation'
+    Fault $oldState.Context.Paths.ActivationPath {param($d)$d.runtime_contract_sha256='0'*64} 'wrong activation runtime'
+    $pendingPaths=@($oldState.Context.Paths.ActivationPath,$oldState.Context.Paths.OperationPath);$pendingBytes=@($pendingPaths|ForEach-Object{,[IO.File]::ReadAllBytes($_)})
+    $pendingDirectory=Join-Path $oldState.Context.Paths.ContractRoot ('operations/'+$oldState.Operation.Attempt.OperationId)
+    try {
+        foreach($path in $pendingPaths){$d=(Read-BoundedJsonDocument -Path $path -Label 'paired pending fixture' -MaximumBytes 1048576).Document;if($path -ceq $oldState.Context.Paths.ActivationPath){$d.publication_phase='ACTIVATING'}else{$d.phase='ACTIVATING'};Record $path $d}
+        [void][IO.Directory]::CreateDirectory($pendingDirectory)
+        $pending=Blocked 'paired pending historical activation'
+        Check ($pending.detail.Contains('committed activation evidence')) 'pending rejected by committed historical authority'
+    } finally {for($i=0;$i -lt $pendingPaths.Count;$i++){[IO.File]::WriteAllBytes($pendingPaths[$i],$pendingBytes[$i])};Remove-Item -LiteralPath $pendingDirectory}
+    $worker=Join-Path $selected.Generation.GenerationRoot $script:InstanceWorkerRelativePath;$workerBytes=[IO.File]::ReadAllBytes($worker)
+    try{[IO.File]::AppendAllText($worker,'drift');$null=Blocked 'immutable historical worker drift'}finally{[IO.File]::WriteAllBytes($worker,$workerBytes)}
+    foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='123'},[pscustomobject]@{Alive=$true;StartTicks=$null})){$script:Holder=$holder;$blocked=Blocked 'live or unknown retained holder';Check ($blocked.detail.Contains('holder')) 'holder reason preserved';Record (Join-Path $Container 'blocked-observation.json') $blocked;Emit (Join-Path $Container 'blocked-observation-output.txt') $blocked}
+    $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+    $unknown=Join-Path $root ($script:InstancesRelativePath+'/'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($unknown)
+    try{$blocked=Blocked 'unbound relevant candidate remains blocked';Check ($blocked.detail.Contains('unbound or ambiguous')) 'independent candidate reason preserved'}finally{Remove-Item -LiteralPath $unknown}
+    Check ($before -ceq (Digest $root)) 'all observation refusals preserve fixture bytes and index absence'
+    Record (Join-Path $Container 'safe-observation.json') $historical
+    Emit (Join-Path $Container 'safe-observation-output.txt') $historical
+    Record (Join-Path $Container 'current-observation.json') $current
+    Record (Join-Path $Container 'observation-context.json') ([ordered]@{project_root=$root;package_root=$PackageRoot;candidate_id=$id;action_id=$actionId;predecessor_package_root=$PredecessorRoot;historical_runtime_sha256=$old.RuntimeContractSha256;target_runtime_sha256=$manifest.RuntimeContractSha256})
+    Write-Output ('[VERSION_TRANSITION_OBSERVATION] PASS cases='+$script:Cases+' native_children=0 PocFixture=true external_process_observation=synthetic')
+}
+
 function Invoke-GenerationAlignmentCases {
     param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot)
     function Check { param([bool]$Condition, [string]$Label); if (-not $Condition) { throw "Alignment assertion: $Label" }; $script:Cases++; Write-Host "[OK] $Label" }
@@ -1201,26 +1282,31 @@ function Invoke-GenerationAlignmentCases {
     Write-Output ('[GENERATION_ALIGNMENT] PASS cases='+$script:Cases+' native_children=0 PocFixture=true external_process_observation=synthetic')
 }
 
-if ($GenerationAlignmentOnly) {
+if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly) {
     if (-not $CanonicalPayloadRoot -or -not $PredecessorPackageRoot -or -not $RetainedFixtureRoot) {throw 'Alignment requires explicit candidate, predecessor and owned fixture roots.'}
     $packageRoot=Split-Path ([IO.Path]::GetFullPath($CanonicalPayloadRoot)) -Parent
     $parent=[IO.Path]::GetFullPath($RetainedFixtureRoot)
     $checkout=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
     # The explicit checkout owns fixture persistence; extracted candidate paths
     # are read-only production inputs, never the default test scratch authority.
-    if ($parent.IndexOf('/.artifacts/tests/s29-generation-alignment',[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\s29-generation-alignment',[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
+    $family=if($VersionTransitionObservationOnly){'s29-version-transition-observation'}else{'s29-generation-alignment'}
+    if ($parent.IndexOf('/.artifacts/tests/'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
     $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
     [void][IO.Directory]::CreateDirectory($container)
     $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot)')
-    foreach($path in @((Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-strict-json.ps1'),(Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-instance-manifest-contract.ps1'),(Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'),(Join-Path $packageRoot 'Tools~/codedb-instance-engine.ps1'))) {
+    $productionPaths=@((Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-strict-json.ps1'),(Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-instance-manifest-contract.ps1'))
+    if($VersionTransitionObservationOnly){$productionPaths+=Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1'}
+    $productionPaths+=@((Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'),(Join-Path $packageRoot 'Tools~/codedb-instance-engine.ps1'))
+    foreach($path in $productionPaths) {
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);if($errors.Count){throw 'Alignment production parse failed'}
         if($null -ne $ast.ParamBlock){foreach($parameter in $ast.ParamBlock.Parameters){$value=if($null -eq $parameter.DefaultValue){'$null'}else{$parameter.DefaultValue.Extent.Text};$parts.Add('$script:'+$parameter.Name.VariablePath.UserPath+' = '+$value)}}
         $beforeFunctions=$true
         foreach($statement in $ast.EndBlock.Statements){if($statement -is [Management.Automation.Language.FunctionDefinitionAst]){$beforeFunctions=$false;$parts.Add($statement.Extent.Text)}elseif($beforeFunctions -and (($statement -is [Management.Automation.Language.AssignmentStatementAst] -and $statement.Left.Extent.Text.StartsWith('$script:')) -or $statement -is [Management.Automation.Language.ForEachStatementAst])){$parts.Add($statement.Extent.Text)}}
     }
-    $parts.Add('function Invoke-GenerationAlignmentCases {'+(Get-Command Invoke-GenerationAlignmentCases).ScriptBlock.ToString()+'}')
+    $caseName=if($VersionTransitionObservationOnly){'Invoke-VersionTransitionObservationCases'}else{'Invoke-GenerationAlignmentCases'}
+    $parts.Add('function '+$caseName+' {'+(Get-Command $caseName).ScriptBlock.ToString()+'}')
     $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot
-    try {& $module {Invoke-GenerationAlignmentCases -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot}} finally {Remove-Module $module -ErrorAction SilentlyContinue}
+    try {& $module ([scriptblock]::Create($caseName+' -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot'))} finally {Remove-Module $module -ErrorAction SilentlyContinue}
     Write-Output ('[PRESERVED_FIXTURE] '+$container)
     return
 }

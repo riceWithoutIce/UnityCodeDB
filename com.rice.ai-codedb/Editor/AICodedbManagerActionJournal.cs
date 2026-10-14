@@ -218,9 +218,11 @@ namespace Rice.AI.Codedb.Editor
                         return new AICodedbManagerActionIndexRead(
                             AICodedbManagerActionIndexState.Conflict,
                             currentRetainedIndex,
-                            "Historical candidate ownership is ambiguous: " + orphanCandidate
-                                + " has no matching Manager action journal marker or terminal closure. "
-                                + "New project changes remain blocked until that candidate is explicitly reconciled.",
+                            effectsObservation != null && !effectsObservation.Safe
+                                ? "Retained effects safety check is blocked: " + effectsObservation.Detail
+                                : "Historical candidate ownership is ambiguous: " + orphanCandidate
+                                    + " has no matching Manager action journal marker or terminal closure. "
+                                    + "New project changes remain blocked until that candidate is explicitly reconciled.",
                             actionId,
                             historicalWarning: "Original INSTALL remains failed/unknown; its candidate effects are inert and retained.",
                             historicalResult: closure.OriginalResult);
@@ -929,9 +931,11 @@ namespace Rice.AI.Codedb.Editor
                 return new AICodedbManagerActionIndexRead(
                     AICodedbManagerActionIndexState.Conflict,
                     failedInstallIndex,
-                    "Historical candidate ownership is ambiguous: " + orphanCandidate
-                        + " has no matching Manager action journal marker or terminal closure. "
-                        + "New project changes remain blocked until that candidate is explicitly reconciled.",
+                    effectsObservation != null && !effectsObservation.Safe
+                        ? "Retained effects safety check is blocked: " + effectsObservation.Detail
+                        : "Historical candidate ownership is ambiguous: " + orphanCandidate
+                            + " has no matching Manager action journal marker or terminal closure. "
+                            + "New project changes remain blocked until that candidate is explicitly reconciled.",
                     failedInstallIndex?.ActionId,
                     historicalWarning: warning,
                     historicalResult: failedInstallResult);

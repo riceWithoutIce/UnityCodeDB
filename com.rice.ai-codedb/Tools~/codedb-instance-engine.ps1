@@ -3391,16 +3391,25 @@ function Get-InstanceRetainedEffectsObservation {
         foreach ($selected in @($current, $lkg)) {
             if ($null -ne $selected -and $selected.InstanceId -cin $ids) { throw 'Retained failed candidate is selected.' }
         }
-        try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
-        catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+        # Historical ownership is observation authority, not target-runtime
+        # admission. Selection already passed the Package transition closure.
+        $historicalSelection = $null -ne $current -and $current.GenerationDisposition -ceq 'TRUSTED_PREVIOUS'
+        if ($historicalSelection) {
+            $selection = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 2
+            $contract = Get-RemoveIntegrationActivationState -Manifest $Manifest -AuthorityKind VERSIONED_V2 -OwnerIdentityVersion 2 -ProjectRoot $ProjectRoot -Selection $selection
+        } else {
+            try { $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+            catch { $contract = Get-InstanceActivationContractRecoveryState -Manifest $Manifest -ProjectRoot $ProjectRoot }
+        }
         if ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING')) {
             throw 'Activation ownership is pending; retained effects cannot authorize a new operation.'
         }
-        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval:$historicalSelection
         $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $installEligible = $desired.DesiredState -eq 'UNINSTALLED' -or (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot)
         $operationDetail = if ($installEligible) { 'Existing Install preconditions are present; confirmed dispatch still revalidates.' } else { 'Retained effects are safe, but existing Install requires first-install or explicit UNINSTALLED state. Installed generation migration remains a separate route.' }
-        return [ordered]@{ state = 'SAFE'; project_root = $ProjectRoot; package_root = $PackageRoot; instance_ids = @($ids | Sort-Object); detail = 'Current retained effects are independently validated; original command outcomes are unchanged.'; install_eligible = [bool]$installEligible; operation_detail = $operationDetail }
+        $detail = if ($historicalSelection) { 'Selected predecessor ownership and retained effects are independently validated against Package authority; target runtime readiness and historical removal remain separate checks. Original command outcomes are unchanged.' } else { 'Current retained effects are independently validated; original command outcomes are unchanged.' }
+        return [ordered]@{ state = 'SAFE'; project_root = $ProjectRoot; package_root = $PackageRoot; instance_ids = @($ids | Sort-Object); detail = $detail; install_eligible = [bool]$installEligible; operation_detail = $operationDetail }
     } catch {
         return [ordered]@{ state = 'BLOCKED'; project_root = $ProjectRoot; package_root = $PackageRoot; instance_ids = @(); detail = $_.Exception.Message; install_eligible = $false; operation_detail = 'Relevant effects remain unresolved; no new operation is authorized by this observation.' }
     }
