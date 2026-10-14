@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -601,7 +603,12 @@ namespace Rice.AI.Codedb.Editor
             if (text(desired, "desired_state") != "INSTALLED")
                 throw new InvalidOperationException("Retained candidate current disposition is unresolved.");
             var selected = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
-            if (!selected.CanPublishEditorLease || selected.InstanceId == retainedId)
+            // Historical closure validation authenticates the selected instance
+            // and its Package transition.  A TrustedPrevious selection is valid
+            // historical evidence even though it must not publish an operational
+            // lease for the current Package.
+            if ((!selected.IsCurrent && !selected.IsTrustedPrevious)
+                || selected.InstanceId == retainedId)
                 throw new InvalidOperationException("Retained candidate fresh selection is not authenticated.");
             var instancePath = RetainedProjectPath(context, selected.InstanceRelativePath + "/instance.json");
             var instance = AICodedbStrictJson.ReadObject(instancePath, 131072, label);
@@ -908,13 +915,17 @@ namespace Rice.AI.Codedb.Editor
                         null, "A historical unknown-action marker has no matching original receipt.",
                         closure.Key);
             }
+            var ignoredCandidates = new List<string>();
             var orphanCandidate = FindUnownedProvisioningCandidate(context, knownActionIds,
-                effectsObservation, inspectCandidateEffects);
+                effectsObservation, inspectCandidateEffects, ignoredCandidates);
             if (effectsObservation != null && !effectsObservation.Safe)
                 orphanCandidate = effectsObservation.Detail;
             if (!string.IsNullOrEmpty(orphanCandidate))
             {
                 var warning = string.Join("\n", retainedUnknown);
+                if (ignoredCandidates.Count != 0)
+                    warning += (warning.Length == 0 ? string.Empty : "\n")
+                        + string.Join("\n", ignoredCandidates);
                 return new AICodedbManagerActionIndexRead(
                     AICodedbManagerActionIndexState.Conflict,
                     failedInstallIndex,
@@ -926,6 +937,9 @@ namespace Rice.AI.Codedb.Editor
                     historicalResult: failedInstallResult);
             }
             var historicalWarning = string.Join("\n", retainedUnknown);
+            if (ignoredCandidates.Count != 0)
+                historicalWarning += (historicalWarning.Length == 0 ? string.Empty : "\n")
+                    + string.Join("\n", ignoredCandidates);
             if (effectsObservation != null && effectsObservation.Safe && effectsObservation.InstanceIds.Count != 0)
                 historicalWarning += "\nIndependently validated retained candidates are historical effects; original failed/unknown results are unchanged. " + effectsObservation.OperationDetail;
             var historicalIds = new List<string>(historicalActionIds).ToArray();
@@ -940,19 +954,26 @@ namespace Rice.AI.Codedb.Editor
         private static AICodedbManagerActionIndexRead ReadEffectsOnly(
             AICodedbEditorExecutionContext context, AICodedbRetainedEffectsObservation observation)
         {
-            var orphan = FindUnownedProvisioningCandidate(context, Array.Empty<string>(), observation);
+            var ignoredCandidates = new List<string>();
+            var orphan = FindUnownedProvisioningCandidate(context, Array.Empty<string>(), observation,
+                historicalWarnings: ignoredCandidates);
             if (observation != null && !observation.Safe) orphan = observation.Detail;
+            var warning = observation != null && observation.Safe && observation.InstanceIds.Count != 0
+                ? "Independently validated retained candidates are historical effects; original action attribution remains unavailable. " + observation.OperationDetail
+                : string.Empty;
+            if (ignoredCandidates.Count != 0)
+                warning += (warning.Length == 0 ? string.Empty : "\n") + string.Join("\n", ignoredCandidates);
             return new AICodedbManagerActionIndexRead(string.IsNullOrEmpty(orphan)
                 ? AICodedbManagerActionIndexState.Empty : AICodedbManagerActionIndexState.Conflict,
                 detail: orphan, effectsObservation: observation,
-                historicalWarning: observation != null && observation.Safe && observation.InstanceIds.Count != 0
-                    ? "Independently validated retained candidates are historical effects; original action attribution remains unavailable. " + observation.OperationDetail : null);
+                historicalWarning: warning);
         }
 
         private static string FindUnownedProvisioningCandidate(
             AICodedbEditorExecutionContext context, IEnumerable<string> knownActionIds,
             AICodedbRetainedEffectsObservation effectsObservation = null,
-            bool inspectCandidateEffects = true)
+            bool inspectCandidateEffects = true,
+            List<string> historicalWarnings = null)
         {
             if (!inspectCandidateEffects) return string.Empty;
             var instancesRoot = Path.Combine(context.ProjectRoot, "AIWork/.runtime/codedb/instances");
@@ -988,9 +1009,379 @@ namespace Rice.AI.Codedb.Editor
                     || !AICodedbSupervisorProtocol.IsManagerActionId(actionId))
                     return instanceId + " (invalid INSTALL origin)";
                 if (!known.Contains(actionId))
-                    return instanceId + " (originating action " + actionId + ")";
+                {
+                    var unrelated = ClassifyUnownedProvisioningCandidate(
+                        context, entry, instanceId, manifest, out var warning);
+                    if (!string.IsNullOrEmpty(warning))
+                        historicalWarnings?.Add(warning);
+                    if (!string.IsNullOrEmpty(unrelated))
+                        return unrelated;
+                }
             }
             return string.Empty;
+        }
+
+        private static string ClassifyUnownedProvisioningCandidate(
+            AICodedbEditorExecutionContext context, string instanceRoot, string instanceId,
+            Dictionary<string, object> manifest, out string warning)
+        {
+            warning = string.Empty;
+            const string label = "CodeDB unowned provisioning candidate";
+            // Legacy/minimal manifests are not enough to prove that a candidate
+            // belongs to an unrelated generation. Keep their old fail-closed
+            // behavior instead of guessing from directory age alone.
+            if (!manifest.ContainsKey("project_identity")
+                || !manifest.ContainsKey("generation_id")
+                || !manifest.ContainsKey("generation_relative_path")
+                || !manifest.ContainsKey("generation_manifest_sha256")
+                || !manifest.ContainsKey("payload_version")
+                || !manifest.ContainsKey("payload_sequence")
+                || !manifest.ContainsKey("package_version")
+                || !manifest.ContainsKey("bootstrap_protocol")
+                || !manifest.ContainsKey("instance_id")
+                || !manifest.ContainsKey("instance_relative_path")
+                || !manifest.ContainsKey("worker_relative_path")
+                || !manifest.ContainsKey("worker_sha256"))
+                return instanceId + " (candidate identity is incomplete)";
+
+            AICodedbCurrentInstanceStore.ValidateOriginatingAction(manifest);
+            var expectedProjectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(context.ProjectRoot);
+            var projectIdentity = AICodedbStrictJson.GetRequiredString(manifest, "project_identity", label);
+            var manifestInstanceId = AICodedbStrictJson.GetRequiredString(manifest, "instance_id", label);
+            var instanceRelativePath = AICodedbStrictJson.GetRequiredString(manifest, "instance_relative_path", label);
+            var generationId = AICodedbStrictJson.GetRequiredString(manifest, "generation_id", label);
+            var generationRelativePath = AICodedbStrictJson.GetRequiredString(manifest, "generation_relative_path", label);
+            var generationManifestSha256 = AICodedbStrictJson.GetRequiredString(manifest,
+                "generation_manifest_sha256", label);
+            var packageVersion = AICodedbStrictJson.GetRequiredString(manifest, "package_version", label);
+            var payloadVersion = AICodedbStrictJson.GetRequiredString(manifest, "payload_version", label);
+            var payloadSequence = AICodedbStrictJson.GetRequiredInt32(manifest, "payload_sequence", label);
+            var bootstrapProtocol = AICodedbStrictJson.GetRequiredInt32(manifest, "bootstrap_protocol", label);
+            var expectedRelativePath = AICodedbProjectSettings.InstancesRelativePath + "/" + instanceId;
+            var expectedGenerationPath = AICodedbProjectSettings.HostGenerationsRelativePath + "/" + generationId;
+            if (!string.Equals(projectIdentity, expectedProjectIdentity, StringComparison.Ordinal)
+                || !string.Equals(manifestInstanceId, instanceId, StringComparison.Ordinal)
+                || !string.Equals(instanceRelativePath, expectedRelativePath, StringComparison.Ordinal)
+                || !IsGenerationIdentity(generationId)
+                || !string.Equals(generationRelativePath, expectedGenerationPath, StringComparison.Ordinal)
+                || !IsLowerHex64(generationManifestSha256)
+                || string.IsNullOrWhiteSpace(packageVersion)
+                || string.IsNullOrWhiteSpace(payloadVersion)
+                || payloadSequence < 1
+                || bootstrapProtocol < 1)
+                return instanceId + " (candidate identity conflicts with the project)";
+
+            var generationRoot = Path.Combine(context.ProjectRoot, generationRelativePath);
+            AssertProjectPath(context, generationRoot);
+            var generationManifestPath = Path.Combine(generationRoot, "generation-manifest.json");
+            AssertProjectPath(context, generationManifestPath);
+            if (!File.Exists(generationManifestPath) || new FileInfo(generationManifestPath).Length > 1048576
+                || !string.Equals(RetainedFileHash(generationManifestPath), generationManifestSha256,
+                    StringComparison.OrdinalIgnoreCase))
+                return instanceId + " (candidate generation closure is unavailable)";
+
+            var generation = AICodedbStrictJson.ReadObject(generationManifestPath, 1048576, label);
+            if (AICodedbStrictJson.GetRequiredInt32(generation, "schema_version", label) != 1
+                || AICodedbStrictJson.GetRequiredString(generation, "managed_by", label) != "com.rice.ai-codedb"
+                || AICodedbStrictJson.GetRequiredString(generation, "generation_id", label) != generationId
+                || AICodedbStrictJson.GetRequiredString(generation, "package_version", label) != packageVersion
+                || AICodedbStrictJson.GetRequiredString(generation, "payload_version", label) != payloadVersion
+                || AICodedbStrictJson.GetRequiredInt32(generation, "payload_sequence", label) != payloadSequence
+                || AICodedbStrictJson.GetRequiredInt32(generation, "bootstrap_protocol", label) != bootstrapProtocol)
+                return instanceId + " (candidate generation metadata conflicts)";
+            var declaredFiles = AICodedbStrictJson.GetRequiredArray(generation, "files", label);
+            if (declaredFiles.Count == 0 || declaredFiles.Count > 256)
+                return instanceId + " (candidate generation file count is invalid)";
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var workerHash = AICodedbStrictJson.GetRequiredString(manifest, "worker_sha256", label);
+            if (!IsLowerHex64(workerHash)
+                || AICodedbStrictJson.GetRequiredString(manifest, "worker_relative_path", label)
+                    != "wrapper/codedb-project-instance-worker.mjs")
+                return instanceId + " (candidate worker identity is invalid)";
+            var workerMatched = false;
+            foreach (var raw in declaredFiles)
+            {
+                var file = AICodedbStrictJson.RequireObject(raw, label);
+                var relative = AICodedbStrictJson.GetRequiredString(file, "path", label);
+                var hash = AICodedbStrictJson.GetRequiredString(file, "sha256", label);
+                var path = RetainedProjectPath(context, generationRelativePath + "/" + relative);
+                if (!paths.Add(relative) || !IsLowerHex64(hash) || !File.Exists(path)
+                    || new FileInfo(path).Length > 4194304 || RetainedFileHash(path) != hash)
+                    return instanceId + " (candidate generation file closure conflicts)";
+                if (relative == "wrapper/codedb-project-instance-worker.mjs")
+                    workerMatched = hash == workerHash;
+            }
+            if (!workerMatched) return instanceId + " (candidate worker is not bound to its generation)";
+
+            var selected = AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot);
+            var selectedAuthenticated = selected.IsCurrent || selected.IsTrustedPrevious;
+            if (!selectedAuthenticated || instanceId == selected.InstanceId || generationId == selected.GenerationId)
+            {
+                if (!selectedAuthenticated)
+                    return instanceId + " (current instance selection is unavailable)";
+                return instanceId + " (candidate matches the selected instance generation)";
+            }
+            var runtime = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
+            if (generationId == runtime.Target.GenerationId || payloadSequence >= selected.PayloadSequence
+                || !HasIndependentCurrentSelection(context, selected, instanceId))
+                return instanceId + " (candidate relevance to current control authority is unresolved)";
+            var identity = new AICodedbRuntimeIdentity(packageVersion, payloadVersion, payloadSequence,
+                generationId, bootstrapProtocol);
+            var canonicalGeneration = Path.Combine(context.PackageRoot, "Payload~/Generations", generationId,
+                "generation-manifest.json");
+            if (runtime.Classify(identity) != AICodedbRuntimeGenerationDisposition.TrustedPrevious
+                || !File.Exists(canonicalGeneration) || new FileInfo(canonicalGeneration).Length > 1048576
+                || RetainedFileHash(canonicalGeneration) != generationManifestSha256)
+                return instanceId + " (candidate generation is not an authenticated Package predecessor)";
+
+            var holder = FindActiveCandidateHolder(context, instanceRoot, instanceId,
+                generationId, expectedProjectIdentity);
+            if (!string.IsNullOrEmpty(holder))
+                return instanceId + " (" + holder + ")";
+
+            warning = "Unrelated historical candidate " + instanceId
+                + " (generation " + generationId + ") because the authenticated selected generation is "
+                + selected.GenerationId + " and no active holder was observed. Its original action outcome remains unknown; no cleanup or mutation is authorized by this observation.";
+            return string.Empty;
+        }
+
+        private static bool HasIndependentCurrentSelection(AICodedbEditorExecutionContext context,
+            AICodedbCurrentInstanceStatus selected, string candidateId)
+        {
+            const string label = "historical candidate current authority";
+            var integration = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            if (integration.State != AICodedbProjectIntegrationState.Installed
+                || string.IsNullOrEmpty(integration.StateId)) return false;
+            var runtime = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
+            var root = Path.GetDirectoryName(runtime.ControlContract.NamespaceRelativePath).Replace('\\', '/');
+            var activation = AICodedbStrictJson.ReadObject(
+                RetainedProjectPath(context, root + "/activation.json"), 65536, label);
+            var operation = AICodedbStrictJson.ReadObject(
+                RetainedProjectPath(context, root + "/operation.json"), 1048576, label);
+            Func<Dictionary<string, object>, string, string> text =
+                (record, field) => AICodedbStrictJson.GetRequiredString(record, field, label);
+            if (text(activation, "publication_phase") != "COMMITTED" || text(operation, "phase") != "COMMITTED"
+                || !AICodedbSupervisorProtocol.IsManagerActionId(text(operation, "operation_id"))
+                || text(activation, "operation_id") != text(operation, "operation_id")
+                || text(activation, "runtime_contract_sha256") != text(operation, "runtime_contract_sha256")
+                || !IsLowerHex64(text(operation, "runtime_contract_sha256"))) return false;
+            foreach (var record in new[] { activation, operation })
+            {
+                var contract = AICodedbStrictJson.RequireObject(record["control_contract"], label);
+                if (AICodedbStrictJson.GetRequiredInt32(record, "schema_version", label) != 1
+                    || text(record, "managed_by") != "com.rice.ai-codedb"
+                    || text(record, "project_identity") != AICodedbEditorLifecycle.CreateProjectIdentity(context.ProjectRoot)
+                    || !AICodedbPaths.AreSameAbsoluteProjectRoot(text(record, "project_root"), context.ProjectRoot)
+                    || text(record, "activation_epoch") != selected.ActivationEpoch
+                    || text(contract, "id") != runtime.ControlContract.Id
+                    || AICodedbStrictJson.GetRequiredInt32(contract, "version", label) != runtime.ControlContract.Version
+                    || AICodedbStrictJson.GetRequiredInt32(contract, "schema_version", label) != runtime.ControlContract.SchemaVersion
+                    || text(contract, "sha256") != runtime.ControlContract.Sha256) return false;
+            }
+            foreach (var pair in new[] { Tuple.Create(activation, "candidate"), Tuple.Create(activation, "current"),
+                Tuple.Create(activation, "last_known_good"), Tuple.Create(operation, "candidate") })
+            {
+                var reference = AICodedbStrictJson.RequireObject(pair.Item1[pair.Item2], label);
+                if (text(reference, "instance_id") != selected.InstanceId
+                    || text(reference, "generation_id") != selected.GenerationId
+                    || text(reference, "instance_manifest_sha256") != RetainedFileHash(
+                        RetainedProjectPath(context, selected.InstanceRelativePath + "/instance.json"))) return false;
+            }
+            var lastGood = AICodedbStrictJson.ReadObject(RetainedProjectPath(context,
+                "AIWork/.runtime/codedb/control/last-known-good-instance.json"), 65536, label);
+            if (text(lastGood, "instance_id") != selected.InstanceId
+                || text(lastGood, "generation_id") != selected.GenerationId) return false;
+            var candidateRelative = AICodedbProjectSettings.InstancesRelativePath + "/" + candidateId;
+            foreach (var raw in AICodedbStrictJson.GetRequiredArray(operation, "mutations", label))
+            {
+                var mutation = AICodedbStrictJson.RequireObject(raw, label);
+                var target = text(mutation, "target");
+                if (target == candidateRelative || target.StartsWith(candidateRelative + "/", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+
+        private static string FindActiveCandidateHolder(
+            AICodedbEditorExecutionContext context, string instanceRoot, string instanceId,
+            string generationId, string projectIdentity)
+        {
+            var editorLeaseRoot = Path.Combine(instanceRoot, "watch", "lifecycle", "editor-leases");
+            AssertProjectPath(context, editorLeaseRoot);
+            if (Directory.Exists(editorLeaseRoot))
+            {
+                var paths = Directory.GetFiles(editorLeaseRoot);
+                if (paths.Length > 128)
+                    return "candidate Editor lease count exceeds its bound";
+                foreach (var path in paths)
+                {
+                    AssertProjectPath(context, path);
+                    var lease = AICodedbEditorLifecycle.ReadEditorLease(path);
+                    if (lease == null)
+                        return "candidate Editor lease is invalid";
+                    if (lease.schema_version != 1 || lease.managed_by != "com.rice.ai-codedb"
+                        || !AICodedbSupervisorProtocol.IsManagerActionId(lease.session_id)
+                        || Path.GetFileName(path) != lease.session_id + ".json"
+                        || lease.project_identity != projectIdentity
+                        || !AICodedbPaths.AreSameAbsoluteProjectRoot(lease.project_root, context.ProjectRoot)
+                        || !long.TryParse(lease.process_start_ticks, NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+                        || ticks <= 0)
+                        return "candidate Editor lease identity conflicts";
+                    if (IsLeasePossiblyLive(lease.editor_pid, lease.created_at_utc, lease.heartbeat_at_utc))
+                        return "candidate has an active Editor lease";
+                }
+                if (Directory.GetDirectories(editorLeaseRoot).Length != 0)
+                    return "candidate Editor lease directory is invalid";
+            }
+
+            var instanceLeaseRoot = Path.Combine(instanceRoot, "leases");
+            AssertProjectPath(context, instanceLeaseRoot);
+            if (Directory.Exists(instanceLeaseRoot))
+            {
+                var paths = Directory.GetFiles(instanceLeaseRoot);
+                if (paths.Length > 128)
+                    return "candidate instance lease count exceeds its bound";
+                foreach (var path in paths)
+                {
+                    AssertProjectPath(context, path);
+                    if (IsActiveInstanceLease(path, context, instanceId, generationId, projectIdentity))
+                        return "candidate has an active instance lease";
+                }
+                if (Directory.GetDirectories(instanceLeaseRoot).Length != 0)
+                    return "candidate instance lease directory is invalid";
+            }
+
+            var generationLeaseRoot = Path.Combine(
+                context.ProjectRoot, "AIWork/.runtime/codedb/host/leases", generationId);
+            AssertProjectPath(context, generationLeaseRoot);
+            if (Directory.Exists(generationLeaseRoot))
+            {
+                var paths = Directory.GetFiles(generationLeaseRoot);
+                if (paths.Length > 128)
+                    return "candidate generation lease count exceeds its bound";
+                foreach (var path in paths)
+                {
+                    AssertProjectPath(context, path);
+                    if (IsActiveGenerationLease(path, context, generationId))
+                        return "candidate has an active generation lease";
+                }
+                if (Directory.GetDirectories(generationLeaseRoot).Length != 0)
+                    return "candidate generation lease directory is invalid";
+            }
+            foreach (var relative in new[] { "watch/coordinator/coordinator-state.json", "watch/state.json", "retiring.json" })
+            {
+                var path = Path.Combine(instanceRoot, relative);
+                AssertProjectPath(context, path);
+                if (File.Exists(path) || Directory.Exists(path)) return "candidate has unresolved runtime authority";
+            }
+            return string.Empty;
+        }
+
+        private static bool IsActiveInstanceLease(
+            string path, AICodedbEditorExecutionContext context, string instanceId,
+            string generationId, string projectIdentity)
+        {
+            const string label = "CodeDB instance lease";
+            try
+            {
+                var lease = AICodedbStrictJson.ReadObject(path, 65536, label);
+                if (AICodedbStrictJson.GetRequiredInt32(lease, "schema_version", label) != 1
+                    || AICodedbStrictJson.GetRequiredInt32(lease, "instance_lease_version", label) != 1
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "managed_by", label),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "project_identity", label),
+                        projectIdentity, StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "instance_id", label),
+                        instanceId, StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "generation_id", label),
+                        generationId, StringComparison.Ordinal)
+                    || !AICodedbPaths.AreSameAbsoluteProjectRoot(
+                        AICodedbStrictJson.GetRequiredString(lease, "project_root", label), context.ProjectRoot)
+                    || AICodedbStrictJson.GetRequiredString(lease, "owner", label) != "mcp"
+                    || Path.GetFileName(path) != AICodedbStrictJson.GetRequiredString(lease, "lease_id", label) + ".json"
+                    || !long.TryParse(AICodedbStrictJson.GetRequiredString(lease, "process_start_identity", label),
+                        NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) || ticks <= 0)
+                    throw new InvalidOperationException("identity mismatch");
+                return IsLeasePossiblyLive(AICodedbStrictJson.GetRequiredInt32(lease, "pid", label),
+                    AICodedbStrictJson.GetRequiredString(lease, "created_at_utc", label),
+                    AICodedbStrictJson.GetRequiredString(lease, "heartbeat_at_utc", label));
+            }
+            catch
+            {
+                throw new InvalidOperationException("candidate instance lease is invalid");
+            }
+        }
+
+        private static bool IsActiveGenerationLease(
+            string path, AICodedbEditorExecutionContext context, string generationId)
+        {
+            const string label = "CodeDB generation lease";
+            try
+            {
+                var lease = AICodedbStrictJson.ReadObject(path, 65536, label);
+                var owner = AICodedbStrictJson.GetRequiredString(lease, "owner", label);
+                if (AICodedbStrictJson.GetRequiredInt32(lease, "schema_version", label) != 2
+                    || AICodedbStrictJson.GetRequiredInt32(lease, "generation_lease_version", label) < 2
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "managed_by", label),
+                        "com.rice.ai-codedb", StringComparison.Ordinal)
+                    || !string.Equals(AICodedbStrictJson.GetRequiredString(lease, "generation_id", label),
+                        generationId, StringComparison.Ordinal)
+                    || (owner != "watcher" && owner != "mcp")
+                    || !AICodedbPaths.AreSameAbsoluteProjectRoot(
+                        AICodedbStrictJson.GetRequiredString(lease, "project_root", label), context.ProjectRoot)
+                    || Path.GetFileName(path) != AICodedbStrictJson.GetRequiredString(lease, "lease_id", label) + ".json"
+                    || !long.TryParse(AICodedbStrictJson.GetRequiredString(lease, "process_start_identity", label),
+                        NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) || ticks <= 0)
+                    throw new InvalidOperationException("identity mismatch");
+                return IsLeasePossiblyLive(AICodedbStrictJson.GetRequiredInt32(lease, "pid", label),
+                    AICodedbStrictJson.GetRequiredString(lease, "created_at_utc", label),
+                    AICodedbStrictJson.GetRequiredString(lease, "heartbeat_at_utc", label));
+            }
+            catch
+            {
+                throw new InvalidOperationException("candidate generation lease is invalid");
+            }
+        }
+
+        private static bool IsLeasePossiblyLive(int pid, string created, string heartbeat)
+        {
+            if (pid <= 0 || !DateTimeOffset.TryParse(created, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out var createdAt)
+                || !DateTimeOffset.TryParse(heartbeat, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out var heartbeatAt)
+                || createdAt > heartbeatAt || heartbeatAt > DateTimeOffset.UtcNow.AddSeconds(30))
+                throw new InvalidOperationException("Candidate lease timestamps or process identity are invalid.");
+            return heartbeatAt >= DateTimeOffset.UtcNow.AddSeconds(-90)
+                || !string.IsNullOrEmpty(GetProcessStartTicks(pid));
+        }
+
+        private static string GetProcessStartTicks(int processId)
+        {
+            try
+            {
+                using (var process = Process.GetProcessById(processId))
+                {
+                    if (process.HasExited) return string.Empty;
+                    return process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+            catch (ArgumentException)
+            {
+                return string.Empty;
+            }
+            catch { return "unknown"; }
+        }
+
+        private static bool IsGenerationIdentity(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length > 64) return false;
+            foreach (var character in value)
+                if (!((character >= 'a' && character <= 'z')
+                    || (character >= 'A' && character <= 'Z')
+                    || (character >= '0' && character <= '9')
+                    || character == '.' || character == '-' || character == '_'))
+                    return false;
+            return true;
         }
 
         private static bool IsPhysicalKey(string value)

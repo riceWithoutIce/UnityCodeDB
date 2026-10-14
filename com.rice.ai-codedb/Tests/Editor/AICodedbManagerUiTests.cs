@@ -4218,6 +4218,231 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(status.BlocksAutomaticStart, Is.True);
         }
 
+        [TestCase("historical", false)]
+        [TestCase("stale-editor", false)]
+        [TestCase("current-generation", true)]
+        [TestCase("foreign-project", true)]
+        [TestCase("missing-identity", true)]
+        [TestCase("generation-tamper", true)]
+        [TestCase("selection-tamper", true)]
+        [TestCase("uninstalled", true)]
+        [TestCase("operation-pending", true)]
+        [TestCase("activation-candidate", true)]
+        [TestCase("operation-target", true)]
+        [TestCase("editor-holder", true)]
+        [TestCase("instance-holder", true)]
+        [TestCase("generation-holder", true)]
+        [TestCase("invalid-lease", true)]
+        [TestCase("coordinator-state", true)]
+        public void ManagerActionJournal_UnownedHistoricalCandidateRequiresIndependentSelection(
+            string defect, bool blocked)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var originalRoot = _projectRoot;
+                _projectRoot = workspace.GetPath("p");
+                try
+                {
+                    CreateFixtureRoot();
+                    CreateCurrentEvidence();
+                    var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                        _projectRoot, _packageRoot, "historical candidate");
+                    using var receiptScope = AICodedbPaths.UseManagerActionsRootForTests(workspace.GetPath("journal"));
+                    var runtime = AICodedbPackageRuntimeContractStore.Read(_packageRoot);
+                    var selected = AICodedbCurrentInstanceStore.Read(_projectRoot, _packageRoot);
+                    Assert.That(selected.IsCurrent, Is.True, selected.Detail);
+                    AICodedbRuntimeIdentity old = default(AICodedbRuntimeIdentity);
+                    foreach (var transition in runtime.Transitions)
+                        if (transition.Identity.PayloadSequence < runtime.Target.PayloadSequence)
+                            old = transition.Identity;
+                    Assert.That(old.PayloadSequence, Is.GreaterThan(0));
+                    if (defect == "current-generation") old = runtime.Target;
+                    var generationRelative = AICodedbProjectSettings.HostGenerationsRelativePath + "/" + old.GenerationId;
+                    var generationRoot = context.GetProjectPath(generationRelative);
+                    if (!Directory.Exists(generationRoot))
+                        CopyDirectory(Path.Combine(_packageRoot, "Payload~/Generations", old.GenerationId), generationRoot);
+                    var candidateId = Guid.NewGuid().ToString("N");
+                    var candidateRelative = AICodedbProjectSettings.InstancesRelativePath + "/" + candidateId;
+                    var candidatePath = context.GetProjectPath(candidateRelative + "/instance.json");
+                    var candidate = new Dictionary<string, object>
+                    {
+                        ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                        ["project_identity"] = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot),
+                        ["instance_id"] = candidateId, ["instance_relative_path"] = candidateRelative,
+                        ["state"] = "PROVISIONING", ["verified_at_utc"] = "",
+                        ["package_version"] = old.PackageVersion, ["payload_version"] = old.PayloadVersion,
+                        ["payload_sequence"] = old.PayloadSequence, ["generation_id"] = old.GenerationId,
+                        ["generation_relative_path"] = generationRelative,
+                        ["generation_manifest_sha256"] = HashFile(Path.Combine(generationRoot, "generation-manifest.json")),
+                        ["bootstrap_protocol"] = old.BootstrapProtocol,
+                        ["worker_relative_path"] = "wrapper/codedb-project-instance-worker.mjs",
+                        ["worker_sha256"] = HashFile(Path.Combine(generationRoot, "wrapper/codedb-project-instance-worker.mjs")),
+                        ["originating_action"] = new Dictionary<string, object>
+                        {
+                            ["action"] = "INSTALL", ["action_id"] = Guid.NewGuid().ToString("N"),
+                            ["operation_id"] = Guid.NewGuid().ToString("N")
+                        }
+                    };
+                    if (defect == "foreign-project") candidate["project_identity"] = "sha256:" + new string('0', 64);
+                    if (defect == "missing-identity") candidate.Remove("project_identity");
+                    WriteJson(candidatePath, candidate);
+                    var pointerPath = context.GetProjectPath(AICodedbProjectSettings.InstanceCurrentRelativePath);
+                    var pointer = AICodedbStrictJson.ReadObject(pointerPath, 65536, "fixture pointer");
+                    var lastGoodPath = context.GetProjectPath("AIWork/.runtime/codedb/control/last-known-good-instance.json");
+                    WriteJson(lastGoodPath, pointer);
+                    var current = new Dictionary<string, object>
+                    {
+                        ["instance_id"] = selected.InstanceId, ["generation_id"] = selected.GenerationId,
+                        ["instance_manifest_sha256"] = pointer["instance_manifest_sha256"]
+                    };
+                    var common = new Dictionary<string, object>
+                    {
+                        ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                        ["project_identity"] = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot), ["project_root"] = context.ProjectRoot,
+                        ["operation_id"] = Guid.NewGuid().ToString("N"), ["activation_epoch"] = selected.ActivationEpoch,
+                        ["runtime_contract_sha256"] = runtime.Sha256,
+                        ["control_contract"] = new Dictionary<string, object>
+                        {
+                            ["id"] = runtime.ControlContract.Id, ["version"] = runtime.ControlContract.Version,
+                            ["schema_version"] = runtime.ControlContract.SchemaVersion, ["sha256"] = runtime.ControlContract.Sha256
+                        },
+                        ["candidate"] = current
+                    };
+                    var activation = CloneDocument(common);
+                    activation["publication_phase"] = "COMMITTED";
+                    activation["current"] = current;
+                    activation["last_known_good"] = current;
+                    var operation = CloneDocument(common);
+                    operation["phase"] = defect == "operation-pending" ? "PREPARED" : "COMMITTED";
+                    operation["mutations"] = defect == "operation-target"
+                        ? new List<object> { new Dictionary<string, object> { ["target"] = candidateRelative + "/config/config.json" } }
+                        : new List<object>();
+                    if (defect == "activation-candidate")
+                        activation["candidate"] = new Dictionary<string, object> { ["instance_id"] = candidateId, ["generation_id"] = old.GenerationId };
+                    var controlRoot = Path.GetDirectoryName(runtime.ControlContract.NamespaceRelativePath);
+                    var activationPath = context.GetProjectPath(controlRoot + "/activation.json");
+                    var operationPath = context.GetProjectPath(controlRoot + "/operation.json");
+                    WriteJson(activationPath, activation);
+                    WriteJson(operationPath, operation);
+                    var desiredPath = context.GetProjectPath(AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+                    WriteJson(desiredPath, new Dictionary<string, object>
+                    {
+                        ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                        ["project_root"] = context.ProjectRoot, ["project_identity"] = common["project_identity"],
+                        ["desired_state"] = defect == "uninstalled" ? "UNINSTALLED" : "INSTALLED",
+                        ["state_id"] = Guid.NewGuid().ToString("N"), ["cleanup_state"] = "PENDING",
+                        ["updated_at_utc"] = DateTime.UtcNow.ToString("o")
+                    });
+                    if (defect == "generation-tamper") File.AppendAllText(Path.Combine(generationRoot, "generation-manifest.json"), " ");
+                    if (defect == "selection-tamper") File.AppendAllText(context.GetProjectPath(selected.InstanceRelativePath + "/instance.json"), " ");
+                    if (defect.Contains("holder") || defect == "stale-editor" || defect == "invalid-lease")
+                    {
+                        using var process = System.Diagnostics.Process.GetCurrentProcess();
+                        var session = Guid.NewGuid().ToString("N");
+                        var at = DateTime.UtcNow.AddSeconds(defect == "stale-editor" ? -120 : -1).ToString("o");
+                        var lease = new Dictionary<string, object>
+                        {
+                            ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                            ["project_root"] = _projectRoot, ["project_identity"] = common["project_identity"],
+                            ["created_at_utc"] = at, ["heartbeat_at_utc"] = at,
+                            ["session_id"] = session, ["editor_pid"] = defect == "stale-editor" ? int.MaxValue : process.Id,
+                            ["process_start_ticks"] = process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture)
+                        };
+                        var leasePath = context.GetProjectPath(candidateRelative + "/watch/lifecycle/editor-leases/" + session + ".json");
+                        if (defect == "instance-holder" || defect == "generation-holder")
+                        {
+                            lease["schema_version"] = defect == "generation-holder" ? 2 : 1;
+                            lease[defect == "generation-holder" ? "generation_lease_version" : "instance_lease_version"] = defect == "generation-holder" ? 2 : 1;
+                            lease["lease_id"] = "mcp-" + session; lease["owner"] = "mcp"; lease["pid"] = process.Id;
+                            lease["process_start_identity"] = "1"; lease["instance_id"] = candidateId;
+                            lease["generation_id"] = old.GenerationId;
+                            leasePath = context.GetProjectPath((defect == "generation-holder"
+                                ? "AIWork/.runtime/codedb/host/leases/" + old.GenerationId : candidateRelative + "/leases") + "/mcp-" + session + ".json");
+                        }
+                        WriteJson(leasePath, defect == "invalid-lease" ? new Dictionary<string, object>() : lease);
+                    }
+                    if (defect == "coordinator-state")
+                        WriteJson(context.GetProjectPath(candidateRelative + "/watch/coordinator/coordinator-state.json"),
+                            new Dictionary<string, object> { ["state"] = "stopping", ["pid"] = int.MaxValue });
+                    var protectedPaths = new[] { desiredPath, pointerPath, lastGoodPath, activationPath, operationPath, candidatePath };
+                    var before = new List<string>();
+                    foreach (var path in protectedPaths) before.Add(HashFile(path));
+                    var read = AICodedbManagerActionJournal.Read(context);
+                    Assert.That(read.State, Is.EqualTo(blocked ? AICodedbManagerActionIndexState.Conflict : AICodedbManagerActionIndexState.Empty), read.Detail);
+                    if (defect == "coordinator-state") Assert.That(read.Detail, Does.Contain("unresolved runtime authority"));
+                    if (!blocked) Assert.That(read.HistoricalWarning, Does.Contain(candidateId).And.Contain("outcome remains unknown"));
+                    for (var i = 0; i < protectedPaths.Length; i++) Assert.That(HashFile(protectedPaths[i]), Is.EqualTo(before[i]));
+                }
+                finally { _projectRoot = originalRoot; }
+            });
+        }
+
+        [TestCase("trusted-previous", false)]
+        [TestCase("same-candidate", true)]
+        [TestCase("tampered-selection", true)]
+        [TestCase("foreign-project", true)]
+        public void RetainedCurrentState_AuthenticatesHistoricalSelectionWithoutOperationalLease(string defect, bool blocked)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                var originalRoot = _projectRoot;
+                _projectRoot = workspace.GetPath("p");
+                try
+                {
+                    CreateFixtureRoot();
+                    var runtime = AICodedbPackageRuntimeContractStore.Read(_packageRoot);
+                    AICodedbRuntimeIdentity previous = default(AICodedbRuntimeIdentity);
+                    foreach (var transition in runtime.Transitions)
+                        if (transition.Identity.PayloadSequence < runtime.Target.PayloadSequence)
+                            previous = transition.Identity;
+                    Assert.That(previous.PayloadSequence, Is.GreaterThan(0));
+                    CreateCurrentEvidence(previous);
+                    var selected = AICodedbCurrentInstanceStore.Read(_projectRoot, _packageRoot);
+                    Assert.That(selected.IsTrustedPrevious, Is.True, selected.Detail);
+                    Assert.That(selected.CanPublishEditorLease, Is.False);
+                    var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor, _projectRoot, _packageRoot, "retained history");
+                    var manifestPath = context.GetProjectPath(selected.InstanceRelativePath + "/instance.json");
+                    var manifest = AICodedbStrictJson.ReadObject(manifestPath, 131072, "fixture manifest");
+                    manifest["originating_action"] = new Dictionary<string, object>
+                    {
+                        ["action"] = "INSTALL", ["action_id"] = Guid.NewGuid().ToString("N"),
+                        ["operation_id"] = Guid.NewGuid().ToString("N")
+                    };
+                    WriteJson(manifestPath, manifest);
+                    var pointerPath = context.GetProjectPath(AICodedbProjectSettings.InstanceCurrentRelativePath);
+                    var pointer = AICodedbStrictJson.ReadObject(pointerPath, 65536, "fixture pointer");
+                    pointer["instance_manifest_sha256"] = HashFile(manifestPath);
+                    if (defect == "foreign-project") pointer["project_identity"] = "sha256:" + new string('0', 64);
+                    WriteJson(pointerPath, pointer);
+                    if (defect == "tampered-selection") File.AppendAllText(manifestPath, " ");
+                    var identity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
+                    var desiredPath = context.GetProjectPath(AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+                    WriteJson(desiredPath, new Dictionary<string, object>
+                    {
+                        ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                        ["project_identity"] = identity, ["project_root"] = _projectRoot, ["desired_state"] = "INSTALLED"
+                    });
+                    var paths = new[] { manifestPath, pointerPath, desiredPath };
+                    var hashes = new List<string>();
+                    foreach (var path in paths) hashes.Add(HashFile(path));
+                    var reader = typeof(AICodedbManagerActionJournal).GetMethod("ValidateRetainedCurrentState",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Exception failure = null;
+                    try
+                    {
+                        reader.Invoke(null, new object[] { context,
+                            new Dictionary<string, object> { ["action_id"] = Guid.NewGuid().ToString("N") },
+                            new Dictionary<string, object> { ["project_identity"] = identity },
+                            defect == "same-candidate" ? selected.InstanceId : Guid.NewGuid().ToString("N"), true });
+                    }
+                    catch (System.Reflection.TargetInvocationException exception) { failure = exception.InnerException; }
+                    Assert.That(failure != null, Is.EqualTo(blocked), failure?.Message);
+                    for (var i = 0; i < paths.Length; i++) Assert.That(HashFile(paths[i]), Is.EqualTo(hashes[i]));
+                }
+                finally { _projectRoot = originalRoot; }
+            });
+        }
+
         [Test]
         public void Read_RejectsSignatureOnlyLegacyEvidence()
         {
@@ -4403,6 +4628,11 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase("malformed")]
         [TestCase("foreign")]
         [TestCase("success")]
+        [TestCase("degraded")]
+        [TestCase("starting")]
+        [TestCase("stopping")]
+        [TestCase("invalid-readiness")]
+        [TestCase("foreign-readiness")]
         public void Read_ClassifiesLiveTransportSeparatelyFromInvalidAuthority(string outcome)
         {
             var fixture = CreateCurrentEvidence();
@@ -4419,7 +4649,23 @@ namespace Rice.AI.Codedb.Editor.Tests
             }
             PublishEvidence(fixture);
             var response = CreateAuthenticatedResponse(fixture);
+            if (outcome == "degraded")
+            {
+                var readiness = (Dictionary<string, object>)response["operational_readiness"];
+                readiness["state"] = "degraded";
+                readiness["reason_code"] = "COORDINATOR_START_FAILED";
+                readiness["coordinator_failure_category"] = "NONZERO_EXIT";
+                readiness["detail"] = "synthetic coordinator startup failure";
+            }
             if (outcome == "foreign") response["owner_epoch"] = "foreign-owner";
+            var operational = (Dictionary<string, object>)response["operational_readiness"];
+            if (outcome == "starting" || outcome == "stopping")
+            {
+                operational["state"] = outcome;
+                operational["reason_code"] = outcome == "starting" ? "COORDINATOR_STARTING" : "SUPERVISOR_STOPPING";
+            }
+            if (outcome == "invalid-readiness") operational["state"] = "unknown-state";
+            if (outcome == "foreign-readiness") operational["selected_instance_id"] = Guid.NewGuid().ToString("N");
             var requests = 0;
             var status = AICodedbControlContractMigrationStore.Read(_projectRoot, _packageRoot,
                 (pipe, request, token) =>
@@ -4433,12 +4679,16 @@ namespace Rice.AI.Codedb.Editor.Tests
                 });
             Assert.That(requests, Is.EqualTo(1), status.DiagnosticDetail);
             var transient = outcome == "timeout" || outcome == "io" || outcome == "empty";
+            var authenticated = outcome == "success" || outcome == "degraded" || outcome == "starting" || outcome == "stopping";
             Assert.That(status.State, Is.EqualTo(transient
                 ? AICodedbControlContractMigrationState.TransientAuthenticationUnavailable
-                : outcome == "success" ? AICodedbControlContractMigrationState.Current
+                : authenticated
+                    ? AICodedbControlContractMigrationState.Current
                     : AICodedbControlContractMigrationState.InvalidOrAmbiguous), status.DiagnosticDetail);
-            Assert.That(status.BlocksAutomaticStart, Is.EqualTo(outcome != "success"));
-            Assert.That(status.IsUsableForAutomaticStart, Is.EqualTo(outcome == "success"));
+            Assert.That(status.BlocksAutomaticStart,
+                Is.EqualTo(!authenticated));
+            Assert.That(status.IsUsableForAutomaticStart,
+                Is.EqualTo(authenticated));
         }
 
         private Dictionary<string, object> CreateAuthenticatedResponse(EvidenceFixture fixture)
@@ -4544,10 +4794,10 @@ namespace Rice.AI.Codedb.Editor.Tests
             };
         }
 
-        private EvidenceFixture CreateCurrentEvidence()
+        private EvidenceFixture CreateCurrentEvidence(AICodedbRuntimeIdentity? identity = null)
         {
             var runtimeContract = AICodedbPackageRuntimeContractStore.Read(_packageRoot);
-            var target = runtimeContract.Target;
+            var target = identity ?? runtimeContract.Target;
             var packageGenerationRoot = Path.Combine(
                 _packageRoot,
                 "Payload~",
@@ -4583,6 +4833,16 @@ namespace Rice.AI.Codedb.Editor.Tests
                 workerRelativePath.Replace('/', Path.DirectorySeparatorChar));
             var generationManifestHash = HashFile(generationManifestPath);
             var workerHash = HashFile(workerPath);
+            if (identity.HasValue)
+                WriteJson(Path.Combine(_projectRoot, AICodedbProjectSettings.HostCurrentPointerRelativePath),
+                    new Dictionary<string, object>
+                    {
+                        ["schema_version"] = 1, ["managed_by"] = "com.rice.ai-codedb",
+                        ["package_version"] = target.PackageVersion, ["payload_version"] = target.PayloadVersion,
+                        ["payload_sequence"] = target.PayloadSequence, ["generation_id"] = target.GenerationId,
+                        ["generation_relative_path"] = generationRelativePath,
+                        ["generation_manifest_sha256"] = generationManifestHash, ["bootstrap_protocol"] = target.BootstrapProtocol
+                    });
             var projectIdentity = AICodedbEditorLifecycle.CreateProjectIdentity(_projectRoot);
             var instanceManifestPath = Path.Combine(instanceRoot, "instance.json");
             const string activationEpoch = "0123456789abcdef0123456789abcdef";

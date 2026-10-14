@@ -206,9 +206,6 @@ namespace Rice.AI.Codedb.Editor.Tests
         [TestCase(AICodedbCurrentInstanceState.ObsoleteReinstallRequired, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.Current)]
         [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Uninstalled, AICodedbControlContractMigrationState.Current)]
         [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Invalid, AICodedbControlContractMigrationState.Current)]
-        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.InvalidOrAmbiguous)]
-        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.TransientAuthenticationUnavailable)]
-        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious, AICodedbProjectIntegrationState.Installed, AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
         public void HistoricalRemovalRouting_PreservesEarlierGuards(
             AICodedbCurrentInstanceState state, AICodedbProjectIntegrationState integration,
             AICodedbControlContractMigrationState migration)
@@ -222,6 +219,27 @@ namespace Rice.AI.Codedb.Editor.Tests
                 () => true, CancellationToken.None, out status, out result), Is.False);
             Assert.That(calls, Is.Zero);
             Assert.That(status.RemovalPreflightPassed, Is.False);
+        }
+
+        [TestCase(AICodedbControlContractMigrationState.InvalidOrAmbiguous)]
+        [TestCase(AICodedbControlContractMigrationState.TransientAuthenticationUnavailable)]
+        [TestCase(AICodedbControlContractMigrationState.ObsoleteReinstallRequired)]
+        public void HistoricalRemovalRouting_OperationalFailureStillRequiresIndependentPreflight(
+            AICodedbControlContractMigrationState migration)
+        {
+            var events = new List<string>();
+            AICodedbProductStatus status;
+            AICodedbCommandResult result;
+            Assert.That(AICodedbEditorLifecycle.TryRouteHistoricalRemoval(
+                HistoricalIntegration(AICodedbProjectIntegrationState.Installed), HistoricalMigration(migration),
+                HistoricalSelection(AICodedbCurrentInstanceState.TrustedPrevious),
+                () => { events.Add("prerequisite"); return Result("[PRODUCT_LAYER PREREQUISITE] CURRENT"); },
+                product => { events.Add("preflight-refused"); return product; },
+                () => events.Add("block"), () => true, CancellationToken.None, out status, out result), Is.True);
+            Assert.That(events, Is.EqualTo(new[] { "block", "prerequisite", "preflight-refused" }));
+            Assert.That(status.RequiresReinstall, Is.True);
+            Assert.That(status.RemovalPreflightPassed, Is.False);
+            Assert.That(status.IsReady, Is.False);
         }
 
         [TestCase("missing")]

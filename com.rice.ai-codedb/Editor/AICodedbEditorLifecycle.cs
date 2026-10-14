@@ -954,7 +954,8 @@ namespace Rice.AI.Codedb.Editor
                 return LifecycleReconcileResult.WithState(AICodedbProductState.NotIntegrated);
             }
             if (migrationStatus.IsTransientAuthenticationFailure
-                && integrationStatus.IsValid && !integrationStatus.IsUninstalled)
+                && integrationStatus.IsValid && !integrationStatus.IsUninstalled
+                && !AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot).IsTrustedPrevious)
             {
                 // Authentication uncertainty never admits start, mutation, or a
                 // new lease. Retry the full classifier against the same context.
@@ -1546,12 +1547,13 @@ namespace Rice.AI.Codedb.Editor
             status = default(AICodedbProductStatus);
             prerequisiteResult = null;
             if (!selected.IsTrustedPrevious
-                || integration.State != AICodedbProjectIntegrationState.Installed
-                || !migration.IsUsableForAutomaticStart)
+                || integration.State != AICodedbProjectIntegrationState.Installed)
                 return false;
 
+            // Historical identity is authenticated by the selection reader.
+            // Operational Supervisor availability does not authorize removal:
+            // the independent backend preflight must still prove it is safe.
             // This route never grants bootstrap eligibility or a lease.
-            // Delegates are the existing worker boundaries, not new permits.
             blockOperationalAdmission();
             if (cancellationToken.IsCancellationRequested || !canContinue())
                 return true;

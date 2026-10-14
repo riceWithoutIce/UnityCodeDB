@@ -1831,7 +1831,7 @@ namespace Rice.AI.Codedb.Editor
                     "Authenticated Supervisor status does not match the current owner and selection evidence.");
             }
 
-            ValidateCoreReadyObservation(
+            ValidateOperationalReadinessObservation(
                 projectRoot,
                 namespacePath,
                 runtimeContract,
@@ -1841,7 +1841,7 @@ namespace Rice.AI.Codedb.Editor
                 label);
         }
 
-        private static void ValidateCoreReadyObservation(
+        private static void ValidateOperationalReadinessObservation(
             string projectRoot,
             string namespacePath,
             AICodedbPackageRuntimeContract runtimeContract,
@@ -1860,23 +1860,18 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException("Authenticated Supervisor operational readiness fields are invalid.");
 
             const string observationLabel = "Authenticated Supervisor operational readiness";
+            var readinessState = AICodedbStrictJson.GetRequiredString(
+                observation, "state", observationLabel);
+            var reasonCode = AICodedbStrictJson.GetRequiredString(
+                observation, "reason_code", observationLabel);
+            var failureCategory = AICodedbStrictJson.GetRequiredString(
+                observation, "coordinator_failure_category", observationLabel);
             if (AICodedbStrictJson.GetRequiredInt32(observation, "schema_version", observationLabel)
                     != AICodedbSupervisorProtocol.OperationalReadinessSchemaVersion
-                || !string.Equals(
-                    AICodedbStrictJson.GetRequiredString(observation, "state", observationLabel),
-                    "core_ready",
-                    StringComparison.Ordinal)
-                || !string.Equals(
-                    AICodedbStrictJson.GetRequiredString(observation, "reason_code", observationLabel),
-                    "COORDINATOR_OPERATIONAL",
-                    StringComparison.Ordinal)
-                || !string.Equals(
-                    AICodedbStrictJson.GetRequiredString(
-                        observation,
-                        "coordinator_failure_category",
-                        observationLabel),
-                    "NONE",
-                    StringComparison.Ordinal)
+                || !AICodedbSupervisorProtocol.IsOperationalReadinessReason(
+                    readinessState, reasonCode)
+                || !AICodedbSupervisorProtocol.IsCoordinatorFailureCategoryCode(
+                    failureCategory)
                 || !AICodedbSupervisorProtocol.PathsEqual(
                     AICodedbStrictJson.GetRequiredString(observation, "project_root", observationLabel),
                     projectRoot)
@@ -1917,7 +1912,7 @@ namespace Rice.AI.Codedb.Editor
                     != AICodedbStrictJson.GetRequiredInt32(state, "supervisor_pid", "Supervisor state"))
             {
                 throw new InvalidOperationException(
-                    "Authenticated Supervisor status is not an owner-bound core_ready observation.");
+                    "Authenticated Supervisor status is not an owner-bound operational readiness observation.");
             }
         }
 
