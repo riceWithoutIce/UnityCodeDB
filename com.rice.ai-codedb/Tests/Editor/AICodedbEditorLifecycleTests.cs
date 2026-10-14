@@ -37,14 +37,15 @@ namespace Rice.AI.Codedb.Editor.Tests
         [Test]
         public void RemovalPreflightFailureCache_PreservesBackendReasonWithoutDispatch()
         {
-            AssertCachedRemovalFailure(new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
-                "Supervisor history conflicts with canonical operation.", false), "history conflicts with canonical operation");
+            AICodedbTestWorkspace.Run(workspace =>
+                AssertCachedRemovalFailure(workspace.Root, new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
+                    "Supervisor history conflicts with canonical operation.", false), "history conflicts with canonical operation"));
         }
 
-        internal static void AssertCachedRemovalFailure(AICodedbCommandResult result, string reason)
+        internal static void AssertCachedRemovalFailure(string testRoot, AICodedbCommandResult result, string reason)
         {
                 var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
-                    "C:/codedb-synthetic/project", "C:/codedb-synthetic/package", "cached refusal");
+                    Path.Combine(testRoot, "project"), Path.Combine(testRoot, "package"), "cached refusal");
                 var status = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
                     AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
                     AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable, "retained instance",

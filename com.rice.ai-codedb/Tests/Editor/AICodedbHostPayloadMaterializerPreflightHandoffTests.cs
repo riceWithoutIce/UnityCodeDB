@@ -33,7 +33,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(failure), Does.Contain("foreign.json"));
-            AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(failure, "foreign.json");
+            AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, failure, "foreign.json");
             var success = new AICodedbCommandResult(0,
                 System.IO.File.ReadAllText(System.IO.Path.Combine(root, "preflight-available.stdout")), string.Empty, false);
             Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(success), Is.True);
