@@ -56,6 +56,8 @@ param(
 
     [switch]$VersionTransitionObservationOnly,
 
+    [switch]$FailedBeforeInstall,
+
     [switch]$HistoricalProbeOnly,
 
     [string]$PredecessorPackageRoot,
@@ -1107,7 +1109,7 @@ function Invoke-FailedPreparationRecoveryCases {
 }
 
 function Invoke-VersionTransitionObservationCases {
-    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot)
+    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot, [switch]$FailedBeforeInstall)
     # Existing production-function extraction and PocFixture are the only seams.
     # No real project, native child, live IPC or authority reader is substituted.
     function Check { param([bool]$Condition,[string]$Label); if(-not $Condition){throw "Version observation assertion: $Label"};$script:Cases++;Write-Host "[OK] $Label" }
@@ -1124,10 +1126,12 @@ function Invoke-VersionTransitionObservationCases {
     $root=Join-Path $Container 'project';foreach($marker in @('Assets','Packages','ProjectSettings')){[void][IO.Directory]::CreateDirectory((Join-Path $root $marker))}
     $script:GenerationId='';$old=Read-PayloadManifest -Root (Join-Path $PredecessorRoot 'Payload~') -ProjectRoot $root
     $script:PocFixture=$true;$script:Action='Install'
-    Invoke-InstanceConvergence -Manifest $old -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
-    $selected=Get-ValidatedCurrentInstance -Manifest $old -ProjectRoot $root
-    $oldState=Get-InstanceActivationContractState -Manifest $old -ProjectRoot $root
-    Check ($oldState.Operation.Phase -ceq 'COMMITTED' -and $selected.GenerationDisposition -ceq 'CURRENT') 'original42 production selected and committed'
+    if ($FailedBeforeInstall) {
+        foreach($file in $old.Files){if($file.Target.StartsWith($script:GenerationTargetPrefix,[StringComparison]::Ordinal)){[void][IO.Directory]::CreateDirectory((Split-Path $file.TargetPath -Parent));Copy-Item -LiteralPath $file.SourcePath -Destination $file.TargetPath}}
+        Check (-not(Test-Path -LiteralPath (Join-Path $root 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs'))) 'failed candidate precedes wrapper publication'
+    } else {
+        Invoke-InstanceConvergence -Manifest $old -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+    }
     $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
     Check ($old.GenerationId -ceq 'poc.42' -and $manifest.GenerationId -ceq 'poc.43' -and $old.RuntimeContractSha256 -cne $manifest.RuntimeContractSha256) 'exact distinct predecessor42 target43'
     # Produce a failed predecessor candidate and intent from real serializers,
@@ -1144,9 +1148,30 @@ function Invoke-VersionTransitionObservationCases {
     $sessionId=[guid]::NewGuid().ToString('N');$leasePath=Join-Path $candidateRoot ('watch/lifecycle/editor-leases/'+$sessionId+'.json')
     Record $leasePath ([ordered]@{schema_version=1;managed_by=$script:ManagedBy;session_id=$sessionId;editor_pid=424242;process_start_ticks='123';project_root=$root;project_identity=Get-MaterializerProjectIdentity -ProjectRoot $root;last_heartbeat_utc=[DateTime]::UtcNow.ToString('o')})
     $retained=Get-ValidatedRetiredInstance -ProjectRoot $root -Manifest $manifest -InstanceRoot $candidateRoot -AllowProvisioning -FailedPreparation
-    $authority=[pscustomobject]@{Evidence=$retained;Effects=@(Get-FailedPreparationEffects -ProjectRoot $root -InstanceId $id -GenerationId $old.GenerationId -Manifest $manifest -Generation $retained.Generation);WrapperSha256=Get-FileSha256 -Path (Join-Path $root 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs')}
+    $wrapperPath=Join-Path $root 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs'
+    $authority=[pscustomobject]@{Evidence=$retained;Effects=@(Get-FailedPreparationEffects -ProjectRoot $root -InstanceId $id -GenerationId $old.GenerationId -Manifest $manifest -Generation $retained.Generation);WrapperSha256=$(if(Test-Path -LiteralPath $wrapperPath){Get-FileSha256 -Path $wrapperPath}else{''})}
     $intentId=[guid]::NewGuid().ToString('N');$intentPath=Join-Path $root ($script:InstanceRemovalIntentsRelativePath+'/'+$intentId+'.json')
     Record $intentPath (New-FailedPreparationRemovalIntentDocument -ProjectRoot $root -StateId $intentId -Authority $authority)
+    $intentHash=Get-FileSha256 -Path $intentPath
+    if ($FailedBeforeInstall) {
+        Check ($authority.WrapperSha256 -ceq '') 'original failed intent records absent wrapper'
+        Record (Join-Path $root $script:InstanceDesiredStateRelativePath) (New-InstanceDesiredStateDocument -ProjectRoot $root -DesiredState UNINSTALLED -StateId $intentId -CleanupState PENDING)
+        $script:GenerationId='';$old=Read-PayloadManifest -Root (Join-Path $PredecessorRoot 'Payload~') -ProjectRoot $root
+        Invoke-InstanceConvergence -Manifest $old -ProjectRoot $root -MarkerPath (Join-Path $root $script:MarkerRelativePath) -ActionName Install
+        $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
+    }
+    $selected=Get-ValidatedCurrentInstance -Manifest $old -ProjectRoot $root
+    $oldState=Get-InstanceActivationContractState -Manifest $old -ProjectRoot $root
+    Check ($oldState.Operation.Phase -ceq 'COMMITTED' -and $selected.GenerationDisposition -ceq 'CURRENT' -and $selected.InstanceId -cne $id) 'original42 production selected and committed distinct from failed candidate'
+    $parsedIntent=(Get-InstanceRemovalIntent -Manifest $old -ProjectRoot $root -StateId $intentId).Document
+    Check ((Assert-FailedPreparationWrapper -Manifest $old -ProjectRoot $root -Document $parsedIntent -AllowActivationHandoff) -ceq $(if($FailedBeforeInstall){'COMMITTED'}else{'ORIGINAL'})) 'current wrapper route preserves original or committed handoff'
+    if ($FailedBeforeInstall) {
+        $strict=$false;try{$null=Get-InstanceRemovalIntent -Manifest $manifest -ProjectRoot $root -StateId $intentId}catch{$strict=$true}
+        Check $strict 'default target intent remains strict on predecessor handoff'
+        Check ((Get-InstanceRemovalIntents -Manifest $manifest -ProjectRoot $root -HistoricalObservation).InstanceId -ceq $id) 'explicit historical intent chain authenticates committed handoff'
+        $null=Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root -HistoricalRemoval -HistoricalObservation
+        Check $true 'explicit historical admission re-reads authenticated intent'
+    }
     $before=Digest $root
     $historical=Observe
     Check ($historical.state -ceq 'SAFE' -and -not $historical.install_eligible -and $historical.instance_ids.Count -eq 1 -and $historical.instance_ids[0] -ceq $id) 'selected42 target43 retained effects SAFE without Install'
@@ -1173,16 +1198,19 @@ function Invoke-VersionTransitionObservationCases {
     } finally {for($i=0;$i -lt $pendingPaths.Count;$i++){[IO.File]::WriteAllBytes($pendingPaths[$i],$pendingBytes[$i])};Remove-Item -LiteralPath $pendingDirectory}
     $worker=Join-Path $selected.Generation.GenerationRoot $script:InstanceWorkerRelativePath;$workerBytes=[IO.File]::ReadAllBytes($worker)
     try{[IO.File]::AppendAllText($worker,'drift');$null=Blocked 'immutable historical worker drift'}finally{[IO.File]::WriteAllBytes($worker,$workerBytes)}
+    $wrapperBytes=[IO.File]::ReadAllBytes($wrapperPath)
+    try{[IO.File]::AppendAllText($wrapperPath,'arbitrary');$null=Blocked 'arbitrary current wrapper hash'}finally{[IO.File]::WriteAllBytes($wrapperPath,$wrapperBytes)}
     foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='123'},[pscustomobject]@{Alive=$true;StartTicks=$null})){$script:Holder=$holder;$blocked=Blocked 'live or unknown retained holder';Check ($blocked.detail.Contains('holder')) 'holder reason preserved';Record (Join-Path $Container 'blocked-observation.json') $blocked;Emit (Join-Path $Container 'blocked-observation-output.txt') $blocked}
     $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
     $unknown=Join-Path $root ($script:InstancesRelativePath+'/'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($unknown)
     try{$blocked=Blocked 'unbound relevant candidate remains blocked';Check ($blocked.detail.Contains('unbound or ambiguous')) 'independent candidate reason preserved'}finally{Remove-Item -LiteralPath $unknown}
     Check ($before -ceq (Digest $root)) 'all observation refusals preserve fixture bytes and index absence'
+    Check ($intentHash -ceq (Get-FileSha256 -Path $intentPath)) 'original failed intent remains byte-identical after install and observation'
     Record (Join-Path $Container 'safe-observation.json') $historical
     Emit (Join-Path $Container 'safe-observation-output.txt') $historical
     Record (Join-Path $Container 'current-observation.json') $current
     Record (Join-Path $Container 'observation-context.json') ([ordered]@{project_root=$root;package_root=$PackageRoot;candidate_id=$id;action_id=$actionId;predecessor_package_root=$PredecessorRoot;historical_runtime_sha256=$old.RuntimeContractSha256;target_runtime_sha256=$manifest.RuntimeContractSha256})
-    Write-Output ('[VERSION_TRANSITION_OBSERVATION] PASS cases='+$script:Cases+' native_children=0 PocFixture=true external_process_observation=synthetic')
+    Write-Output ('[VERSION_TRANSITION_OBSERVATION] PASS cases='+$script:Cases+' failed_before_install='+[bool]$FailedBeforeInstall+' native_children=0 PocFixture=true external_process_observation=synthetic')
 }
 
 function Invoke-GenerationAlignmentCases {
@@ -1293,7 +1321,7 @@ if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly) {
     if ($parent.IndexOf('/.artifacts/tests/'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
     $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
     [void][IO.Directory]::CreateDirectory($container)
-    $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot)')
+    $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot,$FailedBeforeInstall)')
     $productionPaths=@((Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-strict-json.ps1'),(Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-instance-manifest-contract.ps1'))
     if($VersionTransitionObservationOnly){$productionPaths+=Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1'}
     $productionPaths+=@((Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'),(Join-Path $packageRoot 'Tools~/codedb-instance-engine.ps1'))
@@ -1305,8 +1333,9 @@ if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly) {
     }
     $caseName=if($VersionTransitionObservationOnly){'Invoke-VersionTransitionObservationCases'}else{'Invoke-GenerationAlignmentCases'}
     $parts.Add('function '+$caseName+' {'+(Get-Command $caseName).ScriptBlock.ToString()+'}')
-    $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot
-    try {& $module ([scriptblock]::Create($caseName+' -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot'))} finally {Remove-Module $module -ErrorAction SilentlyContinue}
+    $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot,([bool]$FailedBeforeInstall)
+    $extra=if($VersionTransitionObservationOnly){' -FailedBeforeInstall:$FailedBeforeInstall'}else{''}
+    try {& $module ([scriptblock]::Create($caseName+' -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot'+$extra))} finally {Remove-Module $module -ErrorAction SilentlyContinue}
     Write-Output ('[PRESERVED_FIXTURE] '+$container)
     return
 }

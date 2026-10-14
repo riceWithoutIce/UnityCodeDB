@@ -2003,7 +2003,7 @@ function Get-FailedPreparationFingerprint {
 }
 
 function Assert-FailedPreparationWrapper {
-    param([string]$ProjectRoot, $Document, [AllowNull()]$Manifest, [switch]$AllowActivationHandoff)
+    param([string]$ProjectRoot, $Document, [AllowNull()]$Manifest, [switch]$AllowActivationHandoff, [switch]$HistoricalObservation)
     $target = 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs'
     $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $target -Label 'retained shared wrapper'
     $actual = ''
@@ -2014,11 +2014,27 @@ function Assert-FailedPreparationWrapper {
     $original = [string]$Document.retained_wrapper_sha256
     if ($actual -ceq $original) { return 'ORIGINAL' }
     if (-not $AllowActivationHandoff -or $null -eq $Manifest) { throw 'Retained shared wrapper changed outside an Install handoff.' }
-    $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $historicalSelection = $null
+    if ($HistoricalObservation) {
+        # This branch is read-only and only reachable after the caller has
+        # independently classified the selected predecessor as TRUSTED_PREVIOUS.
+        # Its runtime authority comes from the Package-declared predecessor tuple,
+        # never from the target Package or the retained record's self-declared hash.
+        $historicalSelection = Get-ValidatedRemoveIntegrationSelection -Manifest $Manifest -ProjectRoot $ProjectRoot -OwnerIdentityVersion 2
+        if ($historicalSelection.Generation.Disposition -cne 'TRUSTED_PREVIOUS') { throw 'Historical wrapper observation requires a Package-declared predecessor selection.' }
+        $state = Get-RemoveIntegrationActivationState -Manifest $Manifest -AuthorityKind VERSIONED_V2 -OwnerIdentityVersion 2 -ProjectRoot $ProjectRoot -Selection $historicalSelection
+    } else {
+        $state = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    }
     if ($null -eq $state) { throw 'Retained shared wrapper has no activation handoff authority.' }
     if ($state.Operation.Phase -ceq 'COMMITTED') {
         $selected = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot
-        $selectionEvidence = New-InstanceActivationSelectionEvidence -Instance $selected -Context $state.Context
+        $selectionEvidence = if ($null -ne $historicalSelection) {
+            # COMMITTED historical documents record CURRENT relative to the
+            # original Package. The historical reader already cross-bound this
+            # exact identity; preserve that meaning instead of target disposition.
+            New-InstanceActivationEvidence -InstanceId $selected.InstanceId -GenerationId $selected.Generation.GenerationId -InstanceManifestSha256 $selected.ManifestSha256 -GenerationManifestSha256 ([string]$selected.Manifest.generation_manifest_sha256) -GenerationDisposition CURRENT
+        } else { New-InstanceActivationSelectionEvidence -Instance $selected -Context $state.Context }
         if ($selected.InstanceId -ceq $Document.retained_instance_id -or $selected.Manifest.state -cne 'READY' -or
             -not (Test-InstanceActivationEvidenceEqual -Left $selectionEvidence -Right $state.Operation.Candidate) -or
             -not (Test-InstanceActivationEvidenceEqual -Left $selectionEvidence -Right $state.Activation.Current) -or
@@ -2157,7 +2173,8 @@ function Get-InstanceRemovalIntent {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$StateId,
-        [AllowNull()]$Manifest
+        [AllowNull()]$Manifest,
+        [switch]$HistoricalObservation
     )
 
     if ($StateId -cnotmatch '^[0-9a-f]{32}$') { throw "Removal intent state identity is invalid." }
@@ -2224,7 +2241,7 @@ function Get-InstanceRemovalIntent {
         Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $document
         if ($null -eq $Manifest) { throw 'Failed preparation intent requires current Package authority.' }
         $null = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instanceRoot -AllowProvisioning -FailedPreparation
-        $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $document -Manifest $Manifest -AllowActivationHandoff
+        $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $document -Manifest $Manifest -AllowActivationHandoff -HistoricalObservation:$HistoricalObservation
     }
     if ([string]$retainedManifest.managed_by -cne $script:ManagedBy -or
         [string]$retainedManifest.project_identity -cne [string]$document.project_identity -or
@@ -2283,7 +2300,7 @@ function New-InstanceRemovalIntentDocument {
 }
 
 function Get-InstanceRemovalIntents {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot, [AllowNull()]$Manifest)
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot, [AllowNull()]$Manifest, [switch]$HistoricalObservation)
 
     $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceRemovalIntentsRelativePath -Label "project removal intents"
     if (-not (Test-Path -LiteralPath $root)) { return }
@@ -2293,7 +2310,7 @@ function Get-InstanceRemovalIntents {
         if ($entry.PSIsContainer -or $entry.Name -cnotmatch '^([0-9a-f]{32})\.json$') {
             throw "Project removal intents root contains an unknown entry."
         }
-        Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $Matches[1] -Manifest $Manifest
+        Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $Matches[1] -Manifest $Manifest -HistoricalObservation:$HistoricalObservation
     }
 }
 
@@ -3294,7 +3311,8 @@ function Assert-InstanceNextChangeAdmission {
         [AllowNull()]$Candidate,
         [AllowNull()]$FailedPreparationAuthority,
         [AllowNull()][string]$ExpectedFingerprint,
-        [switch]$HistoricalRemoval
+        [switch]$HistoricalRemoval,
+        [switch]$HistoricalObservation
     )
 
     $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
@@ -3302,7 +3320,10 @@ function Assert-InstanceNextChangeAdmission {
     $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
     $bound = @{}
     $failed = @{}
-    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+    if ($HistoricalObservation -and (-not $HistoricalRemoval -or $null -eq $current -or $current.GenerationDisposition -cne 'TRUSTED_PREVIOUS')) {
+        throw 'Historical effects observation requires an independently validated predecessor selection.'
+    }
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalObservation:$HistoricalObservation)) {
         $bound[$intent.InstanceId] = [string]$intent.Document.retained_instance_manifest_sha256
         if ($intent.Document.schema_version -eq 2) { $failed[$intent.InstanceId] = $true }
     }
@@ -3374,7 +3395,13 @@ function Get-InstanceRetainedEffectsObservation {
     param($Manifest, [string]$ProjectRoot, [string]$PackageRoot)
     $ids = @()
     try {
-        $intents = @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)
+        # Resolve the selected package identity before reading schema-2 intents.
+        # This lets the intent/wrapper reader use the same explicit historical
+        # authority as the outer observation, while ordinary callers remain strict.
+        $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
+        $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
+        $historicalSelection = $null -ne $current -and $current.GenerationDisposition -ceq 'TRUSTED_PREVIOUS'
+        $intents = @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalObservation:$historicalSelection)
         $bound = @{}
         foreach ($intent in $intents) {
             if ($bound.ContainsKey($intent.InstanceId)) { throw 'Retained candidate binding is duplicated.' }
@@ -3386,8 +3413,6 @@ function Get-InstanceRetainedEffectsObservation {
                 $ids += $intent.InstanceId
             }
         }
-        $current = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing
-        $lkg = Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing
         foreach ($selected in @($current, $lkg)) {
             if ($null -ne $selected -and $selected.InstanceId -cin $ids) { throw 'Retained failed candidate is selected.' }
         }
@@ -3404,7 +3429,7 @@ function Get-InstanceRetainedEffectsObservation {
         if ($null -ne $contract -and $contract.Operation.Phase -in @('PREPARED', 'ACTIVATING')) {
             throw 'Activation ownership is pending; retained effects cannot authorize a new operation.'
         }
-        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval:$historicalSelection
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval:$historicalSelection -HistoricalObservation:$historicalSelection
         $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $installEligible = $desired.DesiredState -eq 'UNINSTALLED' -or (Test-InstanceFirstInstall -Manifest $Manifest -ProjectRoot $ProjectRoot)
         $operationDetail = if ($installEligible) { 'Existing Install preconditions are present; confirmed dispatch still revalidates.' } else { 'Retained effects are safe, but existing Install requires first-install or explicit UNINSTALLED state. Installed generation migration remains a separate route.' }
