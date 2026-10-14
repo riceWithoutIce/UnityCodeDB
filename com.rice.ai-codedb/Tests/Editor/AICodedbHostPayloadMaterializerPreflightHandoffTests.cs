@@ -27,13 +27,38 @@ namespace Rice.AI.Codedb.Editor.Tests
         internal static void AssertProductionNamespaceFixture(string root)
         {
             var normalized = System.IO.Path.GetFullPath(root).Replace('\\', '/');
-            Assert.That(normalized, Does.Contain("/.artifacts/tests/s29-removal-namespace/"));
+            Assert.That(normalized, Does.Contain("/.artifacts/tests/s29-removal-namespace/")
+                .Or.Contain("/.artifacts/tests/s29-removal-process-identity/"));
             var failure = new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
                 System.IO.File.ReadAllText(System.IO.Path.Combine(root, "preflight-blocked.stderr")), false);
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(failure), Does.Contain("foreign.json"));
             AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, failure, "foreign.json");
+            if (normalized.Contains("/.artifacts/tests/s29-removal-process-identity/"))
+            {
+            foreach (var role in new[] { "child", "stale-owner", "current-owner" })
+            {
+                foreach (var mode in new[] { "live", "unknown" })
+                {
+                    var reason = mode == "live" ? "original process is still alive" : "process identity is unavailable";
+                    var processFailure = new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
+                        System.IO.File.ReadAllText(System.IO.Path.Combine(root, "process-" + role + "-" + mode + ".stderr")), false);
+                    Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(processFailure), Is.False);
+                    Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(processFailure), Is.False);
+                    var diagnostic = AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(processFailure);
+                    Assert.That(diagnostic, Does.Contain(reason));
+                    Assert.That(diagnostic, Does.Contain(role == "child" ? new string('1', 32) : role == "stale-owner" ? "Stale Supervisor owner" : "Current Supervisor owner"));
+                    Assert.That(diagnostic.Length, Is.LessThanOrEqualTo(900));
+                    Assert.That(diagnostic, Does.Not.Contain("[REMOVAL_PREFLIGHT_HANDOFF]"));
+                    AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, processFailure, reason);
+                }
+            }
+            var missingChild = new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
+                System.IO.File.ReadAllText(System.IO.Path.Combine(root, "process-child-missing.stderr")), false);
+            Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(missingChild), Is.False);
+            AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, missingChild, "child evidence is missing");
+            }
             var success = new AICodedbCommandResult(0,
                 System.IO.File.ReadAllText(System.IO.Path.Combine(root, "preflight-available.stdout")), string.Empty, false);
             Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(success), Is.True);

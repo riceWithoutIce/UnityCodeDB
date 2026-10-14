@@ -1223,9 +1223,18 @@ function Invoke-GenerationAlignmentCases {
     function Digest { param([string]$Path); $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/'); $rows=@(Get-ChildItem -LiteralPath $full -File -Recurse -Force | Sort-Object FullName | ForEach-Object { $relative=$_.FullName.Substring($full.Length+1).Replace('\','/'); "$relative|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" }); return Get-TextSha256 -Text ($rows -join "`n") }
     function Fault { param([string]$Path,[scriptblock]$Change,[scriptblock]$Read,[string]$Label); $bytes=[IO.File]::ReadAllBytes($Path); try { $d=(Read-BoundedJsonDocument -Path $Path -Label 'alignment fault' -MaximumBytes 1048576).Document; & $Change $d; Record $Path $d; Reject $Read $Label } finally { [IO.File]::WriteAllBytes($Path,$bytes) } }
     function script:Get-MaterializerMachinePrerequisiteStatus { param($Manifest); return [pscustomobject]@{Current=$true;State='CURRENT';ReasonCode='FIXTURE_CURRENT';Detail='Synthetic prerequisite';NextAction='';NodePath='';NodeVersion='fixture';ProviderVersion='fixture';ProviderRoot='';ProviderManifestPath='';ProviderExecutablePath=''} }
-    function script:Get-MaterializerProcessIdentity { param([int]$ProcessId); if ($ProcessId -ne 424242) { throw 'Unexpected process observation in synthetic alignment' }; return $script:Holder }
+    function script:Get-MaterializerProcessIdentity {
+        param([int]$ProcessId)
+        if ($ProcessId -notin @(424242,424243,424244,424245)) { throw 'Unexpected process observation in synthetic alignment' }
+        if ($script:ProcessObservations.ContainsKey($ProcessId)) {
+            $value=$script:ProcessObservations[$ProcessId]
+            if ($value -is [scriptblock]) { return & $value }
+            return $value
+        }
+        return $script:Holder
+    }
     function script:Invoke-BoundedNativeProcessWithFileOutput { throw 'Native execution forbidden in generation alignment' }
-    $script:Cases=0; $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+    $script:Cases=0; $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null};$script:ProcessObservations=@{}
     $root=Join-Path $Container 'project'; [void][IO.Directory]::CreateDirectory($root)
     foreach ($marker in @('Assets','Packages','ProjectSettings')) { [void][IO.Directory]::CreateDirectory((Join-Path $root $marker)) }
     $script:GenerationId=''; $old=Read-PayloadManifest -Root (Join-Path $PredecessorRoot 'Payload~') -ProjectRoot $root
@@ -1250,13 +1259,48 @@ function Invoke-GenerationAlignmentCases {
         Check ($uninstallRecoveryBody -match 'Invoke-InstanceOperationRecovery\s+-ProjectRoot \$ProjectRoot\s+-StageRoot \$lock\.Root\s+-Manifest \$Manifest') 'Uninstall production recovery entrance forwards Package Manifest'
         Check ($authority.Kind -ceq 'VERSIONED_V2') 'ordinary current owner-pair control'
         Check (@(Get-RemoveIntegrationNamespaceInventory -NamespacePath $namespace -ProjectRoot $root).Count -eq 2) 'unchanged v1/default namespace inventory admits exact current pair'
+        function ExpectProcessRefusal {
+            param([scriptblock]$Body,[string]$Reason,[string]$Label)
+            $message='';try {& $Body|Out-Null} catch {$message=$_.Exception.Message}
+            Check ($message.Contains($Reason)) ($Label+' precise refusal: '+$Reason)
+        }
+        function ProcessCases {
+            param([int]$ObservedPid,[scriptblock]$Body,[string]$Role)
+            try {
+                foreach($ticks in @('638000000000000000','638000000000000009')) {
+                    $script:ProcessObservations[$ObservedPid]=[pscustomobject]@{Alive=$true;StartTicks=$ticks}
+                    ExpectProcessRefusal $Body ($Role+' original process is still alive') ($Role+' producer microsecond precision')
+                }
+                # Same executable is deliberately not authority for PID ownership.
+                $script:ProcessObservations[$ObservedPid]=[pscustomobject]@{Alive=$true;StartTicks='638000000000000010';ExecutablePath=(Get-Command powershell.exe).Source}
+                $null=& $Body;Check $true ($Role+' reused valid identity, same executable, continues other gates')
+                foreach($observation in @([pscustomobject]@{Alive=$true;StartTicks=$null},[pscustomobject]@{Alive=$true;StartTicks='invalid'},[pscustomobject]@{Alive=$true;StartTicks='1'},[pscustomobject]@{Alive=$true},$null,{throw 'Synthetic query failure'})) {
+                    $script:ProcessObservations[$ObservedPid]=$observation
+                    ExpectProcessRefusal $Body ($Role+' process identity is unavailable') ($Role+' unknown identity')
+                }
+                $script:ProcessObservations[$ObservedPid]=[pscustomobject]@{Alive=$false;StartTicks=$null}
+                $null=& $Body;Check $true ($Role+' definitively absent continues other gates')
+            } finally {$script:ProcessObservations.Remove($ObservedPid)}
+        }
+        ProcessCases 424242 $read 'Current Supervisor owner'
+        foreach($identity in @('1','638000000000000001','99999999999999999999999999999999')) {
+            $stateBytes=[IO.File]::ReadAllBytes($statePath);$ownerBytes=[IO.File]::ReadAllBytes($ownerPath)
+            try {$badState=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $state) -Label 'bad current identity';$badOwner=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $owner) -Label 'bad current owner';$badState.owner_evidence.process_start_identity=$identity;$badOwner.owner_evidence.process_start_identity=$identity;Record $statePath $badState;Record $ownerPath $badOwner;ExpectProcessRefusal $read 'Current Supervisor owner recorded process start identity is invalid' 'invalid recorded current identity is never absence'}
+            finally {[IO.File]::WriteAllBytes($statePath,$stateBytes);[IO.File]::WriteAllBytes($ownerPath,$ownerBytes)}
+        }
         $suffix='1760000000000.'+('e'*32)
         $staleState=$statePath+'.stale.'+$suffix; $staleLock=$ownerPath+'.stale.'+$suffix
         [IO.File]::Move($statePath,$staleState); [IO.File]::Move($ownerPath,$staleLock)
         $opId='1'*32; $historyPath=Join-Path $namespace ('operation-history/'+$opId+'.json');$opPath=Join-Path $namespace 'operation.json'
-        $child=[ordered]@{schema_version=1;pid=424242;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64);command=(Get-Command powershell.exe).Source;normalized_argv=@('-NoProfile','-File','materialize-codedb-host-payload.ps1','-Action','Upgrade')}
+        $child=[ordered]@{schema_version=1;pid=424243;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64);command=(Get-Command powershell.exe).Source;normalized_argv=@('-NoProfile','-File','materialize-codedb-host-payload.ps1','-Action','Upgrade')}
         $op=[ordered]@{schema_version=1;managed_by=$script:ManagedBy;operation_id=$opId;key='["materialize:Upgrade","Upgrade",true]';request_id='fixture';manager_action_id='';name='materialize:Upgrade';lane='maintenance';state='failed';phase='failed';owner_epoch=('f'*32);project_identity=(Get-MaterializerProjectIdentity -ProjectRoot $root);root=$root;runtime=$namespace;selected_instance_id=$selected.InstanceId;selected_generation_id=$selected.Generation.GenerationId;runtime_contract_sha256=$old.RuntimeContractSha256;child=$child;started_at_utc='2026-10-13T03:10:48.181Z';completed_at_utc='2026-10-13T03:10:55.514Z';result=[ordered]@{exit_code=6;stdout='';stderr='Synthetic rejected Upgrade';timed_out=$false};error='Synthetic rejected Upgrade'}
         Record $opPath $op; Record $historyPath $op
+        ProcessCases 424243 $read ('Retained Supervisor operation '+$opId+' child')
+        ProcessCases 424242 $read 'Stale Supervisor owner'
+        Fault $historyPath {param($d)$d.child.process_start_identity='638000000000000001'} $read 'invalid recorded child identity is never absence'
+        $badStaleState=[IO.File]::ReadAllBytes($staleState);$badStaleOwner=[IO.File]::ReadAllBytes($staleLock)
+        try {$badState=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $state) -Label 'bad stale identity';$badOwner=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $owner) -Label 'bad stale owner';$badState.owner_evidence.process_start_identity='1';$badOwner.owner_evidence.process_start_identity='1';Record $staleState $badState;Record $staleLock $badOwner;ExpectProcessRefusal $read 'Stale Supervisor owner recorded process start identity is invalid' 'invalid recorded stale identity is never absence'}
+        finally {[IO.File]::WriteAllBytes($staleState,$badStaleState);[IO.File]::WriteAllBytes($staleLock,$badStaleOwner)}
         Reject {Get-RemoveIntegrationNamespaceInventory -NamespacePath $namespace -ProjectRoot $root} 'v1/default namespace inventory does not inherit retired-v2 admission'
         $before=Digest $root; $authority=& $read
         Check ($authority.Inventory.Count -eq 0 -and $authority.PreservedInventory.Count -eq 4) 'retired-v2 proof is separate from removal Delete inventory'
@@ -1278,8 +1322,27 @@ function Invoke-GenerationAlignmentCases {
         try {Reject $read 'incomplete stale pair'} finally {[IO.File]::WriteAllBytes($staleLock,$staleBytes)}
         Record $statePath $state
         try {Reject $read 'single canonical owner record is blocked'} finally {[IO.File]::Delete($statePath)}
-        foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='1'},[pscustomobject]@{Alive=$true;StartTicks=$null})) {$script:Holder=$holder;Reject $read 'live reused or unknown child/owner PID'}
+        foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='638000000000000000'},[pscustomobject]@{Alive=$true;StartTicks=$null})) {$script:Holder=$holder;Reject $read 'original live or unknown child/owner PID'}
         $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+        $script:Holder=[pscustomobject]@{Alive=$true;StartTicks='638000000000000010'}
+        try {
+            Fault $historyPath {param($d)$d.state='running'} $read 'PID reuse does not bypass active history'
+            Fault $historyPath {param($d)$d.child=$null} $read 'PID reuse and clear holders do not bypass missing child'
+            Fault $historyPath {param($d)$d.selected_instance_id='0'*32} $read 'PID reuse does not bypass foreign history'
+            Fault $historyPath {param($d)$d.child.pid=0} $read 'PID reuse does not bypass invalid child'
+            Fault $staleLock {param($d)$d.owner_epoch='unknown-owner'} $read 'PID reuse does not bypass ambiguous ownership'
+            $leaseId='mcp-424244-'+('a'*32);$leasePath=Join-Path $authority.Selection.LeaseRoot ($leaseId+'.json')
+            $lease=[ordered]@{schema_version=1;instance_lease_version=1;managed_by=$script:ManagedBy;owner='mcp';instance_id=$selected.InstanceId;generation_id=$selected.GenerationId;lease_id=$leaseId;pid=424244;process_start_identity='1';project_root=$root;project_identity=(Get-MaterializerProjectIdentity -ProjectRoot $root);created_at_utc=[DateTime]::UtcNow.ToString('o');heartbeat_at_utc=[DateTime]::UtcNow.ToString('o')}
+            Record $leasePath $lease
+            try {
+                $script:ProcessObservations[424244]=[pscustomobject]@{Alive=$true;StartTicks='638000000000000010';StartUnixMilliseconds=[int64]1}
+                ExpectProcessRefusal $read 'selected instance owner is live or ambiguous' 'PID reuse does not bypass live related holder'
+                $script:ProcessObservations[424244]=[pscustomobject]@{Alive=$true;StartTicks=$null;StartUnixMilliseconds=$null}
+                ExpectProcessRefusal $read 'selected instance owner is live or ambiguous' 'PID reuse does not bypass unknown related holder'
+                $lease.owner='foreign';Record $leasePath $lease
+                ExpectProcessRefusal $read 'selected instance owner is live or ambiguous' 'PID reuse does not bypass invalid related holder'
+            } finally {$script:ProcessObservations.Remove(424244);[IO.File]::Delete($leasePath)}
+        } finally {$script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}}
         $unknown=Join-Path $namespace 'foreign.json';Record $unknown @{}
         try {Reject $read 'unknown namespace entry'} finally {[IO.File]::Delete($unknown)}
         $oversize=Join-Path $namespace 'supervisor-error.json';[IO.File]::WriteAllBytes($oversize,[byte[]]::new(262145))
@@ -1301,7 +1364,7 @@ function Invoke-GenerationAlignmentCases {
             Reject $read 'aggregate preserved-history byte budget'
         } finally {foreach($path in $budgetFiles){[IO.File]::Delete($path)}}
         $successId='2'*32;$successPath=Join-Path $namespace ('operation-history/'+$successId+'.json')
-        $success=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'terminal success fixture';$success.operation_id=$successId;$success.state='completed';$success.phase='completed';$success.result.exit_code=0;Record $successPath $success
+        $success=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'terminal success fixture';$success.operation_id=$successId;$success.state='completed';$success.phase='completed';$success.result.exit_code=0;$success.child.pid=424245;Record $successPath $success
         $authority=& $read;Check ($authority.PreservedInventory.Count -eq 5) 'terminal success and terminal failure both authenticated'
         # Emit the exact production preflight handler under the in-process module,
         # without evaluating script entry, launching PowerShell or touching real state.
@@ -1310,6 +1373,35 @@ function Invoke-GenerationAlignmentCases {
         $switchAst=$handlerAst.Find({param($a)$a -is [Management.Automation.Language.SwitchStatementAst] -and @($a.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'}).Count -eq 1},$true)
         $handler=@($switchAst.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'})[0].Item2
         $handlerScript=[scriptblock]::Create($handler.Extent.Text.TrimStart('{').TrimEnd('}'))
+        $authorityAst=$handlerAst.Find({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq 'Get-RemoveIntegrationAuthority'},$true)
+        $identityBranch=$authorityAst.Find({param($a)$a -is [Management.Automation.Language.IfStatementAst] -and $a.Extent.Text.Contains("-Label 'Current Supervisor owner'") -and $a.Clauses[0].Item1.Extent.Text -ceq "`$authority.Kind -ceq 'VERSIONED_V2'"},$true)
+        Check ($null -ne $identityBranch) 'exact production v2-only identity branch located'
+        $identityBranchScript=[scriptblock]::Create($identityBranch.Extent.Text)
+        foreach($oldKind in @('VERSIONED_V1','LEGACY_FIXED')) {
+            # Execute the exact original dispatch branch with reused identity;
+            # old kinds must retain PID-only refusal, not inherit v2 reuse.
+            $script:Holder=[pscustomobject]@{Alive=$true;StartTicks='638000000000000010'}
+            try {& {param($branch,$kind)$authority=[pscustomobject]@{Kind=$kind};$validatedState=[pscustomobject]@{ProcessId=424242};ExpectProcessRefusal {& $branch} 'Supervisor owner PID is live or unverifiable' ($kind+' keeps original PID-only refusal')} $identityBranchScript $oldKind}
+            finally {$script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}}
+        }
+        # Run the original handler for each attributable refusal. No process is
+        # inspected outside the synthetic seam, and no native child is started.
+        foreach($roleCase in @(@{Pid=424243;Label=('Retained Supervisor operation '+$opId+' child');Stem='child'},@{Pid=424242;Label='Stale Supervisor owner';Stem='stale-owner'},@{Pid=424244;Label='Current Supervisor owner';Stem='current-owner'})) {
+            if($roleCase.Stem -ceq 'current-owner') {$currentState=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $state) -Label 'current test state';$currentOwner=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $owner) -Label 'current test owner';$currentState.supervisor_pid=424244;$currentState.owner_evidence.pid=424244;$currentOwner.supervisor_pid=424244;$currentOwner.owner_evidence.pid=424244;Record $statePath $currentState;Record $ownerPath $currentOwner}
+            try {
+                foreach($mode in @('live','unknown')) {
+                    $script:ProcessObservations[$roleCase.Pid]=[pscustomobject]@{Alive=$true;StartTicks=$(if($mode -ceq 'live'){'638000000000000009'}else{$null})}
+                    $message='';try {& $handlerScript 6>&1|Out-Null}catch {$message=$_.Exception.Message}
+                    $reason=$roleCase.Label+$(if($mode -ceq 'live'){' original process is still alive'}else{' process identity is unavailable'})
+                    [IO.File]::WriteAllText((Join-Path $Container ('process-'+$roleCase.Stem+'-'+$mode+'.stderr')),$message,[Text.UTF8Encoding]::new($false))
+                    Check ($script:RequestedExitCode -eq 4 -and $message.Contains($reason)) ($roleCase.Stem+' production '+$mode+' refusal')
+                    $script:RequestedExitCode=0
+                }
+            } finally {$script:ProcessObservations.Remove($roleCase.Pid);if($roleCase.Stem -ceq 'current-owner'){[IO.File]::Delete($statePath);[IO.File]::Delete($ownerPath)}}
+        }
+        $missingChildBytes=[IO.File]::ReadAllBytes($historyPath)
+        try {$missing=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'missing child fixture';$missing.child=$null;Record $historyPath $missing;$message='';try {& $handlerScript 6>&1|Out-Null}catch {$message=$_.Exception.Message};Check ($script:RequestedExitCode -eq 4 -and $message.Contains($opId+' child evidence is missing')) 'missing child production refusal remains explicit';[IO.File]::WriteAllText((Join-Path $Container 'process-child-missing.stderr'),$message,[Text.UTF8Encoding]::new($false))}
+        finally {[IO.File]::WriteAllBytes($historyPath,$missingChildBytes);$script:RequestedExitCode=0}
         $captured=@(& $handlerScript 6>&1)
         [IO.File]::WriteAllText((Join-Path $Container 'preflight-available.stdout'),(($captured | ForEach-Object {$_.ToString()}) -join "`n"),[Text.UTF8Encoding]::new($false))
         Record $unknown @{}
@@ -1333,6 +1425,29 @@ function Invoke-GenerationAlignmentCases {
         $script:OriginalPublish=(Get-Command Publish-InstanceOperation).ScriptBlock
         function script:Publish-InstanceOperation {param($ProjectRoot,$ActionName,$CandidateInstanceId,$Entries,$StageRoot,$OperationRoot,$VerifyBeforeMutation,$VerifyBeforeCommit,$OperationId);[IO.File]::AppendAllText($script:NamespaceDriftPath,"`n");& $script:OriginalPublish @PSBoundParameters}
         try {Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'before-mutation namespace drift rejects transaction'} finally {Set-Item -LiteralPath Function:script:Publish-InstanceOperation -Value $script:OriginalPublish;[IO.File]::WriteAllBytes($historyPath,$script:NamespaceDriftBytes);$script:RequestedExitCode=0}
+        # Permit identity stays byte-identical while observations change at
+        # each existing revalidation boundary; stale permits cannot override it.
+        $script:OriginalEnterLock=(Get-Command Enter-MaterializerLock).ScriptBlock
+        foreach($mode in @('live','unknown')) {
+            $script:ChangedStart=if($mode -ceq 'live'){'638000000000000009'}else{$null}
+            function script:Enter-MaterializerLock {param($ProjectRoot,[switch]$WaitForExisting,$WaitTimeoutMilliseconds);$lock=& $script:OriginalEnterLock @PSBoundParameters;$script:ProcessObservations[424243]=[pscustomobject]@{Alive=$true;StartTicks=$script:ChangedStart};return $lock}
+            try {ExpectProcessRefusal {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} $(if($mode -ceq 'live'){'original process is still alive'}else{'process identity is unavailable'}) ('lock-time process '+$mode+' change refuses old permit')}
+            finally {Set-Item -LiteralPath Function:script:Enter-MaterializerLock -Value $script:OriginalEnterLock;$script:ProcessObservations.Remove(424243);$script:RequestedExitCode=0}
+        }
+        foreach($boundary in @('mutation','commit')) {
+            foreach($mode in @('live','unknown')) {
+                $script:ChangedStart=if($mode -ceq 'live'){'638000000000000009'}else{$null};$script:ChangedBoundary=$boundary
+                function script:Publish-InstanceOperation {
+                    param($ProjectRoot,$ActionName,$CandidateInstanceId,$Entries,$StageRoot,$OperationRoot,$VerifyBeforeMutation,$VerifyBeforeCommit,$OperationId)
+                    if($script:ChangedBoundary -ceq 'mutation') {$script:ProcessObservations[424243]=[pscustomobject]@{Alive=$true;StartTicks=$script:ChangedStart}}
+                    else {$script:OriginalVerifyCommit=$VerifyBeforeCommit;$PSBoundParameters['VerifyBeforeCommit']={ $script:ProcessObservations[424243]=[pscustomobject]@{Alive=$true;StartTicks=$script:ChangedStart};& $script:OriginalVerifyCommit }}
+                    & $script:OriginalPublish @PSBoundParameters
+                }
+                try {ExpectProcessRefusal {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} $(if($mode -ceq 'live'){'original process is still alive'}else{'process identity is unavailable'}) ('before-'+$boundary+' process '+$mode+' change refuses old permit')}
+                finally {Set-Item -LiteralPath Function:script:Publish-InstanceOperation -Value $script:OriginalPublish;$script:ProcessObservations.Remove(424243);$script:RequestedExitCode=0}
+                $null=& $read
+            }
+        }
         Reject {Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root} 'ordinary target-strict admission is unchanged'
         # Fault after first transaction write proves normal rollback keeps both
         # the selected identity and preserved proof; the next attempt is separate.
@@ -1347,12 +1462,21 @@ function Invoke-GenerationAlignmentCases {
         foreach($item in $authority.PreservedInventory){Check ((Get-FileSha256 -Path $item.Path) -ceq $item.Sha256) ('history/quarantine preserved: '+$item.Name)}
         Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest
         Check $true 'restart terminal validation binds extant preserved namespace to durable intent'
+        ProcessCases 424243 {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} ('Retained Supervisor operation '+$opId+' child')
+        ProcessCases 424242 {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} 'Stale Supervisor owner'
         Fault $historyPath {param($d)$d.error='terminal drift'} {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} 'terminal/recovery rejects retained evidence drift'
         $hiddenNamespace=$namespace+'.fixture-missing';[IO.Directory]::Move($namespace,$hiddenNamespace)
         try {Reject {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} 'whole namespace absence after restart remains blocked'} finally {[IO.Directory]::Move($hiddenNamespace,$namespace)}
         $recoveryId='3'*32;$recoveryRoot=Join-Path $root ($script:InstanceOperationsRelativePath+'/operation-'+$recoveryId);[void][IO.Directory]::CreateDirectory($recoveryRoot)
         Write-InstanceOperationJournal -ProjectRoot $root -OperationId $recoveryId -State COMMITTED -ActionName RemoveIntegration -CandidateInstanceId $recoveryId -OperationRoot $recoveryRoot -Entries @() -StageRoot $recoveryRoot
         $journalPath=Join-Path $root $script:InstanceOperationRelativePath
+        foreach($recoveryPid in @(424243,424242)) {
+            foreach($mode in @('live','unknown')) {
+                $script:ProcessObservations[$recoveryPid]=[pscustomobject]@{Alive=$true;StartTicks=$(if($mode -ceq 'live'){'638000000000000009'}else{$null})}
+                try {ExpectProcessRefusal {Invoke-InstanceOperationRecovery -ProjectRoot $root -StageRoot $recoveryRoot -Manifest $manifest} $(if($mode -ceq 'live'){'original process is still alive'}else{'process identity is unavailable'}) ('committed recovery rechecks process '+$recoveryPid+' '+$mode);Check (Test-Path -LiteralPath $journalPath -PathType Leaf) 'process refusal preserves committed recovery journal'}
+                finally {$script:ProcessObservations.Remove($recoveryPid)}
+            }
+        }
         Fault $historyPath {param($d)$d.error='recovery drift'} {Invoke-InstanceOperationRecovery -ProjectRoot $root -StageRoot $recoveryRoot -Manifest $manifest} 'committed recovery refuses retained history drift before journal cleanup'
         Check (Test-Path -LiteralPath $journalPath -PathType Leaf) 'blocked committed recovery preserves journal evidence'
         Check (Invoke-InstanceOperationRecovery -ProjectRoot $root -StageRoot $recoveryRoot -Manifest $manifest) 'committed recovery authenticates preserved terminal evidence before cleanup'
@@ -1437,6 +1561,7 @@ if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly -or $RemovalN
     # The explicit checkout owns fixture persistence; extracted candidate paths
     # are read-only production inputs, never the default test scratch authority.
     $family=if($RemovalNamespaceOnly){'s29-removal-namespace'}elseif($VersionTransitionObservationOnly){'s29-version-transition-observation'}else{'s29-generation-alignment'}
+    if ($RemovalNamespaceOnly -and $parent.Replace('\','/').Contains('/.artifacts/tests/s29-removal-process-identity/')) {$family='s29-removal-process-identity'}
     if ($parent.IndexOf('/.artifacts/tests/'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
     $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
     [void][IO.Directory]::CreateDirectory($container)

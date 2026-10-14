@@ -10153,6 +10153,39 @@ function Get-RemoveIntegrationNamespaceInventory {
     return $files.ToArray()
 }
 
+function Assert-RemoveIntegrationV2ProcessAbsent {
+    param([int]$ProcessId, [AllowNull()]$RecordedStartIdentity, [string]$Label)
+
+    # Supervisor Windows evidence is UTC ticks at microsecond precision. Keep
+    # this comparison local to v2 removal: lease identities use another unit.
+    [int64]$recordedTicks = 0
+    if ($ProcessId -le 0 -or $RecordedStartIdentity -isnot [string] -or
+        $RecordedStartIdentity -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        -not [int64]::TryParse($RecordedStartIdentity, [ref]$recordedTicks) -or
+        $recordedTicks -gt [DateTime]::MaxValue.Ticks -or ($recordedTicks % 10) -ne 0) {
+        throw "$Label recorded process start identity is invalid or not comparable."
+    }
+    try { $observed = Get-MaterializerProcessIdentity -ProcessId $ProcessId }
+    catch { throw "$Label process identity is unavailable; removal remains blocked." }
+    if ($null -ne $observed -and $null -ne $observed.PSObject.Properties['Alive'] -and
+        $observed.Alive -is [bool] -and -not $observed.Alive) { return }
+    [int64]$currentTicks = 0
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+        $null -eq $observed -or $null -eq $observed.PSObject.Properties['Alive'] -or $observed.Alive -isnot [bool] -or
+        $null -eq $observed.PSObject.Properties['StartTicks'] -or
+        $observed.StartTicks -isnot [string] -or $observed.StartTicks -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        -not [int64]::TryParse($observed.StartTicks, [ref]$currentTicks) -or
+        $currentTicks -lt 10 -or $currentTicks -gt [DateTime]::MaxValue.Ticks) {
+        throw "$Label process identity is unavailable; removal remains blocked."
+    }
+    $currentTicks = $currentTicks - ($currentTicks % 10)
+    if ($currentTicks -eq $recordedTicks) {
+        throw "$Label original process is still alive; removal remains blocked."
+    }
+    # A different valid start identity proves PID reuse, not ownership of the
+    # new process or permission to remove. Callers must continue every gate.
+}
+
 function Assert-RemoveIntegrationTerminalOperation {
     param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, [string]$RuntimeContractSha256)
     $label = 'retained Supervisor operation'
@@ -10189,7 +10222,7 @@ function Assert-RemoveIntegrationTerminalOperation {
         (($Document.state -ceq 'completed') -ne ($exitCode -eq 0))) { throw 'Retained Supervisor terminal result is inconsistent or timed out.' }
     # finishOperation overwrites phase even when interrupted child capture failed.
     # A null child can never prove that no child escaped the owning Supervisor.
-    if ($null -eq $Document.child) { throw 'Retained Supervisor operation has no durable child identity; termination cannot be proved.' }
+    if ($null -eq $Document.child) { throw "Retained Supervisor operation $($Document.operation_id) child evidence is missing; termination cannot be proved." }
     $child = $Document.child
     Assert-RemoveIntegrationJsonFields -Object $child -Label "$label child" -Required @('schema_version','pid','process_start_identity','executable_path','argv_sha256','command_line_sha256','command','normalized_argv')
     $childPid = Get-RequiredJsonInt32 -Object $child -Name pid -Label "$label child"
@@ -10199,7 +10232,7 @@ function Assert-RemoveIntegrationTerminalOperation {
         -not (Test-RemoveIntegrationPathEqual -Left $child.command -Right $child.executable_path) -or
         $child.normalized_argv -isnot [array] -or $child.normalized_argv.Count -eq 0 -or
         @($child.normalized_argv | Where-Object { $_ -isnot [string] }).Count -ne 0) { throw 'Retained Supervisor child process evidence is invalid.' }
-    if ((Get-MaterializerProcessIdentity -ProcessId $childPid).Alive) { throw 'Retained Supervisor child PID is live, reused or unverifiable.' }
+    Assert-RemoveIntegrationV2ProcessAbsent -ProcessId $childPid -RecordedStartIdentity $child.process_start_identity -Label "Retained Supervisor operation $($Document.operation_id) child"
 }
 
 function Get-RemoveIntegrationV2NamespaceProof {
@@ -10265,7 +10298,7 @@ function Get-RemoveIntegrationV2NamespaceProof {
         $a=Assert-RemoveIntegrationOwnerRecord -Document $state -Kind VERSIONED_V2 -StateDocument $true -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Manifest $Manifest -Selection $proofSelection -Label 'stale Supervisor state'
         $b=Assert-RemoveIntegrationOwnerRecord -Document $owner -Kind VERSIONED_V2 -StateDocument $false -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Manifest $Manifest -Selection $proofSelection -Label 'stale Supervisor lock'
         if ($a.Fingerprint -cne $b.Fingerprint) { throw 'Supervisor stale quarantine identifies conflicting owners.' }
-        if ((Get-MaterializerProcessIdentity -ProcessId $a.ProcessId).Alive) { throw 'Stale Supervisor owner PID is live, reused or unverifiable.' }
+        Assert-RemoveIntegrationV2ProcessAbsent -ProcessId $a.ProcessId -RecordedStartIdentity $a.OwnerEvidence.process_start_identity -Label 'Stale Supervisor owner'
     }
     $names=@($delete | ForEach-Object Name)
     if (($names -ccontains 'supervisor-state.json') -ne ($names -ccontains 'supervisor.lock')) { throw 'Supervisor namespace contains an incomplete current state and lock pair.' }
@@ -10918,9 +10951,13 @@ function Get-RemoveIntegrationAuthority {
     if (-not [string]::Equals($validatedState.Fingerprint, $validatedOwner.Fingerprint, [StringComparison]::Ordinal)) {
         throw "Supervisor state and lock identify different owners."
     }
-    $processIdentity = Get-MaterializerProcessIdentity -ProcessId $validatedState.ProcessId
-    if ($processIdentity.Alive) {
-        throw "Remove CodeDB Integration is blocked while the Supervisor owner PID is live or unverifiable."
+    if ($authority.Kind -ceq 'VERSIONED_V2') {
+        Assert-RemoveIntegrationV2ProcessAbsent -ProcessId $validatedState.ProcessId -RecordedStartIdentity $validatedState.OwnerEvidence.process_start_identity -Label 'Current Supervisor owner'
+    } else {
+        $processIdentity = Get-MaterializerProcessIdentity -ProcessId $validatedState.ProcessId
+        if ($processIdentity.Alive) {
+            throw "Remove CodeDB Integration is blocked while the Supervisor owner PID is live or unverifiable."
+        }
     }
     }
 
