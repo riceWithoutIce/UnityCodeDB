@@ -1640,8 +1640,8 @@ namespace Rice.AI.Codedb.Editor
                     : AICodedbHostPayloadMaterializer.ReadRemoveIntegrationPreflight(context, cancellationToken);
                 if (cancellationToken.IsCancellationRequested || !canContinue())
                     return status;
-                available = AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(result);
-                diagnostic = !available && result != null ? result.GetSummary() : string.Empty;
+                available = IsRemovalPreflightAvailable(result);
+                diagnostic = !available ? GetRemovalPreflightDiagnostic(result) : string.Empty;
                 lock (RemovalPreflightCacheLock)
                     _removalPreflightCache = new RemovalPreflightCacheEntry(
                         cacheKey, now.AddSeconds(RemovalPreflightCacheSeconds), available, diagnostic);
@@ -1662,6 +1662,76 @@ namespace Rice.AI.Codedb.Editor
                 status.AttentionReason,
                 statusDiagnostic,
                 available);
+        }
+
+        internal static bool IsRemovalPreflightAvailable(AICodedbCommandResult result)
+        {
+            if (result == null || result.OutputDrainIncomplete
+                || !AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(result))
+                return false;
+            var token = AICodedbHostPayloadMaterializer.ReadRemovalPreflightHandoff(result);
+            if (string.IsNullOrEmpty(token) || token.Length > 16384) return false;
+            var parts = token.Split('.');
+            if (parts.Length != 2 || parts[1].Length != 64) return false;
+            try
+            {
+                var encoded = parts[0].Replace('-', '+').Replace('_', '/');
+                var bytes = Convert.FromBase64String(encoded.PadRight((encoded.Length + 3) / 4 * 4, '='));
+                using (var hash = SHA256.Create())
+                {
+                    var digest = BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+                    if (!string.Equals(parts[1], digest, StringComparison.Ordinal)) return false;
+                }
+                var body = AICodedbStrictJson.ParseObject(new UTF8Encoding(false, true).GetString(bytes), "removal preflight handoff");
+                const string label = "removal preflight handoff";
+                if (body.Count != 12 || AICodedbStrictJson.GetRequiredInt32(body, "schema_version", label) != 1)
+                    return false;
+                foreach (var field in new[] { "generation_manifest_sha256", "owner_fingerprint", "config_sha256" })
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, field, label), "^[0-9a-f]{64}$")) return false;
+                foreach (var field in new[] { "instance_id", "nonce" })
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, field, label), "^[0-9a-f]{32}$")) return false;
+                if (!System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, "activation_epoch", label), "^(?:[0-9a-f]{32})?$")
+                    || !System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, "runtime_contract_sha256", label), "^(?:[0-9a-f]{64})?$")
+                    || !System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, "project_identity", label), "^sha256:[0-9a-f]{64}$")
+                    || !System.Text.RegularExpressions.Regex.IsMatch(AICodedbStrictJson.GetRequiredString(body, "generation_id", label), "^[A-Za-z0-9._-]{1,64}$")) return false;
+                DateTimeOffset created, expires;
+                return DateTimeOffset.TryParse(AICodedbStrictJson.GetRequiredString(body, "created_at_utc", label), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out created)
+                    && DateTimeOffset.TryParse(AICodedbStrictJson.GetRequiredString(body, "expires_at_utc", label), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out expires)
+                    && expires > created;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        internal static string GetRemovalPreflightDiagnostic(AICodedbCommandResult result)
+        {
+            if (result == null) return "Removal preflight returned no result.";
+            var summary = result.GetSummary();
+            if (result.OutputDrainIncomplete) summary += " Command output was incomplete.";
+            if (result.Succeeded) summary += " Removal preflight handoff was missing or invalid.";
+            // Only bounded backend refusal lines are projected. Handoff tokens,
+            // JSON records and auth-bearing lines are never copied into Manager.
+            var output = (result.StandardError ?? string.Empty) + "\n" + (result.StandardOutput ?? string.Empty);
+            if (output.Length > 16384) output = output.Substring(0, 16384);
+            var detail = new StringBuilder();
+            foreach (var raw in output.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.IndexOf("HANDOFF", StringComparison.OrdinalIgnoreCase) >= 0
+                    || System.Text.RegularExpressions.Regex.IsMatch(line, @"(?i)auth[_-]?token|\bauth\s*[:=]")
+                    || line.IndexOf("token", StringComparison.OrdinalIgnoreCase) >= 0
+                    || line.StartsWith("{", StringComparison.Ordinal)) continue;
+                // Hashes and encoded receipt values can occur inside errors too.
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"[A-Za-z0-9_+/-]{64,}(?:\.[A-Za-z0-9_-]+)?", "[redacted]");
+                foreach (var character in line)
+                    if (!char.IsControl(character) && detail.Length < 768) detail.Append(character);
+                if (detail.Length < 768) detail.Append(' ');
+                if (detail.Length >= 768) break;
+            }
+            var reason = detail.ToString().Trim();
+            return reason.Length == 0 ? summary : summary + " " + reason;
         }
 
         private static bool IsRemovalPreflightDue(

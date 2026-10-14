@@ -19,6 +19,63 @@ namespace Rice.AI.Codedb.Editor.Tests
     internal sealed class AICodedbS29ExecutionContextTests
     {
         [Test]
+        public void RemovalPreflightFailureDiagnostic_IsBoundedRedactedAndRetainsCause()
+        {
+            var result = new AICodedbCommandResult(4,
+                "[REMOVAL_PREFLIGHT] BLOCKED\n[REMOVAL_PREFLIGHT_HANDOFF] secret.receipt\n",
+                "Removal preflight requires review. Supervisor namespace contains unknown evidence: foreign.json\n"
+                + "auth_token=" + new string('a', 64) + "\n" + new string('x', 2000), false);
+            var diagnostic = AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(result);
+            Assert.That(diagnostic, Does.Contain("exit code 4"));
+            Assert.That(diagnostic, Does.Contain("foreign.json"));
+            Assert.That(diagnostic, Does.Not.Contain("secret.receipt"));
+            Assert.That(diagnostic, Does.Not.Contain(new string('a', 64)));
+            Assert.That(diagnostic.Length, Is.LessThanOrEqualTo(900));
+            Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(result), Is.False);
+        }
+
+        [Test]
+        public void RemovalPreflightFailureCache_PreservesBackendReasonWithoutDispatch()
+        {
+            AssertCachedRemovalFailure(new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
+                "Supervisor history conflicts with canonical operation.", false), "history conflicts with canonical operation");
+        }
+
+        internal static void AssertCachedRemovalFailure(AICodedbCommandResult result, string reason)
+        {
+                var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                    "C:/codedb-synthetic/project", "C:/codedb-synthetic/package", "cached refusal");
+                var status = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable, "retained instance",
+                    attentionReason: AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
+                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+                var lifecycle = typeof(AICodedbEditorLifecycle);
+                var cacheField = lifecycle.GetField("_removalPreflightCache", flags);
+                var cacheType = lifecycle.GetNestedType("RemovalPreflightCacheEntry", System.Reflection.BindingFlags.NonPublic);
+                var key = (string)lifecycle.GetMethod("GetRemovalPreflightCacheKey", flags).Invoke(null,
+                    new object[] { context, default(AICodedbCurrentInstanceStatus), false });
+                var original = cacheField.GetValue(null);
+                try
+                {
+                    var diagnostic = AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(result);
+                    cacheField.SetValue(null, Activator.CreateInstance(cacheType,
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                        null, new object[] { key, DateTime.UtcNow.AddSeconds(30), false, diagnostic }, CultureInfo.InvariantCulture));
+                    var projected = (AICodedbProductStatus)lifecycle.GetMethod("WithRemovalPreflight", flags).Invoke(null,
+                        new object[] { context, status, default(AICodedbCurrentInstanceStatus), new Func<bool>(() => true), CancellationToken.None, false });
+                    Assert.That(projected.RemovalPreflightPassed, Is.False);
+                    Assert.That(projected.DiagnosticDetail, Does.Contain(reason));
+                    Assert.That(projected.State, Is.EqualTo(status.State));
+                    Assert.That(AICodedbManagerWindow.IsUninstallAvailable(projected, true), Is.False);
+                    var uiItem = (AICodedbStatusItem)typeof(AICodedbStatusSnapshot).GetMethod(
+                        "CreateControlContractMigrationStatus", flags).Invoke(null, new object[] { projected });
+                    Assert.That(uiItem.Detail, Does.Contain(reason));
+                }
+                finally { cacheField.SetValue(null, original); }
+        }
+
+        [Test]
         public void RetainedCandidateUninstalledPresentationUsesWorkerPreflightWithoutDispatchOnCancelledWorker()
         {
             AICodedbTestWorkspace.Run(workspace =>

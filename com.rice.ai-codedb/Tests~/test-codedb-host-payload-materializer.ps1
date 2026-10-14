@@ -56,6 +56,8 @@ param(
 
     [switch]$VersionTransitionObservationOnly,
 
+    [switch]$RemovalNamespaceOnly,
+
     [switch]$FailedBeforeInstall,
 
     [switch]$HistoricalProbeOnly,
@@ -1214,7 +1216,7 @@ function Invoke-VersionTransitionObservationCases {
 }
 
 function Invoke-GenerationAlignmentCases {
-    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot)
+    param([string]$Container, [string]$PackageRoot, [string]$PredecessorRoot, [switch]$RemovalNamespace)
     function Check { param([bool]$Condition, [string]$Label); if (-not $Condition) { throw "Alignment assertion: $Label" }; $script:Cases++; Write-Host "[OK] $Label" }
     function Reject { param([scriptblock]$Body, [string]$Label); $rejected=$false; try { & $Body | Out-Null } catch { $rejected=$true; Write-Host ('[REFUSAL] '+$Label+': '+$_.Exception.Message) }; Check $rejected $Label }
     function Record { param([string]$Path, $Value); Assert-PathInside -Path $Path -Root $Container -Label 'alignment fixture'; [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent)); [IO.File]::WriteAllText($Path,(ConvertTo-InstanceJsonText -Value $Value),[Text.UTF8Encoding]::new($false)) }
@@ -1241,6 +1243,123 @@ function Invoke-GenerationAlignmentCases {
     $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
     $read={Get-RemoveIntegrationAuthority -Manifest $manifest -ProjectRoot $root}
     $authority=& $read
+    if ($RemovalNamespace) {
+        $installRecoveryBody=(Get-Command Invoke-InstanceConvergence).ScriptBlock.ToString()
+        $uninstallRecoveryBody=(Get-Command Invoke-InstanceUninstall).ScriptBlock.ToString()
+        Check ($installRecoveryBody -match 'Invoke-InstanceOperationRecovery\s+-ProjectRoot \$ProjectRoot\s+-StageRoot \$lock\.Root\s+-Manifest \$Manifest') 'Install production recovery entrance forwards Package Manifest'
+        Check ($uninstallRecoveryBody -match 'Invoke-InstanceOperationRecovery\s+-ProjectRoot \$ProjectRoot\s+-StageRoot \$lock\.Root\s+-Manifest \$Manifest') 'Uninstall production recovery entrance forwards Package Manifest'
+        Check ($authority.Kind -ceq 'VERSIONED_V2') 'ordinary current owner-pair control'
+        Check (@(Get-RemoveIntegrationNamespaceInventory -NamespacePath $namespace -ProjectRoot $root).Count -eq 2) 'unchanged v1/default namespace inventory admits exact current pair'
+        $suffix='1760000000000.'+('e'*32)
+        $staleState=$statePath+'.stale.'+$suffix; $staleLock=$ownerPath+'.stale.'+$suffix
+        [IO.File]::Move($statePath,$staleState); [IO.File]::Move($ownerPath,$staleLock)
+        $opId='1'*32; $historyPath=Join-Path $namespace ('operation-history/'+$opId+'.json');$opPath=Join-Path $namespace 'operation.json'
+        $child=[ordered]@{schema_version=1;pid=424242;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64);command=(Get-Command powershell.exe).Source;normalized_argv=@('-NoProfile','-File','materialize-codedb-host-payload.ps1','-Action','Upgrade')}
+        $op=[ordered]@{schema_version=1;managed_by=$script:ManagedBy;operation_id=$opId;key='["materialize:Upgrade","Upgrade",true]';request_id='fixture';manager_action_id='';name='materialize:Upgrade';lane='maintenance';state='failed';phase='failed';owner_epoch=('f'*32);project_identity=(Get-MaterializerProjectIdentity -ProjectRoot $root);root=$root;runtime=$namespace;selected_instance_id=$selected.InstanceId;selected_generation_id=$selected.Generation.GenerationId;runtime_contract_sha256=$old.RuntimeContractSha256;child=$child;started_at_utc='2026-10-13T03:10:48.181Z';completed_at_utc='2026-10-13T03:10:55.514Z';result=[ordered]@{exit_code=6;stdout='';stderr='Synthetic rejected Upgrade';timed_out=$false};error='Synthetic rejected Upgrade'}
+        Record $opPath $op; Record $historyPath $op
+        Reject {Get-RemoveIntegrationNamespaceInventory -NamespacePath $namespace -ProjectRoot $root} 'v1/default namespace inventory does not inherit retired-v2 admission'
+        $before=Digest $root; $authority=& $read
+        Check ($authority.Inventory.Count -eq 0 -and $authority.PreservedInventory.Count -eq 4) 'retired-v2 proof is separate from removal Delete inventory'
+        Check ($before -ceq (Digest $root)) 'retired-v2 preflight does not mutate project bytes'
+        Check ($authority.Selection.GenerationId -ceq 'poc.42' -and $manifest.GenerationId -ceq 'poc.43') 'exact committed predecessor identity admits retired namespace'
+        $plan=Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
+        $token=New-RemoveIntegrationPreflightHandoff -Authority $authority -ConfigPlan $plan -ProjectRoot $root
+        $null=Assert-RemoveIntegrationPreflightHandoff -Token $token -Authority $authority -ConfigPlan $plan -ProjectRoot $root
+        [IO.File]::WriteAllText((Join-Path $Container 'preflight-available.stdout'),("[REMOVAL_PREFLIGHT] AVAILABLE`n[REMOVAL_PREFLIGHT_HANDOFF] "+$token+"`n"),[Text.UTF8Encoding]::new($false))
+        foreach($field in @('state','phase','selected_instance_id','runtime_contract_sha256','child','result')) {
+            Fault $historyPath {param($d) switch($field){state{$d.state='running'}phase{$d.phase='queued'}selected_instance_id{$d.selected_instance_id='0'*32}runtime_contract_sha256{$d.runtime_contract_sha256='0'*64}child{$d.child=$null}result{$d.result.exit_code=0}}} $read ('history refuses '+$field)
+        }
+        Fault $historyPath {param($d)$d.root=(Join-Path $Container 'foreign')} $read 'foreign history binding'
+        Fault $historyPath {param($d)$d.child.pid=0} $read 'malformed child identity'
+        Fault $historyPath {param($d)$d.result.timed_out=$true} $read 'timeout is not termination proof'
+        Fault $opPath {param($d)$d.result.stderr='conflicting terminal'} $read 'canonical/history terminal bytes must match'
+        Fault $staleLock {param($d)$d.owner_epoch='conflicting-owner'} $read 'stale pair identifies one exact owner'
+        $staleBytes=[IO.File]::ReadAllBytes($staleLock);[IO.File]::Delete($staleLock)
+        try {Reject $read 'incomplete stale pair'} finally {[IO.File]::WriteAllBytes($staleLock,$staleBytes)}
+        Record $statePath $state
+        try {Reject $read 'single canonical owner record is blocked'} finally {[IO.File]::Delete($statePath)}
+        foreach($holder in @([pscustomobject]@{Alive=$true;StartTicks='1'},[pscustomobject]@{Alive=$true;StartTicks=$null})) {$script:Holder=$holder;Reject $read 'live reused or unknown child/owner PID'}
+        $script:Holder=[pscustomobject]@{Alive=$false;StartTicks=$null}
+        $unknown=Join-Path $namespace 'foreign.json';Record $unknown @{}
+        try {Reject $read 'unknown namespace entry'} finally {[IO.File]::Delete($unknown)}
+        $oversize=Join-Path $namespace 'supervisor-error.json';[IO.File]::WriteAllBytes($oversize,[byte[]]::new(262145))
+        try {Reject $read 'oversized evidence budget'} finally {[IO.File]::Delete($oversize)}
+        $unknownDirectory=Join-Path $namespace 'unknown';[void][IO.Directory]::CreateDirectory($unknownDirectory)
+        try {Reject $read 'unknown nested directory'} finally {[IO.Directory]::Delete($unknownDirectory)}
+        $redirect=Join-Path $namespace 'redirect';New-Item -ItemType Junction -Path $redirect -Target (Join-Path $root 'Assets') | Out-Null
+        try {Reject $read 'redirected namespace entry'} finally {[IO.Directory]::Delete($redirect)}
+        $historyBytes=[IO.File]::ReadAllBytes($historyPath)
+        try {[IO.File]::WriteAllText($historyPath,'{"schema_version":1,"schema_version":1}');Reject $read 'strict duplicate-key history'} finally {[IO.File]::WriteAllBytes($historyPath,$historyBytes)}
+        $budgetHistory=Join-Path $namespace 'operation-history';$budgetFiles=New-Object Collections.Generic.List[string]
+        try {
+            for($i=1;$i -le 4097;$i++){$path=Join-Path $budgetHistory ($i.ToString('x32')+'.json');[IO.File]::WriteAllBytes($path,[byte[]]::new(0));$budgetFiles.Add($path)}
+            Reject $read 'history record-count budget'
+        } finally {foreach($path in $budgetFiles){[IO.File]::Delete($path)}}
+        $budgetFiles.Clear()
+        try {
+            for($i=1;$i -le 129;$i++){$path=Join-Path $budgetHistory ($i.ToString('x32')+'.json');[IO.File]::WriteAllBytes($path,[byte[]]::new(262144));$budgetFiles.Add($path)}
+            Reject $read 'aggregate preserved-history byte budget'
+        } finally {foreach($path in $budgetFiles){[IO.File]::Delete($path)}}
+        $successId='2'*32;$successPath=Join-Path $namespace ('operation-history/'+$successId+'.json')
+        $success=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'terminal success fixture';$success.operation_id=$successId;$success.state='completed';$success.phase='completed';$success.result.exit_code=0;Record $successPath $success
+        $authority=& $read;Check ($authority.PreservedInventory.Count -eq 5) 'terminal success and terminal failure both authenticated'
+        # Emit the exact production preflight handler under the in-process module,
+        # without evaluating script entry, launching PowerShell or touching real state.
+        $payload=$manifest;$projectRootPath=$root
+        $handlerAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PackageRoot 'Tools~/materialize-codedb-host-payload.ps1'),[ref]$null,[ref]$null)
+        $switchAst=$handlerAst.Find({param($a)$a -is [Management.Automation.Language.SwitchStatementAst] -and @($a.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'}).Count -eq 1},$true)
+        $handler=@($switchAst.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'})[0].Item2
+        $handlerScript=[scriptblock]::Create($handler.Extent.Text.TrimStart('{').TrimEnd('}'))
+        $captured=@(& $handlerScript 6>&1)
+        [IO.File]::WriteAllText((Join-Path $Container 'preflight-available.stdout'),(($captured | ForEach-Object {$_.ToString()}) -join "`n"),[Text.UTF8Encoding]::new($false))
+        Record $unknown @{}
+        try {
+            $captured=@(& $handlerScript 6>&1)
+            throw 'Expected production refusal'
+        } catch {
+            $message=$_.Exception.Message
+            [IO.File]::WriteAllText((Join-Path $Container 'preflight-blocked.stderr'),$message,[Text.UTF8Encoding]::new($false))
+            Check ($script:RequestedExitCode -eq 4 -and $message.Contains('foreign.json')) 'production preflight refusal preserves concrete namespace reason'
+        } finally {[IO.File]::Delete($unknown);$script:RequestedExitCode=0}
+        $authority=& $read;$plan=Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'));$token=New-RemoveIntegrationPreflightHandoff -Authority $authority -ConfigPlan $plan -ProjectRoot $root
+        Fault $historyPath {param($d)$d.error='history drift'} {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'history drift invalidates handoff before mutation'
+        $configPath=Join-Path $root '.codex/config.toml';$configBytes=[IO.File]::ReadAllBytes($configPath)
+        try {[IO.File]::AppendAllText($configPath,"`n");Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'configuration drift invalidates handoff'} finally {[IO.File]::WriteAllBytes($configPath,$configBytes)}
+        Fault $selected.SelectionPath {param($d)$d.activation_epoch='0'*32} {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'selection drift invalidates handoff'
+        $script:NamespaceDriftPath=$historyPath;$script:NamespaceDriftBytes=[IO.File]::ReadAllBytes($historyPath)
+        $script:OriginalEnterLock=(Get-Command Enter-MaterializerLock).ScriptBlock
+        function script:Enter-MaterializerLock {param($ProjectRoot,[switch]$WaitForExisting,$WaitTimeoutMilliseconds);$lock=& $script:OriginalEnterLock -ProjectRoot $ProjectRoot -WaitForExisting:$WaitForExisting -WaitTimeoutMilliseconds $WaitTimeoutMilliseconds;[IO.File]::AppendAllText($script:NamespaceDriftPath,"`n");return $lock}
+        try {Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'lock-time namespace drift rejects before mutation'} finally {Set-Item -LiteralPath Function:script:Enter-MaterializerLock -Value $script:OriginalEnterLock;[IO.File]::WriteAllBytes($historyPath,$script:NamespaceDriftBytes);$script:RequestedExitCode=0}
+        $script:OriginalPublish=(Get-Command Publish-InstanceOperation).ScriptBlock
+        function script:Publish-InstanceOperation {param($ProjectRoot,$ActionName,$CandidateInstanceId,$Entries,$StageRoot,$OperationRoot,$VerifyBeforeMutation,$VerifyBeforeCommit,$OperationId);[IO.File]::AppendAllText($script:NamespaceDriftPath,"`n");& $script:OriginalPublish @PSBoundParameters}
+        try {Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'before-mutation namespace drift rejects transaction'} finally {Set-Item -LiteralPath Function:script:Publish-InstanceOperation -Value $script:OriginalPublish;[IO.File]::WriteAllBytes($historyPath,$script:NamespaceDriftBytes);$script:RequestedExitCode=0}
+        Reject {Assert-InstanceNextChangeAdmission -Manifest $manifest -ProjectRoot $root} 'ordinary target-strict admission is unchanged'
+        # Fault after first transaction write proves normal rollback keeps both
+        # the selected identity and preserved proof; the next attempt is separate.
+        $script:Action='RemoveIntegration';$script:TestFailAfterMutation=1;$script:RequestedExitCode=0
+        Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'copied removal transaction fault rolls back'
+        $script:TestFailAfterMutation=0;$script:RequestedExitCode=0
+        $authorityAfter=& $read;Check ($authorityAfter.OwnerFingerprint -ceq $authority.OwnerFingerprint) 'rollback retains original namespace and selection authority'
+        $token=New-RemoveIntegrationPreflightHandoff -Authority $authorityAfter -ConfigPlan $plan -ProjectRoot $root
+        Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token
+        $desired=Get-InstanceDesiredState -ProjectRoot $root
+        Check ($desired.DesiredState -ceq 'UNINSTALLED' -and $desired.CleanupState -ceq 'PENDING') 'copied-project confirmed removal reaches terminal state'
+        foreach($item in $authority.PreservedInventory){Check ((Get-FileSha256 -Path $item.Path) -ceq $item.Sha256) ('history/quarantine preserved: '+$item.Name)}
+        Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest
+        Check $true 'restart terminal validation binds extant preserved namespace to durable intent'
+        Fault $historyPath {param($d)$d.error='terminal drift'} {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} 'terminal/recovery rejects retained evidence drift'
+        $hiddenNamespace=$namespace+'.fixture-missing';[IO.Directory]::Move($namespace,$hiddenNamespace)
+        try {Reject {Assert-RemoveIntegrationTerminalState -ProjectRoot $root -DesiredState $desired -Manifest $manifest} 'whole namespace absence after restart remains blocked'} finally {[IO.Directory]::Move($hiddenNamespace,$namespace)}
+        $recoveryId='3'*32;$recoveryRoot=Join-Path $root ($script:InstanceOperationsRelativePath+'/operation-'+$recoveryId);[void][IO.Directory]::CreateDirectory($recoveryRoot)
+        Write-InstanceOperationJournal -ProjectRoot $root -OperationId $recoveryId -State COMMITTED -ActionName RemoveIntegration -CandidateInstanceId $recoveryId -OperationRoot $recoveryRoot -Entries @() -StageRoot $recoveryRoot
+        $journalPath=Join-Path $root $script:InstanceOperationRelativePath
+        Fault $historyPath {param($d)$d.error='recovery drift'} {Invoke-InstanceOperationRecovery -ProjectRoot $root -StageRoot $recoveryRoot -Manifest $manifest} 'committed recovery refuses retained history drift before journal cleanup'
+        Check (Test-Path -LiteralPath $journalPath -PathType Leaf) 'blocked committed recovery preserves journal evidence'
+        Check (Invoke-InstanceOperationRecovery -ProjectRoot $root -StageRoot $recoveryRoot -Manifest $manifest) 'committed recovery authenticates preserved terminal evidence before cleanup'
+        Check (-not (Test-Path -LiteralPath $journalPath)) 'authenticated committed recovery clears only transaction journal'
+        Write-Output ('[REMOVAL_NAMESPACE] PASS cases='+$script:Cases+' native_children=0 copied_project_only=true')
+        return
+    }
     $handoffPlan=Get-RepairMcpConfigPlan -ProjectRoot $root -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
     $handoff=New-RemoveIntegrationPreflightHandoff -Authority $authority -ConfigPlan $handoffPlan -ProjectRoot $root
     $handoffBody=Assert-RemoveIntegrationPreflightHandoff -Token $handoff -Authority $authority -ConfigPlan $handoffPlan -ProjectRoot $root
@@ -1310,18 +1429,18 @@ function Invoke-GenerationAlignmentCases {
     Write-Output ('[GENERATION_ALIGNMENT] PASS cases='+$script:Cases+' native_children=0 PocFixture=true external_process_observation=synthetic')
 }
 
-if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly) {
+if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly -or $RemovalNamespaceOnly) {
     if (-not $CanonicalPayloadRoot -or -not $PredecessorPackageRoot -or -not $RetainedFixtureRoot) {throw 'Alignment requires explicit candidate, predecessor and owned fixture roots.'}
     $packageRoot=Split-Path ([IO.Path]::GetFullPath($CanonicalPayloadRoot)) -Parent
     $parent=[IO.Path]::GetFullPath($RetainedFixtureRoot)
     $checkout=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
     # The explicit checkout owns fixture persistence; extracted candidate paths
     # are read-only production inputs, never the default test scratch authority.
-    $family=if($VersionTransitionObservationOnly){'s29-version-transition-observation'}else{'s29-generation-alignment'}
+    $family=if($RemovalNamespaceOnly){'s29-removal-namespace'}elseif($VersionTransitionObservationOnly){'s29-version-transition-observation'}else{'s29-generation-alignment'}
     if ($parent.IndexOf('/.artifacts/tests/'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
     $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
     [void][IO.Directory]::CreateDirectory($container)
-    $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot,$FailedBeforeInstall)')
+    $parts=[Collections.Generic.List[string]]::new();$parts.Add('param($Container,$PackageRoot,$PredecessorRoot,$FailedBeforeInstall,$RemovalNamespace)')
     $productionPaths=@((Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-strict-json.ps1'),(Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-instance-manifest-contract.ps1'))
     if($VersionTransitionObservationOnly){$productionPaths+=Join-Path $CanonicalPayloadRoot 'AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1'}
     $productionPaths+=@((Join-Path $packageRoot 'Tools~/materialize-codedb-host-payload.ps1'),(Join-Path $packageRoot 'Tools~/codedb-instance-engine.ps1'))
@@ -1333,8 +1452,8 @@ if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly) {
     }
     $caseName=if($VersionTransitionObservationOnly){'Invoke-VersionTransitionObservationCases'}else{'Invoke-GenerationAlignmentCases'}
     $parts.Add('function '+$caseName+' {'+(Get-Command $caseName).ScriptBlock.ToString()+'}')
-    $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot,([bool]$FailedBeforeInstall)
-    $extra=if($VersionTransitionObservationOnly){' -FailedBeforeInstall:$FailedBeforeInstall'}else{''}
+    $module=New-Module -Name 'S29GenerationAlignment' -ScriptBlock ([scriptblock]::Create(($parts -join "`n"))) -ArgumentList $container,$packageRoot,$PredecessorPackageRoot,([bool]$FailedBeforeInstall),([bool]$RemovalNamespaceOnly)
+    $extra=if($VersionTransitionObservationOnly){' -FailedBeforeInstall:$FailedBeforeInstall'}elseif($RemovalNamespaceOnly){' -RemovalNamespace:$RemovalNamespace'}else{''}
     try {& $module ([scriptblock]::Create($caseName+' -Container $Container -PackageRoot $PackageRoot -PredecessorRoot $PredecessorRoot'+$extra))} finally {Remove-Module $module -ErrorAction SilentlyContinue}
     Write-Output ('[PRESERVED_FIXTURE] '+$container)
     return

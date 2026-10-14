@@ -10153,6 +10153,125 @@ function Get-RemoveIntegrationNamespaceInventory {
     return $files.ToArray()
 }
 
+function Assert-RemoveIntegrationTerminalOperation {
+    param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, [string]$RuntimeContractSha256)
+    $label = 'retained Supervisor operation'
+    Assert-RemoveIntegrationJsonFields -Object $Document -Label $label `
+        -Required @('schema_version','managed_by','operation_id','key','request_id','name','lane','state','phase','owner_epoch','project_identity','root','runtime','selected_instance_id','selected_generation_id','runtime_contract_sha256','child','started_at_utc','completed_at_utc','result') `
+        -Optional @('manager_action_id','error','error_code','handoff_queued','handoff_reason')
+    if ((Get-RequiredJsonInt32 -Object $Document -Name schema_version -Label $label) -ne 1 -or
+        $Document.managed_by -cne $script:ManagedBy -or $Document.operation_id -cnotmatch '^[0-9a-f]{32}$' -or
+        $Document.owner_epoch -cnotmatch '^[0-9a-f]{32}$' -or $Document.lane -cne 'maintenance' -or
+        $Document.state -cnotin @('completed','failed') -or $Document.phase -cne $Document.state -or
+        $Document.project_identity -cne (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot) -or
+        -not (Test-RemoveIntegrationPathEqual -Left $Document.root -Right $ProjectRoot) -or
+        -not (Test-RemoveIntegrationPathEqual -Left $Document.runtime -Right $NamespacePath) -or
+        $Document.selected_instance_id -cne $Selection.InstanceId -or $Document.selected_generation_id -cne $Selection.GenerationId -or
+        $Document.runtime_contract_sha256 -cne $RuntimeContractSha256 -or
+        ($null -ne $Document.PSObject.Properties['manager_action_id'] -and $Document.manager_action_id -cnotmatch '^(?:[0-9a-f]{32})?$')) {
+        throw 'Retained Supervisor operation has active, foreign or inconsistent identity.'
+    }
+    $null = Get-RequiredJsonString -Object $Document -Name key -Label $label
+    $null = Get-RequiredJsonString -Object $Document -Name name -Label $label
+    if ($Document.request_id -isnot [string]) { throw 'Retained Supervisor request identity is invalid.' }
+    foreach ($field in @('error','error_code','handoff_reason')) {
+        if ($null -ne $Document.PSObject.Properties[$field] -and $null -ne $Document.$field -and $Document.$field -isnot [string]) { throw 'Retained Supervisor operation has malformed optional metadata.' }
+    }
+    if ($null -ne $Document.PSObject.Properties['handoff_queued'] -and $Document.handoff_queued -isnot [bool]) { throw 'Retained Supervisor handoff metadata is invalid.' }
+    [DateTimeOffset]$started = [DateTimeOffset]::MinValue; [DateTimeOffset]$completed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
+        -not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
+        $started.Offset -ne [TimeSpan]::Zero -or $completed.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Retained Supervisor operation terminal timestamps are invalid.' }
+    Assert-RemoveIntegrationJsonFields -Object $Document.result -Label "$label result" -Required @('exit_code','stdout','stderr','timed_out')
+    $exitCode = Get-RequiredJsonInt32 -Object $Document.result -Name exit_code -Label "$label result"
+    if ($Document.result.stdout -isnot [string] -or $Document.result.stderr -isnot [string] -or
+        $Document.result.timed_out -isnot [bool] -or $Document.result.timed_out -or
+        (($Document.state -ceq 'completed') -ne ($exitCode -eq 0))) { throw 'Retained Supervisor terminal result is inconsistent or timed out.' }
+    # finishOperation overwrites phase even when interrupted child capture failed.
+    # A null child can never prove that no child escaped the owning Supervisor.
+    if ($null -eq $Document.child) { throw 'Retained Supervisor operation has no durable child identity; termination cannot be proved.' }
+    $child = $Document.child
+    Assert-RemoveIntegrationJsonFields -Object $child -Label "$label child" -Required @('schema_version','pid','process_start_identity','executable_path','argv_sha256','command_line_sha256','command','normalized_argv')
+    $childPid = Get-RequiredJsonInt32 -Object $child -Name pid -Label "$label child"
+    if ((Get-RequiredJsonInt32 -Object $child -Name schema_version -Label "$label child") -ne 1 -or $childPid -le 0 -or
+        $child.process_start_identity -cnotmatch '^[0-9]{1,32}$' -or -not [IO.Path]::IsPathRooted($child.executable_path) -or
+        $child.argv_sha256 -cnotmatch '^[0-9a-f]{64}$' -or $child.command_line_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-RemoveIntegrationPathEqual -Left $child.command -Right $child.executable_path) -or
+        $child.normalized_argv -isnot [array] -or $child.normalized_argv.Count -eq 0 -or
+        @($child.normalized_argv | Where-Object { $_ -isnot [string] }).Count -ne 0) { throw 'Retained Supervisor child process evidence is invalid.' }
+    if ((Get-MaterializerProcessIdentity -ProcessId $childPid).Alive) { throw 'Retained Supervisor child PID is live, reused or unverifiable.' }
+}
+
+function Get-RemoveIntegrationV2NamespaceProof {
+    param($Manifest, [string]$ProjectRoot, [string]$NamespacePath, $Selection,
+        [switch]$Terminal, [AllowEmptyString()][string]$ExpectedFingerprint = '')
+    Assert-NoReparsePoint -Path $NamespacePath -Root $ProjectRoot -Label 'Supervisor v2 namespace'
+    $delete = New-Object System.Collections.Generic.List[object]
+    $preserved = New-Object System.Collections.Generic.List[object]
+    $stale = @{}; $history = @{}; $canonical = $null; [int64]$bytes = 0
+    $entries = @(Get-ChildItem -LiteralPath $NamespacePath -Force -ErrorAction Stop | Sort-Object Name)
+    if ($entries.Count -gt 70) { throw 'Supervisor namespace entry count exceeds its bounded limit.' }
+    foreach ($item in $entries) {
+        Assert-NoReparsePoint -Path $item.FullName -Root $NamespacePath -Label 'Supervisor namespace proof'
+        if ($item.PSIsContainer) {
+            if ($item.Name -cne 'operation-history') { throw "Supervisor namespace contains unknown directory: $($item.Name)" }
+            $archives = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop | Sort-Object Name)
+            if ($archives.Count -gt 4096) { throw 'Supervisor operation history count exceeds its bounded limit.' }
+            foreach ($archive in $archives) {
+                Assert-NoReparsePoint -Path $archive.FullName -Root $NamespacePath -Label 'Supervisor operation history'
+                if ($archive.PSIsContainer -or $archive.Name -cnotmatch '^([0-9a-f]{32})\.json$' -or $archive.Length -le 0 -or $archive.Length -gt 262144) { throw 'Supervisor operation history contains invalid or oversized evidence.' }
+                $id = $Matches[1]; $history[$id] = $archive.FullName; $bytes += $archive.Length
+                $preserved.Add([pscustomobject]@{Name='operation-history/'+$archive.Name;Path=$archive.FullName;Sha256=Get-FileSha256 -Path $archive.FullName})
+            }
+        } else {
+            $limit = if ($item.Name -ceq 'supervisor-events.jsonl') {4194304} else {262144}
+            if ($item.Length -lt 0 -or $item.Length -gt $limit) { throw "Supervisor namespace evidence exceeds its bounded size: $($item.Name)" }
+            $record = [pscustomobject]@{Name=$item.Name;Path=$item.FullName;Sha256=Get-FileSha256 -Path $item.FullName}
+            if ($item.Name -cmatch '^(supervisor-state\.json|supervisor\.lock)\.stale\.([0-9]{1,17}\.[0-9a-f]{32})$') {
+                $suffix=$Matches[2]; if (-not $stale.ContainsKey($suffix)) {$stale[$suffix]=@{}}
+                $stale[$suffix][$Matches[1]]=$item.FullName; $preserved.Add($record); $bytes += $item.Length
+            } elseif ($item.Name -ceq 'operation.json') { $canonical=$record; $preserved.Add($record); $bytes += $item.Length
+            } elseif ($item.Name -cin @('supervisor-state.json','supervisor.lock','supervisor-events.jsonl','supervisor-error.json')) {
+                if ($Terminal) { throw "Logical integration removal retains current Supervisor evidence: $($item.Name)" }
+                $delete.Add($record)
+            } else { throw "Supervisor namespace contains unknown or in-flight evidence: $($item.Name)" }
+        }
+        if ($bytes -gt 33554432) { throw 'Supervisor preserved evidence exceeds its aggregate byte budget.' }
+    }
+    if ($stale.Count -gt 32) { throw 'Supervisor stale-pair count exceeds its bounded limit.' }
+    $parts=@('V2_PRESERVED_NAMESPACE', (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot), $Selection.InstanceId,
+        $Selection.GenerationId, $Selection.InstanceManifestSha256, $Selection.GenerationManifestSha256)
+    $parts += @($preserved | Sort-Object Name | ForEach-Object { $_.Name+'|'+$_.Sha256 })
+    $fingerprint=Get-TextSha256 -Text ($parts -join "`n")
+    if ($Terminal -and $fingerprint -cne $ExpectedFingerprint) { throw 'Preserved Supervisor evidence changed after integration removal admission.' }
+    $context=Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
+    foreach ($id in $history.Keys) {
+        $operation=(Read-BoundedJsonDocument -Path $history[$id] -Label 'Supervisor history operation' -MaximumBytes 262144).Document
+        Assert-RemoveIntegrationTerminalOperation -Document $operation -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Selection $Selection -RuntimeContractSha256 $context.RuntimeContractSha256
+        if ($operation.operation_id -cne $id) { throw 'Supervisor history filename conflicts with operation identity.' }
+    }
+    if ($null -ne $canonical) {
+        $operation=(Read-BoundedJsonDocument -Path $canonical.Path -Label 'Supervisor canonical operation' -MaximumBytes 262144).Document
+        if (-not $history.ContainsKey([string]$operation.operation_id) -or $canonical.Sha256 -cne (Get-FileSha256 -Path $history[[string]$operation.operation_id])) { throw 'Supervisor canonical operation conflicts with its terminal history.' }
+    }
+    foreach ($pair in $stale.Values) {
+        if ($pair.Count -ne 2) { throw 'Supervisor stale quarantine requires a complete state and lock pair.' }
+        $state=(Read-BoundedJsonDocument -Path $pair['supervisor-state.json'] -Label 'stale Supervisor state' -MaximumBytes 262144).Document
+        $owner=(Read-BoundedJsonDocument -Path $pair['supervisor.lock'] -Label 'stale Supervisor lock' -MaximumBytes 262144).Document
+        # Terminal bytes were bound by the original intent fingerprint before
+        # their epoch is reused; they cannot introduce fresh selection authority.
+        $proofSelection=$Selection
+        if ($Terminal) { $proofSelection=$Selection.PSObject.Copy(); $proofSelection.ActivationEpoch=$state.activation_epoch }
+        $a=Assert-RemoveIntegrationOwnerRecord -Document $state -Kind VERSIONED_V2 -StateDocument $true -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Manifest $Manifest -Selection $proofSelection -Label 'stale Supervisor state'
+        $b=Assert-RemoveIntegrationOwnerRecord -Document $owner -Kind VERSIONED_V2 -StateDocument $false -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Manifest $Manifest -Selection $proofSelection -Label 'stale Supervisor lock'
+        if ($a.Fingerprint -cne $b.Fingerprint) { throw 'Supervisor stale quarantine identifies conflicting owners.' }
+        if ((Get-MaterializerProcessIdentity -ProcessId $a.ProcessId).Alive) { throw 'Stale Supervisor owner PID is live, reused or unverifiable.' }
+    }
+    $names=@($delete | ForEach-Object Name)
+    if (($names -ccontains 'supervisor-state.json') -ne ($names -ccontains 'supervisor.lock')) { throw 'Supervisor namespace contains an incomplete current state and lock pair.' }
+    return [pscustomobject]@{Inventory=$delete.ToArray();PreservedInventory=$preserved.ToArray();Fingerprint=$fingerprint;HasCurrentPair=($names -ccontains 'supervisor-state.json')}
+}
+
 function Assert-PartialV1SupervisorFailureEvents {
     param(
         [Parameter(Mandatory = $true)][string]$EventsPath,
@@ -10752,7 +10871,6 @@ function Get-RemoveIntegrationAuthority {
             return Get-PartialV1RemoveIntegrationAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -Authority $authority
         }
     }
-    $inventory = @(Get-RemoveIntegrationNamespaceInventory -NamespacePath $authority.Path -ProjectRoot $ProjectRoot)
     $selection = Get-ValidatedRemoveIntegrationSelection `
         -Manifest $Manifest `
         -ProjectRoot $ProjectRoot `
@@ -10764,8 +10882,19 @@ function Get-RemoveIntegrationAuthority {
         -LastKnownGood `
         -AllowMissing
 
+    $namespaceProof = $null
+    if ($authority.Kind -ceq 'VERSIONED_V2') {
+        $namespaceProof = Get-RemoveIntegrationV2NamespaceProof -Manifest $Manifest -ProjectRoot $ProjectRoot -NamespacePath $authority.Path -Selection $selection
+        $inventory = @($namespaceProof.Inventory)
+    } else {
+        $inventory = @(Get-RemoveIntegrationNamespaceInventory -NamespacePath $authority.Path -ProjectRoot $ProjectRoot)
+    }
+
     $statePath = Join-Path $authority.Path "supervisor-state.json"
     $lockPath = Join-Path $authority.Path "supervisor.lock"
+    $retiredV2 = $null -ne $namespaceProof -and -not $namespaceProof.HasCurrentPair
+    $validatedState = $null
+    if (-not $retiredV2) {
     $state = (Read-BoundedJsonDocument -Path $statePath -Label "Supervisor state" -MaximumBytes (256 * 1024)).Document
     $owner = (Read-BoundedJsonDocument -Path $lockPath -Label "Supervisor lock" -MaximumBytes (256 * 1024)).Document
     $validatedState = Assert-RemoveIntegrationOwnerRecord `
@@ -10793,6 +10922,7 @@ function Get-RemoveIntegrationAuthority {
     if ($processIdentity.Alive) {
         throw "Remove CodeDB Integration is blocked while the Supervisor owner PID is live or unverifiable."
     }
+    }
 
     foreach ($instance in @($selection, $lastKnownGood) | Where-Object { $null -ne $_ }) {
         $holders = Get-InstanceRetirementHolderEvidence -Evidence $instance -ProjectRoot $ProjectRoot
@@ -10813,15 +10943,21 @@ function Get-RemoveIntegrationAuthority {
         OwnerIdentityVersion = $authority.OwnerIdentityVersion
         RelativePath = $authority.RelativePath
         Path = $authority.Path
-        OwnerFingerprint = $validatedState.Fingerprint
+        OwnerFingerprint = $(if ($null -eq $namespaceProof) { $validatedState.Fingerprint } else {
+            $fingerprintParts=@($namespaceProof.Fingerprint, $(if ($retiredV2) {'RETIRED'} else {$validatedState.Fingerprint}))
+            $fingerprintParts+=@($inventory | Sort-Object Name | ForEach-Object { $_.Name+'|'+$_.Sha256 })
+            Get-TextSha256 -Text ($fingerprintParts -join "`n")
+        })
+        PreservedFingerprint = $(if ($null -eq $namespaceProof) { '' } else { $namespaceProof.Fingerprint })
+        PreservedInventory = $(if ($null -eq $namespaceProof) { @() } else { @($namespaceProof.PreservedInventory) })
         Selection = $selection
         LastKnownGood = $lastKnownGood
         Inventory = $inventory
         ActivationState = $activationState
-        RuntimeContractSha256 = (Get-RequiredJsonString `
+        RuntimeContractSha256 = $(if ($retiredV2) { (Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $selection).RuntimeContractSha256 } else { (Get-RequiredJsonString `
             -Object $validatedState.Document `
             -Name "runtime_contract_sha256" `
-            -Label "Supervisor state").ToLowerInvariant()
+            -Label "Supervisor state").ToLowerInvariant() })
     }
 }
 
@@ -11013,7 +11149,8 @@ function Assert-RemoveIntegrationTerminalState {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$DesiredState,
         [AllowNull()]$Manifest,
-        [switch]$AllowEmptyCleanupDirectories
+        [switch]$AllowEmptyCleanupDirectories,
+        [AllowNull()]$PreservedAuthority
     )
 
     if (-not $DesiredState.Present -or $DesiredState.Legacy -or
@@ -11022,7 +11159,15 @@ function Assert-RemoveIntegrationTerminalState {
         $DesiredState.StateId -cnotmatch '^[0-9a-f]{32}$') {
         throw "Integration removal requires the exact authenticated UNINSTALLED / PENDING desired state."
     }
-    $null = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $DesiredState.StateId -Manifest $Manifest
+    $terminalIntent = Get-InstanceRemovalIntent -ProjectRoot $ProjectRoot -StateId $DesiredState.StateId -Manifest $Manifest
+    if ($null -ne $PreservedAuthority -and $null -ne $PreservedAuthority.PSObject.Properties['PreservedInventory']) {
+        foreach ($item in @($PreservedAuthority.PreservedInventory)) {
+            Assert-NoReparsePoint -Path $item.Path -Root $ProjectRoot -Label 'preserved Supervisor terminal evidence'
+            if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf) -or (Get-FileSha256 -Path $item.Path) -cne $item.Sha256) {
+                throw 'Preserved Supervisor evidence disappeared or changed during integration removal.'
+            }
+        }
+    }
     foreach ($relativePath in @(
             $script:InstanceCurrentRelativePath,
             $script:InstanceLastKnownGoodRelativePath,
@@ -11059,6 +11204,19 @@ function Assert-RemoveIntegrationTerminalState {
                 throw "Logical integration removal retains activation operation evidence."
             }
         }
+    }
+    $namespacePath = Join-Path $ProjectRoot "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v2/supervisor"
+    if (Test-Path -LiteralPath $namespacePath) {
+        if ($null -eq $Manifest) { throw 'Retained Supervisor terminal evidence requires Package authority.' }
+        $instance = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $terminalIntent.InstanceRoot
+        $selection = [pscustomobject]@{InstanceId=$terminalIntent.InstanceId;GenerationId=$instance.Generation.GenerationId;Instance=$instance;Generation=$instance.Generation;
+            InstanceManifestSha256=$terminalIntent.Document.retained_instance_manifest_sha256;GenerationManifestSha256=$terminalIntent.Document.retained_generation_manifest_sha256;ActivationEpoch=''}
+        $null = Get-RemoveIntegrationV2NamespaceProof -Manifest $Manifest -ProjectRoot $ProjectRoot -NamespacePath $namespacePath -Selection $selection -Terminal -ExpectedFingerprint $terminalIntent.Document.authority_fingerprint
+    } elseif ($null -eq $PreservedAuthority -and $terminalIntent.Document.schema_version -eq 1) {
+        # Schema 1 cannot distinguish an old v1 intent from lost retained v2
+        # history after restart. An in-memory successful transaction has an
+        # explicit inventory; recovery without it must not claim preservation.
+        throw 'Supervisor namespace is absent and the legacy removal intent cannot prove retained-history integrity; recovery remains blocked.'
     }
     $mcpPlan = Get-RepairMcpConfigPlan `
         -ProjectRoot $ProjectRoot `
@@ -11557,8 +11715,8 @@ function Invoke-RemoveIntegration {
         }
         $preMutationConfigPlan = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId ([guid]::Empty.ToString('N'))
         $null = Assert-RemoveIntegrationPreflightHandoff -Token $PreflightHandoff -Authority $preMutationAuthority -ConfigPlan $preMutationConfigPlan -ProjectRoot $ProjectRoot
-        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval
-        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
+        $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval -HistoricalObservation:($preMutationAuthority.Selection.Generation.Disposition -ceq 'TRUSTED_PREVIOUS')
+        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root -Manifest $Manifest
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         if ($desiredBefore.Present -and -not $desiredBefore.Legacy -and
             $desiredBefore.DesiredState -ceq "UNINSTALLED" -and
@@ -11576,7 +11734,8 @@ function Invoke-RemoveIntegration {
             return
         }
 
-        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval
+        $historicalObservation = $authority.Selection.Generation.Disposition -ceq 'TRUSTED_PREVIOUS'
+        $nextChangeFingerprint = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -HistoricalRemoval -HistoricalObservation:$historicalObservation
         $operationId = [guid]::NewGuid().ToString("N")
         $operationRoot = Get-InstanceProjectPath `
             -ProjectRoot $ProjectRoot `
@@ -11590,7 +11749,7 @@ function Invoke-RemoveIntegration {
         $intent = New-InstanceRemovalIntentDocument `
             -ProjectRoot $ProjectRoot `
             -StateId $stateId `
-            -AuthorityFingerprint ([string]$authority.OwnerFingerprint) `
+            -AuthorityFingerprint $(if ($null -ne $authority.PSObject.Properties['PreservedFingerprint'] -and $authority.PreservedFingerprint) { [string]$authority.PreservedFingerprint } else { [string]$authority.OwnerFingerprint }) `
             -SelectionSha256 (Get-TextSha256 -Text $authority.Selection.Text) `
             -ActivationSha256 $activationSha256 `
             -ActivationOperationSha256 $activationOperationSha256 `
@@ -11621,7 +11780,7 @@ function Invoke-RemoveIntegration {
 
         $expectedFingerprint = [string]$authority.OwnerFingerprint
         $verifyBeforeMutation = {
-            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint -HistoricalRemoval
+            $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -ExpectedFingerprint $nextChangeFingerprint -HistoricalRemoval -HistoricalObservation:$historicalObservation
             $currentAuthority = Get-RemoveIntegrationAuthority `
                 -Manifest $Manifest `
                 -ProjectRoot $ProjectRoot `
@@ -11636,6 +11795,8 @@ function Invoke-RemoveIntegration {
             Assert-RemoveIntegrationTerminalState `
                 -ProjectRoot $ProjectRoot `
                 -DesiredState $state `
+                -Manifest $Manifest `
+                -PreservedAuthority $authority `
                 -AllowEmptyCleanupDirectories
             foreach ($entry in @($entries | Where-Object { $_.Mutation -eq "Delete" })) {
                 if (Test-Path -LiteralPath $entry.TargetPath) {
@@ -11657,7 +11818,7 @@ function Invoke-RemoveIntegration {
             -OperationId $operationId
         Remove-EmptyRemoveIntegrationDirectories -ProjectRoot $ProjectRoot -Authority $authority
         $finalState = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
-        Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $finalState -Manifest $Manifest
+        Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState $finalState -Manifest $Manifest -PreservedAuthority $authority
         Write-Host "[RESULT] UNINSTALLED"
         Write-Host "[CLEANUP_STATE] PENDING"
         Write-Host "[NEXT] Use Install CodeDB to create a fresh project integration."

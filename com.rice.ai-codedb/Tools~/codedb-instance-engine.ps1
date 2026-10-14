@@ -3043,6 +3043,7 @@ function Read-InstanceOperationJournal {
     return [pscustomobject]@{
         Path = $path
         OperationId = $operationId
+        Operation = $operation
         State = $state
         CandidateInstanceId = $candidateId
         OperationRoot = $operationRoot
@@ -3101,13 +3102,18 @@ function Restore-InstanceTransactionEntry {
 function Invoke-InstanceOperationRecovery {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$StageRoot
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [AllowNull()]$Manifest
     )
 
     $journal = Read-InstanceOperationJournal -ProjectRoot $ProjectRoot
     if ($null -eq $journal) { return $false }
     Write-Host "[RECOVERY] Found instance operation $($journal.OperationId) in state $($journal.State)."
     if ($journal.State -eq "COMMITTED") {
+        if ($journal.Operation -ceq 'REMOVEINTEGRATION') {
+            if ($null -eq $Manifest) { throw 'Committed integration removal recovery requires Package authority before journal cleanup.' }
+            Assert-RemoveIntegrationTerminalState -ProjectRoot $ProjectRoot -DesiredState (Get-InstanceDesiredState -ProjectRoot $ProjectRoot) -Manifest $Manifest -AllowEmptyCleanupDirectories
+        }
         Remove-Item -LiteralPath $journal.Path -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $journal.OperationRoot -Recurse -Force -ErrorAction SilentlyContinue
         return $true
@@ -4895,7 +4901,7 @@ function Invoke-InstanceConvergence {
         }
         $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot
         $null = Invoke-InstanceActivationContractRecovery @activationRecoveryParameters
-        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
+        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root -Manifest $Manifest
         $desiredLocked = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $pendingInstallHandoff = $null -ne $supersededContractState
         $removalIntent = $null
@@ -5244,7 +5250,7 @@ function Invoke-InstanceUninstall {
         $initialAuthority = if ($initialDesired.DesiredState -eq 'INSTALLED' -or -not $AutomaticCleanup) { Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNoNewCandidate:($initialDesired.DesiredState -eq 'UNINSTALLED') } else { $null }
         $failedAuthority = if ($null -ne $initialAuthority -and $initialAuthority.Kind -ceq 'FAILED_PREPARATION') { $initialAuthority } else { $null }
         $null = Assert-InstanceNextChangeAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -FailedPreparationAuthority $failedAuthority
-        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root
+        $null = Invoke-InstanceOperationRecovery -ProjectRoot $ProjectRoot -StageRoot $lock.Root -Manifest $Manifest
         $desiredBefore = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $currentRemovalAuthority = if ($desiredBefore.DesiredState -eq "INSTALLED" -or -not $AutomaticCleanup) {
             Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNoNewCandidate:($desiredBefore.DesiredState -eq 'UNINSTALLED')
