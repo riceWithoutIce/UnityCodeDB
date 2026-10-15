@@ -10187,7 +10187,7 @@ function Assert-RemoveIntegrationV2ProcessAbsent {
 }
 
 function Assert-RemoveIntegrationTerminalOperation {
-    param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, [string]$RuntimeContractSha256)
+    param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, $HistoryAuthorities)
     $label = 'retained Supervisor operation'
     Assert-RemoveIntegrationJsonFields -Object $Document -Label $label `
         -Required @('schema_version','managed_by','operation_id','key','request_id','name','lane','state','phase','owner_epoch','project_identity','root','runtime','selected_instance_id','selected_generation_id','runtime_contract_sha256','child','started_at_utc','completed_at_utc','result') `
@@ -10200,9 +10200,13 @@ function Assert-RemoveIntegrationTerminalOperation {
         -not (Test-RemoveIntegrationPathEqual -Left $Document.root -Right $ProjectRoot) -or
         -not (Test-RemoveIntegrationPathEqual -Left $Document.runtime -Right $NamespacePath) -or
         $Document.selected_instance_id -cne $Selection.InstanceId -or $Document.selected_generation_id -cne $Selection.GenerationId -or
-        $Document.runtime_contract_sha256 -cne $RuntimeContractSha256 -or
         ($null -ne $Document.PSObject.Properties['manager_action_id'] -and $Document.manager_action_id -cnotmatch '^(?:[0-9a-f]{32})?$')) {
         throw 'Retained Supervisor operation has active, foreign or inconsistent identity.'
+    }
+    # Operations record the executing Package contract, not a target generation.
+    # Their schema cannot establish additional target or activation owner proof.
+    if (@($HistoryAuthorities | Where-Object { $_.RuntimeContractSha256 -ceq $Document.runtime_contract_sha256 }).Count -ne 1) {
+        throw "Retained Supervisor operation $($Document.operation_id) runtime contract does not match a trusted history source."
     }
     $null = Get-RequiredJsonString -Object $Document -Name key -Label $label
     $null = Get-RequiredJsonString -Object $Document -Name name -Label $label
@@ -10277,10 +10281,10 @@ function Get-RemoveIntegrationV2NamespaceProof {
     $parts += @($preserved | Sort-Object Name | ForEach-Object { $_.Name+'|'+$_.Sha256 })
     $fingerprint=Get-TextSha256 -Text ($parts -join "`n")
     if ($Terminal -and $fingerprint -cne $ExpectedFingerprint) { throw 'Preserved Supervisor evidence changed after integration removal admission.' }
-    $context=Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
+    $historyAuthorities=@(Get-RemoveIntegrationHistoryAuthorities -Manifest $Manifest -Selection $Selection)
     foreach ($id in $history.Keys) {
         $operation=(Read-BoundedJsonDocument -Path $history[$id] -Label 'Supervisor history operation' -MaximumBytes 262144).Document
-        Assert-RemoveIntegrationTerminalOperation -Document $operation -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Selection $Selection -RuntimeContractSha256 $context.RuntimeContractSha256
+        Assert-RemoveIntegrationTerminalOperation -Document $operation -ProjectRoot $ProjectRoot -NamespacePath $NamespacePath -Selection $Selection -HistoryAuthorities $historyAuthorities
         if ($operation.operation_id -cne $id) { throw 'Supervisor history filename conflicts with operation identity.' }
     }
     if ($null -ne $canonical) {
@@ -10698,15 +10702,20 @@ function Assert-RemoveIntegrationOwnerRecord {
         }
     }
     if ($Kind -eq "VERSIONED_V2") {
-        $historicalContext = Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
+        $historyAuthorities = @(Get-RemoveIntegrationHistoryAuthorities -Manifest $Manifest -Selection $Selection)
         $activationEpoch = Get-RequiredJsonString -Object $Document -Name "activation_epoch" -Label $Label
         if ((Get-RequiredJsonInt32 -Object $Document -Name "owner_identity_version" -Label $Label) -ne 2 -or
             $activationEpoch -cnotmatch '^[0-9a-f]{32}$' -or
             -not [string]::Equals($activationEpoch, $Selection.ActivationEpoch, [StringComparison]::Ordinal) -or
-            -not [string]::Equals($targetGenerationId, $historicalContext.TargetGenerationId, [StringComparison]::Ordinal) -or
-            -not [string]::Equals($runtimeContractSha256, $historicalContext.RuntimeContractSha256, [StringComparison]::Ordinal) -or
             (Get-RequiredJsonInt32 -Object $Document -Name "supervisor_protocol_version" -Label $Label) -ne 3) {
             throw "$Label does not match the Owner Identity v2 Package contract."
+        }
+        if (@($historyAuthorities | Where-Object {
+            $_.TargetGenerationId -ceq $targetGenerationId -and
+            $_.RuntimeContractSha256 -ceq $runtimeContractSha256 -and
+            $_.GenerationDisposition -ceq $disposition
+        }).Count -ne 1) {
+            throw "$Label target, runtime contract and disposition do not match one trusted history source."
         }
     } elseif ((Get-RequiredJsonInt32 -Object $Document -Name "supervisor_protocol_version" -Label $Label) -notin @(1, 2, 3)) {
         throw "$Label uses an unsupported Owner Identity v1 Supervisor protocol."
@@ -10995,6 +11004,40 @@ function Get-RemoveIntegrationAuthority {
             -Object $validatedState.Document `
             -Name "runtime_contract_sha256" `
             -Label "Supervisor state").ToLowerInvariant() })
+    }
+}
+
+function Get-RemoveIntegrationHistoryAuthorities {
+    param([Parameter(Mandatory = $true)]$Manifest, [Parameter(Mandatory = $true)]$Selection)
+    # Local removal provenance only. Activation continues to use the unchanged
+    # selected runtime context; records cannot nominate their own trust roots.
+    $selected = Get-RemoveIntegrationRuntimeContext -Manifest $Manifest -Selection $Selection
+    $current = Get-PackageGenerationIdentityForRuntimeIdentity -Manifest $Manifest -Identity $Manifest
+    if ($null -eq $current -or $current.Disposition -cne 'CURRENT' -or
+        $current.GenerationManifestSha256 -cne $Manifest.TargetGenerationManifestSha256 -or
+        $Manifest.RuntimeContractSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $selected.TargetGenerationId -cne $Selection.GenerationId -or
+        -not (Test-InstanceGenerationIdIsPackageSupported -Manifest $Manifest -GenerationId $Manifest.GenerationId)) {
+        throw 'Removal history source requires an unambiguous validated current Package identity.'
+    }
+    $selectedSource = [pscustomobject]@{
+        TargetGenerationId = $selected.TargetGenerationId
+        RuntimeContractSha256 = $selected.RuntimeContractSha256
+        GenerationDisposition = 'CURRENT'
+    }
+    if ($selected.TargetGenerationId -ceq $Manifest.GenerationId) {
+        if ($selected.RuntimeContractSha256 -cne $Manifest.RuntimeContractSha256) {
+            throw 'Removal history source has conflicting current Package contracts.'
+        }
+        return $selectedSource
+    }
+    if ($selected.RuntimeContractSha256 -ceq $Manifest.RuntimeContractSha256) {
+        throw 'Removal history source runtime contract is ambiguous between Package generations.'
+    }
+    return $selectedSource, [pscustomobject]@{
+        TargetGenerationId = $Manifest.GenerationId
+        RuntimeContractSha256 = $Manifest.RuntimeContractSha256
+        GenerationDisposition = 'TRUSTED_PREVIOUS'
     }
 }
 

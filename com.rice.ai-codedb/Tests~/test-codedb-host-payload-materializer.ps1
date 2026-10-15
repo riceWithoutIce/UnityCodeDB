@@ -1249,6 +1249,11 @@ function Invoke-GenerationAlignmentCases {
     $owner=[ordered]@{schema_version=3;evidence_schema_version=1;managed_by=$script:ManagedBy;role='project-local-supervisor';root=$root;project_identity=Get-MaterializerProjectIdentity -ProjectRoot $root;runtime=$namespace;control_contract_id=$old.ControlContract.Id;control_contract_version=2;control_contract_schema_version=1;control_contract_sha256=$old.ControlContract.Sha256;control_namespace=$namespace;owner_identity_version=2;activation_epoch=$selected.ActivationEpoch;pipe_name=Get-RemoveIntegrationExpectedPipeName -ProjectRoot $root -NamespacePath $namespace;generation_id=$old.GenerationId;target_generation_id=$old.GenerationId;selected_generation_id=$old.GenerationId;selected_instance_id=$selected.InstanceId;runtime_contract_sha256=$old.RuntimeContractSha256;supervisor_protocol_version=3;generation_disposition='CURRENT';lifecycle_id='alignment-lifecycle';supervisor_id='alignment-supervisor';owner_epoch='alignment-owner';owner_evidence=[ordered]@{schema_version=1;pid=424242;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64)};supervisor_pid=424242;publication_phase='listening';owner_started_at_utc='2026-09-15T00:00:00.0000000Z'}
     $state=[ordered]@{}; foreach ($key in $owner.Keys) {$state[$key]=$owner[$key]}; $state.protocol_version=1; $state.auth_token='d'*64; $state.desired_state='enabled';$state.editor_demand='online';$state.readiness_state='core_ready';$state.reason_code='COORDINATOR_OPERATIONAL';$state.detail='synthetic';$state.last_event='provider_ready';$state.last_event_detail=''
     $statePath=Join-Path $namespace 'supervisor-state.json';$ownerPath=Join-Path $namespace 'supervisor.lock'; Record $statePath $state; Record $ownerPath $owner
+    if ($RemovalNamespace) {
+        $currentAuthority=Get-RemoveIntegrationAuthority -Manifest $old -ProjectRoot $root
+        $single=@(Get-RemoveIntegrationHistoryAuthorities -Manifest $old -Selection $currentAuthority.Selection)
+        Check ($single.Count -eq 1 -and $single[0].TargetGenerationId -ceq $old.GenerationId -and $single[0].RuntimeContractSha256 -ceq $old.RuntimeContractSha256 -and $single[0].GenerationDisposition -ceq 'CURRENT') 'CURRENT authenticates one deduplicated history origin'
+    }
     $script:GenerationId='';$manifest=Read-PayloadManifest -Root (Join-Path $PackageRoot 'Payload~') -ProjectRoot $root
     $read={Get-RemoveIntegrationAuthority -Manifest $manifest -ProjectRoot $root}
     $authority=& $read
@@ -1282,6 +1287,48 @@ function Invoke-GenerationAlignmentCases {
                 $null=& $Body;Check $true ($Role+' definitively absent continues other gates')
             } finally {$script:ProcessObservations.Remove($ObservedPid)}
         }
+        function OwnerSources {
+            param([string]$StateFile,[string]$LockFile,[string]$Role)
+            $stateBytes=[IO.File]::ReadAllBytes($StateFile);$lockBytes=[IO.File]::ReadAllBytes($LockFile)
+            try {
+                foreach($source in @('selected','package')) {
+                    $s=ConvertFrom-StrictJsonText -Text ([Text.Encoding]::UTF8.GetString($stateBytes)) -Label 'history source state'
+                    $o=ConvertFrom-StrictJsonText -Text ([Text.Encoding]::UTF8.GetString($lockBytes)) -Label 'history source lock'
+                    if($source -ceq 'package'){foreach($d in @($s,$o)){$d.target_generation_id=$manifest.GenerationId;$d.runtime_contract_sha256=$manifest.RuntimeContractSha256;$d.generation_disposition='TRUSTED_PREVIOUS'}}
+                    Record $StateFile $s;Record $LockFile $o
+                    $a=& $read
+                    Check ($a.ActivationState.Context.RuntimeContractSha256 -ceq $old.RuntimeContractSha256) ($Role+' '+$source+' origin preserves selected activation context')
+                    if($source -ceq 'package'){ProcessCases 424242 $read $(if($Role -ceq 'current'){'Current Supervisor owner'}else{'Stale Supervisor owner'})}
+                }
+                # Both individual tuples are valid, but the pair must name the same owner.
+                [IO.File]::WriteAllBytes($StateFile,$stateBytes)
+                Reject $read ($Role+' mixed source state and lock refuse conflicting owner')
+                foreach($target in @($old.GenerationId,$manifest.GenerationId)) {
+                    foreach($hash in @($old.RuntimeContractSha256,$manifest.RuntimeContractSha256)) {
+                        foreach($disposition in @('CURRENT','TRUSTED_PREVIOUS')) {
+                            if(($target -ceq $old.GenerationId -and $hash -ceq $old.RuntimeContractSha256 -and $disposition -ceq 'CURRENT') -or ($target -ceq $manifest.GenerationId -and $hash -ceq $manifest.RuntimeContractSha256 -and $disposition -ceq 'TRUSTED_PREVIOUS')){continue}
+                            foreach($d in @($s,$o)){$d.target_generation_id=$target;$d.runtime_contract_sha256=$hash;$d.generation_disposition=$disposition}
+                            Record $StateFile $s;Record $LockFile $o
+                            Reject $read ($Role+' cross-source target/hash/disposition tuple refused')
+                        }
+                    }
+                }
+                foreach($field in @('selected_instance_id','project_identity','runtime_contract_sha256')) {
+                    [IO.File]::WriteAllBytes($StateFile,$stateBytes);[IO.File]::WriteAllBytes($LockFile,$lockBytes)
+                    Fault $StateFile {param($d)$d.$field='0'*$(if($field -ceq 'selected_instance_id'){32}else{64})} $read ($Role+' foreign '+$field+' refused')
+                }
+            } finally {[IO.File]::WriteAllBytes($StateFile,$stateBytes);[IO.File]::WriteAllBytes($LockFile,$lockBytes)}
+        }
+        $origins=@(Get-RemoveIntegrationHistoryAuthorities -Manifest $manifest -Selection $authority.Selection)
+        Check ($origins.Count -eq 2 -and $origins[0].RuntimeContractSha256 -ceq $old.RuntimeContractSha256 -and $origins[1].RuntimeContractSha256 -ceq $manifest.RuntimeContractSha256) 'TRUSTED_PREVIOUS derives selected and executing Package origins'
+        OwnerSources $statePath $ownerPath 'current'
+        $transitions=$manifest.BootstrapTransitions;$transition=@($transitions|Where-Object SourceGenerationId -ceq $old.GenerationId)[0];$sourceHash=$transition.SourceRuntimeContractSha256
+        try {
+            foreach($bad in @($null,('0'*64),$manifest.RuntimeContractSha256)){$transition.SourceRuntimeContractSha256=$bad;Reject $read 'missing unknown or ambiguous predecessor source remains refused'}
+        } finally {$transition.SourceRuntimeContractSha256=$sourceHash}
+        try {$manifest.BootstrapTransitions=@($transitions)+@($transition);Reject $read 'ambiguous exact predecessor transitions remain refused'} finally {$manifest.BootstrapTransitions=$transitions}
+        $packageHash=$manifest.RuntimeContractSha256
+        try {$manifest.RuntimeContractSha256='invalid';Reject $read 'missing validated current Package source remains refused'} finally {$manifest.RuntimeContractSha256=$packageHash}
         ProcessCases 424242 $read 'Current Supervisor owner'
         foreach($identity in @('1','638000000000000001','99999999999999999999999999999999')) {
             $stateBytes=[IO.File]::ReadAllBytes($statePath);$ownerBytes=[IO.File]::ReadAllBytes($ownerPath)
@@ -1295,6 +1342,7 @@ function Invoke-GenerationAlignmentCases {
         $child=[ordered]@{schema_version=1;pid=424243;process_start_identity='638000000000000000';executable_path=(Get-Command powershell.exe).Source;argv_sha256=('b'*64);command_line_sha256=('c'*64);command=(Get-Command powershell.exe).Source;normalized_argv=@('-NoProfile','-File','materialize-codedb-host-payload.ps1','-Action','Upgrade')}
         $op=[ordered]@{schema_version=1;managed_by=$script:ManagedBy;operation_id=$opId;key='["materialize:Upgrade","Upgrade",true]';request_id='fixture';manager_action_id='';name='materialize:Upgrade';lane='maintenance';state='failed';phase='failed';owner_epoch=('f'*32);project_identity=(Get-MaterializerProjectIdentity -ProjectRoot $root);root=$root;runtime=$namespace;selected_instance_id=$selected.InstanceId;selected_generation_id=$selected.Generation.GenerationId;runtime_contract_sha256=$old.RuntimeContractSha256;child=$child;started_at_utc='2026-10-13T03:10:48.181Z';completed_at_utc='2026-10-13T03:10:55.514Z';result=[ordered]@{exit_code=6;stdout='';stderr='Synthetic rejected Upgrade';timed_out=$false};error='Synthetic rejected Upgrade'}
         Record $opPath $op; Record $historyPath $op
+        OwnerSources $staleState $staleLock 'stale'
         ProcessCases 424243 $read ('Retained Supervisor operation '+$opId+' child')
         ProcessCases 424242 $read 'Stale Supervisor owner'
         Fault $historyPath {param($d)$d.child.process_start_identity='638000000000000001'} $read 'invalid recorded child identity is never absence'
@@ -1364,8 +1412,14 @@ function Invoke-GenerationAlignmentCases {
             Reject $read 'aggregate preserved-history byte budget'
         } finally {foreach($path in $budgetFiles){[IO.File]::Delete($path)}}
         $successId='2'*32;$successPath=Join-Path $namespace ('operation-history/'+$successId+'.json')
-        $success=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'terminal success fixture';$success.operation_id=$successId;$success.state='completed';$success.phase='completed';$success.result.exit_code=0;$success.child.pid=424245;Record $successPath $success
-        $authority=& $read;Check ($authority.PreservedInventory.Count -eq 5) 'terminal success and terminal failure both authenticated'
+        $success=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'terminal success fixture';$success.operation_id=$successId;$success.state='completed';$success.phase='completed';$success.result.exit_code=0;$success.child.pid=424245;$success.runtime_contract_sha256=$manifest.RuntimeContractSha256;Record $successPath $success
+        $packageSuffix='1760000000001.'+('a'*32)
+        foreach($entry in @(@{Name='supervisor-state.json';Value=$state},@{Name='supervisor.lock';Value=$owner})) {
+            $d=ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $entry.Value) -Label 'Package source stale owner'
+            $d.target_generation_id=$manifest.GenerationId;$d.runtime_contract_sha256=$manifest.RuntimeContractSha256;$d.generation_disposition='TRUSTED_PREVIOUS'
+            Record (Join-Path $namespace ($entry.Name+'.stale.'+$packageSuffix)) $d
+        }
+        $authority=& $read;Check ($authority.PreservedInventory.Count -eq 7) 'mixed terminal history and stale owners retain both real producer origins'
         # Emit the exact production preflight handler under the in-process module,
         # without evaluating script entry, launching PowerShell or touching real state.
         $payload=$manifest;$projectRootPath=$root
@@ -1373,6 +1427,17 @@ function Invoke-GenerationAlignmentCases {
         $switchAst=$handlerAst.Find({param($a)$a -is [Management.Automation.Language.SwitchStatementAst] -and @($a.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'}).Count -eq 1},$true)
         $handler=@($switchAst.Clauses | Where-Object {$_.Item1.Extent.Text -ceq '"RemoveIntegrationPreflight"'})[0].Item2
         $handlerScript=[scriptblock]::Create($handler.Extent.Text.TrimStart('{').TrimEnd('}'))
+        foreach($role in @('operation','stale-owner','current-owner')) {
+            $paths=if($role -ceq 'operation'){@($historyPath)}elseif($role -ceq 'stale-owner'){@($staleState,$staleLock)}else{@($statePath,$ownerPath)}
+            $saved=@{};foreach($p in $paths){$saved[$p]=$(if(Test-Path -LiteralPath $p){[IO.File]::ReadAllBytes($p)}else{$null})}
+            try {
+                foreach($p in $paths){$d=if($role -ceq 'operation'){ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $op) -Label 'source refusal operation'}else{ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText $(if($p.Contains('state.json')){$state}else{$owner})) -Label 'source refusal owner'};$d.runtime_contract_sha256='0'*64;Record $p $d}
+                $message='';try {& $handlerScript 6>&1|Out-Null}catch{$message=$_.Exception.Message}
+                $reason=if($role -ceq 'operation'){$opId+' runtime contract does not match a trusted history source'}else{'target, runtime contract and disposition do not match one trusted history source'}
+                Check ($script:RequestedExitCode -eq 4 -and $message.Contains($reason)) ($role+' production precise history-source refusal')
+                [IO.File]::WriteAllText((Join-Path $Container ('history-source-'+$role+'.stderr')),$message,[Text.UTF8Encoding]::new($false))
+            } finally {foreach($p in $paths){if($null -eq $saved[$p]){[IO.File]::Delete($p)}else{[IO.File]::WriteAllBytes($p,$saved[$p])}};$script:RequestedExitCode=0}
+        }
         $authorityAst=$handlerAst.Find({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq 'Get-RemoveIntegrationAuthority'},$true)
         $identityBranch=$authorityAst.Find({param($a)$a -is [Management.Automation.Language.IfStatementAst] -and $a.Extent.Text.Contains("-Label 'Current Supervisor owner'") -and $a.Clauses[0].Item1.Extent.Text -ceq "`$authority.Kind -ceq 'VERSIONED_V2'"},$true)
         Check ($null -ne $identityBranch) 'exact production v2-only identity branch located'
@@ -1425,6 +1490,25 @@ function Invoke-GenerationAlignmentCases {
         $script:OriginalPublish=(Get-Command Publish-InstanceOperation).ScriptBlock
         function script:Publish-InstanceOperation {param($ProjectRoot,$ActionName,$CandidateInstanceId,$Entries,$StageRoot,$OperationRoot,$VerifyBeforeMutation,$VerifyBeforeCommit,$OperationId);[IO.File]::AppendAllText($script:NamespaceDriftPath,"`n");& $script:OriginalPublish @PSBoundParameters}
         try {Reject {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} 'before-mutation namespace drift rejects transaction'} finally {Set-Item -LiteralPath Function:script:Publish-InstanceOperation -Value $script:OriginalPublish;[IO.File]::WriteAllBytes($historyPath,$script:NamespaceDriftBytes);$script:RequestedExitCode=0}
+        # Keep retained bytes and permit fixed while their executing Package
+        # authority changes at each original revalidation boundary.
+        $script:HistoryPackageManifest=$manifest;$script:HistoryPackageHash=$manifest.RuntimeContractSha256
+        foreach($boundary in @('lock','mutation','commit')) {
+            $script:HistoryBoundary=$boundary
+            if($boundary -ceq 'lock') {
+                function script:Enter-MaterializerLock {param($ProjectRoot,[switch]$WaitForExisting,$WaitTimeoutMilliseconds);$lock=& $script:OriginalEnterLock @PSBoundParameters;$script:HistoryPackageManifest.RuntimeContractSha256='0'*64;return $lock}
+            } else {
+                function script:Publish-InstanceOperation {
+                    param($ProjectRoot,$ActionName,$CandidateInstanceId,$Entries,$StageRoot,$OperationRoot,$VerifyBeforeMutation,$VerifyBeforeCommit,$OperationId)
+                    if($script:HistoryBoundary -ceq 'mutation'){$script:HistoryPackageManifest.RuntimeContractSha256='0'*64}
+                    else{$script:HistoryVerifyCommit=$VerifyBeforeCommit;$PSBoundParameters['VerifyBeforeCommit']={ $script:HistoryPackageManifest.RuntimeContractSha256='0'*64;& $script:HistoryVerifyCommit }}
+                    & $script:OriginalPublish @PSBoundParameters
+                }
+            }
+            try {ExpectProcessRefusal {Invoke-RemoveIntegration -Manifest $manifest -ProjectRoot $root -PreflightHandoff $token} ($successId+' runtime contract does not match a trusted history source') ($boundary+' provenance drift revalidates original mixed history')}
+            finally {$manifest.RuntimeContractSha256=$script:HistoryPackageHash;Set-Item -LiteralPath Function:script:Enter-MaterializerLock -Value $script:OriginalEnterLock;Set-Item -LiteralPath Function:script:Publish-InstanceOperation -Value $script:OriginalPublish;$script:RequestedExitCode=0}
+            $null=& $read
+        }
         # Permit identity stays byte-identical while observations change at
         # each existing revalidation boundary; stale permits cannot override it.
         $script:OriginalEnterLock=(Get-Command Enter-MaterializerLock).ScriptBlock
@@ -1562,6 +1646,7 @@ if ($GenerationAlignmentOnly -or $VersionTransitionObservationOnly -or $RemovalN
     # are read-only production inputs, never the default test scratch authority.
     $family=if($RemovalNamespaceOnly){'s29-removal-namespace'}elseif($VersionTransitionObservationOnly){'s29-version-transition-observation'}else{'s29-generation-alignment'}
     if ($RemovalNamespaceOnly -and $parent.Replace('\','/').Contains('/.artifacts/tests/s29-removal-process-identity/')) {$family='s29-removal-process-identity'}
+    if ($RemovalNamespaceOnly -and $parent.Replace('\','/').Contains('/.artifacts/tests/s29-removal-history-authority/')) {$family='s29-removal-history-authority'}
     if ($parent.IndexOf('/.artifacts/tests/'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0 -and $parent.IndexOf('\.artifacts\tests\'+$family,[StringComparison]::OrdinalIgnoreCase) -lt 0) {throw 'Alignment fixture root must stay in the declared repository test family.'}
     $container=Join-Path $parent ('r-'+[guid]::NewGuid().ToString('N').Substring(0,8))
     [void][IO.Directory]::CreateDirectory($container)

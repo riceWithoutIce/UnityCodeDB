@@ -28,14 +28,35 @@ namespace Rice.AI.Codedb.Editor.Tests
         {
             var normalized = System.IO.Path.GetFullPath(root).Replace('\\', '/');
             Assert.That(normalized, Does.Contain("/.artifacts/tests/s29-removal-namespace/")
-                .Or.Contain("/.artifacts/tests/s29-removal-process-identity/"));
+                .Or.Contain("/.artifacts/tests/s29-removal-process-identity/")
+                .Or.Contain("/.artifacts/tests/s29-removal-history-authority/"));
             var failure = new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
                 System.IO.File.ReadAllText(System.IO.Path.Combine(root, "preflight-blocked.stderr")), false);
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(failure), Is.False);
             Assert.That(AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(failure), Does.Contain("foreign.json"));
             AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, failure, "foreign.json");
-            if (normalized.Contains("/.artifacts/tests/s29-removal-process-identity/"))
+            if (normalized.Contains("/.artifacts/tests/s29-removal-history-authority/"))
+            {
+                foreach (var role in new[] { "operation", "stale-owner", "current-owner" })
+                {
+                    var sourceFailure = new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] BLOCKED\n",
+                        System.IO.File.ReadAllText(System.IO.Path.Combine(root, "history-source-" + role + ".stderr")), false);
+                    var reason = role == "operation" ? "runtime contract does not match a trusted history source"
+                        : "target, runtime contract and disposition do not match one trusted history source";
+                    Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(sourceFailure), Is.False);
+                    Assert.That(AICodedbEditorLifecycle.IsRemovalPreflightAvailable(sourceFailure), Is.False);
+                    var diagnostic = AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(sourceFailure);
+                    Assert.That(diagnostic, Does.Contain(reason));
+                    Assert.That(diagnostic, Does.Contain(role == "operation" ? new string('1', 32)
+                        : role == "stale-owner" ? "stale Supervisor" : "Supervisor"));
+                    Assert.That(diagnostic.Length, Is.LessThanOrEqualTo(900));
+                    Assert.That(diagnostic, Does.Not.Contain("[REMOVAL_PREFLIGHT_HANDOFF]"));
+                    AICodedbS29ExecutionContextTests.AssertCachedRemovalFailure(root, sourceFailure, reason);
+                }
+            }
+            if (normalized.Contains("/.artifacts/tests/s29-removal-process-identity/")
+                || normalized.Contains("/.artifacts/tests/s29-removal-history-authority/"))
             {
             foreach (var role in new[] { "child", "stale-owner", "current-owner" })
             {
