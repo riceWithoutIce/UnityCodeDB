@@ -1310,6 +1310,12 @@ namespace Rice.AI.Codedb.Editor
                         GUILayout.Height(HeaderPackageVersionHeight));
                 }
             }
+            var removalStatus = GetRemovalPresentationStatus();
+            var removalBusy = IsRemovalActionBusy();
+            if (IsRemovalActionVisible(removalStatus)
+                && !IsRemovalActionEnabled(removalStatus, _statusSnapshot.IsProjectUninstalled, removalBusy))
+                EditorGUILayout.HelpBox(GetRemovalActionLabel(removalStatus) + ": "
+                    + GetRemovalActionDisabledReason(removalStatus, removalBusy), MessageType.Info);
         }
 
         private void ApplyWindowTitle()
@@ -1371,22 +1377,19 @@ namespace Rice.AI.Codedb.Editor
             {
                 menu.AddDisabledItem(new GUIContent("Provider Guidance"));
             }
-            if (IsRemoveIntegrationMenuAvailable(removalStatus))
+            if (IsRemovalActionVisible(removalStatus))
             {
                 menu.AddSeparator(string.Empty);
-                menu.AddItem(
-                    new GUIContent("Remove CodeDB Integration"),
-                    false,
-                    RunRemoveIntegrationWithConfirmation);
-            }
-            else if (IsUninstallAvailable(
-                         removalStatus, _statusSnapshot.IsProjectUninstalled))
-            {
-                menu.AddSeparator(string.Empty);
-                menu.AddItem(
-                    new GUIContent("Uninstall CodeDB from Project"),
-                    false,
-                    RunUninstallCodeDBWithConfirmation);
+                var busy = IsRemovalActionBusy();
+                var enabled = IsRemovalActionEnabled(removalStatus, _statusSnapshot.IsProjectUninstalled, busy);
+                var content = new GUIContent(GetRemovalActionLabel(removalStatus),
+                    enabled ? string.Empty : GetRemovalActionDisabledReason(removalStatus, busy));
+                if (!enabled)
+                    menu.AddDisabledItem(content);
+                else if (removalStatus.RequiresReinstall)
+                    menu.AddItem(content, false, RunRemoveIntegrationWithConfirmation);
+                else
+                    menu.AddItem(content, false, RunUninstallCodeDBWithConfirmation);
             }
             menu.ShowAsContext();
         }
@@ -2259,7 +2262,8 @@ namespace Rice.AI.Codedb.Editor
         private void RunRemoveIntegrationWithConfirmation()
         {
             var cachedProductStatus = GetRemovalPresentationStatus();
-            if (!IsRemoveIntegrationMenuAvailable(cachedProductStatus))
+            if (IsRemovalActionBusy()
+                || !IsRemoveIntegrationMenuAvailable(cachedProductStatus))
                 return;
             ConfirmAndRunRemoveIntegration(
                 () => EditorUtility.DisplayDialog(
@@ -2290,7 +2294,7 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunUninstallCodeDBWithConfirmation()
         {
-            if (_statusSnapshot == null ||
+            if (IsRemovalActionBusy() || _statusSnapshot == null ||
                 !IsUninstallAvailable(GetRemovalPresentationStatus(), _statusSnapshot.IsProjectUninstalled))
                 return;
             ConfirmAndRunUninstallCodeDB(
@@ -2343,6 +2347,56 @@ namespace Rice.AI.Codedb.Editor
                 AttachCurrentActionSession();
                 Repaint();
             }
+        }
+
+        private bool IsRemovalActionBusy()
+        {
+            var session = AICodedbManagerActionSession.CurrentFor(_executionContext);
+            return IsRemovalActionBusy(_userActionInFlight, _actionRecoveryInspectionInFlight,
+                session != null && session.IsRecovering && session.HasOriginalContext);
+        }
+
+        internal static bool IsRemovalActionBusy(bool actionInFlight, bool inspectionInFlight, bool retainedRecovery)
+        {
+            // The existing confirmed failed-candidate recovery is not a running action.
+            return inspectionInFlight || (actionInFlight && !retainedRecovery);
+        }
+
+        internal static bool IsRemovalActionVisible(AICodedbProductStatus status)
+        {
+            // Cached product evidence only; no directory-based installation inference.
+            return status.RequiresReinstall || status.State == AICodedbProductState.Ready
+                   || status.Installed == AICodedbProductLayerState.Current
+                   || (status.State == AICodedbProductState.Uninstalled && status.RemovalPreflightPassed);
+        }
+
+        internal static string GetRemovalActionLabel(AICodedbProductStatus status)
+        {
+            return status.RequiresReinstall ? "Remove CodeDB Integration" : "Uninstall CodeDB from Project";
+        }
+
+        internal static bool IsRemovalActionEnabled(AICodedbProductStatus status, bool isProjectUninstalled, bool actionInFlight)
+        {
+            return !actionInFlight && IsRemovalActionVisible(status)
+                   && (IsRemoveIntegrationMenuAvailable(status) || IsUninstallAvailable(status, isProjectUninstalled));
+        }
+
+        internal static string GetRemovalActionDisabledReason(AICodedbProductStatus status, bool actionInFlight)
+        {
+            if (actionInFlight) return "Wait for the current CodeDB action to finish.";
+            const string prefix = " Removal preflight: ";
+            var diagnostic = status.DiagnosticDetail ?? string.Empty;
+            var start = diagnostic.LastIndexOf(prefix, StringComparison.Ordinal);
+            if (start >= 0)
+            {
+                // This segment is the lifecycle's bounded, redacted cached diagnostic.
+                var reason = diagnostic.Substring(start + prefix.Length);
+                return reason.Length > 900 ? reason.Substring(0, 900) : reason;
+            }
+            if (status.AttentionReason == AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous
+                || status.AttentionReason == AICodedbProductAttentionReason.ControlContractAuthenticationUnavailable)
+                return "Integration ownership is not authenticated. Refresh status before trying again.";
+            return "Removal admission has not passed. Refresh status to check availability.";
         }
 
         internal static bool IsUninstallAvailable(

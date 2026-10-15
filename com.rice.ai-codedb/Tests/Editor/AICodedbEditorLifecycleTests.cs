@@ -18,6 +18,45 @@ namespace Rice.AI.Codedb.Editor.Tests
     // legacy OS-temp SetUp/TearDown below.
     internal sealed class AICodedbS29ExecutionContextTests
     {
+        internal static void AssertUninstallPreflightProjection(string root, AICodedbCommandResult result,
+            bool expectedAvailable, string expectedReason)
+        {
+            var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                Path.Combine(root, "project"), Path.Combine(root, "package"), "S30 admission");
+            var status = new AICodedbProductStatus(AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current, "Ready");
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            var lifecycle = typeof(AICodedbEditorLifecycle);
+            var cacheField = lifecycle.GetField("_removalPreflightCache", flags);
+            var cacheType = lifecycle.GetNestedType("RemovalPreflightCacheEntry", System.Reflection.BindingFlags.NonPublic);
+            var key = (string)lifecycle.GetMethod("GetRemovalPreflightCacheKey", flags).Invoke(null,
+                new object[] { context, default(AICodedbCurrentInstanceStatus), true });
+            var original = cacheField.GetValue(null);
+            try
+            {
+                var available = AICodedbEditorLifecycle.IsRemovalPreflightAvailable(result, AICodedbHostPayloadAction.UninstallPreflight);
+                var diagnostic = available ? string.Empty : AICodedbEditorLifecycle.GetRemovalPreflightDiagnostic(result, AICodedbHostPayloadAction.UninstallPreflight);
+                cacheField.SetValue(null, Activator.CreateInstance(cacheType,
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                    null, new object[] { key, DateTime.UtcNow.AddSeconds(30), available, diagnostic }, CultureInfo.InvariantCulture));
+                var projected = (AICodedbProductStatus)lifecycle.GetMethod("WithRemovalPreflight", flags).Invoke(null,
+                    new object[] { context, status, default(AICodedbCurrentInstanceStatus), new Func<bool>(() => true), CancellationToken.None, true });
+                Assert.That(projected.State, Is.EqualTo(AICodedbProductState.Ready));
+                Assert.That(projected.RemovalPreflightPassed, Is.EqualTo(expectedAvailable));
+                AICodedbLifecycleControlTests.AssertRemovalAdmissionPresentation(projected, false, expectedAvailable);
+                AICodedbLifecycleControlTests.AssertRemovalAdmissionPresentation(projected, true, false);
+                if (!expectedAvailable)
+                {
+                    var reason = AICodedbManagerWindow.GetRemovalActionDisabledReason(projected, false);
+                    Assert.That(reason.Length, Is.LessThanOrEqualTo(900));
+                    Assert.That(reason, Does.Not.Contain("handoff was missing"));
+                    if (!string.IsNullOrEmpty(expectedReason)) Assert.That(reason, Does.Contain(expectedReason));
+                }
+            }
+            finally { cacheField.SetValue(null, original); }
+        }
+
         [Test]
         public void RemovalPreflightFailureDiagnostic_IsBoundedRedactedAndRetainsCause()
         {

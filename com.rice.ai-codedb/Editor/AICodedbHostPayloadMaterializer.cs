@@ -194,6 +194,23 @@ namespace Rice.AI.Codedb.Editor
                 "-ConfirmedProjectMutation", "-RetainedCandidateActionId", originalActionId);
         }
 
+        internal static bool HasUninstallPreflight(AICodedbCommandResult result)
+        {
+            if (result == null || !result.Succeeded || result.OutputDrainIncomplete)
+                return false;
+            var available = 0;
+            foreach (var raw in (result.StandardOutput ?? string.Empty).Split('\n'))
+            {
+                var line = raw.Trim();
+                if (!line.StartsWith("[REMOVAL_PREFLIGHT", StringComparison.Ordinal))
+                    continue;
+                // Normal uninstall has one classification and no recovery permit.
+                if (line != "[REMOVAL_PREFLIGHT] AVAILABLE") return false;
+                available++;
+            }
+            return available == 1;
+        }
+
         internal static bool HasAuthenticatedRemovalPreflight(AICodedbCommandResult result)
         {
             if (result == null || !result.Succeeded)

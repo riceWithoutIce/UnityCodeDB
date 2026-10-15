@@ -1640,8 +1640,11 @@ namespace Rice.AI.Codedb.Editor
                     : AICodedbHostPayloadMaterializer.ReadRemoveIntegrationPreflight(context, cancellationToken);
                 if (cancellationToken.IsCancellationRequested || !canContinue())
                     return status;
-                available = IsRemovalPreflightAvailable(result);
-                diagnostic = !available ? GetRemovalPreflightDiagnostic(result) : string.Empty;
+                var preflightAction = currentIntegration
+                    ? AICodedbHostPayloadAction.UninstallPreflight
+                    : AICodedbHostPayloadAction.RemoveIntegrationPreflight;
+                available = IsRemovalPreflightAvailable(result, preflightAction);
+                diagnostic = !available ? GetRemovalPreflightDiagnostic(result, preflightAction) : string.Empty;
                 lock (RemovalPreflightCacheLock)
                     _removalPreflightCache = new RemovalPreflightCacheEntry(
                         cacheKey, now.AddSeconds(RemovalPreflightCacheSeconds), available, diagnostic);
@@ -1705,12 +1708,29 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        internal static bool IsRemovalPreflightAvailable(
+            AICodedbCommandResult result, AICodedbHostPayloadAction action)
+        {
+            if (action == AICodedbHostPayloadAction.UninstallPreflight)
+                return AICodedbHostPayloadMaterializer.HasUninstallPreflight(result);
+            return action == AICodedbHostPayloadAction.RemoveIntegrationPreflight
+                   && IsRemovalPreflightAvailable(result);
+        }
+
         internal static string GetRemovalPreflightDiagnostic(AICodedbCommandResult result)
+        {
+            return GetRemovalPreflightDiagnostic(result, AICodedbHostPayloadAction.RemoveIntegrationPreflight);
+        }
+
+        internal static string GetRemovalPreflightDiagnostic(
+            AICodedbCommandResult result, AICodedbHostPayloadAction action)
         {
             if (result == null) return "Removal preflight returned no result.";
             var summary = result.GetSummary();
             if (result.OutputDrainIncomplete) summary += " Command output was incomplete.";
-            if (result.Succeeded) summary += " Removal preflight handoff was missing or invalid.";
+            if (result.Succeeded) summary += action == AICodedbHostPayloadAction.UninstallPreflight
+                ? " Uninstall preflight classification was missing or invalid."
+                : " Removal preflight handoff was missing or invalid.";
             // Only bounded backend refusal lines are projected. Handoff tokens,
             // JSON records and auth-bearing lines are never copied into Manager.
             var output = (result.StandardError ?? string.Empty) + "\n" + (result.StandardOutput ?? string.Empty);

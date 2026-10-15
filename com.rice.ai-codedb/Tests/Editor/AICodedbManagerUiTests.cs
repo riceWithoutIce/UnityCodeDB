@@ -6788,6 +6788,54 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     internal sealed class AICodedbLifecycleControlTests
     {
+        internal static void AssertRemovalAdmissionPresentation(AICodedbProductStatus status, bool busy, bool enabled)
+        {
+            Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(status), Is.True);
+            Assert.That(AICodedbManagerWindow.GetRemovalActionLabel(status), Is.EqualTo("Uninstall CodeDB from Project"));
+            Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(status, false, busy), Is.EqualTo(enabled));
+            if (busy) Assert.That(AICodedbManagerWindow.GetRemovalActionDisabledReason(status, true), Does.Contain("Wait"));
+        }
+
+        [Test]
+        public void RemovalMenu_KeepsKnownIntegrationVisibleWithoutGrantingAdmission()
+        {
+            Assert.That(AICodedbManagerWindow.IsRemovalActionBusy(true, false, false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsRemovalActionBusy(true, false, true), Is.False);
+            Assert.That(AICodedbManagerWindow.IsRemovalActionBusy(true, true, true), Is.True);
+            var ready = new AICodedbProductStatus(AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current, "Ready");
+            AssertRemovalAdmissionPresentation(ready, false, false);
+            Assert.That(AICodedbManagerWindow.GetRemovalActionDisabledReason(ready, false), Does.Contain("not passed"));
+            var unknownOwner = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Unavailable, "ownership unavailable",
+                attentionReason: AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous);
+            AssertRemovalAdmissionPresentation(unknownOwner, false, false);
+            Assert.That(AICodedbManagerWindow.GetRemovalActionDisabledReason(unknownOwner, false), Does.Contain("not authenticated"));
+            foreach (var status in new[] { default(AICodedbProductStatus),
+                new AICodedbProductStatus(AICodedbProductState.NotIntegrated, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable, "not integrated"),
+                new AICodedbProductStatus(AICodedbProductState.Uninstalled, AICodedbProductLayerState.Missing,
+                    AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable, "uninstalled") })
+            {
+                Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(status), Is.False);
+                Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(status, true, false), Is.False);
+            }
+            var recovery = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Blocked,
+                AICodedbProductLayerState.Unavailable, "previous integration",
+                attentionReason: AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
+            Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(recovery), Is.True);
+            Assert.That(AICodedbManagerWindow.GetRemovalActionLabel(recovery), Is.EqualTo("Remove CodeDB Integration"));
+            Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(recovery, false, false), Is.False);
+            var retainedCandidate = new AICodedbProductStatus(AICodedbProductState.Uninstalled,
+                AICodedbProductLayerState.Missing, AICodedbProductLayerState.Missing,
+                AICodedbProductLayerState.Unavailable, "retained candidate", removalPreflightPassed: true);
+            Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(retainedCandidate, true,
+                AICodedbManagerWindow.IsRemovalActionBusy(true, false, true)), Is.True);
+        }
+
         [Test]
         public void MissingRemovalStatus_DoesNotOfferProjectMutation()
         {
@@ -6805,7 +6853,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbHostPayloadAction.RemoveIntegrationPreflight, false, projectRoot);
             Assert.That(arguments, Is.EqualTo(new[] { "-Action", "RemoveIntegrationPreflight", "-ProjectRoot", projectRoot }));
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
-                new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] AVAILABLE\n", string.Empty, false)), Is.True);
+                new AICodedbCommandResult(0, "[REMOVAL_PREFLIGHT] AVAILABLE\n", string.Empty, false)), Is.False);
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
                 new AICodedbCommandResult(4, "[REMOVAL_PREFLIGHT] AVAILABLE\n", "blocked", false)), Is.False);
             Assert.That(AICodedbHostPayloadMaterializer.HasAuthenticatedRemovalPreflight(
