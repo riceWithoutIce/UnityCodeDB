@@ -383,6 +383,7 @@ namespace Rice.AI.Codedb.Editor
         internal bool OneShotFallbackAuthorized { get; }
         internal bool HasOperationEvidence { get; }
         internal bool TimedOut { get; }
+        private readonly AICodedbCommandResult _boundTerminalResult;
 
         internal AICodedbSupervisorCommandResponse(
             bool succeeded,
@@ -396,7 +397,8 @@ namespace Rice.AI.Codedb.Editor
             long eventSequence,
             bool oneShotFallbackAuthorized = false,
             bool hasOperationEvidence = false,
-            bool timedOut = false)
+            bool timedOut = false,
+            AICodedbCommandResult boundTerminalResult = null)
         {
             Succeeded = succeeded;
             ExitCode = exitCode;
@@ -410,10 +412,24 @@ namespace Rice.AI.Codedb.Editor
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
             HasOperationEvidence = hasOperationEvidence;
             TimedOut = timedOut;
+            _boundTerminalResult = boundTerminalResult;
         }
 
         internal AICodedbCommandResult ToCommandResult()
         {
+            if (_boundTerminalResult != null)
+            {
+                if (_boundTerminalResult.SupervisorTerminalEvidence != null)
+                {
+                    if (string.Equals(ErrorCode, "SUPERVISOR_HANDOFF_FAILED", StringComparison.Ordinal))
+                        return _boundTerminalResult.WithSupervisorHandoffWarning(ErrorCode,
+                            string.IsNullOrWhiteSpace(Error) ? StandardError : Error);
+                    if (Snapshot != null && string.Equals(Snapshot.ReasonCode,
+                            "SUPERVISOR_HANDOFF_COMPLETE", StringComparison.Ordinal))
+                        return _boundTerminalResult.WithSupervisorHandoffWarning(string.Empty, string.Empty);
+                }
+                return _boundTerminalResult;
+            }
             var error = string.IsNullOrWhiteSpace(StandardError) ? Error : StandardError;
             if (!Succeeded && !string.IsNullOrWhiteSpace(ErrorCode))
                 error = "[SUPERVISOR:" + ErrorCode + "] " + error;
@@ -1969,9 +1985,10 @@ namespace Rice.AI.Codedb.Editor
                         0);
                 }
 
+                var originalRequestId = Guid.NewGuid().ToString("N");
                 var request = AICodedbSupervisorProtocol.BuildCommandRequest(
                     identity.AuthToken,
-                    Guid.NewGuid().ToString("N"),
+                    originalRequestId,
                     command,
                     action,
                     expectedLifecycleId,
@@ -2034,6 +2051,28 @@ namespace Rice.AI.Codedb.Editor
                     eventSequence = AICodedbStrictJson.GetOptionalNullableInt32(status, "event_sequence", "CodeDB Supervisor command status") ?? 0;
                 }
                 var commandSucceeded = succeeded && exitCode == 0;
+                AICodedbCommandResult boundTerminalResult = null;
+                if (command == "materialize" && action == "Uninstall"
+                    && AICodedbSupervisorProtocol.IsManagerActionId(managerActionId)
+                    && !string.IsNullOrWhiteSpace(operationId))
+                {
+                    var bound = AICodedbSupervisorTerminalEvidence.Read(context, managerActionId,
+                        operationId, identity.OwnerEpoch, originalRequestId, identity.SelectedInstanceId,
+                        identity.SelectedGenerationId, identity.RuntimeContractSha256);
+                    if (bound.State == AICodedbManagerActionRecoveryState.Terminal)
+                    {
+                        if (bound.Result.ExitCode == exitCode && bound.Result.StandardOutput == standardOutput
+                            && bound.Result.StandardError == standardError && !timedOut)
+                            boundTerminalResult = bound.Result;
+                    }
+                    if (boundTerminalResult == null)
+                        boundTerminalResult = new AICodedbCommandResult(4, standardOutput,
+                            "The authenticated returned terminal conflicts with its exact durable binding: " + bound.Detail,
+                            false, authoritativeTerminalEvidence: false, actionId: managerActionId,
+                            terminalForManagerAction: false,
+                            managerActionEvidenceKind: AICodedbManagerActionEvidenceKind.Indeterminate,
+                            supervisorTerminalBindingRejected: true);
+                }
                 var handoffQueued = AICodedbStrictJson.GetOptionalBoolean(
                     response,
                     "handoff_queued",
@@ -2063,7 +2102,8 @@ namespace Rice.AI.Codedb.Editor
                                 "SUPERVISOR_HANDOFF_FAILED",
                                 handoffError),
                             eventName,
-                            eventSequence);
+                            eventSequence,
+                            boundTerminalResult: boundTerminalResult);
                     }
 
                     Invalidate();
@@ -2083,7 +2123,8 @@ namespace Rice.AI.Codedb.Editor
                     eventSequence,
                     false,
                     !string.IsNullOrWhiteSpace(operationId),
-                    timedOut);
+                    timedOut,
+                    boundTerminalResult);
             }
             catch (OperationCanceledException)
             {
@@ -2439,8 +2480,9 @@ namespace Rice.AI.Codedb.Editor
                     cancellationToken))
                 return true;
 
-            error = "The selected instance changed, but the authenticated previous Supervisor "
-                    + "did not retire within the bounded handoff window.";
+            error = "The selected instance changed, but retirement of the authenticated previous Supervisor "
+                    + "was not confirmed within the bounded handoff window. State/lock disappearance was not observed; "
+                    + "this does not establish whether its process is still running.";
             return false;
         }
 

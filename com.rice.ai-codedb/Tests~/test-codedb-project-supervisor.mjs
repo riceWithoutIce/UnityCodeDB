@@ -12,6 +12,85 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
+// Bounded S31-D producer-only entry: no Supervisor, Provider or child launch.
+if (process.argv[2] === "--terminal-session-fixture") {
+  const root = path.resolve(process.argv[3]);
+  const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  assert.ok(root.startsWith(path.join(repository, ".artifacts", "tests", "s31d-uninstall-terminal") + path.sep));
+  assert.equal(fs.existsSync(root), false, "Preserve earlier evidence");
+  fs.mkdirSync(root, { recursive: true });
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../Tools~/codedb-project-supervisor.mjs");
+  const lines = fs.readFileSync(script, "utf8").split(/\r?\n/);
+  const source = (name) => {
+    const start = lines.findIndex(line => line.startsWith(`function ${name}(`));
+    const end = lines.findIndex((line, i) => i > start && /^(?:async )?function |^await main\(/.test(line));
+    assert.ok(start >= 0 && end > start, name);
+    return lines.slice(start, end).join("\n");
+  };
+  const names = ["compactResult", "commandExitCode", "truncate", "persistOperation", "operationHistoryFile",
+    "persistManagerActionOperation", "managerActionOperationFile", "ensureOperationEvidenceDirectory",
+    "validId", "assertInside", "isPathInside", "assertNoRedirectedAncestors", "assertReviewedPath", "pathsEqual",
+    "writeJson", "writeFdJson", "renameWithRetry", "normalizeProcessArgv", "hashArgv", "hash"];
+  const producer = vm.runInNewContext(names.map(source).join("\n")
+    + "\n({compactResult,persistOperation,normalizeProcessArgv,hashArgv})", {
+      fs, path, crypto, process, Buffer, EVIDENCE_SCHEMA_VERSION: 1, OPERATION_RETENTION_LIMIT: 32,
+      ATOMIC_RENAME_RETRY_DELAYS_MS: [], ATOMIC_RENAME_RETRYABLE_CODES: new Set()
+    });
+  const packageRoot = path.join(root, "package");
+  fs.mkdirSync(path.join(packageRoot, "Payload~"), {recursive:true});
+  const manifestPath = path.join(repository, "com.rice.ai-codedb", "Payload~", "payload-manifest.json");
+  fs.copyFileSync(manifestPath, path.join(packageRoot, "Payload~", "payload-manifest.json"));
+  const wrapperRelative = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
+  fs.mkdirSync(path.dirname(path.join(packageRoot, "Payload~", wrapperRelative)), {recursive:true});
+  fs.copyFileSync(path.join(repository,"com.rice.ai-codedb/Payload~",wrapperRelative), path.join(packageRoot,"Payload~",wrapperRelative));
+  const manifestBytes = fs.readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestBytes);
+  const descriptors = [];
+  const selectedFixtures = process.argv[4] ? process.argv[4].split(",") : ["success", "failure", "overflow", "timeout", "incomplete"];
+  assert.ok(selectedFixtures.length > 0 && selectedFixtures.every(name => ["success", "failure", "overflow", "timeout", "incomplete"].includes(name)));
+  for (const name of selectedFixtures) {
+    const projectRoot = path.join(root, name);
+    const runtime = path.join(projectRoot, "AIWork/.runtime/codedb/control/contracts",
+      manifest.control_contract.id, `v${manifest.control_contract.version}`, "supervisor");
+    const actionId = crypto.randomBytes(16).toString("hex");
+    const operationId = crypto.randomBytes(16).toString("hex");
+    const projectKey = crypto.createHash("sha256").update(projectRoot.replaceAll("\\", "/").toLowerCase()).digest("hex");
+    const packageKey = crypto.createHash("sha256").update(packageRoot.replaceAll("\\", "/").toLowerCase()).digest("hex");
+    const context = { root:projectRoot, runtime, packageRoot, projectIdentity:`sha256:${projectKey}`,
+      operationPath:path.join(runtime,"operation.json"), operationHistoryPath:path.join(runtime,"operation-history"),
+      actionOperationPath:path.join(runtime,"manager-actions") };
+    const argv = producer.normalizeProcessArgv(["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",
+      path.join(packageRoot,"Tools~/materialize-codedb-host-payload.ps1"),"-Action","Uninstall","-ProjectRoot",projectRoot,
+      "-PayloadRoot",path.join(packageRoot,"Payload~"),"-OriginatingOperationId",operationId,"-OriginatingActionId",actionId,"-ConfirmedProjectMutation"]);
+    const result = producer.compactResult({code:name === "failure" ? 7 : 0,
+      stdout:name === "overflow" ? "x".repeat(32769) : "uninstall terminal", stderr:name === "failure" ? "confirmed failure" : "",
+      timedOut:name === "timeout", outputDrainIncomplete:name === "incomplete"});
+    const operation = {schema_version:1,managed_by:"com.rice.ai-codedb",operation_id:operationId,
+      manager_action_id:actionId,key:'["materialize:Uninstall","Uninstall",true,"",false,false,"",0,""]',
+      request_id:crypto.randomBytes(16).toString("hex"),name:"materialize:Uninstall",lane:"maintenance",
+      state:name === "failure" ? "failed" : "completed",phase:name === "failure" ? "failed" : "completed",
+      owner_epoch:crypto.randomBytes(16).toString("hex"),project_identity:context.projectIdentity,root:projectRoot,runtime,
+      selected_instance_id:crypto.randomBytes(16).toString("hex"),selected_generation_id:manifest.generation_id,
+      runtime_contract_sha256:crypto.createHash("sha256").update(manifestBytes).digest("hex"),
+      child:{normalized_argv:argv,argv_sha256:producer.hashArgv(argv)},started_at_utc:"2026-10-17T00:00:00Z",
+      completed_at_utc:"2026-10-17T00:00:01Z",result};
+    producer.persistOperation(context, operation);
+    assert.equal(fs.existsSync(path.join(runtime,"supervisor-state.json")),false);
+    const receipts = path.join(root,"receipts");
+    const identity = {schema_version:1,managed_by:"com.rice.ai-codedb",storage_layout:"compact-v1",action_id:actionId,
+      project_key:projectKey,package_key:packageKey,project_root:projectRoot.replaceAll("\\","/"),package_root:packageRoot.replaceAll("\\","/")};
+    const actionDir = path.join(receipts,actionId); fs.mkdirSync(actionDir,{recursive:true});
+    fs.writeFileSync(path.join(actionDir,"action.json"),JSON.stringify(identity));
+    const indexDir = path.join(receipts,projectKey.slice(0,24)); fs.mkdirSync(indexDir,{recursive:true});
+    fs.writeFileSync(path.join(indexDir,`current-action-${actionId}.json`),JSON.stringify({...identity,state:"pending",
+      title:"Uninstall CodeDB from Project",effect_class:"ConfirmedProjectMutation",authorization_source:"UserConfirmationAndBackendAdmission"}));
+    descriptors.push({name,projectRoot,packageRoot,actionId,operationId,runtime});
+  }
+  fs.writeFileSync(path.join(root,"fixtures.json"),JSON.stringify({fixtures:descriptors}));
+  console.log(`PASS S31-D original compactResult + persistOperation/action-map serialization (${selectedFixtures.length} fixtures; no processes)`);
+  process.exit(0);
+}
+
 if (process.platform !== "win32") {
   console.log("[DEFERRED] Supervisor named-pipe harness requires Windows.");
   process.exit(0);

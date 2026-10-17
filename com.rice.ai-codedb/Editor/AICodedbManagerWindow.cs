@@ -2841,9 +2841,12 @@ namespace Rice.AI.Codedb.Editor
                 AICodedbManagerActionEvidenceKind.Indeterminate);
         }
 
-        private static async Task<AICodedbCommandResult> ResolveActionEvidenceAsync(
+        internal static async Task<AICodedbCommandResult> ResolveActionEvidenceAsync(
             AICodedbManagerActionSession session, AICodedbCommandResult reported)
         {
+            if (reported != null && reported.SupervisorTerminalBindingRejected
+                && reported.ActionId == session.ActionId)
+                return reported;
             if (reported != null
                 && reported.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal
                 && string.Equals(reported.ActionId, session.ActionId, StringComparison.Ordinal))
@@ -2860,8 +2863,16 @@ namespace Rice.AI.Codedb.Editor
 
             if (IsSupervisorAction(session.Title))
             {
-                var supervisor = await AICodedbEditorLifecycle.RecoverManagerActionAsync(
-                    session.Context, session.ActionId);
+                var returnedBoundTerminal = session.Title == "Uninstall CodeDB from Project"
+                    && reported?.SupervisorTerminalEvidence != null
+                    && reported.SupervisorTerminalEvidence.Matches(session.Context, session.ActionId)
+                    && reported.HasAuthoritativeTerminalEvidence && reported.TerminalForManagerAction
+                    && !AICodedbManagerActionSession.RequiresRetainedAdmission(reported);
+                var supervisor = returnedBoundTerminal
+                    ? AICodedbManagerActionRecoveryOutcome.Terminal(reported)
+                    : session.Title == "Uninstall CodeDB from Project"
+                        ? await Task.Run(() => AICodedbSupervisorTerminalEvidence.Read(session.Context, session.ActionId))
+                        : await AICodedbEditorLifecycle.RecoverManagerActionAsync(session.Context, session.ActionId);
                 if (direct.State == AICodedbManagerActionRecoveryState.Terminal
                     && supervisor.State == AICodedbManagerActionRecoveryState.Terminal)
                     return UnconfirmedActionResult(session.ActionId,
@@ -3121,6 +3132,9 @@ namespace Rice.AI.Codedb.Editor
         {
             if (_postCommandStatusObservationInFlight || !string.IsNullOrEmpty(_postCommandStatusObservationDetail))
                 EditorGUILayout.HelpBox(_postCommandStatusObservationDetail, MessageType.Info);
+            var handoffWarning = _lastResult?.GetSupervisorHandoffWarningText();
+            if (!string.IsNullOrWhiteSpace(handoffWarning))
+                EditorGUILayout.HelpBox(handoffWarning, MessageType.Warning);
             using (new EditorGUILayout.HorizontalScope(
                        EditorStyles.helpBox,
                        GUILayout.Height(UserActionStatusHeight),

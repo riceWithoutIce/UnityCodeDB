@@ -33,6 +33,10 @@ namespace Rice.AI.Codedb.Editor
         internal bool HasAuthoritativeTerminalEvidence { get; }
         internal bool TerminalForManagerAction { get; }
         internal AICodedbManagerActionEvidenceKind ManagerActionEvidenceKind { get; }
+        internal AICodedbSupervisorTerminalEvidence SupervisorTerminalEvidence { get; }
+        internal bool SupervisorTerminalBindingRejected { get; }
+        internal string SupervisorHandoffWarningCode { get; }
+        internal string SupervisorHandoffWarningDetail { get; }
         internal bool FailedCandidateEffectsRetained =>
             ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.FailedCandidateEffectsRetained;
         // Only the Supervisor Bridge may set this bit. It records a
@@ -62,7 +66,11 @@ namespace Rice.AI.Codedb.Editor
             AICodedbManagerActionEvidenceKind managerActionEvidenceKind =
                 AICodedbManagerActionEvidenceKind.CommandTerminal,
             bool outputOverflow = false,
-            bool outputDrainIncomplete = false)
+            bool outputDrainIncomplete = false,
+            AICodedbSupervisorTerminalEvidence supervisorTerminalEvidence = null,
+            bool supervisorTerminalBindingRejected = false,
+            string supervisorHandoffWarningCode = null,
+            string supervisorHandoffWarningDetail = null)
         {
             ExitCode = exitCode;
             StandardOutput = standardOutput ?? string.Empty;
@@ -70,6 +78,10 @@ namespace Rice.AI.Codedb.Editor
             TimedOut = timedOut;
             OutputOverflow = outputOverflow;
             OutputDrainIncomplete = outputDrainIncomplete;
+            SupervisorTerminalEvidence = supervisorTerminalEvidence;
+            SupervisorTerminalBindingRejected = supervisorTerminalBindingRejected;
+            SupervisorHandoffWarningCode = supervisorHandoffWarningCode ?? string.Empty;
+            SupervisorHandoffWarningDetail = supervisorHandoffWarningDetail ?? string.Empty;
             ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
             ActionId = actionId ?? AICodedbPaths.CurrentActionId;
             OneShotFallbackAuthorized = oneShotFallbackAuthorized;
@@ -79,6 +91,21 @@ namespace Rice.AI.Codedb.Editor
             ManagerActionEvidenceKind = !authoritativeTerminalEvidence.HasValue && isManagerAction
                 ? AICodedbManagerActionEvidenceKind.Indeterminate
                 : managerActionEvidenceKind;
+        }
+
+        internal AICodedbCommandResult WithSupervisorHandoffWarning(string code, string detail)
+        {
+            return new AICodedbCommandResult(ExitCode, StandardOutput, StandardError, TimedOut,
+                ElapsedMilliseconds, OneShotFallbackAuthorized, HasAuthoritativeTerminalEvidence,
+                ActionId, TerminalForManagerAction, ManagerActionEvidenceKind, OutputOverflow,
+                OutputDrainIncomplete, SupervisorTerminalEvidence, SupervisorTerminalBindingRejected,
+                code, detail);
+        }
+
+        internal string GetSupervisorHandoffWarningText()
+        {
+            return string.IsNullOrWhiteSpace(SupervisorHandoffWarningCode) ? string.Empty
+                : "[" + SupervisorHandoffWarningCode + "] " + SupervisorHandoffWarningDetail;
         }
 
         /// <summary>
@@ -98,7 +125,8 @@ namespace Rice.AI.Codedb.Editor
             if (!Succeeded)
                 return $"Command failed with exit code {ExitCode}.";
 
-            if (HasLeadingFreshnessWarningMarker(StandardOutput))
+            if (!string.IsNullOrWhiteSpace(SupervisorHandoffWarningCode)
+                || HasLeadingFreshnessWarningMarker(StandardOutput))
                 return "Command completed with warning.";
 
             return "Command completed successfully.";
@@ -125,6 +153,7 @@ namespace Rice.AI.Codedb.Editor
 
             AppendSection(builder, "Output", StandardOutput);
             AppendSection(builder, "Error", StandardError);
+            AppendSection(builder, "Supervisor handoff warning", GetSupervisorHandoffWarningText());
 
             return builder.ToString();
         }

@@ -2063,7 +2063,11 @@ function compactResult(result) {
     exit_code: commandExitCode(result),
     stdout: truncate(result.stdout),
     stderr: truncate(result.stderr),
-    timed_out: result.timedOut === true
+    timed_out: result.timedOut === true,
+    output_overflow: result.outputOverflow === true
+      || String(result.stdout ?? "").length > 32768
+      || String(result.stderr ?? "").length > 32768,
+    output_drain_incomplete: result.outputDrainIncomplete === true
   };
 }
 
@@ -2203,6 +2207,13 @@ function persistManagerActionOperation(context, operation) {
     project_identity: context.projectIdentity,
     root: context.root,
     runtime: context.runtime,
+    terminal_binding_schema_version: 1,
+    package_root: context.packageRoot,
+    owner_epoch: operation.owner_epoch,
+    request_id: operation.request_id,
+    selected_instance_id: operation.selected_instance_id,
+    selected_generation_id: operation.selected_generation_id,
+    runtime_contract_sha256: operation.runtime_contract_sha256,
     operation_ids: operationIds,
     latest_operation_id: operation.operation_id,
     updated_at_utc: new Date().toISOString()
@@ -3021,18 +3032,28 @@ function runChild(commandName, args, cwd, timeoutMs, onSpawn = null, environment
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputOverflow = false;
     let settled = false;
     const finish = (value) => {
       if (settled) return;
       settled = true;
       resolve(value);
     };
-    child.stdout.on("data", (chunk) => { stdout = `${stdout}${String(chunk)}`.slice(-32768); });
-    child.stderr.on("data", (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-32768); });
+    child.stdout.on("data", (chunk) => {
+      const next = `${stdout}${String(chunk)}`;
+      outputOverflow ||= next.length > 32768;
+      stdout = next.slice(-32768);
+    });
+    child.stderr.on("data", (chunk) => {
+      const next = `${stderr}${String(chunk)}`;
+      outputOverflow ||= next.length > 32768;
+      stderr = next.slice(-32768);
+    });
     const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* best effort */ } }, timeoutMs);
     child.once("error", (error) => {
       clearTimeout(timer);
-      finish({ code: 1, stdout, stderr: error.message, timedOut, launchFailed: true, evidenceFailed: false });
+      finish({ code: 1, stdout, stderr: error.message, timedOut, outputOverflow,
+        outputDrainIncomplete: true, launchFailed: true, evidenceFailed: false });
     });
     let spawnEvidence = Promise.resolve();
     try {
@@ -3051,6 +3072,8 @@ function runChild(commandName, args, cwd, timeoutMs, onSpawn = null, environment
         stdout: stdout.trim(),
         stderr: [stderr.trim(), evidenceError].filter(Boolean).join("\n"),
         timedOut,
+        outputOverflow,
+        outputDrainIncomplete: false,
         launchFailed: false,
         evidenceFailed: Boolean(evidenceError)
       });

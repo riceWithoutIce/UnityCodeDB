@@ -950,6 +950,103 @@ namespace Rice.AI.Codedb.Editor.Tests
 
         // Synchronous, test-owned isolation only. Hold the production Gate so
         // other session callers cannot observe or replace the temporary owner.
+        internal static void AssertS31DHandoffReturnedWithoutLookup(AICodedbEditorExecutionContext context,
+            string actionId, AICodedbCommandResult returned, string historyPath)
+        {
+            var session = CreateS31DHandoffSession(context, actionId);
+            File.Move(historyPath, historyPath + ".held");
+            try
+            {
+                var resolved = AICodedbManagerWindow.ResolveActionEvidenceAsync(session, returned).GetAwaiter().GetResult();
+                Assert.That(resolved, Is.SameAs(returned));
+                Assert.That(resolved.GetSupervisorHandoffWarningText(), Is.EqualTo(returned.GetSupervisorHandoffWarningText()));
+            }
+            finally { File.Move(historyPath + ".held", historyPath); }
+        }
+
+        internal static void AssertS31DHandoffClosure(AICodedbEditorExecutionContext context,
+            string actionId, AICodedbCommandResult returned, string historyPath)
+        {
+            var bytes = File.ReadAllBytes(historyPath);
+            AssertS31DHandoffReturnedWithoutLookup(context, actionId, returned, historyPath);
+            var reopened = CreateS31DHandoffSession(context, actionId);
+            var recovered = AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, null).GetAwaiter().GetResult();
+            var recoveredAgain = AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, null).GetAwaiter().GetResult();
+            Assert.That(recovered.ExitCode, Is.EqualTo(returned.ExitCode));
+            Assert.That(recoveredAgain.ExitCode, Is.EqualTo(returned.ExitCode));
+            Assert.That(recovered.SupervisorHandoffWarningCode,
+                Is.EqualTo(returned.Succeeded ? "SUPERVISOR_HANDOFF_UNCONFIRMED" : string.Empty));
+            Assert.That(AICodedbManagerActionSession.RequiresRetainedAdmission(returned), Is.False);
+            // Handoff warning neither grants a foreign action authority nor
+            // alters the existing exact-action journal release checks.
+            var foreign = new AICodedbCommandResult(returned.ExitCode, returned.StandardOutput,
+                returned.StandardError, false, authoritativeTerminalEvidence:true, actionId:new string('0',32),
+                supervisorHandoffWarningCode:returned.SupervisorHandoffWarningCode,
+                supervisorHandoffWarningDetail:returned.SupervisorHandoffWarningDetail);
+            Assert.That(reopened.TryReleaseDurableIndex(foreign, out _), Is.False);
+            Assert.That(File.Exists(AICodedbPaths.GetManagerActionIndexPath(context, actionId)), Is.True);
+            Assert.That(reopened.TryReleaseDurableIndex(returned, out var detail), Is.True, detail);
+            Assert.That(File.Exists(AICodedbPaths.GetManagerActionIndexPath(context, actionId)), Is.False);
+            Assert.That(File.ReadAllBytes(historyPath), Is.EqualTo(bytes));
+            Assert.That(AICodedbManagerActionSession.SelectDisplayResult(returned, null), Is.SameAs(returned));
+        }
+
+        private static AICodedbManagerActionSession CreateS31DHandoffSession(AICodedbEditorExecutionContext context,
+            string actionId)
+        {
+            var constructor = typeof(AICodedbManagerActionSession).GetConstructor(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
+                new[] { typeof(string), typeof(AICodedbEditorExecutionContext), typeof(double), typeof(string), typeof(bool) }, null);
+            var session = (AICodedbManagerActionSession)constructor.Invoke(
+                new object[] { "Uninstall CodeDB from Project", context, 1d, actionId, true });
+            session.MarkDurableAdmitted();
+            return session;
+        }
+
+        internal static void AssertS31DSessionClosure(AICodedbEditorExecutionContext context,
+            string actionId, AICodedbCommandResult returned, string historyPath)
+        {
+            var constructor = typeof(AICodedbManagerActionSession).GetConstructor(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
+                new[] { typeof(string), typeof(AICodedbEditorExecutionContext), typeof(double), typeof(string), typeof(bool) }, null);
+            Func<AICodedbManagerActionSession> session = () => (AICodedbManagerActionSession)constructor.Invoke(
+                new object[] { "Uninstall CodeDB from Project", context, 1d, actionId, true });
+            var original = session(); original.MarkDurableAdmitted();
+            // Removing exact history after provenance minting proves the normal
+            // returned terminal is preserved without a second history/live query.
+            var bytes = File.ReadAllBytes(historyPath);
+            File.Move(historyPath, historyPath + ".held");
+            try
+            {
+                var normal = AICodedbManagerWindow.ResolveActionEvidenceAsync(original, returned).GetAwaiter().GetResult();
+                Assert.That(normal, Is.SameAs(returned));
+            }
+            finally { File.Move(historyPath + ".held", historyPath); }
+            var reopened = session(); reopened.MarkDurableAdmitted();
+            var recovered = AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, null).GetAwaiter().GetResult();
+            Assert.That(recovered.ExitCode, Is.EqualTo(returned.ExitCode));
+            Assert.That(recovered.SupervisorTerminalEvidence, Is.Not.Null);
+            var recoveredAgain = AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, null).GetAwaiter().GetResult();
+            Assert.That(recoveredAgain.ExitCode, Is.EqualTo(returned.ExitCode));
+            var conflictPath = Path.Combine(AICodedbPaths.GetManagerActionReceiptRoot(context, actionId), "unexpected-writer.json");
+            File.WriteAllText(conflictPath, "{}", new System.Text.UTF8Encoding(false));
+            try
+            {
+                var conflict = AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, returned).GetAwaiter().GetResult();
+                Assert.That(conflict.HasAuthoritativeTerminalEvidence, Is.False);
+                Assert.That(reopened.TryReleaseDurableIndex(conflict, out _), Is.False);
+            }
+            finally { File.Delete(conflictPath); }
+            var rejected = new AICodedbCommandResult(4, "", "original binding rejected", false,
+                authoritativeTerminalEvidence:false, actionId:actionId, terminalForManagerAction:false,
+                managerActionEvidenceKind:AICodedbManagerActionEvidenceKind.Indeterminate,
+                supervisorTerminalBindingRejected:true);
+            Assert.That(AICodedbManagerWindow.ResolveActionEvidenceAsync(reopened, rejected).GetAwaiter().GetResult(), Is.SameAs(rejected));
+            Assert.That(reopened.TryReleaseDurableIndex(recovered, out var detail), Is.True, detail);
+            Assert.That(File.Exists(AICodedbPaths.GetManagerActionIndexPath(context, actionId)), Is.False);
+            Assert.That(File.ReadAllBytes(historyPath), Is.EqualTo(bytes));
+        }
+
         private sealed class ManagerActionSessionFixture : IDisposable
         {
             private const string MissingValue = "S28_FIXTURE_KEY_ABSENT";

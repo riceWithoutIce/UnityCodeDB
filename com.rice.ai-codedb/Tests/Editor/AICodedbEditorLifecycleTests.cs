@@ -14,6 +14,147 @@ using UnityEngine.TestTools;
 
 namespace Rice.AI.Codedb.Editor.Tests
 {
+    internal sealed class AICodedbS31DTerminalTests
+    {
+        [Test]
+        public void SupervisorTerminal_GenericSuccessHasNoBoundProvenance()
+        {
+            var result = new AICodedbSupervisorCommandResponse(true, 0, "", "", "success", "", null, "", 0,
+                hasOperationEvidence: true).ToCommandResult();
+            Assert.That(result.SupervisorTerminalEvidence, Is.Null);
+        }
+
+        internal static void AssertHandoffRepairFixtures(string root)
+        {
+            var document = AICodedbStrictJson.ReadObject(Path.Combine(root, "fixtures.json"), 16384, "S31-D F1 fixtures");
+            using (AICodedbPaths.UseManagerActionsRootForTests(Path.Combine(root, "receipts")))
+            foreach (var entry in AICodedbStrictJson.GetRequiredArray(document, "fixtures", "S31-D F1 fixtures"))
+            {
+                var fixture = AICodedbStrictJson.RequireObject(entry, "fixture");
+                Func<string, string> get = key => AICodedbStrictJson.GetRequiredString(fixture, key, "fixture");
+                var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                    get("projectRoot"), get("packageRoot"), "S31-D F1");
+                var outcome = AICodedbSupervisorTerminalEvidence.Read(context, get("actionId"));
+                Assert.That(outcome.State, Is.EqualTo(AICodedbManagerActionRecoveryState.Terminal), outcome.Detail);
+                var backend = outcome.Result;
+                AICodedbCommandResult converted;
+                if (get("name") == "success")
+                {
+                    Assert.That(backend.SupervisorHandoffWarningCode, Is.EqualTo("SUPERVISOR_HANDOFF_UNCONFIRMED"));
+                    const string detail = "State/lock disappearance was not observed within the bounded handoff window.";
+                    var handoffFailed = new AICodedbSupervisorCommandResponse(false, 4, "SUPERVISOR_HANDOFF_FAILED",
+                        detail, backend.StandardOutput, detail, AICodedbSupervisorSnapshot.Blocked("SUPERVISOR_HANDOFF_FAILED", detail),
+                        "", 0, boundTerminalResult: backend);
+                    converted = handoffFailed.ToCommandResult();
+                    Assert.That(converted.SupervisorHandoffWarningCode, Is.EqualTo(handoffFailed.ErrorCode));
+                    Assert.That(converted.SupervisorHandoffWarningDetail, Is.EqualTo(handoffFailed.Error));
+                    Assert.That(converted.GetDisplayText(), Does.Contain("Supervisor handoff warning:"));
+                    Assert.That(converted.GetDisplayText(), Does.Contain(handoffFailed.ErrorCode).And.Contain(detail));
+                    Assert.That(converted.GetSummary(), Is.EqualTo("Command completed with warning."));
+                    Assert.That(converted.Succeeded, Is.True);
+                    var handoffComplete = new AICodedbSupervisorCommandResponse(true, 0, "", "", backend.StandardOutput, "",
+                        AICodedbSupervisorSnapshot.Disconnected("SUPERVISOR_HANDOFF_COMPLETE", "Retirement observed."),
+                        "", 0, boundTerminalResult: backend).ToCommandResult();
+                    Assert.That(handoffComplete.SupervisorHandoffWarningCode, Is.Empty);
+                    Assert.That(handoffComplete.GetSummary(), Is.EqualTo("Command completed successfully."));
+                    AssertBackendUnchanged(backend, handoffComplete);
+                    var observationMissing = new AICodedbSupervisorCommandResponse(true, 0, "", "", backend.StandardOutput, "",
+                        null, "", 0, boundTerminalResult: backend).ToCommandResult();
+                    Assert.That(observationMissing.SupervisorHandoffWarningCode, Is.EqualTo("SUPERVISOR_HANDOFF_UNCONFIRMED"));
+                    AICodedbProjectSettingsTests.AssertS31DHandoffReturnedWithoutLookup(context, get("actionId"), handoffComplete,
+                        Path.Combine(get("runtime"), "operation-history", get("operationId") + ".json"));
+                }
+                else
+                {
+                    Assert.That(get("name"), Is.EqualTo("failure"));
+                    converted = new AICodedbSupervisorCommandResponse(false, backend.ExitCode, "SUPERVISOR_COMMAND_FAILED",
+                        backend.StandardError, backend.StandardOutput, backend.StandardError, null, "", 0,
+                        boundTerminalResult: backend).ToCommandResult();
+                    Assert.That(converted.Succeeded, Is.False);
+                    Assert.That(converted.ExitCode, Is.EqualTo(7));
+                    Assert.That(converted.SupervisorHandoffWarningCode, Is.Empty);
+                }
+                AssertBackendUnchanged(backend, converted);
+                AICodedbProjectSettingsTests.AssertS31DHandoffClosure(context, get("actionId"), converted,
+                    Path.Combine(get("runtime"), "operation-history", get("operationId") + ".json"));
+            }
+        }
+
+        private static void AssertBackendUnchanged(AICodedbCommandResult backend, AICodedbCommandResult converted)
+        {
+            Assert.That(converted.ExitCode, Is.EqualTo(backend.ExitCode));
+            Assert.That(converted.StandardOutput, Is.EqualTo(backend.StandardOutput));
+            Assert.That(converted.StandardError, Is.EqualTo(backend.StandardError));
+            Assert.That(converted.SupervisorTerminalEvidence, Is.SameAs(backend.SupervisorTerminalEvidence));
+            Assert.That(converted.ActionId, Is.EqualTo(backend.ActionId));
+        }
+
+        internal static void AssertProductionFixtures(string root)
+        {
+            var document = AICodedbStrictJson.ReadObject(Path.Combine(root, "fixtures.json"), 16384, "S31-D fixtures");
+            using (AICodedbPaths.UseManagerActionsRootForTests(Path.Combine(root, "receipts")))
+            foreach (var entry in AICodedbStrictJson.GetRequiredArray(document, "fixtures", "S31-D fixtures"))
+            {
+                var fixture = AICodedbStrictJson.RequireObject(entry, "fixture");
+                Func<string, string> get = key => AICodedbStrictJson.GetRequiredString(fixture, key, "fixture");
+                var context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                    get("projectRoot"), get("packageRoot"), "S31-D");
+                var actionId = get("actionId");
+                var outcome = AICodedbSupervisorTerminalEvidence.Read(context, actionId);
+                var valid = get("name") == "success" || get("name") == "failure";
+                Assert.That(outcome.State == AICodedbManagerActionRecoveryState.Terminal, Is.EqualTo(valid), outcome.Detail);
+                if (!valid) continue;
+                Assert.That(outcome.Result.Succeeded, Is.EqualTo(get("name") == "success"));
+                Assert.That(outcome.Result.SupervisorTerminalEvidence.Matches(context, actionId), Is.True);
+                Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId, expectedOwnerEpoch: new string('0',32)).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+                Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId, expectedRequestId: new string('0',32)).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+                Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId, expectedOperationId: new string('0',32)).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Conflict));
+                var mapPath = Path.Combine(get("runtime"), "manager-actions", actionId + ".json");
+                var historyPath = Path.Combine(get("runtime"), "operation-history", get("operationId") + ".json");
+                AssertRecordRejection(context, actionId, mapPath, text => text.Replace("\"terminal_binding_schema_version\": 1", "\"terminal_binding_schema_version\": 0"));
+                AssertRecordRejection(context, actionId, mapPath, text => text.Replace("\"package_root\":", "\"wrong_package_root\":"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("materialize:Uninstall", "materialize:Install"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace(actionId, new string('0',32)));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("sha256:", "sha255:"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("\"owner_epoch\":", "\"wrong_owner_epoch\":"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("\"output_overflow\": false", "\"output_overflow\": true"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("\"output_drain_incomplete\": false", "\"output_drain_incomplete\": true"));
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("\"timed_out\": false", "\"timed_out\": true"));
+                var state = get("name") == "success" ? "completed" : "failed";
+                AssertRecordRejection(context, actionId, historyPath, text => text.Replace("\"state\": \"" + state + "\"", "\"state\": \"running\""));
+                File.Move(mapPath, mapPath + ".held");
+                try { Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.NotFound)); }
+                finally { File.Move(mapPath + ".held", mapPath); }
+                File.Move(historyPath, historyPath + ".held");
+                try { Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId).State,
+                    Is.EqualTo(AICodedbManagerActionRecoveryState.Pending)); }
+                finally { File.Move(historyPath + ".held", historyPath); }
+                AICodedbProjectSettingsTests.AssertS31DSessionClosure(context, actionId, outcome.Result,
+                    historyPath);
+            }
+        }
+
+        private static void AssertRecordRejection(AICodedbEditorExecutionContext context, string actionId,
+            string path, Func<string, string> mutation)
+        {
+            var bytes = File.ReadAllBytes(path);
+            var text = Encoding.UTF8.GetString(bytes);
+            var changed = mutation(text);
+            Assert.That(changed, Is.Not.EqualTo(text), "Mutation must touch the production serialized record.");
+            try
+            {
+                File.WriteAllText(path, changed, new UTF8Encoding(false));
+                Assert.That(AICodedbSupervisorTerminalEvidence.Read(context, actionId).State,
+                    Is.Not.EqualTo(AICodedbManagerActionRecoveryState.Terminal));
+            }
+            finally { File.WriteAllBytes(path, bytes); }
+        }
+    }
+
     // These scope-only S29 tests must not enter the unrelated lifecycle fixture's
     // legacy OS-temp SetUp/TearDown below.
     internal sealed class AICodedbS29ExecutionContextTests
