@@ -107,7 +107,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     Assert.That(projected.RemovalPreflightPassed, Is.False);
                     Assert.That(projected.DiagnosticDetail, Does.Contain(reason));
                     Assert.That(projected.State, Is.EqualTo(status.State));
-                    Assert.That(AICodedbManagerWindow.IsUninstallAvailable(projected, true), Is.False);
+                    Assert.That(AICodedbManagerWindow.IsUninstallAvailable(projected, true), Is.True);
                     var uiItem = (AICodedbStatusItem)typeof(AICodedbStatusSnapshot).GetMethod(
                         "CreateControlContractMigrationStatus", flags).Invoke(null, new object[] { projected });
                     Assert.That(uiItem.Detail, Does.Contain(reason));
@@ -140,7 +140,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                     AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Missing,
                     AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable,
                     "unknown candidate effects", removalPreflightPassed: false);
-                Assert.That(AICodedbManagerWindow.IsUninstallAvailable(blocked, true), Is.False);
+                Assert.That(AICodedbManagerWindow.IsUninstallAvailable(blocked, true), Is.True);
             });
         }
 

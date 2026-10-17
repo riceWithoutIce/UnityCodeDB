@@ -15,6 +15,154 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        [TestCase(AICodedbProductState.Ready, false, "Uninstall CodeDB from Project")]
+        [TestCase(AICodedbProductState.NotIntegrated, false, "Install CodeDB")]
+        [TestCase(AICodedbProductState.Uninstalled, false, "Install CodeDB")]
+        [TestCase(AICodedbProductState.NeedsAttention, true, "Install CodeDB")]
+        [TestCase(AICodedbProductState.NeedsAttention, false, "Uninstall CodeDB from Project")]
+        public void UninstallEntry_OverviewLabelFollowsStateWithoutAdmissionGating(
+            AICodedbProductState state, bool freshRecovery, string expected)
+        {
+            var status = new AICodedbProductStatus(state, AICodedbProductLayerState.Unknown,
+                AICodedbProductLayerState.Unknown, AICodedbProductLayerState.Unavailable, "cached status");
+            Assert.That(AICodedbManagerWindow.GetPrimaryActionLabel(status, freshRecovery), Is.EqualTo(expected));
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, false, false, freshRecovery), Is.True);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, true, freshRecovery), Is.False);
+        }
+
+        [Test]
+        public void UninstallEntry_RepeatedBusyClickObservesWithoutConfirmationOrDispatch()
+        {
+            var confirmations = 0;
+            var dispatches = 0;
+            var observations = 0;
+            Assert.That(AICodedbManagerWindow.ConfirmAndRunUninstallCodeDB(false,
+                () => observations++, () => { confirmations++; return true; }, () => dispatches++), Is.True);
+            Assert.That(AICodedbManagerWindow.ConfirmAndRunUninstallCodeDB(true,
+                () => observations++, () => { confirmations++; return true; }, () => dispatches++), Is.False);
+            Assert.That(confirmations, Is.EqualTo(1));
+            Assert.That(dispatches, Is.EqualTo(1));
+            Assert.That(observations, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void UninstallEntry_CanonicalNoInstallAndAmbiguousEvidenceNeverDispatch()
+        {
+            AICodedbTestWorkspace.Run(workspace => AssertUninstallEntryLocalRouting(workspace.Root));
+        }
+
+        internal static void AssertUninstallEntryLocalRouting(string ownedRoot)
+        {
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                Path.Combine(ownedRoot, "uninstall-entry-project"), Path.Combine(ownedRoot, "package"), "S31-C routing");
+            foreach (var name in new[] { "Assets", "Packages", "ProjectSettings" })
+                Directory.CreateDirectory(Path.Combine(context.ProjectRoot, name));
+            var dispatches = 0;
+            Func<Task<AICodedbCommandResult>> dispatch = () => {
+                dispatches++;
+                return Task.FromResult(new AICodedbCommandResult(4, string.Empty, "bounded dispatcher", false));
+            };
+            using (AICodedbPaths.UseActionContext(context, Guid.NewGuid().ToString("N"), "project-mutation", "confirmed"))
+            {
+                var fresh = AICodedbActions.RunUninstallCodeDBAsync(context, dispatch).GetAwaiter().GetResult();
+                Assert.That(fresh.StandardOutput, Does.Contain("NoActionNeeded"));
+                Assert.That(fresh.Succeeded, Is.True);
+                AssertLocalUninstallEvidence(fresh);
+                var desired = Path.Combine(context.ProjectRoot, AICodedbProjectSettings.InstanceDesiredStateRelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(desired));
+                File.WriteAllText(desired, "{}");
+                var ambiguous = AICodedbActions.RunUninstallCodeDBAsync(context, dispatch).GetAwaiter().GetResult();
+                Assert.That(ambiguous.StandardError, Does.Contain("Blocked"));
+                Assert.That(ambiguous.Succeeded, Is.False);
+                AssertLocalUninstallEvidence(ambiguous);
+                File.Delete(desired);
+                Directory.CreateDirectory(Path.Combine(context.ProjectRoot, "AIWork/codedb"));
+                var missingInstance = AICodedbActions.RunUninstallCodeDBAsync(context, dispatch).GetAwaiter().GetResult();
+                Assert.That(missingInstance.StandardError, Does.Contain("Blocked"));
+                AssertLocalUninstallEvidence(missingInstance);
+                Assert.That(dispatches, Is.Zero);
+                string State(string cleanup) => "{\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\","
+                    + "\"project_root\":\"" + context.ProjectRoot.Replace("\\", "\\\\") + "\",\"project_identity\":\""
+                    + AICodedbEditorLifecycle.CreateProjectIdentity(context.ProjectRoot) + "\",\"state_id\":\""
+                    + Guid.NewGuid().ToString("N") + "\",\"updated_at_utc\":\"" + DateTimeOffset.UtcNow.ToString("o")
+                    + "\",\"desired_state\":\"UNINSTALLED\",\"cleanup_state\":\"" + cleanup + "\"}";
+                File.WriteAllText(desired, State("COMPLETE"));
+                AICodedbActions.RunUninstallCodeDBAsync(context, dispatch).GetAwaiter().GetResult();
+                Assert.That(dispatches, Is.EqualTo(1), "COMPLETE alone cannot bypass existing backend consistency checks.");
+                File.WriteAllText(desired, State("PENDING"));
+                AICodedbActions.RunUninstallCodeDBAsync(context, dispatch).GetAwaiter().GetResult();
+                Assert.That(dispatches, Is.EqualTo(2), "Pending cleanup must still reach existing internal admission.");
+            }
+        }
+
+        [TestCase(AICodedbCurrentInstanceState.Missing)]
+        [TestCase(AICodedbCurrentInstanceState.Current)]
+        [TestCase(AICodedbCurrentInstanceState.TrustedPrevious)]
+        [TestCase(AICodedbCurrentInstanceState.ObsoleteReinstallRequired)]
+        [TestCase(AICodedbCurrentInstanceState.Invalid)]
+        public void UninstallEntry_CompleteDesiredStateAlwaysDefersToExistingBackend(AICodedbCurrentInstanceState currentState)
+        {
+            var integration = new AICodedbProjectIntegrationStatus(AICodedbProjectIntegrationState.Uninstalled,
+                AICodedbProjectCleanupState.Complete, Guid.NewGuid().ToString("N"), "canonical COMPLETE document");
+            var current = new AICodedbCurrentInstanceStatus(currentState, "selected", string.Empty, string.Empty,
+                string.Empty, string.Empty, string.Empty, string.Empty, 0, 0, "selected authority observation");
+            Assert.That(AICodedbActions.GetUninstallLocalDisposition(integration, current), Is.Null,
+                "The local action must not convert COMPLETE into successful absence proof, even when current evidence is missing.");
+        }
+
+        [Test]
+        public void UninstallEntry_FreshNoOpAndInvalidRefusalRemainLocalWithoutTerminalEvidence()
+        {
+            var fresh = new AICodedbProjectIntegrationStatus(AICodedbProjectIntegrationState.NotIntegrated,
+                AICodedbProjectCleanupState.None, string.Empty, "canonical absence proof");
+            var result = AICodedbActions.GetUninstallLocalDisposition(fresh, default(AICodedbCurrentInstanceStatus));
+            Assert.That(result.Succeeded, Is.True);
+            Assert.That(result.StandardOutput, Does.Contain("NoActionNeeded"));
+            AssertLocalUninstallEvidence(result);
+            var invalid = new AICodedbProjectIntegrationStatus(AICodedbProjectIntegrationState.Invalid,
+                AICodedbProjectCleanupState.Invalid, string.Empty, "conflicting evidence");
+            result = AICodedbActions.GetUninstallLocalDisposition(invalid, default(AICodedbCurrentInstanceStatus));
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.StandardError, Does.Contain("Blocked"));
+            AssertLocalUninstallEvidence(result);
+        }
+
+        private static void AssertLocalUninstallEvidence(AICodedbCommandResult result)
+        {
+            Assert.That(result.ManagerActionEvidenceKind, Is.EqualTo(AICodedbManagerActionEvidenceKind.PreEffectRefusal));
+            Assert.That(result.HasAuthoritativeTerminalEvidence, Is.False);
+            Assert.That(result.TerminalForManagerAction, Is.False);
+            Assert.That(result.ActionId, Is.EqualTo(AICodedbPaths.CurrentActionId));
+            Assert.That(AICodedbManagerActionSession.CanRequestPostCommandReconcile(result), Is.False);
+        }
+
+        [Test]
+        public void UninstallEntry_LocalDecisionReleasesExactSessionWithoutWaitingForWriter()
+        {
+            AICodedbTestWorkspace.Run(workspace => {
+                using var sessions = new ManagerActionSessionFixture(workspace);
+                using var receipts = AICodedbPaths.UseManagerActionsRootForTests(workspace.GetPath("receipts"));
+                var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "local decision");
+                foreach (var name in new[] { "Assets", "Packages", "ProjectSettings" })
+                    Directory.CreateDirectory(Path.Combine(context.ProjectRoot, name));
+                Assert.That(AICodedbManagerActionSession.TryStart("Uninstall CodeDB from Project", context, 1d,
+                    out var session), Is.True);
+                Assert.That(AICodedbManagerActionJournal.TryAdmit(session.DurableIndex, out var detail), Is.True, detail);
+                session.MarkDurableAdmitted();
+                AICodedbCommandResult result;
+                using (AICodedbPaths.UseActionContext(context, session.ActionId, session.EffectClass, session.AuthorizationSource))
+                    result = AICodedbActions.ReadUninstallLocalDisposition(context);
+                Assert.That(result.StandardOutput, Does.Contain("NoActionNeeded"));
+                Assert.That(session.TryReleaseDurableIndex(result, out detail), Is.True, detail);
+                session.Complete(result, AICodedbProductState.NotIntegrated, false, 2d);
+                Assert.That(session.IsRunning, Is.False);
+                Assert.That(session.IsRecovering, Is.False);
+                Assert.That(AICodedbManagerActionJournal.Read(context).State, Is.EqualTo(AICodedbManagerActionIndexState.Empty));
+                Assert.That(AICodedbManagerActionSession.TryStart("Uninstall CodeDB from Project", context, 3d, out _), Is.True);
+            });
+        }
+
         [Test]
         public void ManagerActionJournal_SuccessWithCleanupPendingReleasesExactIndexAndRetainsTrace()
         {
@@ -3508,11 +3656,11 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [TestCase(AICodedbProductState.Starting, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.Ready, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
-        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.None, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.Ready, AICodedbProductAttentionReason.None, true, false, ExpectedResult = true)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.None, true, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractReinstallRequired, true, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.InstanceIdentityReinstallRequired, true, false, ExpectedResult = true)]
-        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous, true, false, ExpectedResult = false)]
+        [TestCase(AICodedbProductState.NeedsAttention, AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous, true, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.Uninstalled, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NotIntegrated, AICodedbProductAttentionReason.None, false, false, ExpectedResult = true)]
         [TestCase(AICodedbProductState.NotIntegrated, AICodedbProductAttentionReason.None, false, true, ExpectedResult = false)]
@@ -3679,7 +3827,7 @@ namespace Rice.AI.Codedb.Editor.Tests
             Assert.That(AICodedbManagerWindow.ShouldOfferConfigureDependencies(status), Is.False);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(false), Is.True);
             Assert.That(AICodedbManagerWindow.CanConfigureDependencies(true), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.True);
         }
 
         [Test]
@@ -3696,7 +3844,7 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
             Assert.That(AICodedbManagerWindow.ShouldShowPersistentDependencyAction(status), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, true, false), Is.True);
             Assert.That(
                 AICodedbStatusSnapshot.CreateOverallDescription(status),
                 Is.EqualTo("CodeDB is ready for this project. New Codex tasks can use project status and search tools."));
@@ -6805,13 +6953,14 @@ namespace Rice.AI.Codedb.Editor.Tests
             var ready = new AICodedbProductStatus(AICodedbProductState.Ready,
                 AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
                 AICodedbProductLayerState.Current, "Ready");
-            AssertRemovalAdmissionPresentation(ready, false, false);
+            AssertRemovalAdmissionPresentation(ready, false, true);
+            AssertRemovalAdmissionPresentation(ready, true, false);
             Assert.That(AICodedbManagerWindow.GetRemovalActionDisabledReason(ready, false), Does.Contain("not passed"));
             var unknownOwner = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
                 AICodedbProductLayerState.Current, AICodedbProductLayerState.Blocked,
                 AICodedbProductLayerState.Unavailable, "ownership unavailable",
                 attentionReason: AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous);
-            AssertRemovalAdmissionPresentation(unknownOwner, false, false);
+            AssertRemovalAdmissionPresentation(unknownOwner, false, true);
             Assert.That(AICodedbManagerWindow.GetRemovalActionDisabledReason(unknownOwner, false), Does.Contain("not authenticated"));
             foreach (var status in new[] { default(AICodedbProductStatus),
                 new AICodedbProductStatus(AICodedbProductState.NotIntegrated, AICodedbProductLayerState.Missing,
@@ -6819,8 +6968,8 @@ namespace Rice.AI.Codedb.Editor.Tests
                 new AICodedbProductStatus(AICodedbProductState.Uninstalled, AICodedbProductLayerState.Missing,
                     AICodedbProductLayerState.Missing, AICodedbProductLayerState.Unavailable, "uninstalled") })
             {
-                Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(status), Is.False);
-                Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(status, true, false), Is.False);
+                Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(status), Is.True);
+                Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(status, true, false), Is.True);
             }
             var recovery = new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
                 AICodedbProductLayerState.Current, AICodedbProductLayerState.Blocked,
@@ -6828,7 +6977,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 attentionReason: AICodedbProductAttentionReason.InstanceIdentityReinstallRequired);
             Assert.That(AICodedbManagerWindow.IsRemovalActionVisible(recovery), Is.True);
             Assert.That(AICodedbManagerWindow.GetRemovalActionLabel(recovery), Is.EqualTo("Remove CodeDB Integration"));
-            Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(recovery, false, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsRemovalActionEnabled(recovery, false, false), Is.True);
             var retainedCandidate = new AICodedbProductStatus(AICodedbProductState.Uninstalled,
                 AICodedbProductLayerState.Missing, AICodedbProductLayerState.Missing,
                 AICodedbProductLayerState.Unavailable, "retained candidate", removalPreflightPassed: true);
@@ -6837,10 +6986,10 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void MissingRemovalStatus_DoesNotOfferProjectMutation()
+        public void MissingRemovalStatus_KeepsUninstallRequestReachableWithoutOfferingPrimaryMutation()
         {
             var status = default(AICodedbProductStatus);
-            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(status, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(status, false), Is.True);
             Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(status), Is.False);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(status, false, false), Is.False);
         }
@@ -6863,7 +7012,7 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
-        public void UninstallPreflight_UsesReadOnlyActionAndGatesIndependentAdmission()
+        public void UninstallPreflight_UsesReadOnlyActionWithoutHidingRequestEntry()
         {
             var projectRoot = Path.Combine(Path.GetTempPath(), "codedb-preflight-" + Guid.NewGuid().ToString("N"));
             var arguments = AICodedbHostPayloadMaterializer.BuildScriptArguments(
@@ -6881,10 +7030,10 @@ namespace Rice.AI.Codedb.Editor.Tests
                 string.Empty,
                 available);
             Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(true), false), Is.True);
-            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(false), false), Is.False);
-            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(true), true), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(false), false), Is.True);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(Status(true), true), Is.True);
             Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(Status(true)), Is.False);
-            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(Status(true), true, false), Is.False);
+            Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(Status(true), true, false), Is.True);
 
             var needsAttention = new AICodedbProductStatus(
                 AICodedbProductState.NeedsAttention,
@@ -6910,7 +7059,7 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductAttentionReason.InstanceIdentityReinstallRequired,
                 string.Empty,
                 true);
-            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(needsReinstall, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(needsReinstall, false), Is.True);
             Assert.That(AICodedbManagerWindow.IsRemoveIntegrationMenuAvailable(needsReinstall), Is.True);
             Assert.That(AICodedbManagerWindow.ResolvePrimaryAction(needsReinstall, true, false), Is.True);
 
@@ -6924,11 +7073,11 @@ namespace Rice.AI.Codedb.Editor.Tests
                 AICodedbProductAttentionReason.ControlContractInvalidOrAmbiguous,
                 string.Empty,
                 true);
-            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(ambiguous, false), Is.False);
+            Assert.That(AICodedbManagerWindow.IsUninstallAvailable(ambiguous, false), Is.True);
             Assert.That(AICodedbManagerWindow.IsUninstallAvailable(
                 AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), true), false), Is.True);
             Assert.That(AICodedbManagerWindow.IsUninstallAvailable(
-                AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), false), false), Is.False);
+                AICodedbManagerWindow.ResolveRemovalPresentationStatus(Status(false), Status(true), false), false), Is.True);
         }
 
         [TestCase(AICodedbHostGenerationState.Unavailable, AICodedbHostPayloadState.SetupRequired, AICodedbHostUpgradePhase.Unavailable)]

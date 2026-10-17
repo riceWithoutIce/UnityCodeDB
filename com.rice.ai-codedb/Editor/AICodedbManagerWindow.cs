@@ -1377,20 +1377,10 @@ namespace Rice.AI.Codedb.Editor
             {
                 menu.AddDisabledItem(new GUIContent("Provider Guidance"));
             }
-            if (IsRemovalActionVisible(removalStatus))
-            {
-                menu.AddSeparator(string.Empty);
-                var busy = IsRemovalActionBusy();
-                var enabled = IsRemovalActionEnabled(removalStatus, _statusSnapshot.IsProjectUninstalled, busy);
-                var content = new GUIContent(GetRemovalActionLabel(removalStatus),
-                    enabled ? string.Empty : GetRemovalActionDisabledReason(removalStatus, busy));
-                if (!enabled)
-                    menu.AddDisabledItem(content);
-                else if (removalStatus.RequiresReinstall)
-                    menu.AddItem(content, false, RunRemoveIntegrationWithConfirmation);
-                else
-                    menu.AddItem(content, false, RunUninstallCodeDBWithConfirmation);
-            }
+            menu.AddSeparator(string.Empty);
+            menu.AddItem(new GUIContent("Uninstall CodeDB from Project"), false, RunUninstallCodeDBWithConfirmation);
+            if (IsRemoveIntegrationMenuAvailable(removalStatus))
+                menu.AddItem(new GUIContent("Remove CodeDB Integration"), false, RunRemoveIntegrationWithConfirmation);
             menu.ShowAsContext();
         }
 
@@ -2199,28 +2189,31 @@ namespace Rice.AI.Codedb.Editor
                 return string.Empty;
             if (_userActionInFlight)
                 return GetUserActionPresentation().ButtonLabel;
-            switch (_statusSnapshot.ProductStatus.State)
+            var freshInstallRecovery = _statusSnapshot.ProductStatus.State == AICodedbProductState.NeedsAttention
+                && IsFreshInstallRecoveryAvailable(_statusSnapshot.ProductStatus, _statusSnapshot.HostPayloadStatus,
+                    AICodedbManagerActionSession.CurrentFor(_executionContext), _executionContext, _retainedEffectsObservation);
+            return GetPrimaryActionLabel(GetRemovalPresentationStatus(), freshInstallRecovery);
+        }
+
+        internal static string GetPrimaryActionLabel(AICodedbProductStatus status, bool freshInstallRecovery)
+        {
+            switch (status.State)
             {
                 case AICodedbProductState.Uninstalled:
                 case AICodedbProductState.NotIntegrated:
                     return "Install CodeDB";
+                case AICodedbProductState.Ready:
+                    return "Uninstall CodeDB from Project";
                 case AICodedbProductState.NeedsAttention:
                 {
-                    if (IsFreshInstallRecoveryAvailable(
-                            _statusSnapshot.ProductStatus,
-                            _statusSnapshot.HostPayloadStatus,
-                            AICodedbManagerActionSession.CurrentFor(_executionContext),
-                            _executionContext, _retainedEffectsObservation))
+                    if (freshInstallRecovery)
                         return "Install CodeDB";
-                    var removalStatus = GetRemovalPresentationStatus();
-                    if (IsRemoveIntegrationMenuAvailable(removalStatus))
+                    if (IsRemoveIntegrationMenuAvailable(status))
                         return "Remove CodeDB Integration";
-                    return IsUninstallAvailable(removalStatus, _statusSnapshot.IsProjectUninstalled)
-                        ? "Uninstall CodeDB from Project"
-                        : string.Empty;
+                    return "Uninstall CodeDB from Project";
                 }
                 case AICodedbProductState.MissingPrerequisite:
-                    return IsProviderInstallAvailable(_statusSnapshot.ProductStatus)
+                    return IsProviderInstallAvailable(status)
                         ? "Configure Dependencies"
                         : string.Empty;
                 default:
@@ -2294,10 +2287,9 @@ namespace Rice.AI.Codedb.Editor
 
         private void RunUninstallCodeDBWithConfirmation()
         {
-            if (IsRemovalActionBusy() || _statusSnapshot == null ||
-                !IsUninstallAvailable(GetRemovalPresentationStatus(), _statusSnapshot.IsProjectUninstalled))
-                return;
             ConfirmAndRunUninstallCodeDB(
+                IsRemovalActionBusy(),
+                () => { AttachCurrentActionSession(); Repaint(); },
                 () => EditorUtility.DisplayDialog(
                     UninstallCodeDBConfirmationTitle,
                     UninstallCodeDBConfirmationMessage,
@@ -2306,7 +2298,8 @@ namespace Rice.AI.Codedb.Editor
                 () =>
                 {
                     var retained = AICodedbManagerActionSession.CurrentFor(_executionContext);
-                    if (retained != null && retained.IsRecovering && retained.HasOriginalContext)
+                    if (retained != null && retained.IsRecovering && retained.HasOriginalContext
+                        && retained.Title == "Install CodeDB")
                         RunFailedCandidateUninstallRecoveryAsync(retained);
                     else
                         RunUserActionAsync("Uninstall CodeDB from Project", AICodedbActions.RunUninstallCodeDBAsync);
@@ -2316,8 +2309,7 @@ namespace Rice.AI.Codedb.Editor
         private async void RunFailedCandidateUninstallRecoveryAsync(AICodedbManagerActionSession original)
         {
             if (_actionRecoveryInspectionInFlight || original == null || !original.IsRecovering
-                || !original.HasOriginalContext || _statusSnapshot == null
-                || !GetRemovalPresentationStatus().RemovalPreflightPassed) return;
+                || !original.HasOriginalContext) return;
             _actionRecoveryInspectionInFlight = true;
             try
             {
@@ -2353,7 +2345,8 @@ namespace Rice.AI.Codedb.Editor
         {
             var session = AICodedbManagerActionSession.CurrentFor(_executionContext);
             return IsRemovalActionBusy(_userActionInFlight, _actionRecoveryInspectionInFlight,
-                session != null && session.IsRecovering && session.HasOriginalContext);
+                session != null && session.IsRecovering && session.HasOriginalContext
+                && session.Title == "Install CodeDB");
         }
 
         internal static bool IsRemovalActionBusy(bool actionInFlight, bool inspectionInFlight, bool retainedRecovery)
@@ -2364,10 +2357,10 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool IsRemovalActionVisible(AICodedbProductStatus status)
         {
-            // Cached product evidence only; no directory-based installation inference.
-            return status.RequiresReinstall || status.State == AICodedbProductState.Ready
-                   || status.Installed == AICodedbProductLayerState.Current
-                   || (status.State == AICodedbProductState.Uninstalled && status.RemovalPreflightPassed);
+            // The uninstall entry is a durable project command, not a cached
+            // readiness affordance. Unknown/malformed authority is classified
+            // by the backend after confirmation and must remain callable.
+            return true;
         }
 
         internal static string GetRemovalActionLabel(AICodedbProductStatus status)
@@ -2377,8 +2370,7 @@ namespace Rice.AI.Codedb.Editor
 
         internal static bool IsRemovalActionEnabled(AICodedbProductStatus status, bool isProjectUninstalled, bool actionInFlight)
         {
-            return !actionInFlight && IsRemovalActionVisible(status)
-                   && (IsRemoveIntegrationMenuAvailable(status) || IsUninstallAvailable(status, isProjectUninstalled));
+            return !actionInFlight;
         }
 
         internal static string GetRemovalActionDisabledReason(AICodedbProductStatus status, bool actionInFlight)
@@ -2403,12 +2395,10 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductStatus status,
             bool isProjectUninstalled)
         {
-            return !status.RequiresReinstall
-                   && (status.State == AICodedbProductState.Ready
-                       || (isProjectUninstalled && status.State == AICodedbProductState.Uninstalled)
-                       || (status.State == AICodedbProductState.NeedsAttention
-                           && status.AttentionReason == AICodedbProductAttentionReason.None))
-                   && status.RemovalPreflightPassed;
+            // Availability answers whether the confirmed request can be
+            // submitted. Effect classification, ownership and no-op handling
+            // belong to the durable backend admission, not the cached status.
+            return true;
         }
 
         internal static bool IsRemoveIntegrationMenuAvailable(AICodedbProductStatus status)
@@ -2455,6 +2445,17 @@ namespace Rice.AI.Codedb.Editor
         internal static bool ConfirmAndRunUninstallCodeDB(Func<bool> confirm, Action uninstall)
         {
             return ConfirmAndRunProjectIntegrationAction(confirm, uninstall);
+        }
+
+        internal static bool ConfirmAndRunUninstallCodeDB(
+            bool busy, Action observeCurrent, Func<bool> confirm, Action uninstall)
+        {
+            if (busy)
+            {
+                observeCurrent();
+                return false;
+            }
+            return ConfirmAndRunUninstallCodeDB(confirm, uninstall);
         }
 
         internal static bool ConfirmAndRunInstallCodeDB(Func<bool> confirm, Action install)
@@ -2506,12 +2507,11 @@ namespace Rice.AI.Codedb.Editor
                 return false;
             if (productStatus.State == AICodedbProductState.Uninstalled || productStatus.State == AICodedbProductState.NotIntegrated)
                 return true;
+            if (productStatus.State == AICodedbProductState.Ready)
+                return true;
             if (freshInstallRecoveryAvailable && productStatus.State == AICodedbProductState.NeedsAttention)
                 return true;
-            if (!recoveryAvailable || productStatus.State != AICodedbProductState.NeedsAttention)
-                return false;
-            return IsRemoveIntegrationMenuAvailable(productStatus)
-                   || IsUninstallAvailable(productStatus, false);
+            return productStatus.State == AICodedbProductState.NeedsAttention;
         }
 
         internal static bool IsFreshInstallRecoveryAvailable(

@@ -185,12 +185,58 @@ namespace Rice.AI.Codedb.Editor
 
         internal static async Task<AICodedbCommandResult> RunUninstallCodeDBAsync()
         {
-            var result = await RunSupervisorCommandWithFallbackAsync(
-                "Uninstall",
-                true,
-                () => AICodedbHostPayloadMaterializer.RunUninstallAsync());
-            AICodedbEditorLifecycle.RequestReconcile();
+            var result = await RunUninstallCodeDBAsync(
+                AICodedbPaths.CaptureExecutionContext(),
+                () => RunSupervisorCommandWithFallbackAsync(
+                    "Uninstall", true, () => AICodedbHostPayloadMaterializer.RunUninstallAsync()));
+            if (result.ManagerActionEvidenceKind != AICodedbManagerActionEvidenceKind.PreEffectRefusal)
+                AICodedbEditorLifecycle.RequestReconcile();
             return result;
+        }
+
+        internal static async Task<AICodedbCommandResult> RunUninstallCodeDBAsync(
+            AICodedbEditorExecutionContext context,
+            Func<Task<AICodedbCommandResult>> dispatch)
+        {
+            if (dispatch == null) throw new ArgumentNullException(nameof(dispatch));
+            var local = await Task.Run(() => ReadUninstallLocalDisposition(context));
+            return local ?? await dispatch();
+        }
+
+        internal static AICodedbCommandResult ReadUninstallLocalDisposition(AICodedbEditorExecutionContext context)
+        {
+            var integration = AICodedbProjectIntegrationStateStore.Read(context.ProjectRoot);
+            var current = integration.State == AICodedbProjectIntegrationState.Installed
+                ? AICodedbCurrentInstanceStore.Read(context.ProjectRoot, context.PackageRoot)
+                : default(AICodedbCurrentInstanceStatus);
+            return GetUninstallLocalDisposition(integration, current);
+        }
+
+        internal static AICodedbCommandResult GetUninstallLocalDisposition(
+            AICodedbProjectIntegrationStatus integration, AICodedbCurrentInstanceStatus current)
+        {
+            string detail;
+            var noActionNeeded = integration.IsNotIntegrated;
+            if (noActionNeeded)
+                detail = "NoActionNeeded: This project has no installed CodeDB integration requiring uninstall.";
+            else if (!integration.IsValid)
+                detail = "Blocked: CodeDB integration ownership cannot be confirmed. " + integration.Detail;
+            else if (integration.State == AICodedbProjectIntegrationState.Installed)
+            {
+                if (current.State != AICodedbCurrentInstanceState.Missing
+                    && current.State != AICodedbCurrentInstanceState.Invalid)
+                    return null;
+                detail = "Blocked: No authenticated current CodeDB instance is available. " + current.Detail;
+            }
+            else
+                // A desired-state document alone does not prove the absence of
+                // selected authority. Both COMPLETE and PENDING use backend admission.
+                return null;
+
+            // This is a local pre-effect decision, never a forged writer terminal.
+            return new AICodedbCommandResult(noActionNeeded ? 0 : 4, detail,
+                noActionNeeded ? string.Empty : detail, false, 0, false, false,
+                AICodedbPaths.CurrentActionId, false, AICodedbManagerActionEvidenceKind.PreEffectRefusal);
         }
 
         internal static AICodedbCommandResult RunInstallCodeDB()
