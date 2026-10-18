@@ -16,10 +16,12 @@ namespace Rice.AI.Codedb.Editor
         internal string AuthorizationSource { get; }
         internal AICodedbEditorExecutionContext Context { get; }
         internal string StorageLayout { get; }
+        internal string ExecutionRoute { get; }
 
         internal AICodedbManagerActionIndex(string actionId, string title,
             string effectClass, string authorizationSource,
-            AICodedbEditorExecutionContext context, string storageLayout = AICodedbPaths.CompactReceiptLayout)
+            AICodedbEditorExecutionContext context, string storageLayout = AICodedbPaths.CompactReceiptLayout,
+            string executionRoute = "")
         {
             ActionId = actionId;
             Title = title;
@@ -27,6 +29,7 @@ namespace Rice.AI.Codedb.Editor
             AuthorizationSource = authorizationSource;
             Context = context;
             StorageLayout = storageLayout;
+            ExecutionRoute = executionRoute;
         }
     }
 
@@ -167,6 +170,11 @@ namespace Rice.AI.Codedb.Editor
                 var effect = AICodedbStrictJson.GetRequiredString(record, "effect_class", label);
                 var authority = AICodedbStrictJson.GetRequiredString(record, "authorization_source", label);
                 var storageLayout = AICodedbPaths.ReadReceiptStorageLayout(record);
+                var executionRoute = record.ContainsKey("execution_route")
+                    ? AICodedbStrictJson.GetRequiredString(record, "execution_route", label) : string.Empty;
+                if (executionRoute != string.Empty
+                    && (executionRoute != AICodedbInstallAdmission.ProjectInstallRoute || title != "Install CodeDB"))
+                    throw new InvalidOperationException("Unsupported Manager execution route.");
                 var previousContext = new AICodedbEditorExecutionContext(
                     context.Platform, projectRoot, packageRoot, context.ProjectDisplayName);
                 if (Directory.Exists(AICodedbPaths.GetManagerActionReceiptRoot(previousContext, actionId,
@@ -204,7 +212,7 @@ namespace Rice.AI.Codedb.Editor
                 if (closure != null && closure.RetainedEffects)
                 {
                     var currentRetainedIndex = new AICodedbManagerActionIndex(
-                        actionId, title, effect, authority, previousContext, storageLayout);
+                        actionId, title, effect, authority, previousContext, storageLayout, executionRoute);
                     var allHistory = ReadLegacyPending(context, directory, resolved,
                         new[] { actionId }, effectsObservation, inspectCandidateEffects);
                     if (allHistory.State != AICodedbManagerActionIndexState.Empty)
@@ -236,7 +244,7 @@ namespace Rice.AI.Codedb.Editor
                 var history = ReadLegacyPending(context, directory, resolved,
                     new[] { actionId }, effectsObservation, inspectCandidateEffects);
                 var currentIndex = new AICodedbManagerActionIndex(
-                    actionId, title, effect, authority, previousContext, storageLayout);
+                    actionId, title, effect, authority, previousContext, storageLayout, executionRoute);
                 if (history.State == AICodedbManagerActionIndexState.Conflict)
                     return new AICodedbManagerActionIndexRead(
                         AICodedbManagerActionIndexState.Conflict,
@@ -1502,6 +1510,8 @@ namespace Rice.AI.Codedb.Editor
                     + "\n  \"state\": \"pending\","
                     + "\n  \"action_id\": \"" + Escape(index.ActionId) + "\","
                     + "\n  \"title\": \"" + Escape(index.Title) + "\","
+                    + (string.IsNullOrEmpty(index.ExecutionRoute) ? string.Empty
+                        : "\n  \"execution_route\": \"" + Escape(index.ExecutionRoute) + "\",")
                     + "\n  \"effect_class\": \"" + Escape(index.EffectClass) + "\","
                     + "\n  \"authorization_source\": \"" + Escape(index.AuthorizationSource) + "\","
                     + "\n  \"project_key\": \"" + AICodedbPaths.GetManagerActionProjectKey(index.Context) + "\","
@@ -1599,7 +1609,8 @@ namespace Rice.AI.Codedb.Editor
                         || !string.Equals(read.Index.ActionId, index.ActionId, StringComparison.Ordinal)
                         || !string.Equals(read.Index.Context.PackageRoot, index.Context.PackageRoot,
                             StringComparison.OrdinalIgnoreCase)
-                        || read.Index.StorageLayout != index.StorageLayout)
+                        || read.Index.StorageLayout != index.StorageLayout
+                        || read.Index.ExecutionRoute != index.ExecutionRoute)
                     {
                         detail = "The Manager action index no longer matches the completed action.";
                         return false;

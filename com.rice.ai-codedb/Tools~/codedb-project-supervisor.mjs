@@ -1481,6 +1481,7 @@ async function runDaemon(raw) {
       selected_instance_id: context.selectedInstance.instanceId,
       selected_generation_id: context.selectedGenerationId,
       runtime_contract_sha256: context.runtimeContractSha256,
+      execution_disposition: "UNKNOWN",
       child: null,
       started_at_utc: null
     };
@@ -1913,7 +1914,13 @@ function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
 
 async function ensureCoordinator(context, operation = null) {
   const existing = await requestCoordinatorStatus(context);
-  if (existing?.provider_state === "ready") return { exit_code: 0, action: "attached", status: existing };
+  if (existing?.provider_state === "ready") {
+    if (operation?.execution_disposition === "UNKNOWN" && operation.child === null) {
+      operation.execution_disposition = "NO_CHILD";
+      persistOperation(context, operation);
+    }
+    return { exit_code: 0, action: "attached", status: existing };
+  }
   const args = [
     context.coordinatorScript,
     "start",
@@ -1981,6 +1988,7 @@ async function runWatchManager(context, action, request, operation = null) {
   if (request.require_new_owner === true) args.push("-RequireNewOwner");
   if (request.exclusive_owner === true) args.push("-ExclusiveOwner");
   const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  prepareOperationChildEvidence(context, operation, "watch_manager_admitted");
   return runChild(
     command,
     args,
@@ -2084,6 +2092,7 @@ function publicOperation(value) {
     state: value.state,
     phase: value.phase ?? null,
     owner_epoch: value.owner_epoch ?? null,
+    execution_disposition: value.execution_disposition ?? "UNKNOWN",
     child_pid: value.child?.pid ?? null,
     started_at_utc: value.started_at_utc,
     completed_at_utc: value.completed_at_utc ?? null,
@@ -2272,6 +2281,11 @@ function validatePersistedOperation(context, operation) {
       || typeof operation.key !== "string") {
     throw new Error("Supervisor operation identity is invalid.");
   }
+  if (operation.execution_disposition !== undefined
+      && !["UNKNOWN", "NO_CHILD", "CHILD_ADMITTED"].includes(operation.execution_disposition))
+    throw new Error("Supervisor operation execution disposition is invalid.");
+  if (operation.execution_disposition === "NO_CHILD" && operation.child != null)
+    throw new Error("Supervisor NO_CHILD disposition conflicts with child evidence.");
   if (operation.state === "running"
       && (operation.selected_instance_id !== context.selectedInstance.instanceId
           || operation.selected_generation_id !== context.selectedGenerationId
@@ -2350,13 +2364,16 @@ async function finishRecoveredOperationAfterChildExit(operation, context, finish
 async function verifyRecoveredOperation(context, operation, operationalReadiness) {
   if (operation.name.startsWith("materialize:")) {
     const action = operation.name.slice("materialize:".length);
+    prepareOperationChildEvidence(context, operation, "recovery_verify_admitted");
+    const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
+    const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript,
+      "-Action", "Verify", "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot];
     const result = await runChild(
-      process.platform === "win32" ? "powershell.exe" : "pwsh",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript,
-        "-Action", "Verify", "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot],
+      command,
+      args,
       context.root,
       120000,
-      null,
+      (child) => queueChildEvidenceCapture(context, operation, command, args, child),
       operationalReadiness
         ? { [OPERATIONAL_READINESS_ENV]: JSON.stringify(operationalReadiness) }
         : null);
@@ -2380,6 +2397,8 @@ async function verifyRecoveredOperation(context, operation, operationalReadiness
 
 function recordChildEvidence(context, operation, commandName, args, child) {
   if (!operation) return;
+  if (operation.execution_disposition !== "CHILD_ADMITTED" || operation.child !== null)
+    throw new Error("Supervisor child has no unique durable admission.");
   const actual = getProcessEvidenceSync(child.pid);
   if (!actual.available || !actual.exists)
     throw new Error(`The admitted child process identity could not be read: ${actual.error || `exists=${actual.exists}`}`);
@@ -2408,7 +2427,23 @@ function prepareOperationChildEvidence(context, operation, phase) {
   if (!operation) return;
   if (operation.state !== "running")
     throw new Error("Supervisor operation is not running and cannot admit another child.");
+  if (!["UNKNOWN", "NO_CHILD", "CHILD_ADMITTED"].includes(operation.execution_disposition))
+    throw new Error("Supervisor operation lacks explicit execution admission; legacy execution stays unknown.");
+  if (operation.execution_disposition === "CHILD_ADMITTED") {
+    if (!operation.child)
+      throw new Error("Prior child admission has unresolved identity; another child is blocked.");
+    validatePersistedChild(operation.child);
+    const actual = getProcessEvidenceSync(operation.child.pid);
+    if (!actual.available || (actual.exists
+        && actual.processStartIdentity === operation.child.process_start_identity))
+      throw new Error("Prior admitted child is live or unknown; another child is blocked.");
+    if (actual.exists && (!actual.processStartIdentity || !operation.child.process_start_identity))
+      throw new Error("Prior admitted child PID reuse is unconfirmed.");
+  } else if (operation.child !== null) {
+    throw new Error("Supervisor operation disposition conflicts with prior child evidence.");
+  }
   operation.phase = phase;
+  operation.execution_disposition = "CHILD_ADMITTED";
   operation.child = null;
   persistOperation(context, operation);
 }

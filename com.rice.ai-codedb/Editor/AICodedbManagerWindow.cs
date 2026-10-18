@@ -2849,7 +2849,8 @@ namespace Rice.AI.Codedb.Editor
                 return reported;
             if (reported != null
                 && reported.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal
-                && string.Equals(reported.ActionId, session.ActionId, StringComparison.Ordinal))
+                && string.Equals(reported.ActionId, session.ActionId, StringComparison.Ordinal)
+                && session.ExecutionRoute != AICodedbInstallAdmission.ProjectInstallRoute)
                 return reported;
 
             var direct = await Task.Run(() => AICodedbProcessRunner.RecoverManagerAction(
@@ -2858,8 +2859,26 @@ namespace Rice.AI.Codedb.Editor
                 || direct.State == AICodedbManagerActionRecoveryState.Pending)
                 return UnconfirmedActionResult(session.ActionId, direct.Detail);
 
-            if (direct.State == AICodedbManagerActionRecoveryState.PreEffectRefusal)
+            if (direct.State == AICodedbManagerActionRecoveryState.PreEffectRefusal
+                && session.ExecutionRoute != AICodedbInstallAdmission.ProjectInstallRoute)
                 return direct.Result;
+
+            if (session.ExecutionRoute == AICodedbInstallAdmission.ProjectInstallRoute)
+            {
+                var conflict = await Task.Run(() => AICodedbInstallAdmission.ReadCompetingAuthority(
+                    session.Context, session.ActionId));
+                if (!string.IsNullOrEmpty(conflict))
+                    return UnconfirmedActionResult(session.ActionId, conflict);
+                if (direct.State == AICodedbManagerActionRecoveryState.PreEffectRefusal)
+                    return direct.Result;
+                if (direct.State == AICodedbManagerActionRecoveryState.NotFound
+                    && reported?.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.PreEffectRefusal
+                    && reported.ActionId == session.ActionId)
+                    return reported;
+                return direct.State == AICodedbManagerActionRecoveryState.Terminal ? direct.Result
+                    : UnconfirmedActionResult(session.ActionId,
+                        "No complete project Install writer terminal is available: " + direct.Detail);
+            }
 
             if (IsSupervisorAction(session.Title))
             {
@@ -3013,7 +3032,8 @@ namespace Rice.AI.Codedb.Editor
                 if (returnedNormally && result != null && !result.Succeeded
                     && result.ManagerActionEvidenceKind == AICodedbManagerActionEvidenceKind.Indeterminate
                     && !dispatchTracker.DirectWriterDispatchAttempted
-                    && IsDirectOnlyAction(title))
+                    && (IsDirectOnlyAction(title)
+                        || session.ExecutionRoute == AICodedbInstallAdmission.ProjectInstallRoute))
                     result = BuildPreEffectManagerDecision(result.ExitCode,
                         result.StandardOutput, result.StandardError,
                         result.ElapsedMilliseconds, session.ActionId);
@@ -3640,8 +3660,9 @@ namespace Rice.AI.Codedb.Editor
         private bool _durableAdmitted;
         private bool _legacyReceipt;
         internal string StorageLayout { get; private set; } = AICodedbPaths.CompactReceiptLayout;
+        internal string ExecutionRoute { get; private set; } = string.Empty;
         internal AICodedbManagerActionIndex DurableIndex => new AICodedbManagerActionIndex(
-            ActionId, Title, EffectClass, AuthorizationSource, Context, StorageLayout);
+            ActionId, Title, EffectClass, AuthorizationSource, Context, StorageLayout, ExecutionRoute);
 
         private AICodedbManagerActionSession(
             string title,
@@ -3681,6 +3702,8 @@ namespace Rice.AI.Codedb.Editor
 
                 var candidate = new AICodedbManagerActionSession(
                     title, context, now, Guid.NewGuid().ToString("N"), false);
+                if (title == "Install CodeDB")
+                    candidate.ExecutionRoute = AICodedbInstallAdmission.ProjectInstallRoute;
                 SessionState.SetString(PendingKey(context),
                     candidate.ActionId + "|" + title + "|" + context.PackageRoot);
                 session = candidate;
@@ -3745,6 +3768,7 @@ namespace Rice.AI.Codedb.Editor
                         _current = new AICodedbManagerActionSession(read.Index.Title,
                             read.Index.Context, now, read.Index.ActionId, true);
                         _current.StorageLayout = read.Index.StorageLayout;
+                        _current.ExecutionRoute = read.Index.ExecutionRoute;
                         if (_current.TryCompleteRecovery(read.HistoricalResult, now)
                             && AICodedbSupervisorProtocol.IsManagerActionId(supersededActionId)
                             && !string.Equals(supersededActionId, _current.ActionId,
@@ -3781,6 +3805,7 @@ namespace Rice.AI.Codedb.Editor
                     _current._durableAdmitted = !read.IsLegacyReceipt;
                     _current._legacyReceipt = read.IsLegacyReceipt;
                     _current.StorageLayout = read.Index.StorageLayout;
+                    _current.ExecutionRoute = read.Index.ExecutionRoute;
                     return;
                 }
                 _current = new AICodedbManagerActionSession(read.Index.Title,
@@ -3788,6 +3813,7 @@ namespace Rice.AI.Codedb.Editor
                 _current._durableAdmitted = !read.IsLegacyReceipt;
                 _current._legacyReceipt = read.IsLegacyReceipt;
                 _current.StorageLayout = read.Index.StorageLayout;
+                _current.ExecutionRoute = read.Index.ExecutionRoute;
             }
         }
 

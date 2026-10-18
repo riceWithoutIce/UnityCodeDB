@@ -248,10 +248,9 @@ namespace Rice.AI.Codedb.Editor
 
         internal static async Task<AICodedbCommandResult> RunInstallCodeDBAsync()
         {
-            var result = await RunSupervisorCommandWithFallbackAsync(
-                "Install",
-                true,
-                () => AICodedbHostPayloadMaterializer.RunInstallAsync());
+            // Creating a selection is a project command. The instance-bound
+            // Supervisor is connected by the existing post-install reconcile.
+            var result = await AICodedbHostPayloadMaterializer.RunInstallAsync();
             RequestInstallReconcile(result);
             return result;
         }

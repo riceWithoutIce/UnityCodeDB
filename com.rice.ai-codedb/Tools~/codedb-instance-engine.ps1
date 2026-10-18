@@ -4842,6 +4842,210 @@ function Test-InstanceFirstInstall {
     return $true
 }
 
+function Assert-ProjectInstallExecutionAdmission {
+    # Called only by the existing project-lock owner, before recovery or a
+    # candidate is created. History is observation, never a replacement owner.
+    param($Manifest, [string]$ProjectRoot, [string]$AdmissionPath)
+    $receiptRoot = Join-Path ([Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')) 'Rice/CodeDB/manager-actions'
+    Assert-NoReparsePoint -Path $AdmissionPath -Root $receiptRoot -Label 'project Install admission'
+    $admitted = (Read-BoundedJsonDocument -Path $AdmissionPath -Label 'project Install admission' -MaximumBytes 262144).Document
+    $actionRoot = Split-Path -Parent $AdmissionPath
+    $identity = (Read-BoundedJsonDocument -Path (Join-Path $actionRoot 'action.json') -Label 'project Install identity' -MaximumBytes 16384).Document
+    $claimPath = $AdmissionPath -creplace '\.admitted\.json$', '.claim.json'
+    $claim = (Read-BoundedJsonDocument -Path $claimPath -Label 'project Install claim' -MaximumBytes 16384).Document
+    if ($identity.execution_route -cne 'project-install-v1' -or $admitted.state -cne 'admitted' -or $claim.state -cne 'claimed' -or
+        $admitted.action_id -cne $identity.action_id -or $claim.action_id -cne $admitted.action_id -or
+        $claim.stage_id -cne $admitted.stage_id -or $admitted.action_id -cne $OriginatingActionId -or
+        $admitted.project_identity -cne (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot) -or
+        -not [string]::Equals([IO.Path]::GetFullPath($admitted.project_root), [IO.Path]::GetFullPath($ProjectRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Project Install writer identity is incomplete or conflicting.'
+    }
+    $writer = Get-MaterializerProcessIdentity -ProcessId ([int]$claim.writer_pid)
+    if (-not $writer.Alive -or [string]$writer.StartTicks -cne [string]$claim.writer_start_utc_ticks) {
+        throw 'Project Install writer process identity is unavailable or changed.'
+    }
+    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+        Where-Object { $_.Name -in @('powershell.exe','pwsh.exe','node.exe','codebase-mcp.exe') })
+    $self = @($processes | Where-Object { [int]$_.ProcessId -eq $PID })
+    if ($self.Count -ne 1 -or [int]$self[0].ParentProcessId -ne [int]$claim.writer_pid) {
+        throw 'Project Install child is not owned by its authenticated writer.'
+    }
+    foreach ($process in $processes) {
+        if ([int]$process.ProcessId -in @($PID, [int]$claim.writer_pid)) { continue }
+        $line = [string]$process.CommandLine
+        # Executable name is not project ownership. Inaccessible unrelated
+        # metadata supplies no global absence proof and is not a project veto.
+        # Recorded owners/children/holders are checked independently below.
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line.Replace('\','/').IndexOf($ProjectRoot.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw 'A project-bound execution is still live; Install remains blocked.'
+        }
+        if ($line.IndexOf('invoke-codedb-manager-action.ps1', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($line -notmatch '(?i)-ReceiptPath\s+(?:"([^"]+)"|(\S+))') { continue }
+            $otherPath = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+            # A foreign writer does not become this project's authority solely
+            # because it uses the same Package script.
+            if (-not (Test-Path -LiteralPath $otherPath -PathType Leaf)) { continue }
+            Assert-NoReparsePoint -Path $otherPath -Root $receiptRoot -Label 'live writer admission'
+            $other = (Read-BoundedJsonDocument -Path $otherPath -Label 'live writer admission' -MaximumBytes 262144).Document
+            if ($other.project_identity -ceq $admitted.project_identity) { throw 'Another project Manager writer is live.' }
+        }
+    }
+    $bound = @{}
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        $evidence = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $intent.InstanceRoot -AllowProvisioning:($intent.Document.schema_version -eq 2) -FailedPreparation:($intent.Document.schema_version -eq 2)
+        $bound[$evidence.InstanceId] = $evidence
+    }
+    foreach ($retired in @(Get-ValidatedInstanceRetirementControls -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($retired.InstanceId)" -Label 'Install retired instance'
+        $bound[$retired.InstanceId] = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $root
+    }
+    foreach ($evidence in $bound.Values) {
+        if (-not (Get-InstanceRetirementHolderEvidence -Evidence $evidence -ProjectRoot $ProjectRoot).Clear) {
+            throw 'Retained instance execution is live or unknown; Install remains blocked.'
+        }
+    }
+    $runtime = Join-Path (Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot) 'supervisor'
+    Assert-RemoveIntegrationContractHierarchy -ProjectRoot $ProjectRoot
+    foreach ($relative in @("$($script:InstanceControlRelativePath)/supervisor",
+        "$($script:InstanceControlRelativePath)/contracts/v0.3-control/v1/supervisor")) {
+        $otherRuntime = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'Install alternate Supervisor authority'
+        Assert-NoReparsePoint -Path $otherRuntime -Root $ProjectRoot -Label 'Install alternate Supervisor authority'
+        if (-not (Test-RemoveIntegrationPathEqual -Left $otherRuntime -Right $runtime) -and (Test-Path -LiteralPath $otherRuntime)) {
+            throw 'An alternate Supervisor authority remains unknown; Install is blocked.'
+        }
+    }
+    Assert-NoReparsePoint -Path $runtime -Root $ProjectRoot -Label 'Install Supervisor evidence'
+    if (-not (Test-Path -LiteralPath $runtime)) { return }
+    $histories = @{}
+    $historyDocuments = @{}
+    $maps = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @(Get-ChildItem -LiteralPath $runtime -Force -ErrorAction Stop)) {
+        Assert-NoReparsePoint -Path $item.FullName -Root $ProjectRoot -Label 'Install Supervisor evidence'
+        if ($item.Name -cin @('supervisor-events.jsonl','supervisor-error.json')) { continue }
+        if (-not $item.PSIsContainer -and $item.Name -ceq 'operation.json') { continue }
+        if (-not $item.PSIsContainer -or $item.Name -cnotin @('operation-history','manager-actions')) {
+            throw 'Supervisor owner, takeover or unknown execution evidence remains; Install is blocked.'
+        }
+        $records = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)
+        if ($records.Count -gt 4096) { throw 'Install Supervisor history exceeds its bounded record count.' }
+        foreach ($record in $records) {
+            Assert-NoReparsePoint -Path $record.FullName -Root $ProjectRoot -Label 'Install Supervisor record'
+            if ($record.PSIsContainer -or $record.Name -cnotmatch '^([0-9a-f]{32})\.json$') { throw 'Install Supervisor record identity is unknown.' }
+            $document = (Read-BoundedJsonDocument -Path $record.FullName -Label 'Install Supervisor record' -MaximumBytes 262144).Document
+            if ($document.managed_by -cne $script:ManagedBy -or $document.project_identity -cne $admitted.project_identity -or
+                -not (Test-RemoveIntegrationPathEqual -Left $document.root -Right $ProjectRoot) -or
+                -not (Test-RemoveIntegrationPathEqual -Left $document.runtime -Right $runtime)) { throw 'Install Supervisor history has foreign identity.' }
+            if ($item.Name -ceq 'operation-history') {
+                # Bounded discovery distinguishes inert history from unclosed
+                # execution; it does not authenticate every old generation.
+                if ($document.schema_version -ne 1 -or $document.operation_id -cne $record.BaseName -or
+                    $document.owner_epoch -cnotmatch '^[0-9a-f]{32}$' -or
+                    $document.selected_instance_id -cnotmatch '^[0-9a-f]{32}$' -or
+                    [string]::IsNullOrWhiteSpace([string]$document.selected_generation_id) -or
+                    $document.runtime_contract_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                    $document.state -cnotin @('completed','failed') -or $document.phase -cne $document.state) {
+                    throw 'Supervisor history has pending or unbound execution; Install remains blocked.'
+                }
+                Assert-ProjectInstallTerminalResult -Document $document
+                $histories[$record.BaseName] = Get-FileSha256 -Path $record.FullName
+                $historyDocuments[$record.BaseName] = $document
+            } else {
+                if ($document.schema_version -ne 1 -or $document.manager_action_id -cne $record.BaseName -or $document.operation_ids -isnot [array] -or
+                    $document.operation_ids.Count -lt 1 -or $document.operation_ids.Count -gt 16 -or
+                    @($document.operation_ids | Where-Object { $_ -cnotmatch '^[0-9a-f]{32}$' }).Count -ne 0 -or
+                    $document.latest_operation_id -cne $document.operation_ids[-1]) {
+                    throw 'Supervisor action map has ambiguous execution ownership.'
+                }
+                $maps.Add($document)
+            }
+        }
+    }
+    foreach ($map in $maps) {
+        foreach ($operationId in $map.operation_ids) {
+            if (-not $histories.ContainsKey([string]$operationId)) { throw 'Supervisor action map has no complete terminal history.' }
+            if ($historyDocuments[[string]$operationId].manager_action_id -cne $map.manager_action_id) { throw 'Supervisor map conflicts with terminal history action.' }
+        }
+    }
+    $canonical = Join-Path $runtime 'operation.json'
+    if ($histories.Count -gt 0 -and -not (Test-Path -LiteralPath $canonical -PathType Leaf)) {
+        throw 'Supervisor history has no current operation anchor; execution remains unknown.'
+    }
+    if (Test-Path -LiteralPath $canonical) {
+        $operation = (Read-BoundedJsonDocument -Path $canonical -Label 'Install canonical operation' -MaximumBytes 262144).Document
+        if (-not $histories.ContainsKey([string]$operation.operation_id) -or
+            (Get-FileSha256 -Path $canonical) -cne $histories[[string]$operation.operation_id]) { throw 'Supervisor canonical operation lacks matching complete history.' }
+        $referenced = @{}
+        foreach ($evidence in $bound.Values) {
+            $origin = Get-ExactJsonProperty -Object $evidence.Manifest -Name 'originating_action' -Label 'Install retained origin'
+            if ($null -ne $origin) {
+                Assert-InstanceOriginatingAction -Origin $origin.Value
+                # The same field is also used by direct materializer commands;
+                # it references Supervisor history only when that id is present.
+                $referenced[[string]$origin.Value.operation_id] = $true
+            }
+        }
+        foreach ($document in $historyDocuments.Values) {
+            $relevant = $referenced.ContainsKey([string]$document.operation_id) -or $document.operation_id -ceq $operation.operation_id -or
+                (-not [string]::IsNullOrEmpty([string]$operation.manager_action_id) -and $document.manager_action_id -ceq $operation.manager_action_id)
+            # Selection precedes child validation. Inert history needs complete
+            # terminal output and explicit producer disposition; absent owners,
+            # labels, or a later uninstall never manufacture that evidence.
+            Assert-ProjectInstallExecutionDisposition -Document $document
+            if (-not $relevant) { continue }
+            if (-not $bound.ContainsKey([string]$document.selected_instance_id)) { throw 'Current Supervisor execution has no retained instance binding.' }
+            $evidence = $bound[[string]$document.selected_instance_id]
+            $source = Get-InstanceGenerationPackageIdentity -Manifest $Manifest -InstanceManifest $evidence.Manifest
+            $selection = [pscustomobject]@{InstanceId=$evidence.InstanceId;GenerationId=$evidence.Generation.GenerationId}
+            Assert-RemoveIntegrationTerminalOperation -Document $document -ProjectRoot $ProjectRoot -NamespacePath $runtime -Selection $selection -HistoryAuthorities @($source)
+        }
+    }
+}
+
+function Assert-ProjectInstallTerminalResult {
+    param($Document)
+    $label = 'Install Supervisor execution result'
+    # Structural discovery rejects an incomplete record rather than granting
+    # inert-history status from terminal labels alone. It does not re-open old
+    # Package closures or inspect their processes.
+    Assert-RemoveIntegrationJsonFields -Object $Document -Label 'Install Supervisor terminal' `
+        -Required @('schema_version','managed_by','operation_id','key','request_id','name','lane','state','phase','owner_epoch','project_identity','root','runtime','selected_instance_id','selected_generation_id','runtime_contract_sha256','child','started_at_utc','completed_at_utc','result') `
+        -Optional @('manager_action_id','error','error_code','handoff_queued','handoff_reason','execution_disposition')
+    if ($Document.lane -cne 'maintenance' -or $Document.request_id -isnot [string]) { throw 'Install Supervisor terminal request is malformed.' }
+    $null = Get-RequiredJsonString -Object $Document -Name key -Label 'Install Supervisor terminal'
+    $null = Get-RequiredJsonString -Object $Document -Name name -Label 'Install Supervisor terminal'
+    [DateTimeOffset]$started = [DateTimeOffset]::MinValue; [DateTimeOffset]$completed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
+        -not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
+        $started.Offset -ne [TimeSpan]::Zero -or $completed.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Install Supervisor terminal timestamps are invalid.' }
+    Assert-RemoveIntegrationJsonFields -Object $Document.result -Label $label -Required @('exit_code','stdout','stderr','timed_out','output_overflow','output_drain_incomplete')
+    $exitCode = Get-RequiredJsonInt32 -Object $Document.result -Name exit_code -Label $label
+    if ($Document.result.stdout -isnot [string] -or $Document.result.stderr -isnot [string] -or
+        (($Document.state -ceq 'completed') -ne ($exitCode -eq 0))) { throw 'Install Supervisor terminal result is inconsistent.' }
+    foreach ($flag in @('timed_out','output_overflow','output_drain_incomplete')) {
+        if ($Document.result.$flag -isnot [bool] -or $Document.result.$flag) { throw 'Install Supervisor execution is incomplete or unknown.' }
+    }
+}
+
+function Assert-ProjectInstallExecutionDisposition {
+    param($Document)
+    $disposition = Get-SupervisorOperationExecutionDisposition -Document $Document
+    if ($disposition -ceq 'UNKNOWN') { throw 'Install Supervisor execution disposition is unknown.' }
+    if ($disposition -ceq 'NO_CHILD') {
+        if ($null -ne $Document.child) { throw 'Supervisor NO_CHILD conflicts with child evidence.' }
+        return
+    }
+    Assert-RemoveIntegrationJsonFields -Object $Document.child -Label 'Install Supervisor child' -Required @('schema_version','pid','process_start_identity','executable_path','argv_sha256','command_line_sha256','command','normalized_argv')
+    $childPid = Get-RequiredJsonInt32 -Object $Document.child -Name pid -Label 'Install Supervisor child'
+    if ((Get-RequiredJsonInt32 -Object $Document.child -Name schema_version -Label 'Install Supervisor child') -ne 1 -or $childPid -le 0 -or
+        $Document.child.process_start_identity -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        -not [IO.Path]::IsPathRooted($Document.child.executable_path) -or $Document.child.argv_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Document.child.command_line_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-RemoveIntegrationPathEqual -Left $Document.child.command -Right $Document.child.executable_path) -or
+        $Document.child.normalized_argv -isnot [array] -or $Document.child.normalized_argv.Count -eq 0 -or
+        @($Document.child.normalized_argv | Where-Object { $_ -isnot [string] }).Count -ne 0) { throw 'Install Supervisor child identity is malformed.' }
+}
+
 function Invoke-InstanceConvergence {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -4877,6 +5081,10 @@ function Invoke-InstanceConvergence {
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
         $null = Assert-MachinePrerequisiteForAction -Manifest $Manifest -ActionName $ActionName
+        $installAdmission = [Environment]::GetEnvironmentVariable('RICE_CODEDB_PROJECT_INSTALL_ADMISSION', 'Process')
+        if ($ActionName -eq 'Install' -and -not [string]::IsNullOrEmpty($installAdmission)) {
+            $null = Assert-ProjectInstallExecutionAdmission -Manifest $Manifest -ProjectRoot $ProjectRoot -AdmissionPath $installAdmission
+        }
         $freshInstallUninstallStateId = if ($ActionName -eq "Install" -and
             $desiredBefore.Present -and
             -not $desiredBefore.Legacy -and

@@ -1614,7 +1614,9 @@ namespace Rice.AI.Codedb.Editor
                 + "\"action_id\":\"" + index.ActionId + "\",\"project_key\":\""
                 + AICodedbPaths.GetManagerActionProjectKey(context) + "\",\"package_key\":\""
                 + AICodedbPaths.GetManagerActionPackageKey(context) + "\",\"project_root\":\""
-                + EscapeJson(context.ProjectRoot) + "\",\"package_root\":\"" + EscapeJson(context.PackageRoot) + "\"}";
+                + EscapeJson(context.ProjectRoot) + "\",\"package_root\":\"" + EscapeJson(context.PackageRoot) + "\""
+                + (string.IsNullOrEmpty(index.ExecutionRoute) ? string.Empty
+                    : ",\"execution_route\":\"" + EscapeJson(index.ExecutionRoute) + "\"") + "}";
             WriteNewUtf8FileAtomic(Path.Combine(root, "action.json"), json);
             ValidateActionManifest(context, index.ActionId);
         }
@@ -1634,6 +1636,7 @@ namespace Rice.AI.Codedb.Editor
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "project_root", label), context.ProjectRoot, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(AICodedbStrictJson.GetRequiredString(record, "package_root", label), context.PackageRoot, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Manager action locator conflicts with its complete identity.");
+            AICodedbInstallAdmission.ValidateRoute(context, actionId, record);
         }
 
         private static void AssertReceiptPath(

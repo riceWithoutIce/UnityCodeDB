@@ -10186,12 +10186,22 @@ function Assert-RemoveIntegrationV2ProcessAbsent {
     # new process or permission to remove. Callers must continue every gate.
 }
 
+function Get-SupervisorOperationExecutionDisposition {
+    param($Document)
+    $property = Get-ExactJsonProperty -Object $Document -Name 'execution_disposition' -Label 'Supervisor operation'
+    if ($null -eq $property) { return 'UNKNOWN' }
+    if ($property.Value -isnot [string] -or $property.Value -cnotin @('UNKNOWN','NO_CHILD','CHILD_ADMITTED')) {
+        throw 'Supervisor execution disposition is malformed.'
+    }
+    return $property.Value
+}
+
 function Assert-RemoveIntegrationTerminalOperation {
     param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, $HistoryAuthorities)
     $label = 'retained Supervisor operation'
     Assert-RemoveIntegrationJsonFields -Object $Document -Label $label `
         -Required @('schema_version','managed_by','operation_id','key','request_id','name','lane','state','phase','owner_epoch','project_identity','root','runtime','selected_instance_id','selected_generation_id','runtime_contract_sha256','child','started_at_utc','completed_at_utc','result') `
-        -Optional @('manager_action_id','error','error_code','handoff_queued','handoff_reason')
+        -Optional @('manager_action_id','error','error_code','handoff_queued','handoff_reason','execution_disposition')
     if ((Get-RequiredJsonInt32 -Object $Document -Name schema_version -Label $label) -ne 1 -or
         $Document.managed_by -cne $script:ManagedBy -or $Document.operation_id -cnotmatch '^[0-9a-f]{32}$' -or
         $Document.owner_epoch -cnotmatch '^[0-9a-f]{32}$' -or $Document.lane -cne 'maintenance' -or
@@ -10219,11 +10229,21 @@ function Assert-RemoveIntegrationTerminalOperation {
     if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
         -not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
         $started.Offset -ne [TimeSpan]::Zero -or $completed.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Retained Supervisor operation terminal timestamps are invalid.' }
-    Assert-RemoveIntegrationJsonFields -Object $Document.result -Label "$label result" -Required @('exit_code','stdout','stderr','timed_out')
+    Assert-RemoveIntegrationJsonFields -Object $Document.result -Label "$label result" -Required @('exit_code','stdout','stderr','timed_out') -Optional @('output_overflow','output_drain_incomplete')
     $exitCode = Get-RequiredJsonInt32 -Object $Document.result -Name exit_code -Label "$label result"
     if ($Document.result.stdout -isnot [string] -or $Document.result.stderr -isnot [string] -or
         $Document.result.timed_out -isnot [bool] -or $Document.result.timed_out -or
         (($Document.state -ceq 'completed') -ne ($exitCode -eq 0))) { throw 'Retained Supervisor terminal result is inconsistent or timed out.' }
+    $disposition = Get-SupervisorOperationExecutionDisposition -Document $Document
+    foreach ($flag in @('output_overflow','output_drain_incomplete')) {
+        $property = Get-ExactJsonProperty -Object $Document.result -Name $flag -Label "$label result"
+        if (($disposition -ceq 'NO_CHILD' -and $null -eq $property) -or
+            ($null -ne $property -and ($property.Value -isnot [bool] -or $property.Value))) { throw 'Retained Supervisor output observation is incomplete.' }
+    }
+    if ($disposition -ceq 'NO_CHILD') {
+        if ($null -ne $Document.child) { throw 'Supervisor NO_CHILD conflicts with child evidence.' }
+        return
+    }
     # finishOperation overwrites phase even when interrupted child capture failed.
     # A null child can never prove that no child escaped the owning Supervisor.
     if ($null -eq $Document.child) { throw "Retained Supervisor operation $($Document.operation_id) child evidence is missing; termination cannot be proved." }
@@ -10422,7 +10442,8 @@ function Get-PartialV1RemoveIntegrationAuthority {
     $operation = (Read-BoundedJsonDocument -Path (Join-Path $namespace "operation.json") -Label "partial Owner Identity v1 Supervisor operation" -MaximumBytes (256 * 1024)).Document
     Assert-RemoveIntegrationJsonFields -Object $operation -Label "partial Owner Identity v1 Supervisor operation" `
         -Required @("schema_version", "managed_by", "operation_id", "key", "request_id", "name", "lane", "state", "phase", "owner_epoch", "project_identity", "root", "runtime", "selected_instance_id", "selected_generation_id", "runtime_contract_sha256", "child", "started_at_utc", "completed_at_utc", "result") `
-        -Optional @("error", "error_code", "handoff_queued", "handoff_reason")
+        -Optional @("error", "error_code", "handoff_queued", "handoff_reason", "execution_disposition")
+    $null = Get-SupervisorOperationExecutionDisposition -Document $operation
     $runtimeHash = Get-RequiredJsonString -Object $operation -Name "runtime_contract_sha256" -Label "partial Owner Identity v1 Supervisor operation"
     if ((Get-RequiredJsonInt32 -Object $operation -Name "schema_version" -Label "partial Owner Identity v1 Supervisor operation") -ne 1 -or
         (Get-RequiredJsonString -Object $operation -Name "managed_by" -Label "partial Owner Identity v1 Supervisor operation") -cne $script:ManagedBy -or

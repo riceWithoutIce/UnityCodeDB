@@ -264,6 +264,22 @@ $claim = [ordered]@{
 }
 Write-AtomicJson $claimPath $claim
 
+if ($null -ne $manifest.PSObject.Properties['execution_route']) {
+    if ($manifest.execution_route -cne 'project-install-v1' -or
+        $admitted.effect_class -cne 'ConfirmedProjectMutation' -or
+        $admitted.authorization_source -cne 'UserConfirmationAndBackendAdmission' -or
+        -not $admitted.terminal_for_action -or
+        -not $commandPath.Equals((Get-NormalizedPath (Join-Path $packageRoot 'Tools~\materialize-codedb-host-payload.ps1')), [StringComparison]::OrdinalIgnoreCase) -or
+        $arguments.Count -lt 3 -or $arguments[0] -cne '-Action' -or $arguments[1] -cne 'Install' -or
+        $arguments -cnotcontains '-ConfirmedProjectMutation') {
+        throw 'The project Install route does not match the authenticated command.'
+    }
+    # Child-only provenance, reauthenticated under the engine's project lock.
+    $child.StartInfo.EnvironmentVariables['RICE_CODEDB_PROJECT_INSTALL_ADMISSION'] = $admittedPath
+} else {
+    $child.StartInfo.EnvironmentVariables.Remove('RICE_CODEDB_PROJECT_INSTALL_ADMISSION')
+}
+
 $startError = $null
 try {
     if (-not $child.Start()) { $startError = 'CHILD_START_RETURNED_FALSE' }

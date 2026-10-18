@@ -12,6 +12,104 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
+// S32 original producer -> durable operation fixture; no child or server starts.
+if (process.argv[2] === "--s32-disposition-fixture") {
+  const root = path.resolve(process.argv[3]);
+  const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  assert.ok(root.startsWith(path.join(repository, ".artifacts/tests/s32-install") + path.sep));
+  assert.equal(fs.existsSync(root), false, "Preserve prior evidence");
+  fs.mkdirSync(root, { recursive: true });
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../Tools~/codedb-project-supervisor.mjs");
+  const text = fs.readFileSync(script, "utf8");
+  const source = (name) => {
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex(line => new RegExp(`^(?:async )?function ${name}\\(`).test(line));
+    const end = lines.findIndex((line, i) => i > start && /^(?:async )?function |^await main\(/.test(line));
+    assert.ok(start >= 0 && end > start, name);
+    return lines.slice(start, end).join("\n");
+  };
+  const names = ["ensureCoordinator", "prepareOperationChildEvidence", "recordChildEvidence", "publicOperation",
+    "validatePersistedOperation", "validatePersistedChild", "compactResult", "commandExitCode", "truncate",
+    "persistOperation", "operationHistoryFile", "persistManagerActionOperation", "managerActionOperationFile",
+    "ensureOperationEvidenceDirectory", "validId", "assertInside", "isPathInside", "assertNoRedirectedAncestors",
+    "assertReviewedPath", "pathsEqual", "writeJson", "writeFdJson", "renameWithRetry", "normalizeProcessArgv",
+    "normalizeExecutable", "hashArgv", "hash", "requireObject"];
+  const finish = text.slice(text.indexOf("  const finishOperation = async ("), text.indexOf("  const startMaintenance ="));
+  const project = path.join(path.dirname(root), "admission-project");
+  const runtime = path.join(project, "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor");
+  const context = { root:project, runtime, packageRoot:path.join(root,"package"),
+    projectIdentity:"sha256:"+crypto.createHash("sha256").update(project.replaceAll("\\","/").toLowerCase()).digest("hex"),
+    operationPath:path.join(runtime,"operation.json"), operationHistoryPath:path.join(runtime,"operation-history"),
+    actionOperationPath:path.join(runtime,"manager-actions") };
+  const sandbox = {fs,path,crypto,process,Buffer,context,EVIDENCE_SCHEMA_VERSION:1,OPERATION_RETENTION_LIMIT:16,
+    ATOMIC_RENAME_RETRY_DELAYS_MS:[],ATOMIC_RENAME_RETRYABLE_CODES:new Set(),
+    requestCoordinatorStatus:async()=>({provider_state:"ready"}),
+    runChild:()=>{throw new Error("UNAUTHORIZED_CHILD_LAUNCH");},
+    getProcessEvidenceSync:()=>({available:false,exists:true}),
+    resolveCommandExecutable:()=>process.execPath,validateProcessEvidenceShape:()=>{},
+    coordinatorStatus:null,updateReadiness:()=>{},emitSafely:()=>true,queueQuery:async()=>{},refresh:()=>{},
+    selectedInstanceChanged:()=>false,scheduleRequestQueue:()=>{}};
+  const producer = vm.runInNewContext(names.map(source).join("\n")
+    + "\nlet activeOperation=null;const state={};let retirementReason='';let shuttingDown=false;let handoffTimer=null;"
+    + "\nconst rememberOperation=value=>persistOperation(context,value);\n"+finish
+    + "\n({ensureCoordinator,prepareOperationChildEvidence,recordChildEvidence,finishOperation,publicOperation,persistOperation,validatePersistedOperation})",sandbox);
+  assert.match(text,/runtime_contract_sha256: context\.runtimeContractSha256,\s+execution_disposition: "UNKNOWN",\s+child: null/);
+  const cases=[];
+  const fresh = () => ({schema_version:1,managed_by:"com.rice.ai-codedb",operation_id:crypto.randomBytes(16).toString("hex"),
+    manager_action_id:"",key:"ensure",request_id:crypto.randomBytes(16).toString("hex"),name:"ensure",lane:"maintenance",
+    state:"running",phase:"admitted",owner_epoch:"7".repeat(32),project_identity:context.projectIdentity,root:project,runtime,
+    selected_instance_id:"3".repeat(32),selected_generation_id:"fixture-generation",runtime_contract_sha256:"4".repeat(64),
+    execution_disposition:"UNKNOWN",child:null,started_at_utc:"2026-10-18T00:00:00.000Z"});
+  async function save(name,op){
+    producer.persistOperation(context,op);
+    const target=path.join(root,name+".json");
+    fs.copyFileSync(path.join(context.operationHistoryPath,op.operation_id+".json"),target);
+    cases.push({name,path:target,operationId:op.operation_id});
+  }
+  const attached=fresh();
+  await producer.finishOperation(attached,await producer.ensureCoordinator(context,attached));
+  assert.equal(attached.execution_disposition,"NO_CHILD");assert.equal(attached.child,null);
+  assert.equal(producer.publicOperation(attached).execution_disposition,"NO_CHILD");
+  await save("ready-no-child",attached);
+  const legacy={...attached,operation_id:crypto.randomBytes(16).toString("hex")};delete legacy.execution_disposition;
+  await producer.ensureCoordinator(context,legacy);
+  assert.equal(legacy.execution_disposition,undefined);assert.equal(producer.publicOperation(legacy).execution_disposition,"UNKNOWN");
+  await save("legacy-missing",legacy);
+  const failed=fresh();producer.prepareOperationChildEvidence(context,failed,"fixture_spawn_admitted");
+  assert.equal(JSON.parse(fs.readFileSync(context.operationPath)).execution_disposition,"CHILD_ADMITTED");
+  assert.throws(()=>producer.recordChildEvidence(context,failed,process.execPath,["fixture"],{pid:87654321}),/could not be read/);
+  await producer.finishOperation(failed,{code:1,stdout:"",stderr:"capture unknown",timedOut:false});
+  await producer.ensureCoordinator(context,failed);
+  assert.equal(failed.execution_disposition,"CHILD_ADMITTED");assert.equal(failed.child,null);
+  await save("capture-failed",failed);
+  failed.state="running";
+  assert.throws(()=>producer.prepareOperationChildEvidence(context,failed,"second"),/unresolved identity/);
+  const child=fresh();producer.prepareOperationChildEvidence(context,child,"fixture_spawn_admitted");
+  sandbox.getProcessEvidenceSync=()=>({available:true,exists:true,pid:87654321,processStartIdentity:"638962990000000000",
+    executablePath:process.execPath,argvSha256:crypto.createHash("sha256").update('["fixture"]').digest("hex"),commandLineSha256:"9".repeat(64)});
+  producer.recordChildEvidence(context,child,process.execPath,["fixture"],{pid:87654321});
+  const prior=JSON.stringify(child.child);
+  assert.throws(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
+  assert.equal(JSON.stringify(child.child),prior);
+  sandbox.getProcessEvidenceSync=()=>({available:false,exists:true});
+  assert.throws(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
+  assert.equal(JSON.stringify(child.child),prior);
+  await producer.finishOperation(child,{code:0,stdout:"complete",stderr:"",timedOut:false});
+  await save("identified-child",child);
+  child.state="running";sandbox.getProcessEvidenceSync=()=>({available:true,exists:false});
+  producer.prepareOperationChildEvidence(context,child,"second-after-proved-exit");
+  assert.equal(child.execution_disposition,"CHILD_ADMITTED");assert.equal(child.child,null);
+  await producer.finishOperation(child,{code:1,stdout:"",stderr:"second capture missing",timedOut:false});
+  await save("second-capture-missing",child);
+  const conflict={...attached,operation_id:crypto.randomBytes(16).toString("hex"),child:{pid:99}};
+  await save("no-child-conflict",conflict);
+  const pending={...attached,operation_id:crypto.randomBytes(16).toString("hex"),state:"running",phase:"admitted",execution_disposition:"UNKNOWN"};
+  await save("hidden-running",pending);
+  fs.writeFileSync(path.join(root,"fixtures.json"),JSON.stringify({context,cases}));
+  console.log("PASS original ready/no-spawn -> finishOperation -> persistOperation/public projection; pre-spawn sticky admission, capture failure, legacy unknown, prior live/unknown and second missing capture. HARNESS; status/process inputs mocked; no child launched.");
+  process.exit(0);
+}
+
 // Bounded S31-D producer-only entry: no Supervisor, Provider or child launch.
 if (process.argv[2] === "--terminal-session-fixture") {
   const root = path.resolve(process.argv[3]);
