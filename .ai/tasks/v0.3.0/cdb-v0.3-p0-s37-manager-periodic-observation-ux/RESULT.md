@@ -231,7 +231,7 @@ The original package consumers were backed up under
 Only the CodeDB local reference changed in each file. Both parsed consumers
 now resolve to:
 
-`<repository-root>/.artifacts/s37-manager-periodic-observation-0ef48d6/review/com.rice.ai-codedb`
+`<repository-root>/.artifacts/s37-manager-periodic-observation-b7b1bd6/review/com.rice.ai-codedb`
 
 The new reference exists, both manifest and lock values match, testables remain
 unchanged, and byte comparison after replacing the single old reference with
