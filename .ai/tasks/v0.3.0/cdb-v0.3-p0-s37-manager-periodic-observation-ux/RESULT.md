@@ -188,3 +188,28 @@ out of scope. Original incident attribution remains unconfirmed.
 - Next action: align one bounded observation-separation repair and its evidence.
 - Human authorization required: production implementation and any delegation;
   no delivery or Unity/lifecycle action is included.
+
+## Exact delivery — 2026-10-19
+
+The approved narrow snapshot was committed without staging unrelated dirty
+state:
+
+- Commit: `f5abf2a2e0042f4ee90f1c9bbd7671fd36f1de11`
+- Message: `fix: decouple supervisor status observation`
+- Allowlist: the Supervisor production source, its focused fixture test, and
+  the three S37 task records.
+
+The existing commit-derived exporter was run once against that commit into
+`.artifacts/s37-manager-periodic-observation-f5abf2a/`:
+
+- commit-stage production admission: PASS;
+- exact ZIP production admission: PASS;
+- byte closure: PASS, 60 declared payload sources, zero mismatches;
+- native binding checks: PASS;
+- extracted Package files / ZIP entries: 623 / 623;
+- ZIP SHA-256:
+  `9f719b4a560935798620eeae7814ad51b94645ffa1402c6ddaffe94ad6814197`.
+
+No Unity, lifecycle command, process termination, Install/Uninstall or push
+was performed during this delivery step. This documentation-only record is
+kept separate from the code-bearing commit.
