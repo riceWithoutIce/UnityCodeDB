@@ -204,3 +204,50 @@ Uninstall/reinstall and dependent smoke/idle acceptance remain paused.
 - Human decision or authorization required: corrected-source disposition and a
   new exact delivery grant. No Unity or real lifecycle authority follows from
   the repair review.
+
+## Corrected delivery result
+
+User later replied `授权`, renewing the exact delivery boundary for the
+corrected one-line snapshot. The prior failed artifact remains preserved and
+was not patched in place.
+
+- Corrected commit: `3c93ddfb52a801cefef99fd4e12d55c10fa7778c`.
+- Commit message: `fix: use supported NUnit parallel attribute`.
+- Exact new commit allowlist: the corrected test plus the six S36 records; the
+  production file remained unchanged. Index was empty after commit.
+- Corrected ZIP:
+  `.artifacts/s36-preflight-refresh-3c93ddf/com.rice.ai-codedb.zip`.
+- Corrected ZIP SHA-256:
+  `8da8ef787d0bed014d4194c0213299d893af8d410e3b7412a08cd2d73650c5e9`.
+- Commit-stage and exact ZIP production admission, byte closure, identity and
+  native binding passed; both contained 623 files. Exact extracted path
+  provenance and helper binding passed. Corrected test hash in extraction:
+  `3a2d379799924e62bd482b28f369d61f2e0915ea06d0d4482b979e5e67b87d2f`.
+- S35 was rechecked closed immediately before switching. New backup:
+  `.backups/s36-preflight-refresh-3c93ddf/{manifest.json,packages-lock.json}`.
+  Only the CodeDB reference changed in each file; parsed manifest/lock
+  consumers agree and resolve to the exact corrected extraction. S35 testables
+  remain enabled. No project runtime/configuration/instance state changed.
+- New reference:
+  `file:../../../s36-preflight-refresh-3c93ddf/review/com.rice.ai-codedb`.
+- No Unity launch, Test Runner, lifecycle action, process control or push ran.
+
+Corrected delivery is COMPLETE / HUMAN_ACCEPTANCE_PENDING. Open S35 and report
+compile/Console status first. If clean, run the focused selections already
+listed above, then Manager reopen/tabs, Ready idle for 3-5 minutes, and normal
+Unity close. Do not click Install/Uninstall/reinstall during this check.
+
+## Deferred periodic observation follow-up
+
+User reports that after reaching Ready and remaining idle for about 3-5 minutes,
+Manager performed another observation and returned to Ready. The visible text
+said the last verified Ready observation was cached. No persistent NeedsAttention,
+Install/Uninstall action or compile error was reported. This is recorded as a
+deferred UX/behavior discussion in
+[S37](../cdb-v0.3-p0-s37-manager-periodic-observation-ux/TASK.md).
+
+S37 does not classify the behavior as a defect, change the S36 acceptance, or
+authorize implementation. It preserves the current interpretation that normal
+freshness/preflight boundaries can cause a background refresh; the later task
+must decide whether that visible transition is acceptable before any code or
+timing change is proposed.

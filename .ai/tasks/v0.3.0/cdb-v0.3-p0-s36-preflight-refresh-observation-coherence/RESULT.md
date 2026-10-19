@@ -172,3 +172,42 @@ were preserved. The previous delivery authorization was not reused.
   nonparallel intent and unchanged test/production review only.
 - Human decision or authorization required: none for the approved narrow review;
   source disposition and new delivery/human execution retain separate gates.
+
+## Approved Fixture Compatibility Repair — 2026-10-19
+
+The focused cache regressions still required the production path's project-root
+validation, while `AICodedbTestWorkspace.GetPath("project")` only resolves and
+guards a child path. Under the approved one-fixture repair, `CacheScope` now
+creates that repository-local test root and the minimum Unity directory markers
+`Assets/`, `Packages/`, and `ProjectSettings/` before constructing its execution
+context. The package path, production code, test bodies and all ten scenarios
+remain unchanged. No artifact extraction or Unity project was modified.
+
+Checks:
+
+- PASS: narrow diff is confined to
+  `AICodedbEditorLifecycleTests.cs` in `CacheScope`; `git diff --check` exit 0.
+- PASS, syntax only: the unchanged C#9 parser reports
+  `[CS_SYNTAX_ONLY] files=1 errors=0; consumer_execution=NOT_RUN`.
+- Production source remains unchanged at SHA-256
+  `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6`.
+- Corrected test source SHA-256:
+  `f9184d748c45c7024cdffba59c46af72ff792ea0334d4b0acf4211bbd24aa581`.
+- Diff stat for the full active test file against the prior repair snapshot is
+  `6 additions / 1 deletion`: five directory-root setup lines plus the local
+  variable substitution. The earlier approved NUnit attribute repair remains
+  preserved.
+
+No NUnit/Unity execution, semantic compilation, lifecycle operation, commit,
+export, reference switch, process control, dependency change or network action
+was performed. This static/syntax result does not claim that the focused tests
+or human S35 acceptance pass. Source writes stopped at this stable snapshot.
+
+- Current task: S36 fixture compatibility repair.
+- Current status: COMPLETE / FIXTURE_ROOT_MARKERS_ADDED_WITH_EXECUTION_LIMITS.
+- Next notification: current parent Planner.
+- Next action: admit the corrected test hash and dispatch the already authorized
+  read-only Verifier for this fixture repair plus the original compatibility
+  claims only.
+- Human decision or authorization required: none for that bounded review;
+  delivery and human Unity gates remain separate.

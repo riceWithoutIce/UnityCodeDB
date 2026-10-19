@@ -4,7 +4,7 @@
 
 - Product: UnityCodeDB, v0.3.0.
 - Workflow: codedb-workflow-v2, revision 2.6.
-- Status: DOING / CORRECTED_DELIVERY_AUTHORIZED.
+- Status: COMPLETE / CORRECTED_DELIVERY_COMPLETE / HUMAN_ACCEPTANCE_PENDING.
 - Planner: current parent. Coder then read-only Verifier: approved sequentially.
 - Review mode: GUARDED (lifecycle cache publication).
 - Execution mode: FAST_SUBAGENT.
@@ -166,11 +166,10 @@ is already consumed; no new commit/export/reference switch is authorized here.
   review passed with no in-scope finding. Semantic compilation, NUnit and human
   idle stability are deferred. User replied `同意 accept` on 2026-10-19,
   accepting the exact source snapshot with those execution limits. See DECISION.md.
-- Next notification: current parent, for the renewed corrected commit/export and
-  closed-S35 reference switch. Review closed the original CS0246 finding with
-  no new finding; parent matched final hashes and exact +1/-1 diff.
-- Next action: execute only the corrected delivery group authorized by the
-  user's `授权`; recheck S35 closure before switching and stop if occupied.
+- Next notification: User, for human compilation/focused tests and Manager idle
+  acceptance against corrected commit `3c93ddf`.
+- Next action: human opens S35, runs the focused checklist, observes Ready idle
+  for 3-5 minutes, and closes Unity; parent then performs read-only checks.
 - Human decision required: none for this approved correction/review; initial source acceptance
   and delivery remain historical facts, while human compilation has failed.
   No new source work, broader review or dependent S35 lifecycle command starts

@@ -627,8 +627,13 @@ namespace Rice.AI.Codedb.Editor.Tests
 
             internal CacheScope(AICodedbTestWorkspace workspace, bool available)
             {
+                var fixtureProjectRoot = workspace.GetPath("project");
+                Directory.CreateDirectory(fixtureProjectRoot);
+                Directory.CreateDirectory(Path.Combine(fixtureProjectRoot, "Assets"));
+                Directory.CreateDirectory(Path.Combine(fixtureProjectRoot, "Packages"));
+                Directory.CreateDirectory(Path.Combine(fixtureProjectRoot, "ProjectSettings"));
                 Context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
-                    workspace.GetPath("project"), workspace.GetPath("package"), "S36 cache fixture");
+                    fixtureProjectRoot, workspace.GetPath("package"), "S36 cache fixture");
                 var lifecycle = typeof(AICodedbEditorLifecycle);
                 _cacheLock = lifecycle.GetField("HostStatusCacheLock", StaticFlags).GetValue(null);
                 lock (_cacheLock)

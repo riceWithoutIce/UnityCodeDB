@@ -146,3 +146,53 @@
   for ACCEPT / FIX / DEFER / STOP; do not dispatch another repair automatically.
 - Human decision or authorization required: any renewed delivery or real Unity
   validation remains a separate explicit gate.
+
+## Targeted Repair Review — CacheScope Unity Project Root Fixture
+
+- Repair verdict: PASS for closure of the original `Unity project root does
+  not exist` fixture finding and its adjacent regression boundary. No new
+  in-scope finding or direct repair request.
+- Repair identity admission matched baseline HEAD
+  `3c93ddfb52a801cefef99fd4e12d55c10fa7778c` and the frozen final hashes:
+
+| File | SHA-256 |
+| --- | --- |
+| `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs` (unchanged) | `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6` |
+| `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs` | `f9184d748c45c7024cdffba59c46af72ff792ea0334d4b0acf4211bbd24aa581` |
+
+- The admitted diff is confined to `CacheScope` in the lifecycle test file,
+  `+6/-1`: it stores `workspace.GetPath("project")`, creates that directory,
+  creates its `Assets`, `Packages`, and `ProjectSettings` child directories,
+  and passes the stored root to `AICodedbEditorExecutionContext`. This closes
+  the production `ValidateProjectRoot` requirements before any context-driven
+  identity call can observe a missing root or marker.
+- Initialization order is coherent: `AICodedbTestWorkspace.Run` initializes
+  and owns the repository-local workspace before the `CacheScope` constructor;
+  `GetPath("project")` remains a descendant/reparse-guarded path; the four
+  `Directory.CreateDirectory` calls stay below that owned root. The surrounding
+  `using (var cache = new CacheScope(...))` disposes cache/Bridge state first,
+  then `AICodedbTestWorkspace.Complete` performs the existing owned-workspace
+  cleanup. No alternate or external cleanup root was introduced.
+- The existing test class, four focused methods and ten parameterized scenarios
+  remain unchanged; the prior NUnit compatibility attribute repair is retained.
+  Production lifecycle code and its cache, revision, observation binding,
+  terminal-failure and cancellation guards retain the admitted production hash;
+  no guard or readiness policy was relaxed.
+- Reused Coder evidence: narrow whitespace and syntax-only checks were recorded
+  as PASS for the corrected test source. This review did not execute NUnit,
+  semantic compilation, Unity/EditMode, lifecycle operations, or human S35
+  acceptance. The fixture correction is therefore a source-level closure of
+  the missing-root setup finding, not a claim that the focused tests now pass.
+- Tests rerun: none. No artifact extraction, Unity project, package, runtime,
+  process, network, export, commit or reference switch was changed. Existing
+  delivery and human acceptance evidence limits remain in force.
+
+## Fixture Repair Handoff
+
+- Current task: cdb-v0.3-p0-s36-preflight-refresh-observation-coherence.
+- Current status: COMPLETE / TARGETED_FIXTURE_REVIEW_PASS_WITH_EXECUTION_LIMITS.
+- Next notification: current parent Planner, then User.
+- Next action: return the consolidated review for ACCEPT / FIX / DEFER / STOP;
+  do not dispatch another repair automatically.
+- Human decision or authorization required: any renewed package delivery,
+  Unity/NUnit execution, or lifecycle acceptance remains separately gated.
