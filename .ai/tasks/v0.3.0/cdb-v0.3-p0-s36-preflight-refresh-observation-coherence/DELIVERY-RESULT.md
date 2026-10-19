@@ -251,3 +251,31 @@ authorize implementation. It preserves the current interpretation that normal
 freshness/preflight boundaries can cause a background refresh; the later task
 must decide whether that visible transition is acceptable before any code or
 timing change is proposed.
+
+## Fixture repair delivery — 2026-10-19
+
+The user renewed delivery authorization after the fixture repair and its
+read-only review passed. The exact source commit is:
+
+- Commit: `46fdba68cec69e9b07a957d10a5b5e9b9f9ddb84`
+- Message: `fix: initialize preflight test project fixture`
+- Package: `.artifacts/s36-preflight-refresh-46fdba6/review/com.rice.ai-codedb`
+- ZIP: `.artifacts/s36-preflight-refresh-46fdba6/com.rice.ai-codedb.zip`
+- ZIP SHA-256:
+  `560f267be27da4f3eb865aebbfcab0238a19dabee2ce43782a4a22a98cbaae12`
+
+The exact export passed production admission, byte closure, native binding and
+623-file consumer closure. The corrected test hash is
+`f9184d748c45c7024cdffba59c46af72ff792ea0334d4b0acf4211bbd24aa581`; the
+production hash remains `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6`.
+
+S35 was closed at the switch check. Unity processes belonged to another
+project, and S35 had no `Temp/UnityLockfile` or `Library/EditorInstance.json`.
+The new relative reference is
+`file:../../../s36-preflight-refresh-46fdba6/review/com.rice.ai-codedb`.
+The manifest and lock backup is under
+`.backups/s36-preflight-refresh-46fdba6/`; only the CodeDB reference changed,
+and both consumers resolve to the exact extracted package. No Unity launch,
+NUnit execution, lifecycle command, Install/Uninstall, process termination or
+push was performed. Human compilation, focused Test Runner execution and S35
+Manager/idle/close acceptance remain pending.
