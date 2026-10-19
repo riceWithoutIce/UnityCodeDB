@@ -12,6 +12,70 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
+// S34 production writers only. No Supervisor, Provider, network or child starts.
+if (process.argv[2] === "--s34-history-fixture") {
+  const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const root = path.resolve(process.argv[3]);
+  assert.ok(root.startsWith(path.join(repository, ".artifacts/tests/s34-history") + path.sep));
+  const append = process.argv[4] === "append";
+  for (let current = path.dirname(root); ; current = path.dirname(current)) {
+    if (fs.existsSync(current)) assert.equal(fs.lstatSync(current).isSymbolicLink(), false);
+    if (path.dirname(current) === current) break;
+  }
+  assert.equal(fs.existsSync(root), append, "Fresh fixture or explicit owned append required");
+  fs.mkdirSync(root, { recursive: true });
+  const script = path.join(repository, "com.rice.ai-codedb/Tools~/codedb-project-supervisor.mjs");
+  const lines = fs.readFileSync(script, "utf8").split(/\r?\n/);
+  const source = name => {
+    const start = lines.findIndex(line => new RegExp(`^(?:async )?function ${name}\\(`).test(line));
+    const end = lines.findIndex((line, i) => i > start && /^(?:async )?function |^await main\(/.test(line));
+    assert.ok(start >= 0 && end > start, name);
+    return lines.slice(start, end).join("\n");
+  };
+  const names = ["completeUnstartedMaintenance", "compactResult", "commandExitCode", "truncate", "persistOperation",
+    "operationHistoryFile", "persistManagerActionOperation", "managerActionOperationFile", "ensureOperationEvidenceDirectory",
+    "validId", "assertInside", "isPathInside", "assertNoRedirectedAncestors", "assertReviewedPath", "pathsEqual", "writeJson",
+    "writeFdJson", "renameWithRetry", "validateManagerActionOperationRecord", "readRequiredJson", "readBoundedBytes",
+    "realFile", "parseStrictJson", "requireObject"];
+  const producer = vm.runInNewContext(names.map(source).join("\n") + "\n({completeUnstartedMaintenance,compactResult,persistOperation})", {
+    fs,path,crypto,process,Buffer,TextDecoder,EVIDENCE_SCHEMA_VERSION:1,OPERATION_RETENTION_LIMIT:16,
+    ATOMIC_RENAME_RETRY_DELAYS_MS:[],ATOMIC_RENAME_RETRYABLE_CODES:new Set()
+  });
+  const project = path.join(root, "project");
+  const runtime = path.join(project, "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor");
+  const context = {root:project,runtime,packageRoot:path.join(repository,"com.rice.ai-codedb"),
+    projectIdentity:"sha256:"+crypto.createHash("sha256").update(project.replaceAll("\\","/").toLowerCase()).digest("hex"),
+    operationPath:path.join(runtime,"operation.json"),operationHistoryPath:path.join(runtime,"operation-history"),
+    actionOperationPath:path.join(runtime,"manager-actions")};
+  const fresh = () => ({schema_version:1,managed_by:"com.rice.ai-codedb",operation_id:crypto.randomBytes(16).toString("hex"),
+    manager_action_id:"",key:"routine",request_id:crypto.randomBytes(16).toString("hex"),name:"materialize:Probe",lane:"maintenance",
+    state:"queued",phase:"queued",owner_epoch:"7".repeat(32),project_identity:context.projectIdentity,root:project,runtime,
+    selected_instance_id:"3".repeat(32),selected_generation_id:"fixture-generation",runtime_contract_sha256:"4".repeat(64),
+    execution_disposition:"UNKNOWN",child:null,started_at_utc:null});
+  if (!append) {
+    const queued=fresh(); producer.completeUnstartedMaintenance(queued,"SUPERVISOR_EPOCH_INVALIDATED","selection changed","queued");
+    assert.equal(queued.started_at_utc,null);assert.equal(queued.execution_disposition,"NO_CHILD");assert.equal(queued.phase,"failed");
+    const admission=fresh();admission.state="running";admission.phase="admitted";admission.started_at_utc=new Date().toISOString();
+    producer.completeUnstartedMaintenance(admission,"SUPERVISOR_STATE_PUBLISH_FAILED","publication failed","admission_publication");
+    assert.equal(admission.started_at_utc,null);assert.equal(admission.error_code,"SUPERVISOR_STATE_PUBLISH_FAILED");
+    const unknown=fresh();unknown.state="running";unknown.phase="child_running";
+    assert.throws(()=>producer.completeUnstartedMaintenance(unknown,"SUPERVISOR_EPOCH_INVALIDATED","bad","queued"),/positively unstarted/);
+    unknown.execution_disposition="CHILD_ADMITTED";unknown.phase="admitted";
+    assert.throws(()=>producer.completeUnstartedMaintenance(unknown,"SUPERVISOR_STATE_PUBLISH_FAILED","bad","admission_publication"),/positively unstarted/);
+    const legacy={...queued,execution_disposition:"UNKNOWN",phase:"invalidated",result:{exit_code:4,stdout:"",stderr:"old",timed_out:false}};
+    for(const [name,value] of Object.entries({queued,admission,legacy})) fs.writeFileSync(path.join(root,name+".json"),JSON.stringify(value));
+    fs.writeFileSync(path.join(root,"context.json"),JSON.stringify(context));
+  }
+  for(let i=0;i<300;i++) {
+    const operation=fresh();operation.state="completed";operation.phase="completed";operation.execution_disposition="NO_CHILD";
+    operation.started_at_utc="2026-10-18T00:00:00.000Z";operation.completed_at_utc="2026-10-18T00:00:01.000Z";
+    operation.result=producer.compactResult({code:0,stdout:"routine complete",stderr:"",timedOut:false});
+    producer.persistOperation(context,operation);
+  }
+  console.log("PASS S34 original queued/admission terminal and persistOperation writers; 300 routine records; no runtime child.");
+  process.exit(0);
+}
+
 // S32 original producer -> durable operation fixture; no child or server starts.
 if (process.argv[2] === "--s32-disposition-fixture") {
   const root = path.resolve(process.argv[3]);

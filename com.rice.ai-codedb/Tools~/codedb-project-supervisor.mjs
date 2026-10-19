@@ -1088,18 +1088,8 @@ async function runDaemon(raw) {
       return false;
     }
   };
-  const failQueuedMaintenance = (value, errorCode, detail) => {
-    value.completed_at_utc = new Date().toISOString();
-    value.result = {
-      exit_code: 4,
-      stdout: "",
-      stderr: detail,
-      timed_out: false
-    };
-    value.state = "failed";
-    value.phase = "invalidated";
-    value.error_code = errorCode;
-    value.error = detail;
+  const failQueuedMaintenance = (value, errorCode, detail, boundary = "queued") => {
+    completeUnstartedMaintenance(value, errorCode, detail, boundary);
     operations.set(value.operation_id, value);
     persistOperation(context, value);
   };
@@ -1363,7 +1353,8 @@ async function runDaemon(raw) {
       failQueuedMaintenance(
         value,
         "SUPERVISOR_STATE_PUBLISH_FAILED",
-        error instanceof Error ? error.message : String(error));
+        error instanceof Error ? error.message : String(error),
+        "admission_publication");
       scheduleRequestQueue();
       return;
     }
@@ -1373,7 +1364,8 @@ async function runDaemon(raw) {
       failQueuedMaintenance(
         value,
         "SUPERVISOR_STATE_PUBLISH_FAILED",
-        state.detail);
+        state.detail,
+        "admission_publication");
       scheduleRequestQueue();
       return;
     }
@@ -2141,6 +2133,27 @@ function readPersistedOperation(context) {
     "Supervisor operation").value;
   validatePersistedOperation(context, operation);
   return operation;
+}
+
+function completeUnstartedMaintenance(value, errorCode, detail, boundary) {
+  // Callers own the queue/admission boundary, before invoking entry.run.
+  // Recovery and running-child failures must never use this certification.
+  if (!["queued", "admission_publication"].includes(boundary)
+      || value.execution_disposition !== "UNKNOWN" || value.child !== null
+      || (boundary === "queued" && (value.state !== "queued" || value.started_at_utc !== null))
+      || (boundary === "admission_publication" && (value.state !== "running" || value.phase !== "admitted")))
+    throw new Error("Supervisor request is not at a positively unstarted execution boundary.");
+  const completed = new Date().toISOString();
+  // Queue cancellation has no execution start; the shared terminal contract
+  // accepts null only with the explicit pre-execution cancellation reason.
+  if (boundary === "admission_publication") value.started_at_utc = null;
+  value.completed_at_utc = completed;
+  value.result = compactResult({ code: 4, stdout: "", stderr: detail, timedOut: false });
+  value.state = "failed";
+  value.phase = "failed";
+  value.execution_disposition = "NO_CHILD";
+  value.error_code = errorCode;
+  value.error = detail;
 }
 
 function persistOperation(context, operation) {

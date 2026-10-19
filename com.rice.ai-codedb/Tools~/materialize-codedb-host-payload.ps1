@@ -10196,6 +10196,151 @@ function Get-SupervisorOperationExecutionDisposition {
     return $property.Value
 }
 
+function Add-SupervisorHistoryReferences {
+    param($Value, [hashtable]$References, [int]$Depth = 0)
+    if ($Depth -gt 32) { throw 'Supervisor retention reference depth exceeds its bound.' }
+    if ($null -eq $Value) { return }
+    if ($Value -is [string]) {
+        if ($Value -cmatch '^[0-9a-f]{32}$') { $References[$Value] = $true }
+        return
+    }
+    if ($Value -is [array]) {
+        foreach ($item in $Value) { Add-SupervisorHistoryReferences -Value $item -References $References -Depth ($Depth + 1) }
+    } elseif ($Value -is [pscustomobject]) {
+        foreach ($property in $Value.PSObject.Properties) { Add-SupervisorHistoryReferences -Value $property.Value -References $References -Depth ($Depth + 1) }
+    }
+}
+
+function Invoke-SupervisorHistoryRetention {
+    # Only routine maintenance calls this under the existing materializer lock.
+    # Supervisor admission stays serialized and new queued/running records are
+    # never candidates. No Manager map or authority record is rewritten.
+    param($Manifest, [string]$ProjectRoot, $Lock)
+    if ($null -eq $Lock -or $null -eq $Lock.Stream -or -not $Lock.Stream.CanWrite) {
+        throw 'Supervisor history retention requires the existing project lock.'
+    }
+    $contract = Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot
+    $runtime = Join-Path $contract 'supervisor'
+    $historyRoot = Join-Path $runtime 'operation-history'
+    Assert-NoReparsePoint -Path $historyRoot -Root $ProjectRoot -Label 'Supervisor history retention'
+    if (-not (Test-Path -LiteralPath $historyRoot -PathType Container)) { return }
+    # Discovery has its own finite bound above the admission bound. This lets
+    # one bounded maintenance pass classify and retire inert routine records
+    # that already crossed the reader's 4096 cap, without accepting an
+    # unbounded directory or selecting an arbitrary recent slice.
+    $records = @(Get-ChildItem -LiteralPath $historyRoot -Force | Select-Object -First 16385)
+    if ($records.Count -gt 16384) { throw 'Supervisor retention exceeds bounded discovery; protected history requires explicit disposition.' }
+    if ($records.Count -le 256) { return }
+    $references = @{}
+    $inputs = New-Object System.Collections.Generic.List[object]
+    $canonical = Join-Path $runtime 'operation.json'
+    if (-not (Test-Path -LiteralPath $canonical -PathType Leaf)) { throw 'Supervisor retention requires the canonical operation anchor.' }
+    $inputs.Add((Get-Item -LiteralPath $canonical))
+    $control = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstanceControlRelativePath -Label 'retention control'
+    foreach ($directory in @($control, $contract)) {
+        Assert-NoReparsePoint -Path $directory -Root $ProjectRoot -Label 'retention authority'
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -File -Force)) {
+            if ($item.Extension -ceq '.json') { $inputs.Add($item) }
+        }
+    }
+    foreach ($directory in @((Join-Path $runtime 'manager-actions'), (Join-Path $control 'retired-instances'),
+        (Join-Path $control 'removal-intents'), (Join-Path $contract 'retirements'), (Join-Path $contract 'operations'))) {
+        Assert-NoReparsePoint -Path $directory -Root $ProjectRoot -Label 'retention references'
+        if (-not (Test-Path -LiteralPath $directory)) { continue }
+        $pending = New-Object System.Collections.Generic.Queue[object]
+        $pending.Enqueue([pscustomobject]@{Path=$directory;Depth=0})
+        $visited = 0
+        while ($pending.Count -gt 0) {
+            $next = $pending.Dequeue()
+            foreach ($item in @(Get-ChildItem -LiteralPath $next.Path -Force | Select-Object -First 4097)) {
+                $visited++
+                if ($visited -gt 4096 -or $next.Depth -gt 4) { throw 'Supervisor retention reference inventory exceeds its bound.' }
+                Assert-NoReparsePoint -Path $item.FullName -Root $ProjectRoot -Label 'retention reference'
+                if ($item.BaseName -cmatch '[0-9a-f]{32}') { $references[$Matches[0]] = $true }
+                if ($item.PSIsContainer) { $pending.Enqueue([pscustomobject]@{Path=$item.FullName;Depth=($next.Depth+1)}) }
+                elseif ($item.Extension -ceq '.json') { $inputs.Add($item) }
+            }
+        }
+    }
+    # Unfinished instance transactions can contain not-yet-published origins.
+    $transactions = Join-Path $control 'operations'
+    Assert-NoReparsePoint -Path $transactions -Root $ProjectRoot -Label 'retention instance transactions'
+    if ((Test-Path -LiteralPath $transactions) -and @(Get-ChildItem -LiteralPath $transactions -Force | Select-Object -First 1).Count -gt 0) { return }
+    $instances = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'retention instances'
+    Assert-NoReparsePoint -Path $instances -Root $ProjectRoot -Label 'retention instances'
+    if (Test-Path -LiteralPath $instances) {
+        $entries = @(Get-ChildItem -LiteralPath $instances -Force | Select-Object -First 4097)
+        if ($entries.Count -gt 4096) { throw 'Supervisor retention instance inventory exceeds its bound.' }
+        foreach ($entry in $entries) {
+            Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'retention instance'
+            if (-not $entry.PSIsContainer -or $entry.Name -cnotmatch '^[0-9a-f]{32}$') { throw 'Supervisor retention instance reference is unknown.' }
+            $inputs.Add((Get-Item -LiteralPath (Join-Path $entry.FullName 'instance.json')))
+        }
+    }
+    if ($inputs.Count -gt 4096) { throw 'Supervisor retention authority count exceeds its bound.' }
+    foreach ($input in $inputs) {
+        Assert-NoReparsePoint -Path $input.FullName -Root $ProjectRoot -Label 'retention authority document'
+        $document = (Read-BoundedJsonDocument -Path $input.FullName -Label 'retention authority document' -MaximumBytes 262144).Document
+        Add-SupervisorHistoryReferences -Value $document -References $references
+    }
+    $eligible = New-Object System.Collections.Generic.List[object]
+    foreach ($record in $records) {
+        Assert-NoReparsePoint -Path $record.FullName -Root $ProjectRoot -Label 'retention history record'
+        if ($record.PSIsContainer -or $record.Name -cnotmatch '^[0-9a-f]{32}\.json$') { throw 'Supervisor retention history identity is unknown.' }
+        $read = Read-BoundedJsonDocument -Path $record.FullName -Label 'retention history record' -MaximumBytes 262144
+        $document = $read.Document
+        if ($references.ContainsKey($record.BaseName)) { continue }
+        try {
+            if ($document.schema_version -ne 1 -or $document.managed_by -cne $script:ManagedBy -or
+                $document.operation_id -cne $record.BaseName -or $document.project_identity -cne (Get-MaterializerProjectIdentity -ProjectRoot $ProjectRoot) -or
+                -not (Test-RemoveIntegrationPathEqual -Left $document.root -Right $ProjectRoot) -or
+                -not (Test-RemoveIntegrationPathEqual -Left $document.runtime -Right $runtime) -or
+                $document.runtime_contract_sha256 -cne $Manifest.RuntimeContractSha256 -or
+                $document.owner_epoch -cnotmatch '^[0-9a-f]{32}$' -or $document.selected_instance_id -cnotmatch '^[0-9a-f]{32}$' -or
+                [string]::IsNullOrWhiteSpace([string]$document.selected_generation_id) -or
+                $document.name -cnotin @('materialize:Probe','materialize:Upgrade') -or
+                $document.state -cne 'completed' -or $document.phase -cne 'completed' -or
+                -not [string]::IsNullOrEmpty([string]$document.manager_action_id)) { continue }
+            Assert-ProjectInstallTerminalResult -Document $document
+            Assert-ProjectInstallExecutionDisposition -Document $document
+            if ($document.execution_disposition -ceq 'CHILD_ADMITTED') {
+                Assert-RemoveIntegrationV2ProcessAbsent -ProcessId ([int]$document.child.pid) -RecordedStartIdentity $document.child.process_start_identity -Label 'retention child'
+            }
+            $eligible.Add([pscustomobject]@{Path=$record.FullName;Id=$record.BaseName;Sha256=(Get-FileSha256 -Path $record.FullName);Completed=$document.completed_at_utc})
+        } catch { continue } # Unknown/incomplete/live evidence is retained verbatim.
+    }
+    # Each unlink removes one whole, unreferenced inert file. A crash leaves a
+    # safe prefix of the same plan; it never leaves a partially rewritten map.
+    foreach ($record in @($eligible | Sort-Object Completed,Id | Select-Object -First ([Math]::Max(0, $eligible.Count - 128)))) {
+        $current = (Read-BoundedJsonDocument -Path $canonical -Label 'retention current operation' -MaximumBytes 262144).Document
+        if ($current.operation_id -ceq $record.Id) { continue }
+        Assert-NoReparsePoint -Path $record.Path -Root $ProjectRoot -Label 'retention delete'
+        if ((Get-FileSha256 -Path $record.Path) -cne $record.Sha256) { throw 'Supervisor retention history changed during maintenance.' }
+        Remove-Item -LiteralPath $record.Path -Force
+    }
+    if ($records.Count - $eligible.Count + [Math]::Min(128, $eligible.Count) -ge 4096) {
+        throw 'Supervisor retained protected or unresolved evidence has exhausted history capacity.'
+    }
+}
+
+function Assert-SupervisorOperationTerminalTiming {
+    param($Document)
+    [DateTimeOffset]$completed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
+        $completed.Offset -ne [TimeSpan]::Zero) { throw 'Supervisor terminal completion timestamp is invalid.' }
+    if ($null -eq $Document.started_at_utc) {
+        $reason = Get-ExactJsonProperty -Object $Document -Name error_code -Label 'Supervisor unstarted terminal'
+        if ((Get-SupervisorOperationExecutionDisposition -Document $Document) -cne 'NO_CHILD' -or
+            $null -ne $Document.child -or $Document.state -cne 'failed' -or $Document.phase -cne 'failed' -or
+            $null -eq $reason -or $reason.Value -cnotin @('SUPERVISOR_STOPPING','SUPERVISOR_EPOCH_INVALIDATED','SUPERVISOR_STATE_PUBLISH_FAILED') -or
+            $Document.result.exit_code -ne 4) { throw 'Supervisor null start requires explicit unstarted cancellation evidence.' }
+        return
+    }
+    [DateTimeOffset]$started = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
+        $started.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Supervisor terminal start timestamp is invalid.' }
+}
+
 function Assert-RemoveIntegrationTerminalOperation {
     param($Document, [string]$ProjectRoot, [string]$NamespacePath, $Selection, $HistoryAuthorities)
     $label = 'retained Supervisor operation'
@@ -10225,10 +10370,7 @@ function Assert-RemoveIntegrationTerminalOperation {
         if ($null -ne $Document.PSObject.Properties[$field] -and $null -ne $Document.$field -and $Document.$field -isnot [string]) { throw 'Retained Supervisor operation has malformed optional metadata.' }
     }
     if ($null -ne $Document.PSObject.Properties['handoff_queued'] -and $Document.handoff_queued -isnot [bool]) { throw 'Retained Supervisor handoff metadata is invalid.' }
-    [DateTimeOffset]$started = [DateTimeOffset]::MinValue; [DateTimeOffset]$completed = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
-        -not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
-        $started.Offset -ne [TimeSpan]::Zero -or $completed.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Retained Supervisor operation terminal timestamps are invalid.' }
+    Assert-SupervisorOperationTerminalTiming -Document $Document
     Assert-RemoveIntegrationJsonFields -Object $Document.result -Label "$label result" -Required @('exit_code','stdout','stderr','timed_out') -Optional @('output_overflow','output_drain_incomplete')
     $exitCode = Get-RequiredJsonInt32 -Object $Document.result -Name exit_code -Label "$label result"
     if ($Document.result.stdout -isnot [string] -or $Document.result.stderr -isnot [string] -or
@@ -12474,6 +12616,7 @@ try {
             $lock = $null
             try {
                 $lock = Enter-MaterializerLock -ProjectRoot $projectRootPath
+                Invoke-SupervisorHistoryRetention -Manifest $payload -ProjectRoot $projectRootPath -Lock $lock
                 # An activated immutable instance owns its own runtime and
                 # availability evidence. Probe that closure in place instead
                 # of routing through the legacy flat Host probe, which would

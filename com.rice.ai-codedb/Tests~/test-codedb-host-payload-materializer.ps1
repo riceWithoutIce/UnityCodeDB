@@ -40,6 +40,8 @@ param(
 
     [switch]$NextChangeAdmissionIntegrationOnly,
 
+    [switch]$SupervisorHistoryRetentionOnly,
+
     [switch]$FirstInstallAttributionOnly,
 
     [switch]$InstanceManifestContractOnly,
@@ -107,7 +109,51 @@ if ($HistoricalProbeOnly) {
     return
 }
 
-if (@($CommandResultSemanticsOnly, $RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $FailedPreparationRecoveryOnly, $FailedPreparationInterruptionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
+if ($SupervisorHistoryRetentionOnly) {
+    if (-not $RetainedFixtureRoot) { throw 'Supervisor history retention requires an owned fixture root.' }
+    $root = [IO.Path]::GetFullPath($RetainedFixtureRoot)
+    if ($root.IndexOf('\.artifacts\tests\s34-history\',[StringComparison]::OrdinalIgnoreCase) -lt 0) { throw 'Retention fixture escapes its declared test family.' }
+    if (Test-Path -LiteralPath $root) { throw 'Retention fixture already exists.' }
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $sourcePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Tools~/materialize-codedb-host-payload.ps1'
+    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'Retention production parse failed.' }
+    $names=@('Add-SupervisorHistoryReferences','Invoke-SupervisorHistoryRetention')
+    $parts=New-Object 'System.Collections.Generic.List[string]'
+    foreach($name in $names){$node=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true));if($node.Count -ne 1){throw "Retention function $name is ambiguous"};$parts.Add($node[0].Extent.Text)}
+    $module=New-Module -Name ('S34Retention_'+[guid]::NewGuid().ToString('N')) -ScriptBlock ([scriptblock]::Create(("param(`$moduleRoot)`n`$script:InitialRoot = `$moduleRoot`n" + ($parts -join "`n")))) -ArgumentList $root
+    try { & $module {
+        $root = $script:InitialRoot
+        $script:ManagedBy='com.rice.ai-codedb';$script:InstanceControlRelativePath='AIWork/.runtime/codedb/control';$script:InstancesRelativePath='AIWork/.runtime/codedb/instances'
+        function Get-InstanceActivationContractRoot { param($Manifest,$ProjectRoot);Join-Path $ProjectRoot 'AIWork/.runtime/codedb/control/contracts/v0.3-control/v2' }
+        function Get-InstanceProjectPath { param($ProjectRoot,$RelativePath,$Label);Join-Path $ProjectRoot $RelativePath }
+        function Assert-NoReparsePoint { param($Path,$Root,$Label) }
+        function Get-MaterializerProjectIdentity { param($ProjectRoot);'sha256:' + ('a'*64) }
+        function Read-BoundedJsonDocument { param($Path,$Label,$MaximumBytes);[pscustomobject]@{Document=(Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)} }
+        function Test-RemoveIntegrationPathEqual { param($Left,$Right);[IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right) }
+        function Get-FileSha256 { param($Path);(Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
+        function Assert-ProjectInstallTerminalResult { param($Document) }
+        function Assert-ProjectInstallExecutionDisposition { param($Document) }
+        function Assert-RemoveIntegrationV2ProcessAbsent { param($ProcessId,$RecordedStartIdentity,$Label) }
+        $project=Join-Path $root 'project';$runtime=Join-Path $project 'AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor';$history=Join-Path $runtime 'operation-history';$control=Join-Path $project 'AIWork/.runtime/codedb/control'
+        New-Item -ItemType Directory -Force -Path $history,$control | Out-Null
+        $lock=[pscustomobject]@{Stream=[IO.MemoryStream]::new()}
+        $manifest=[pscustomobject]@{RuntimeContractSha256=('4'*64)}
+        $base=[ordered]@{schema_version=1;managed_by='com.rice.ai-codedb';key='routine';request_id='r';name='materialize:Probe';lane='maintenance';state='completed';phase='completed';owner_epoch=('7'*32);project_identity='sha256:'+('a'*64);root=$project;runtime=$runtime;selected_instance_id=('3'*32);selected_generation_id='fixture';runtime_contract_sha256=('4'*64);child=$null;started_at_utc='2026-10-18T00:00:00.000Z';completed_at_utc='2026-10-18T00:00:01.000Z';execution_disposition='NO_CHILD';result=[ordered]@{exit_code=0;stdout='';stderr='';timed_out=$false;output_overflow=$false;output_drain_incomplete=$false}}
+        $canonicalId=[guid]::NewGuid().ToString('N');$canonical=Join-Path $runtime 'operation.json';$base.operation_id=$canonicalId;$base | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $canonical -Encoding utf8
+        for($i=0;$i -lt 5000;$i++){ $d=[ordered]@{};foreach($p in $base.Keys){$d[$p]=$base[$p]};$d.operation_id=([guid]::NewGuid().ToString('N'));$d | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $history ($d.operation_id+'.json')) -Encoding utf8 }
+        $canonicalRecord=[ordered]@{};foreach($p in $base.Keys){$canonicalRecord[$p]=$base[$p]};$canonicalRecord.operation_id=$canonicalId
+        $canonicalRecord | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $history ($canonicalId+'.json')) -Encoding utf8
+        $unknown=[ordered]@{};foreach($p in $base.Keys){$unknown[$p]=$base[$p]};$unknown.operation_id=([guid]::NewGuid().ToString('N'));$unknown.state='failed';$unknown.phase='failed';$unknown.execution_disposition='UNKNOWN';$unknown.result.exit_code=1;$unknown | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $history ($unknown.operation_id+'.json')) -Encoding utf8
+        & $module { param($manifest,$project,$lock); Invoke-SupervisorHistoryRetention -Manifest $manifest -ProjectRoot $project -Lock $lock } $manifest $project $lock
+        $remaining=@(Get-ChildItem -LiteralPath $history -File);if($remaining.Count -ge 4096 -or $remaining.Count -ne 130){throw "Retention count was $($remaining.Count), expected canonical, unknown and 128."}
+        if (-not (Test-Path -LiteralPath (Join-Path $history ($unknown.operation_id+'.json')))) { throw 'Retention removed unresolved UNKNOWN evidence.' }
+        Write-Output '[HISTORY_RETENTION] PASS production retention function classified 5000 complete NO_CHILD routine records beyond the former 4096 bound, preserved canonical and UNKNOWN evidence, and retained bounded 128-record suffix; no child/process launched.'
+    } -ArgumentList $root } finally {Remove-Module $module -ErrorAction SilentlyContinue}
+    return
+}
+
+if (@($CommandResultSemanticsOnly, $RepairOnly, $McpAvailabilityOnly, $UninstallOnly, $McpConfigOnly, $PrerequisiteOnly, $UpgradeOnly, $PayloadContractOnly, $ActivationContractOnly, $ActivationTransactionOnly, $ActivationRetirementOnly, $OperationalReadinessOnly, $HistoricalReconciliationOnly, $ControlContractReinstallOnly, $OwnerIdentityRemovalOnly, $PartialV1RemovalOnly, $PortabilityOnly, $NextChangeAdmissionOnly, $NextChangeAdmissionIntegrationOnly, $SupervisorHistoryRetentionOnly, $FirstInstallAttributionOnly, $InstanceManifestContractOnly, $FailedPreparationRecoveryOnly, $FailedPreparationInterruptionOnly, $TransactionOnly | Where-Object { $_ }).Count -gt 1) {
     throw "Focused materializer switches are mutually exclusive."
 }
 

@@ -5014,10 +5014,7 @@ function Assert-ProjectInstallTerminalResult {
     if ($Document.lane -cne 'maintenance' -or $Document.request_id -isnot [string]) { throw 'Install Supervisor terminal request is malformed.' }
     $null = Get-RequiredJsonString -Object $Document -Name key -Label 'Install Supervisor terminal'
     $null = Get-RequiredJsonString -Object $Document -Name name -Label 'Install Supervisor terminal'
-    [DateTimeOffset]$started = [DateTimeOffset]::MinValue; [DateTimeOffset]$completed = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse($Document.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$started) -or
-        -not [DateTimeOffset]::TryParse($Document.completed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$completed) -or
-        $started.Offset -ne [TimeSpan]::Zero -or $completed.Offset -ne [TimeSpan]::Zero -or $completed -lt $started) { throw 'Install Supervisor terminal timestamps are invalid.' }
+    Assert-SupervisorOperationTerminalTiming -Document $Document
     Assert-RemoveIntegrationJsonFields -Object $Document.result -Label $label -Required @('exit_code','stdout','stderr','timed_out','output_overflow','output_drain_incomplete')
     $exitCode = Get-RequiredJsonInt32 -Object $Document.result -Name exit_code -Label $label
     if ($Document.result.stdout -isnot [string] -or $Document.result.stderr -isnot [string] -or
@@ -5080,6 +5077,7 @@ function Invoke-InstanceConvergence {
     Set-MaterializerCommandPhase -Phase "PREFLIGHT"
     try {
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
+        Invoke-SupervisorHistoryRetention -Manifest $Manifest -ProjectRoot $ProjectRoot -Lock $lock
         $null = Assert-MachinePrerequisiteForAction -Manifest $Manifest -ActionName $ActionName
         $installAdmission = [Environment]::GetEnvironmentVariable('RICE_CODEDB_PROJECT_INSTALL_ADMISSION', 'Process')
         if ($ActionName -eq 'Install' -and -not [string]::IsNullOrEmpty($installAdmission)) {
@@ -5454,6 +5452,7 @@ function Invoke-InstanceUninstall {
             Invoke-TestAutomaticCleanupStateCapturedSignal
         }
         $lock = Enter-MaterializerLock -ProjectRoot $ProjectRoot -WaitForExisting -WaitTimeoutMilliseconds 120000
+        Invoke-SupervisorHistoryRetention -Manifest $Manifest -ProjectRoot $ProjectRoot -Lock $lock
         $initialDesired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
         $initialAuthority = if ($initialDesired.DesiredState -eq 'INSTALLED' -or -not $AutomaticCleanup) { Get-CurrentProjectRemovalAuthority -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowNoNewCandidate:($initialDesired.DesiredState -eq 'UNINSTALLED') } else { $null }
         $failedAuthority = if ($null -ne $initialAuthority -and $initialAuthority.Kind -ceq 'FAILED_PREPARATION') { $initialAuthority } else { $null }
@@ -5500,15 +5499,21 @@ function Invoke-InstanceUninstall {
             return
         }
         if ($desiredBefore.DesiredState -eq "UNINSTALLED" -and $null -eq $previous -and $null -eq $failedAuthority) {
-            Invoke-TestUninstallAfterMcpHandshake
-            $cleanupState = Get-InstanceUninstallCleanupState `
-                -ProjectRoot $ProjectRoot `
-                -Manifest $Manifest `
-                -Lock $lock `
-                -MarkerPath $MarkerPath `
-                -PerformCleanup
-            if ($desiredBefore.CleanupState -ne $cleanupState) {
-                Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "UNINSTALLED" -StateId $desiredBefore.StateId -CleanupState $cleanupState
+            # A repeated logical uninstall is observationally idempotent. The
+            # first accepted operation owns cleanup disposition; a later click
+            # must not retrigger physical cleanup or touch retained content.
+            $cleanupState = [string]$desiredBefore.CleanupState
+            if ($AutomaticCleanup) {
+                Invoke-TestUninstallAfterMcpHandshake
+                $cleanupState = Get-InstanceUninstallCleanupState `
+                    -ProjectRoot $ProjectRoot `
+                    -Manifest $Manifest `
+                    -Lock $lock `
+                    -MarkerPath $MarkerPath `
+                    -PerformCleanup
+                if ($desiredBefore.CleanupState -ne $cleanupState) {
+                    Update-InstanceDesiredCleanupState -ProjectRoot $ProjectRoot -Lock $lock -DesiredState "UNINSTALLED" -StateId $desiredBefore.StateId -CleanupState $cleanupState
+                }
             }
             $nextAction = if ($cleanupState -eq "PENDING") {
                 "The prior instance remains inert and pending; use Install CodeDB to create a fresh integration."
