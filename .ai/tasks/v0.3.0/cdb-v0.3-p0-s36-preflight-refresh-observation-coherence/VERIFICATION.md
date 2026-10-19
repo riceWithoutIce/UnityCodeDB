@@ -92,3 +92,57 @@
   do not automatically dispatch repairs or begin delivery/real execution.
 - Human decision or authorization required: source disposition; any later
   delivery or real Unity gate requires its own applicable authorization.
+
+## Targeted Repair Review — NUnit Attribute Compatibility
+
+- Repair verdict: PASS for closure of the original attribute-compatibility
+  finding at the source/API surface; semantic compilation and execution remain
+  DEFERRED. No new in-scope finding or direct repair request.
+- Review scope was limited to the original CS0246 finding, the approved one-line
+  replacement, its actual consumer metadata, and unchanged production/test
+  behavior. No broader audit was performed.
+- Repair admission matched the approved baseline HEAD
+  `4291e80795681ad0057518b5ecd6c04e3c9ca92b` and the exact final identities:
+
+| File | SHA-256 |
+| --- | --- |
+| `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs` | `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6` |
+| `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs` | `3a2d379799924e62bd482b28f369d61f2e0915ea06d0d4482b979e5e67b87d2f` |
+
+- The implementation file is byte-identical to the admitted production
+  snapshot. The only implementation diff is one test line:
+  `[NonParallelizable]` -> `[Parallelizable(ParallelScope.None)]` on
+  `AICodedbPreflightRefreshTests`; `git diff --check` passes. The existing
+  `NUnit.Framework` import, all four methods, all 10 parameterized scenarios,
+  fixtures, and production cache logic remain unchanged.
+- Independently loaded the actual S35 consumer assembly
+  `com.unity.ext.nunit@1.0.6/net35/unity-custom/nunit.framework.dll`:
+  SHA-256 `e388e140954de12970384331d1730e95b4613ef53c3326b6f8fa0fffdbc9314f`,
+  assembly version `3.5.0.0`. Reflection confirmed
+  `NUnit.Framework.NonParallelizableAttribute` is absent,
+  `ParallelizableAttribute(ParallelScope)` has a public constructor, and
+  `ParallelScope.None` exists with numeric value `0`. The replacement therefore
+  uses the available API while retaining the intended no-parallel scheduling.
+- This closes the original unsupported-attribute diagnosis as a bounded source
+  compatibility issue. The prior human CS0246 evidence remains historical and
+  preserved in `DELIVERY-RESULT.md`; it is not relabeled as a successful
+  compile. The reused syntax-only check and metadata inspection do not prove
+  referenced semantic compilation, NUnit execution, or Unity behavior.
+- Tests rerun: none. No Unity/EditMode/Test Runner, MCP/BatchMode, lifecycle
+  command, live operation, process control, network, export, commit or
+  reference switch ran for this repair review. The failed delivery artifact and
+  protected S35 state remain unchanged.
+- Original finding status: CLOSED at the approved source/API compatibility
+  boundary; nearest regression review PASS. Remaining evidence boundary is
+  DEFERRED semantic compilation, focused NUnit execution and human idle
+  acceptance on the corrected snapshot.
+
+## Repair Handoff
+
+- Current task: cdb-v0.3-p0-s36-preflight-refresh-observation-coherence.
+- Current status: COMPLETE / TARGETED_REPAIR_REVIEW_PASS_WITH_EXECUTION_LIMITS.
+- Next notification: current parent Planner, then User.
+- Next action: return the consolidated original review plus this repair review
+  for ACCEPT / FIX / DEFER / STOP; do not dispatch another repair automatically.
+- Human decision or authorization required: any renewed delivery or real Unity
+  validation remains a separate explicit gate.

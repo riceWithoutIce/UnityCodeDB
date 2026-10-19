@@ -380,7 +380,7 @@ namespace Rice.AI.Codedb.Editor.Tests
     }
 
     // Cache-only regressions use the owned workspace and never dispatch a preflight.
-    [NonParallelizable]
+    [Parallelizable(ParallelScope.None)]
     internal sealed class AICodedbPreflightRefreshTests
     {
         [TestCase(true, 1d)]

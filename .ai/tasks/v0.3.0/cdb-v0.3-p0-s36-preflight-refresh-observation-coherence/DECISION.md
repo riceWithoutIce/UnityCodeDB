@@ -75,6 +75,34 @@ original same-S34-artifact grant.
 
 ## Handoff
 
+## Corrected delivery authorization
+
+The prior artifact failed human compilation because its test used an NUnit
+attribute absent from S35's actual consumer DLL. The approved one-line repair
+was independently reviewed and closed the original finding. User now replied
+`授权` to the renewed delivery request. Treat this as authorization for the
+corrected snapshot only: one exact local commit, exact commit-derived export
+and checks, then replacement of the closed S35 Package reference. It does not
+authorize Unity launch, Test Runner execution, Install/Uninstall/reinstall,
+process control, push or publication. The prior failed artifact and evidence
+remain protected.
+
+- Corrected test SHA-256:
+  `3a2d379799924e62bd482b28f369d61f2e0915ea06d0d4482b979e5e67b87d2f`.
+- Production SHA-256 remains:
+  `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6`.
+- New commit message: `fix: use supported NUnit parallel attribute`.
+- Exact new commit allowlist: the corrected test file and this task's six
+  records (`TASK.md`, `RESULT.md`, `VERIFICATION.md`, `DECISION.md`,
+  `DELIVERY-RESULT.md`); no production source or unrelated dirty path.
+- After export, use a fresh output root under
+  `.artifacts/s36-preflight-refresh-<new-commit-short>/`. Back up the current
+  S35 manifest/lock under a new repository-local `.backups/` child and replace
+  only their existing S36 reference with the new exact extraction.
+- Recheck S35 closure immediately before switching. If Unity is open or a lock
+  is present, stop and hand the closure prerequisite back to the user; do not
+  terminate it.
+
 Human closure handoff received: `s35 已经关闭`. Parent read-only checks found
 zero attributed S35 Unity processes, no `Temp/UnityLockfile` and no
 `Library/EditorInstance.json`. Accepted source/test hashes still match, and
@@ -85,10 +113,10 @@ group was still pending at that earlier closure check. The subsequent explicit
 `同意授权` grants the group above; execution starts after recording this grant.
 
 - Current task: S36 source repair.
-- Current status: SOURCE_ACCEPTED_WITH_EXECUTION_LIMITS / DELIVERY_AUTHORIZED.
-- Next notification: current parent, to execute the exact named delivery group;
-  S35 closure handoff has been received and checked.
-- Next action: execute that group without repeated
-  stage approval, stopping dependent actions on a failed prerequisite/gate.
-- Human authorization required: none for that frozen delivery group. Unity
-  execution and real lifecycle commands remain outside this delivery grant.
+- Current status: SOURCE_ACCEPTED_WITH_EXECUTION_LIMITS / CORRECTED_DELIVERY_AUTHORIZED.
+- Next notification: current parent, for the corrected exact commit/export and
+  closed-S35 reference switch.
+- Next action: execute the renewed corrected delivery group and then hand back
+  the human compile/focused-test/idle checklist.
+- Human authorization required: none inside this corrected delivery group;
+  real Unity and lifecycle commands remain outside it.

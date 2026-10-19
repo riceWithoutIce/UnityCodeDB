@@ -4,7 +4,7 @@
 
 - Product: UnityCodeDB, v0.3.0.
 - Workflow: codedb-workflow-v2, revision 2.6.
-- Status: COMPLETE / SOURCE_ACCEPTED_WITH_EXECUTION_LIMITS.
+- Status: DOING / CORRECTED_DELIVERY_AUTHORIZED.
 - Planner: current parent. Coder then read-only Verifier: approved sequentially.
 - Review mode: GUARDED (lifecycle cache publication).
 - Execution mode: FAST_SUBAGENT.
@@ -110,6 +110,46 @@ This is a separate source deliverable; S35 remains real acceptance only.
 - Structural guard starts at repairs 0/2, independent causes 1/2, consecutive
   diagnostic-only checkpoints 0/3. Model escalation: NONE.
 
+## Approved direct NUnit compatibility repair
+
+User replied `同意批准` to the concrete single-attribute correction and reuse
+of the stopped Coder -> read-only Verifier. This is a same-task direct test
+regression repair, not new delivery authorization. The earlier delivery group
+is already consumed; no new commit/export/reference switch is authorized here.
+
+- Repair baseline: HEAD `4291e80795681ad0057518b5ecd6c04e3c9ca92b`.
+  Test SHA-256 `2d635f6e858184d11ad28e88c3afd7031ea2945e0c2e766d69ba92f4bf95cc8b`.
+  Production SHA-256 `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6`.
+  Both C# files are clean at this repair admission.
+- Repair change allowlist narrows to exactly one test-source line:
+  `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`, replacing
+  `[NonParallelizable]` with `[Parallelizable(ParallelScope.None)]` on
+  `AICodedbPreflightRefreshTests`. Preserve all test bodies/cases and production
+  source bytes. Coder appends the repair outcome to RESULT.md; original result
+  identities/evidence remain historical and must not be rewritten as a new pass.
+- Read closure narrows to this decoration, its NUnit using/assembly reference,
+  the S35 actual NUnit DLL/package dependency metadata, existing syntax tool,
+  and the failure/accepted records in this task. No broader source review.
+- Evidence: exact one-line diff/whitespace; original ten cases remain intact;
+  actual NUnit DLL metadata provides ParallelizableAttribute(ParallelScope)
+  and ParallelScope.None while NonParallelizableAttribute is absent. If an
+  unchanged applicable syntax check is reused, label syntax only. Do not build
+  another harness or claim full semantic compilation/NUnit/Unity execution.
+- Actual consumer: S35 PackageCache `com.unity.ext.nunit@1.0.6/net35/unity-custom/`
+  `nunit.framework.dll`, assembly 3.5.0.0, SHA-256
+  `e388e140954de12970384331d1730e95b4613ef53c3326b6f8fa0fffdbc9314f`.
+- Independent review: reuse the stopped Verifier only after stopped Coder's
+  stable snapshot admission; review original CS0246 finding, replacement
+  compatibility/nonparallel intent and unchanged tests/production only.
+  Append the repair review to VERIFICATION.md; no unchanged test reruns.
+- Existing model, role time/attempt budgets and repository-local output rules
+  continue. Subagent mode remains depth-one sequential FAST_SUBAGENT with
+  TASK_SPECIFIC current approval. No Unity launch, Test Runner, lifecycle action,
+  runtime mutation, package extraction edit, dependency update or process control.
+- On any need beyond this one decoration, stop and return its concrete reason.
+  This is repair iteration 1/2 for the direct compiler regression; no real
+  acceptance reevaluation has yet run on the corrected source.
+
 ## Definition Of Done And Handoff
 
 - Source path preserves a paired observation and rejects stale publication;
@@ -126,9 +166,13 @@ This is a separate source deliverable; S35 remains real acceptance only.
   review passed with no in-scope finding. Semantic compilation, NUnit and human
   idle stability are deferred. User replied `同意 accept` on 2026-10-19,
   accepting the exact source snapshot with those execution limits. See DECISION.md.
-- Next notification: current parent, for the authorized delivery in DECISION.md.
-- Next action: execute the exact commit/export/S35-reference-switch group after
-  recording `同意授权`; human S35 closure has been reported and checked.
-- Human decision required: none inside that authorized group; source acceptance is complete.
+- Next notification: current parent, for the renewed corrected commit/export and
+  closed-S35 reference switch. Review closed the original CS0246 finding with
+  no new finding; parent matched final hashes and exact +1/-1 diff.
+- Next action: execute only the corrected delivery group authorized by the
+  user's `授权`; recheck S35 closure before switching and stop if occupied.
+- Human decision required: none for this approved correction/review; initial source acceptance
+  and delivery remain historical facts, while human compilation has failed.
   No new source work, broader review or dependent S35 lifecycle command starts
-  automatically. Real Unity acceptance remains separate.
+  automatically. Real Unity acceptance remains separate. Delivery is recorded
+  in DELIVERY-RESULT.md; no lifecycle command or Unity launch was performed.

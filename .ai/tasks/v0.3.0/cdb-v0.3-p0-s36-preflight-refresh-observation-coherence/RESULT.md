@@ -100,3 +100,75 @@ close the human idle-regression gate.
   authorized independent read-only Verifier for one targeted review.
 - Human decision or authorization required: none for that frozen review;
   subsequent source acceptance, delivery and human Unity gates remain separate.
+
+## Approved NUnit Compatibility Repair — 2026-10-19
+
+The original source result above is historical evidence. Subsequent human
+compilation on the exact delivered artifact failed with CS0246 because the
+actual NUnit dependency does not expose `NonParallelizableAttribute`; the
+earlier syntax-only PASS did not establish referenced-type compatibility.
+The failure and failed artifact remain recorded in DELIVERY-RESULT.md.
+
+User explicitly approved the single-attribute fix and sequential reuse of
+Coder -> read-only Verifier. Repair baseline was clean HEAD
+`4291e80795681ad0057518b5ecd6c04e3c9ca92b`, with both original C# hashes matched
+before this repair. Inherited model/reasoning metadata remains as reported
+above; no override, dependency update or delegation occurred.
+
+Only source change: replace `[NonParallelizable]` with
+`[Parallelizable(ParallelScope.None)]` on `AICodedbPreflightRefreshTests`.
+The exact diff is `+1/-1` in the test file. Its using directive already imports
+`NUnit.Framework`, and the unchanged test assembly definition declares
+`optionalUnityReferences: TestAssemblies`. All ten scenarios, fixtures and
+production bytes remain unchanged.
+
+Read-only metadata inspection loaded the actual consumer assembly from
+`.artifacts/unity-projects/s35/Library/PackageCache/com.unity.ext.nunit@1.0.6/net35/unity-custom/nunit.framework.dll`:
+
+- SHA-256 matched
+  `e388e140954de12970384331d1730e95b4613ef53c3326b6f8fa0fffdbc9314f`.
+- Assembly version: `3.5.0.0`.
+- `NonParallelizableAttribute` absent: true.
+- `ParallelizableAttribute(ParallelScope)` public constructor present: true.
+- `ParallelScope.None` enum member present: true; numeric value `0`.
+
+The replacement names the supported constructor with scope None, retaining
+explicit nonparallel scheduling intent without removing the decoration or
+upgrading NUnit. This metadata check validates the replacement API surface;
+it does not execute NUnit scheduling or establish successful Unity compilation.
+
+Checks completed:
+
+- PASS: narrow diff/numstat showed exactly the one replacement above; no other
+  source hunks. The production file is clean and retains its admitted hash.
+- PASS: `git diff --check -- com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`,
+  exit 0.
+- PASS, syntax only: reused the unchanged existing C#9 parser on the changed
+  test file, exit 0:
+
+  ```text
+  dotnet .artifacts/tests/s29-optional-flat/syntax/bin/Debug/net10.0/Syntax.dll com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+  [CS_SYNTAX_ONLY] files=1 errors=0; consumer_execution=NOT_RUN
+  ```
+
+Stable repair snapshot (source writes stopped):
+
+| File | SHA-256 |
+| --- | --- |
+| `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs` (unchanged) | `07594a7b236465e26ca91ab2832b9c82d694728a64a3004dac5144d2c0f691a6` |
+| `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs` | `3a2d379799924e62bd482b28f369d61f2e0915ea06d0d4482b979e5e67b87d2f` |
+
+Semantic compilation, NUnit execution and human Unity/idle acceptance remain
+DEFERRED. No Unity launch, lifecycle action, live operation, process control,
+new harness, package extraction edit, commit/export/reference switch or network
+operation ran during this repair. Existing failed delivery and protected state
+were preserved. The previous delivery authorization was not reused.
+
+- Current task: S36 direct NUnit compatibility repair, iteration 1/2.
+- Current status: COMPLETE / ONE_ATTRIBUTE_FIX_WITH_EXECUTION_LIMITS.
+- Next notification: current parent Planner.
+- Next action: admit this stable single-line snapshot and reuse the already
+  authorized read-only Verifier for original CS0246 compatibility finding,
+  nonparallel intent and unchanged test/production review only.
+- Human decision or authorization required: none for the approved narrow review;
+  source disposition and new delivery/human execution retain separate gates.
