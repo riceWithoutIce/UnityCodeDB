@@ -1317,9 +1317,19 @@ async function runDaemon(raw) {
   };
   const finishOperation = async (value, result, error = null) => {
     value.completed_at_utc = new Date().toISOString();
-    value.result = error
-      ? { exit_code: 1, stdout: "", stderr: String(error.message || error), timed_out: false }
-      : compactResult(result);
+    // An admission/pre-execution exception still produces a terminal record.
+    // Keep the output-observation contract complete even though no child
+    // output was drained; unresolved child identity remains fail-closed below.
+    value.result = compactResult(error
+      ? {
+        code: 1,
+        stdout: "",
+        stderr: String(error.message || error),
+        timedOut: false,
+        outputOverflow: false,
+        outputDrainIncomplete: false
+      }
+      : result);
     const exitCode = commandExitCode(value.result);
     value.state = !error && exitCode === 0 ? "completed" : "failed";
     value.phase = value.state === "completed" ? "completed" : "failed";

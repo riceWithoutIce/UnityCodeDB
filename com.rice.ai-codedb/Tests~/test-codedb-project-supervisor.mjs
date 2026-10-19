@@ -148,6 +148,15 @@ if (process.argv[2] === "--s32-disposition-fixture") {
   await save("capture-failed",failed);
   failed.state="running";
   await assert.rejects(()=>producer.prepareOperationChildEvidence(context,failed,"second"),/unresolved identity/);
+  const admissionError=fresh();
+  await producer.prepareOperationChildEvidence(context,admissionError,"fixture_spawn_admitted");
+  await producer.finishOperation(admissionError,null,new Error("admission failed"));
+  assert.equal(admissionError.result.output_overflow,false);
+  assert.equal(admissionError.result.output_drain_incomplete,false);
+  assert.equal(admissionError.execution_disposition,"CHILD_ADMITTED");
+  assert.equal(admissionError.child,null);
+  admissionError.state="running";
+  await assert.rejects(()=>producer.prepareOperationChildEvidence(context,admissionError,"second"),/unresolved identity/);
   const child=fresh();await producer.prepareOperationChildEvidence(context,child,"fixture_spawn_admitted");
   sandbox.getProcessEvidence=async()=>({available:true,exists:true,pid:87654321,processStartIdentity:"638962990000000000",
     executablePath:process.execPath,argvSha256:crypto.createHash("sha256").update('["fixture"]').digest("hex"),commandLineSha256:"9".repeat(64)});

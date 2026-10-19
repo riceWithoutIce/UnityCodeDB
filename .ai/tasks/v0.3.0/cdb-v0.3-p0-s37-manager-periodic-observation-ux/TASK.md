@@ -4,8 +4,9 @@
 
 - Product: UnityCodeDB, v0.3.0.
 - Workflow: codedb-workflow-v2, revision 2.6.
-- Status: DELIVERY_COMPLETE / HUMAN_ACCEPTANCE_PENDING for the narrow
-  Supervisor repair; broader S37 separation remains pending.
+- Status: HUMAN_ACCEPTANCE_PASS_WITH_FOLLOWUP for the narrow Supervisor repair;
+  the observed periodic timeout did not recur in the latest bounded acceptance.
+  A separate startup-UX follow-up remains deferred.
 - Planner/Coder: current parent. Verifier: authorized S37 read-only child,
   completed including F1 re-review.
 - Review mode: GUARDED; original finding F1 closed, review stopped.
@@ -61,6 +62,22 @@ not evidence that S36's cache-coherence fix failed.
   -> Ready behavior is acceptable, then freeze one narrow objective and evidence
   plan before implementation.
 - Human decision or authorization required: future scope and execution grant.
+
+## Human acceptance follow-up — 2026-10-19
+
+The user reports that acceptance passed and the earlier periodic
+`NeedsAttention` transition did not recur. Manager reopen/tab behavior and
+Unity close/reopen were reported normal. On opening Manager, the visible
+`Starting` state persisted longer than desired before readiness; the screen
+states that Unity can continue to be used and no error or blocked command was
+reported.
+
+Disposition: record the prolonged `Starting` display as a non-blocking startup
+UX follow-up. Complete the current S37 acceptance record first; do not reopen
+the Supervisor timeout repair or change readiness thresholds based on this
+observation alone. A future startup-UX task may measure the transition time
+and decide whether to show a lighter progress state or improve readiness
+publication.
 
 ## New human observation — 2026-10-19
 

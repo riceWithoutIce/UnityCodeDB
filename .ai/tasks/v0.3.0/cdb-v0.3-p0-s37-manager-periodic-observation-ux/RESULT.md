@@ -240,3 +240,49 @@ process termination or runtime-state rewrite was performed.
 
 The next step is human acceptance on S35: open the project, confirm compile and
 focused tests, then Manager reopen/tab behavior and the bounded idle observation.
+
+## Human acceptance closure update — 2026-10-19
+
+The user reports that acceptance passed: the periodic `NeedsAttention` state
+did not recur, Manager close/reopen and tab switching were normal, and Unity
+close/reopen was normal. This closes the current human acceptance evidence for
+the narrow Supervisor observation repair as `PASS_WITH_FOLLOWUP`.
+
+The user also observed that Manager can remain visibly `Starting` for a long
+time when first opened. The screen explicitly allows continued Unity use, and
+no command failure or persistent readiness error was reported. This is recorded
+as a non-blocking startup UX follow-up. It is deferred until after the current
+task acceptance and does not authorize a threshold change, source repair,
+package export, reference switch, or another lifecycle operation.
+
+## Human acceptance observation — 2026-10-19
+
+The user reported that the first S35 opening had no compile error, but Manager
+initially showed `Needs attention` with
+`SUPERVISOR:SUPERVISOR_IPC_TIMEOUT`; Host payload, Current instance and related
+rows were `Not evaluated`. The state later recovered to `Ready` without an
+Install/Uninstall action.
+
+Read-only runtime evidence at `2026-10-19T18:27:17+08:00` showed the same S35
+Supervisor process and Coordinator alive, Supervisor `readiness_state=core_ready`,
+`reason_code=COORDINATOR_OPERATIONAL`, revision `295`, and Coordinator
+`provider_state=ready`. The latest completed Probe had exit code `0`; the first
+Probe after startup failed once before two later Probe attempts completed.
+
+This is recorded as `HUMAN_ACCEPTANCE_PARTIAL / RECOVERED_READY`: the recovery
+path is usable, but the initial timeout remains an observed runtime failure and
+the result does not claim that the intermittent timeout is eliminated. Manager
+reopen/tab, bounded idle recurrence and normal Unity close remain separate
+human evidence items.
+
+## Follow-up source repair prepared — 2026-10-19
+
+The user authorized a narrow repair after the S35 same-version Install
+preflight blocker. The Supervisor exception terminal path now emits the
+complete output-observation fields while preserving fail-closed unknown-child
+admission. A focused fixture covers the real exception branch; syntax, focused
+execution and whitespace checks pass.
+
+This is a working-tree source snapshot only. It does not rewrite the existing
+S35 failed record, export a package, switch the project reference or authorize
+another Install attempt.
