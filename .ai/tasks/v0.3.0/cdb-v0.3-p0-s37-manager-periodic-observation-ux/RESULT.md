@@ -213,3 +213,30 @@ The existing commit-derived exporter was run once against that commit into
 No Unity, lifecycle command, process termination, Install/Uninstall or push
 was performed during this delivery step. This documentation-only record is
 kept separate from the code-bearing commit.
+
+## S35 reference switch — 2026-10-19
+
+The active S35 acceptance project was confirmed closed before mutation: no
+Unity process matched its project root and neither `Temp/UnityLockfile` nor
+`Library/EditorInstance.json` existed.
+
+The original package consumers were backed up under
+`.backups/s37-manager-periodic-observation-0ef48d6/`:
+
+- `manifest.json` before SHA-256:
+  `40948247A542C76D7D9BDF66A74ACC482EFCCA79329BA4DFDDE692FD0EA5740D`;
+- `packages-lock.json` before SHA-256:
+  `06F7BAC62C84EAAA928E048003E4D846D696F866A791FA6836691B5EF606D7C2`.
+
+Only the CodeDB local reference changed in each file. Both parsed consumers
+now resolve to:
+
+`<repository-root>/.artifacts/s37-manager-periodic-observation-0ef48d6/review/com.rice.ai-codedb`
+
+The new reference exists, both manifest and lock values match, testables remain
+unchanged, and byte comparison after replacing the single old reference with
+the new one is exact. No Unity launch, Test Runner, Install/Uninstall,
+process termination or runtime-state rewrite was performed.
+
+The next step is human acceptance on S35: open the project, confirm compile and
+focused tests, then Manager reopen/tab behavior and the bounded idle observation.

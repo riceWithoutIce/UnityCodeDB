@@ -4,13 +4,14 @@
 
 - Product: UnityCodeDB, v0.3.0.
 - Workflow: codedb-workflow-v2, revision 2.6.
-- Status: SOURCE_REVIEW_PASS_WITH_LIMITS / AWAITING_ACCEPT for the narrow
+- Status: DELIVERY_COMPLETE / HUMAN_ACCEPTANCE_PENDING for the narrow
   Supervisor repair; broader S37 separation remains pending.
 - Planner/Coder: current parent. Verifier: authorized S37 read-only child,
   completed including F1 re-review.
 - Review mode: GUARDED; original finding F1 closed, review stopped.
-- Execution mode: parent implementation followed by explicitly authorized
-  read-only child review. No delivery or Unity grant is implied.
+- Execution mode: source review, exact commit/export and S35 reference switch
+  completed under explicit delivery authorization. Human Unity acceptance is
+  still a separate gate.
 - Requirement source: follow-up requested by the user after S36 human smoke.
 
 ## Deferred observation
