@@ -379,6 +379,300 @@ namespace Rice.AI.Codedb.Editor.Tests
 
     }
 
+    // Cache-only regressions use the owned workspace and never dispatch a preflight.
+    [NonParallelizable]
+    internal sealed class AICodedbPreflightRefreshTests
+    {
+        [TestCase(true, 1d)]
+        [TestCase(false, 1d)]
+        [TestCase(true, 121d)]
+        public void PreflightRefresh_PreservesPairedObservationWhenBridgeAdvances(bool available, double ageSeconds)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using (var cache = new CacheScope(workspace, available))
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    var original = Observation(cache.Context, 7, now.AddSeconds(-ageSeconds));
+                    var advanced = Observation(cache.Context, 8, now);
+                    var command = ObservationResult(cache.Context, original);
+                    AICodedbSupervisorSnapshot bound;
+                    Assert.That(AICodedbEditorLifecycle.BindProductStatusToSupervisorObservation(
+                        Ready(), command, original, out bound).State, Is.EqualTo(AICodedbProductState.Ready));
+                    Assert.That(bound, Is.SameAs(original));
+                    Assert.That(AICodedbEditorLifecycle.BindProductStatusToSupervisorObservation(
+                        Ready(), command, advanced, out bound).State, Is.EqualTo(AICodedbProductState.NeedsAttention));
+                    cache.SetBridgeSnapshot(advanced);
+                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(command, Ready(), true, original, null);
+                    var revision = ReadRevision();
+
+                    AICodedbEditorLifecycle.RefreshCachedLifecycleRemovalPreflight(
+                        cache.Context, default(AICodedbCurrentInstanceStatus), () => true, CancellationToken.None);
+
+                    AICodedbCommandResult result;
+                    AICodedbProductStatus status;
+                    bool hasStatus;
+                    AICodedbSupervisorSnapshot snapshot;
+                    AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+                    long updatedRevision;
+                    AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(out result, out status, out hasStatus,
+                        out snapshot, out failure, out updatedRevision);
+                    Assert.That(hasStatus, Is.True);
+                    Assert.That(status.State, Is.EqualTo(AICodedbProductState.Ready));
+                    Assert.That(status.RemovalPreflightPassed, Is.EqualTo(available));
+                    Assert.That(status.Detail, Is.EqualTo(Ready().Detail));
+                    Assert.That(status.DiagnosticDetail, available ? Is.Empty : Does.Contain("fixture denied"));
+                    Assert.That(result, Is.SameAs(command));
+                    Assert.That(snapshot, Is.SameAs(original));
+                    Assert.That(snapshot.OperationalObservationRevision, Is.EqualTo(7));
+                    Assert.That(snapshot.ObservedAtUtc, Is.EqualTo(original.ObservedAtUtc));
+                    Assert.That(AICodedbManagerStatusBoundary.IsReadyObservationFresh(snapshot.ObservedAtUtc, now),
+                        Is.EqualTo(ageSeconds <= 30d));
+                    Assert.That(failure, Is.Null);
+                    Assert.That(updatedRevision, Is.EqualTo(revision + 1));
+                }
+            });
+        }
+
+        [TestCase("Uninstalled")]
+        [TestCase("Ready")]
+        [TestCase("TerminalFailure")]
+        [TestCase("Invalidated")]
+        public void PreflightRefresh_DoesNotOverwriteNewerLifecyclePublication(string replacement)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using (var cache = new CacheScope(workspace, true))
+                {
+                    var original = Observation(cache.Context, 7, DateTimeOffset.UtcNow.AddSeconds(-1));
+                    var newer = Observation(cache.Context, 8, DateTimeOffset.UtcNow);
+                    var newerCommand = ObservationResult(cache.Context, newer);
+                    var terminal = TerminalFailure();
+                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(
+                        ObservationResult(cache.Context, original), Ready(), true, original, null);
+                    var revision = ReadRevision();
+                    var replaced = false;
+                    AICodedbEditorLifecycle.RefreshCachedLifecycleRemovalPreflight(cache.Context,
+                        default(AICodedbCurrentInstanceStatus), () =>
+                        {
+                            // This callback runs after the coherent tuple is captured,
+                            // before the preflight-only update attempts publication.
+                            if (!replaced)
+                            {
+                                replaced = true;
+                                if (replacement == "Uninstalled")
+                                    AICodedbEditorLifecycle.PublishAuthoritativeUninstalledCache();
+                                else if (replacement == "Invalidated")
+                                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(null,
+                                        default(AICodedbProductStatus), false, null, null);
+                                else
+                                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(newerCommand,
+                                        replacement == "Ready" ? Ready() : terminal.ProductStatus,
+                                        true, newer, replacement == "Ready" ? null : terminal);
+                            }
+                            return true;
+                        }, CancellationToken.None);
+
+                    AICodedbCommandResult result;
+                    AICodedbProductStatus status;
+                    bool hasStatus;
+                    AICodedbSupervisorSnapshot snapshot;
+                    AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure failure;
+                    long updatedRevision;
+                    AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(out result, out status, out hasStatus,
+                        out snapshot, out failure, out updatedRevision);
+                    Assert.That(replaced, Is.True);
+                    Assert.That(updatedRevision, Is.EqualTo(revision + 1));
+                    Assert.That(hasStatus, Is.EqualTo(replacement != "Invalidated"));
+                    if (replacement == "Uninstalled" || replacement == "Invalidated")
+                    {
+                        Assert.That(result, Is.Null);
+                        Assert.That(snapshot, Is.Null);
+                        Assert.That(failure, Is.Null);
+                        if (hasStatus) Assert.That(status.State, Is.EqualTo(AICodedbProductState.Uninstalled));
+                    }
+                    else
+                    {
+                        Assert.That(result, Is.SameAs(newerCommand));
+                        Assert.That(snapshot, Is.SameAs(newer));
+                        Assert.That(status.RemovalPreflightPassed, Is.False);
+                        Assert.That(status.State, Is.EqualTo(replacement == "Ready"
+                            ? AICodedbProductState.Ready : AICodedbProductState.NeedsAttention));
+                        Assert.That(failure, replacement == "Ready" ? Is.Null : Is.SameAs(terminal));
+                    }
+                }
+            });
+        }
+
+        [Test]
+        public void PreflightRefresh_CannotClearRetainedTerminalFailure()
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using (var cache = new CacheScope(workspace, true))
+                {
+                    var failure = TerminalFailure();
+                    Assert.That(failure.IsValid, Is.True);
+                    // Even a Ready projection cannot authorize clearing a retained failure.
+                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(null, Ready(), true, null, failure);
+                    var revision = ReadRevision();
+                    AICodedbEditorLifecycle.RefreshCachedLifecycleRemovalPreflight(cache.Context,
+                        default(AICodedbCurrentInstanceStatus), () => { Assert.Fail("Preflight must not start."); return true; },
+                        CancellationToken.None);
+                    Assert.That(ReadRevision(), Is.EqualTo(revision));
+                    Assert.That(AICodedbEditorLifecycle.GetCachedTerminalConvergenceFailure(), Is.SameAs(failure));
+                }
+            });
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void PreflightRefresh_CancellationOrContextLossPreventsPublication(bool cancel)
+        {
+            AICodedbTestWorkspace.Run(workspace =>
+            {
+                using (var cache = new CacheScope(workspace, true))
+                using (var cancellation = new CancellationTokenSource())
+                {
+                    AICodedbEditorLifecycle.PublishLifecycleStatusCache(null, Ready(), true, null, null);
+                    var revision = ReadRevision();
+                    AICodedbEditorLifecycle.RefreshCachedLifecycleRemovalPreflight(cache.Context,
+                        default(AICodedbCurrentInstanceStatus), () =>
+                        {
+                            if (cancel) cancellation.Cancel();
+                            return cancel;
+                        }, cancellation.Token);
+                    Assert.That(ReadRevision(), Is.EqualTo(revision));
+                }
+            });
+        }
+
+        private static long ReadRevision()
+        {
+            AICodedbCommandResult result;
+            AICodedbProductStatus status;
+            bool hasStatus;
+            long revision;
+            AICodedbEditorLifecycle.TryGetCachedLifecycleStatus(out result, out status, out hasStatus, out revision);
+            return revision;
+        }
+
+        private static AICodedbProductStatus Ready()
+        {
+            return new AICodedbProductStatus(AICodedbProductState.Ready,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                AICodedbProductLayerState.Current, AICodedbProductLayerState.Current, "Fixture is ready.");
+        }
+
+        private static AICodedbSupervisorSnapshot Observation(
+            AICodedbEditorExecutionContext context, long revision, DateTimeOffset observedAt)
+        {
+            return AICodedbSupervisorSnapshot.Connected(1, 1234, "fixture-lifecycle", context.GetProjectPath("runtime"),
+                "ready", "", "disabled", "disabled", "enabled", "online", AICodedbSupervisorReadinessState.CoreReady,
+                "COORDINATOR_OPERATIONAL", "Fixture readiness", "provider_ready", 1, "fixture-generation",
+                "fixture-generation", new string('a', 64), "CURRENT", 1234, new string('b', 32),
+                AICodedbCoordinatorFailureCategory.None, 1, revision.ToString("x32"), revision,
+                "fixture-supervisor", new string('c', 32), 1, new string('d', 32), observedAt);
+        }
+
+        private static AICodedbCommandResult ObservationResult(
+            AICodedbEditorExecutionContext context, AICodedbSupervisorSnapshot snapshot)
+        {
+            var observation = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "observation_id", snapshot.OperationalObservationId },
+                { "revision", snapshot.OperationalObservationRevision }, { "observed_at_utc", snapshot.ObservedAtUtc.ToString("O") },
+                { "state", "core_ready" }, { "reason_code", snapshot.ReasonCode }, { "detail", snapshot.Detail },
+                { "coordinator_failure_category", "NONE" }, { "project_root", context.ProjectRoot },
+                { "project_identity", AICodedbEditorLifecycle.CreateProjectIdentity(context.ProjectRoot) },
+                { "runtime", snapshot.RuntimePath }, { "selected_instance_id", snapshot.SelectedInstanceId },
+                { "selected_generation_id", snapshot.SelectedGenerationId }, { "target_generation_id", snapshot.TargetGenerationId },
+                { "runtime_contract_sha256", snapshot.RuntimeContractSha256 }, { "generation_disposition", "CURRENT" },
+                { "owner_identity_version", 1 }, { "activation_epoch", snapshot.ActivationEpoch },
+                { "lifecycle_id", snapshot.LifecycleId }, { "supervisor_id", snapshot.SupervisorId },
+                { "owner_epoch", snapshot.OwnerEpoch }, { "supervisor_pid", snapshot.SupervisorProcessId }
+            };
+            return new AICodedbCommandResult(0, "[SUPERVISOR_OPERATIONAL_READINESS] "
+                + AICodedbSupervisorBridge.SerializeJsonObject(observation), "", false);
+        }
+
+        private static AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure TerminalFailure()
+        {
+            return new AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure(
+                new AICodedbProductStatus(AICodedbProductState.NeedsAttention,
+                    AICodedbProductLayerState.Current, AICodedbProductLayerState.Current,
+                    AICodedbProductLayerState.Current, "Fixture terminal failure."),
+                "MCP_UNAVAILABLE", AICodedbEditorLifecycle.AICodedbTerminalConvergenceFailure.ProducerName,
+                "fixture-package", "fixture-generation", "fixture-generation", new string('b', 32),
+                new string('a', 64), new string('e', 32), "fixture-supervisor", new string('c', 32), 7);
+        }
+
+        private sealed class CacheScope : IDisposable
+        {
+            private const System.Reflection.BindingFlags StaticFlags =
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            private const System.Reflection.BindingFlags InstanceFlags =
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            private readonly Dictionary<System.Reflection.FieldInfo, object> _original =
+                new Dictionary<System.Reflection.FieldInfo, object>();
+            private readonly object _cacheLock;
+            private readonly object _preflightLock;
+            private readonly System.Reflection.FieldInfo _preflightField;
+            private readonly object _preflight;
+            private readonly object _bridge;
+            private readonly object _bridgeLock;
+            private readonly System.Reflection.FieldInfo _bridgeSnapshotField;
+            private readonly object _bridgeSnapshot;
+            internal AICodedbEditorExecutionContext Context { get; }
+
+            internal CacheScope(AICodedbTestWorkspace workspace, bool available)
+            {
+                Context = new AICodedbEditorExecutionContext(UnityEngine.RuntimePlatform.WindowsEditor,
+                    workspace.GetPath("project"), workspace.GetPath("package"), "S36 cache fixture");
+                var lifecycle = typeof(AICodedbEditorLifecycle);
+                _cacheLock = lifecycle.GetField("HostStatusCacheLock", StaticFlags).GetValue(null);
+                lock (_cacheLock)
+                    foreach (var name in new[] { "_cachedHostStatusResult", "_cachedLifecycleProductStatus",
+                        "_cachedLifecycleSupervisorSnapshot", "_cachedTerminalConvergenceFailure",
+                        "_hasCachedLifecycleProductStatus", "_cachedHostStatusRevision" })
+                    {
+                        var field = lifecycle.GetField(name, StaticFlags);
+                        _original.Add(field, field.GetValue(null));
+                    }
+                _preflightLock = lifecycle.GetField("RemovalPreflightCacheLock", StaticFlags).GetValue(null);
+                _preflightField = lifecycle.GetField("_removalPreflightCache", StaticFlags);
+                var cacheType = lifecycle.GetNestedType("RemovalPreflightCacheEntry", System.Reflection.BindingFlags.NonPublic);
+                var key = (string)lifecycle.GetMethod("GetRemovalPreflightCacheKey", StaticFlags).Invoke(null,
+                    new object[] { Context, default(AICodedbCurrentInstanceStatus), true });
+                var entry = Activator.CreateInstance(cacheType, InstanceFlags, null,
+                    new object[] { key, DateTime.UtcNow.AddMinutes(1), available, available ? "" : "fixture denied" },
+                    CultureInfo.InvariantCulture);
+                lock (_preflightLock)
+                {
+                    _preflight = _preflightField.GetValue(null);
+                    _preflightField.SetValue(null, entry);
+                }
+                _bridge = lifecycle.GetField("SupervisorBridge", StaticFlags).GetValue(null);
+                _bridgeLock = _bridge.GetType().GetField("_gate", InstanceFlags).GetValue(_bridge);
+                _bridgeSnapshotField = _bridge.GetType().GetField("_cachedSnapshot", InstanceFlags);
+                lock (_bridgeLock) _bridgeSnapshot = _bridgeSnapshotField.GetValue(_bridge);
+            }
+
+            internal void SetBridgeSnapshot(AICodedbSupervisorSnapshot snapshot)
+            {
+                lock (_bridgeLock) _bridgeSnapshotField.SetValue(_bridge, snapshot);
+            }
+
+            public void Dispose()
+            {
+                lock (_cacheLock)
+                    foreach (var field in _original) field.Key.SetValue(null, field.Value);
+                lock (_preflightLock) _preflightField.SetValue(null, _preflight);
+                lock (_bridgeLock) _bridgeSnapshotField.SetValue(_bridge, _bridgeSnapshot);
+            }
+        }
+    }
+
     internal sealed class AICodedbEditorLifecycleTests
     {
         [TestCase(AICodedbCurrentInstanceState.Missing, true, true)]

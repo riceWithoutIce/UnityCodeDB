@@ -1286,19 +1286,8 @@ namespace Rice.AI.Codedb.Editor
                     && currentInstance.IsCurrent
                     && IsRemovalPreflightDue(context, currentInstance, true))
                 {
-                    AICodedbCommandResult cachedResult;
-                    AICodedbProductStatus cachedStatus;
-                    bool hasCachedStatus;
-                    long ignoredRevision;
-                    TryGetCachedLifecycleStatus(
-                        out cachedResult, out cachedStatus, out hasCachedStatus, out ignoredRevision);
-                    if (hasCachedStatus && cachedStatus.State == AICodedbProductState.Ready)
-                    {
-                        var refreshedStatus = WithRemovalPreflight(
-                            context, cachedStatus, currentInstance, canContinue, cancellationToken, true);
-                        if (!cancellationToken.IsCancellationRequested && canContinue())
-                            RememberLifecycleProductStatus(refreshedStatus, cachedResult);
-                    }
+                    RefreshCachedLifecycleRemovalPreflight(
+                        context, currentInstance, canContinue, cancellationToken);
                 }
                 return null;
             }
@@ -1605,6 +1594,42 @@ namespace Rice.AI.Codedb.Editor
                 observed.Installed, observed.Configured, observed.McpAvailable,
                 observed.Detail, observed.Command, observed.AttentionReason,
                 (observed.DiagnosticDetail + " " + cleanupDetail).Trim(), observed.RemovalPreflightPassed);
+        }
+
+        internal static void RefreshCachedLifecycleRemovalPreflight(
+            AICodedbEditorExecutionContext context,
+            AICodedbCurrentInstanceStatus currentInstance,
+            Func<bool> canContinue,
+            CancellationToken cancellationToken)
+        {
+            AICodedbCommandResult cachedResult;
+            AICodedbProductStatus cachedStatus;
+            bool hasCachedStatus;
+            AICodedbSupervisorSnapshot cachedSnapshot;
+            AICodedbTerminalConvergenceFailure cachedFailure;
+            long cachedRevision;
+            TryGetCachedLifecycleStatus(out cachedResult, out cachedStatus, out hasCachedStatus,
+                out cachedSnapshot, out cachedFailure, out cachedRevision);
+            if (!hasCachedStatus || cachedStatus.State != AICodedbProductState.Ready
+                || cachedFailure != null)
+                return;
+
+            var refreshedStatus = WithRemovalPreflight(
+                context, cachedStatus, currentInstance, canContinue, cancellationToken, true);
+            if (cancellationToken.IsCancellationRequested || !canContinue())
+                return;
+
+            lock (HostStatusCacheLock)
+            {
+                if (_cachedHostStatusRevision != cachedRevision
+                    || cancellationToken.IsCancellationRequested)
+                    return;
+                // This is admission information only, not another readiness
+                // observation. Preserve the paired command/snapshot, including
+                // its original age, and never rebind it to the live Bridge.
+                _cachedLifecycleProductStatus = refreshedStatus;
+                _cachedHostStatusRevision++;
+            }
         }
 
         private static AICodedbProductStatus WithRemovalPreflight(
