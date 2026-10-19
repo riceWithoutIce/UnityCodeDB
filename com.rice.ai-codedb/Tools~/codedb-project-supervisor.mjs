@@ -4,7 +4,7 @@
 // coordinator/Provider implementation; this process owns admission, command
 // serialization, cached status, and the Bridge-facing IPC boundary.
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -52,6 +52,20 @@ const CHILD_EVIDENCE_CAPTURE_DELAY_MS = 50;
 const MAX_START_CLAIM_RETRIES = 16;
 const ATOMIC_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250, 500];
 const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM", "EEXIST"]);
+
+function execFileAsync(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
 const STABLE_WRAPPER_RELATIVE_PATH = "AIWork/codedb/wrapper/codedb-project-wrapper.mjs";
 const COORDINATOR_FAILURE_CATEGORIES = new Set([
   "NOT_EVALUATED",
@@ -369,7 +383,7 @@ async function prepareSupervisorStart(context) {
 
 async function acquireStartClaim(context, retryCount = 0) {
   if (retryCount >= MAX_START_CLAIM_RETRIES) return null;
-  const claimant = getCurrentProcessEvidence(context, "start");
+  const claimant = await getCurrentProcessEvidence(context, "start");
   const claimId = crypto.randomUUID().replaceAll("-", "");
   const claim = {
     schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -413,7 +427,7 @@ async function acquireStartClaim(context, retryCount = 0) {
     const expected = claim.purpose === "supervisor-start"
       ? validateStartClaim(context, claim)
       : validateTakeoverClaim(context, claim);
-    const actual = getProcessEvidenceSync(expected.pid);
+    const actual = await getProcessEvidence(expected.pid);
     if (!actual.available) throw new Error(actual.error || "Supervisor start claimant identity is unavailable.");
     if (actual.exists && processEvidenceMatches(expected, actual)) return null;
     if (actual.exists) throw new Error("Supervisor start claim is live but its process identity does not match.");
@@ -539,7 +553,7 @@ async function inspectExistingSupervisor(context) {
     };
   }
 
-  const actualEvidence = getProcessEvidenceSync(expectedEvidence.pid);
+  const actualEvidence = await getProcessEvidence(expectedEvidence.pid);
   if (!actualEvidence.available) {
     return {
       classification: "INVALID_OR_AMBIGUOUS",
@@ -649,7 +663,7 @@ async function takeoverStaleOwner(context, observed) {
   let ownsClaim = false;
   const claimId = crypto.randomUUID().replaceAll("-", "");
   const claimantCommand = process.argv.includes("daemon") ? "daemon" : "start";
-  const claimant = getCurrentProcessEvidence(context, claimantCommand);
+  const claimant = await getCurrentProcessEvidence(context, claimantCommand);
   try {
     try {
       claimFd = fs.openSync(context.takeoverClaimPath, "wx");
@@ -658,7 +672,7 @@ async function takeoverStaleOwner(context, observed) {
       if (error?.code !== "EEXIST") throw error;
       const existingClaim = readStartClaim(context);
       const existingEvidence = validateTakeoverClaim(context, existingClaim);
-      const actual = getProcessEvidenceSync(existingEvidence.pid);
+      const actual = await getProcessEvidence(existingEvidence.pid);
       if (!actual.available)
         throw new Error(actual.error || "Supervisor takeover claimant identity is unavailable.");
       if (actual.exists && processEvidenceMatches(existingEvidence, actual)) return false;
@@ -1007,7 +1021,7 @@ async function runDaemon(raw) {
   const context = buildContext(raw);
   validatedDaemonContext = context;
   fs.mkdirSync(context.runtime, { recursive: true });
-  const ownerEvidence = getCurrentProcessEvidence(context, "daemon");
+  const ownerEvidence = await getCurrentProcessEvidence(context, "daemon");
   const lock = await acquireSupervisorLock(context, ownerEvidence);
   if (!lock.acquired) return;
 
@@ -1505,12 +1519,13 @@ async function runDaemon(raw) {
   const dispatch = async (request) => {
     const name = String(request.command || "");
     if (name === "status") {
-      return queueQuery(() => {
-        const response = { ok: true, status: publicStatus(state, coordinatorStatus) };
-        void queueQuery(refresh, "internal:status-refresh")
-          .catch((error) => emitSafely("status_error", error.message));
-        return response;
-      }, queryRequestKey(name, request));
+      // Status is an authenticated snapshot read. It must not wait behind
+      // Coordinator refresh, forwarded queries, maintenance, or process
+      // identity capture. Refresh remains best-effort and asynchronous.
+      const response = { ok: true, status: publicStatus(state, coordinatorStatus) };
+      void queueQuery(refresh, "internal:status-refresh")
+        .catch((error) => emitSafely("status_error", error.message));
+      return response;
     }
     if (name === "operation") {
       return queueQuery(() => {
@@ -1925,7 +1940,7 @@ async function ensureCoordinator(context, operation = null) {
     "--exclusive-lifecycle", "false",
     "--startup-timeout-ms", String(context.startupTimeoutMs)
   ];
-  prepareOperationChildEvidence(context, operation, "coordinator_start_admitted");
+  await prepareOperationChildEvidence(context, operation, "coordinator_start_admitted");
   const result = await runChild(
     process.execPath,
     args,
@@ -1980,7 +1995,7 @@ async function runWatchManager(context, action, request, operation = null) {
   if (request.require_new_owner === true) args.push("-RequireNewOwner");
   if (request.exclusive_owner === true) args.push("-ExclusiveOwner");
   const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  prepareOperationChildEvidence(context, operation, "watch_manager_admitted");
+  await prepareOperationChildEvidence(context, operation, "watch_manager_admitted");
   return runChild(
     command,
     args,
@@ -2010,7 +2025,7 @@ async function runProjectMaintenance(context, action, operation = null) {
     ...specification.args
   ];
   const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  prepareOperationChildEvidence(context, operation, "project_maintenance_admitted");
+  await prepareOperationChildEvidence(context, operation, "project_maintenance_admitted");
   return runChild(
     command,
     args,
@@ -2035,7 +2050,7 @@ async function runMaterializer(
   if (Number.isInteger(request.editor_process_id) && request.editor_process_id > 0) args.push("-EditorProcessId", String(request.editor_process_id));
   if (request.editor_process_start_ticks) args.push("-EditorProcessStartTicks", String(request.editor_process_start_ticks));
   const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  prepareOperationChildEvidence(context, operation, "materializer_admitted");
+  await prepareOperationChildEvidence(context, operation, "materializer_admitted");
   return runChild(
     command,
     args,
@@ -2330,7 +2345,7 @@ async function recoverPersistedOperation(operation, context, finish, operational
     argvSha256: operation.child.argv_sha256,
     commandLineSha256: operation.child.command_line_sha256
   };
-  const initial = getProcessEvidenceSync(expected.pid);
+  const initial = await getProcessEvidence(expected.pid);
   if (!initial.available) {
     await finish(operation, null, new Error("Supervisor operation child identity is unavailable; retry was blocked."));
     return;
@@ -2347,7 +2362,7 @@ async function recoverPersistedOperation(operation, context, finish, operational
   persistOperation(context, operation);
   while (true) {
     await delay(100);
-    const current = getProcessEvidenceSync(expected.pid);
+    const current = await getProcessEvidence(expected.pid);
     if (!current.available) {
       await finish(operation, null, new Error("Supervisor operation child identity became unavailable during recovery."));
       return;
@@ -2377,7 +2392,7 @@ async function finishRecoveredOperationAfterChildExit(operation, context, finish
 async function verifyRecoveredOperation(context, operation, operationalReadiness) {
   if (operation.name.startsWith("materialize:")) {
     const action = operation.name.slice("materialize:".length);
-    prepareOperationChildEvidence(context, operation, "recovery_verify_admitted");
+    await prepareOperationChildEvidence(context, operation, "recovery_verify_admitted");
     const command = process.platform === "win32" ? "powershell.exe" : "pwsh";
     const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", context.materializerScript,
       "-Action", "Verify", "-ProjectRoot", context.root, "-PayloadRoot", context.payloadRoot];
@@ -2408,16 +2423,16 @@ async function verifyRecoveredOperation(context, operation, operationalReadiness
     : { ok: false, error: "Recovered operation coordinator state is unavailable." };
 }
 
-function recordChildEvidence(context, operation, commandName, args, child) {
+async function recordChildEvidence(context, operation, commandName, args, child) {
   if (!operation) return;
   if (operation.execution_disposition !== "CHILD_ADMITTED" || operation.child !== null)
     throw new Error("Supervisor child has no unique durable admission.");
-  const actual = getProcessEvidenceSync(child.pid);
+  const actual = await getProcessEvidence(child.pid);
   if (!actual.available || !actual.exists)
     throw new Error(`The admitted child process identity could not be read: ${actual.error || `exists=${actual.exists}`}`);
   const expectedArgv = normalizeProcessArgv(args);
   const expectedHash = hashArgv(expectedArgv);
-  const expectedExecutable = resolveCommandExecutable(commandName);
+  const expectedExecutable = await resolveCommandExecutable(commandName);
   if (actual.argvSha256 !== expectedHash
       || !expectedExecutable
       || !pathsEqual(actual.executablePath, expectedExecutable))
@@ -2436,7 +2451,7 @@ function recordChildEvidence(context, operation, commandName, args, child) {
   persistOperation(context, operation);
 }
 
-function prepareOperationChildEvidence(context, operation, phase) {
+async function prepareOperationChildEvidence(context, operation, phase) {
   if (!operation) return;
   if (operation.state !== "running")
     throw new Error("Supervisor operation is not running and cannot admit another child.");
@@ -2446,7 +2461,7 @@ function prepareOperationChildEvidence(context, operation, phase) {
     if (!operation.child)
       throw new Error("Prior child admission has unresolved identity; another child is blocked.");
     validatePersistedChild(operation.child);
-    const actual = getProcessEvidenceSync(operation.child.pid);
+    const actual = await getProcessEvidence(operation.child.pid);
     if (!actual.available || (actual.exists
         && actual.processStartIdentity === operation.child.process_start_identity))
       throw new Error("Prior admitted child is live or unknown; another child is blocked.");
@@ -2468,13 +2483,13 @@ function queueChildEvidenceCapture(context, operation, commandName, args, child)
   // never turn an asynchronous command into a synchronous request.
   return new Promise((resolve, reject) => {
     let attempt = 0;
-    const capture = () => {
+    const capture = async () => {
       if (operation.state !== "running" || operation.child) {
         resolve();
         return;
       }
       try {
-        recordChildEvidence(context, operation, commandName, args, child);
+        await recordChildEvidence(context, operation, commandName, args, child);
         resolve();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -2511,7 +2526,7 @@ function normalizeExecutable(value) {
   return process.platform === "win32" ? resolved.replace(/\\/g, "/").toLowerCase() : resolved;
 }
 
-function resolveCommandExecutable(commandName) {
+async function resolveCommandExecutable(commandName) {
   const value = String(commandName || "");
   if (path.isAbsolute(value)) return realFile(value, "child executable");
   if (process.platform === "win32" && value.toLowerCase() === "powershell.exe") {
@@ -2522,7 +2537,7 @@ function resolveCommandExecutable(commandName) {
     if (isFile(candidate)) return realFile(candidate, "child executable");
   }
   try {
-    const output = execFileSync(
+    const output = await execFileAsync(
       process.platform === "win32" ? "where.exe" : "which",
       [value],
       { encoding: "utf8", timeout: PROCESS_QUERY_TIMEOUT_MS, windowsHide: true });
@@ -2595,8 +2610,8 @@ function publicProcessEvidence(evidence, includeArgv = false) {
   return result;
 }
 
-function getCurrentProcessEvidence(context, commandName) {
-  const evidence = getProcessEvidenceSync(process.pid);
+async function getCurrentProcessEvidence(context, commandName) {
+  const evidence = await getProcessEvidence(process.pid);
   if (!evidence.available || !evidence.exists)
     throw new Error(`The ${commandName} process identity could not be read; ownership was not published.`);
   validateSupervisorInvocation(context, evidence.normalizedArgv, commandName, context.ownerEpoch);
@@ -2605,14 +2620,14 @@ function getCurrentProcessEvidence(context, commandName) {
   return evidence;
 }
 
-function getProcessEvidenceSync(pid) {
+async function getProcessEvidence(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0)
     return { available: false, exists: null, error: "Process id is invalid." };
-  if (process.platform === "win32") return getWindowsProcessEvidenceSync(pid);
+  if (process.platform === "win32") return getWindowsProcessEvidence(pid);
   return getProcProcessEvidenceSync(pid);
 }
 
-function getWindowsProcessEvidenceSync(pid) {
+async function getWindowsProcessEvidence(pid) {
   const script = [
     "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
     `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop`,
@@ -2624,11 +2639,10 @@ function getWindowsProcessEvidenceSync(pid) {
   ].join("\r\n");
   try {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const bytes = execFileSync(
+    const text = await execFileAsync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-      { encoding: "buffer", timeout: PROCESS_QUERY_TIMEOUT_MS, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      { encoding: "utf8", timeout: PROCESS_QUERY_TIMEOUT_MS, windowsHide: true, maxBuffer: MAX_MESSAGE_BYTES });
     const value = JSON.parse(text);
     if (value?.exists === false) return { available: true, exists: false, pid };
     if (value?.exists !== true

@@ -109,8 +109,8 @@ if (process.argv[2] === "--s32-disposition-fixture") {
     ATOMIC_RENAME_RETRY_DELAYS_MS:[],ATOMIC_RENAME_RETRYABLE_CODES:new Set(),
     requestCoordinatorStatus:async()=>({provider_state:"ready"}),
     runChild:()=>{throw new Error("UNAUTHORIZED_CHILD_LAUNCH");},
-    getProcessEvidenceSync:()=>({available:false,exists:true}),
-    resolveCommandExecutable:()=>process.execPath,validateProcessEvidenceShape:()=>{},
+    getProcessEvidence:async()=>({available:false,exists:true}),
+    resolveCommandExecutable:async()=>process.execPath,validateProcessEvidenceShape:()=>{},
     coordinatorStatus:null,updateReadiness:()=>{},emitSafely:()=>true,queueQuery:async()=>{},refresh:()=>{},
     selectedInstanceChanged:()=>false,scheduleRequestQueue:()=>{}};
   const producer = vm.runInNewContext(names.map(source).join("\n")
@@ -139,29 +139,29 @@ if (process.argv[2] === "--s32-disposition-fixture") {
   await producer.ensureCoordinator(context,legacy);
   assert.equal(legacy.execution_disposition,undefined);assert.equal(producer.publicOperation(legacy).execution_disposition,"UNKNOWN");
   await save("legacy-missing",legacy);
-  const failed=fresh();producer.prepareOperationChildEvidence(context,failed,"fixture_spawn_admitted");
+  const failed=fresh();await producer.prepareOperationChildEvidence(context,failed,"fixture_spawn_admitted");
   assert.equal(JSON.parse(fs.readFileSync(context.operationPath)).execution_disposition,"CHILD_ADMITTED");
-  assert.throws(()=>producer.recordChildEvidence(context,failed,process.execPath,["fixture"],{pid:87654321}),/could not be read/);
+  await assert.rejects(()=>producer.recordChildEvidence(context,failed,process.execPath,["fixture"],{pid:87654321}),/could not be read/);
   await producer.finishOperation(failed,{code:1,stdout:"",stderr:"capture unknown",timedOut:false});
   await producer.ensureCoordinator(context,failed);
   assert.equal(failed.execution_disposition,"CHILD_ADMITTED");assert.equal(failed.child,null);
   await save("capture-failed",failed);
   failed.state="running";
-  assert.throws(()=>producer.prepareOperationChildEvidence(context,failed,"second"),/unresolved identity/);
-  const child=fresh();producer.prepareOperationChildEvidence(context,child,"fixture_spawn_admitted");
-  sandbox.getProcessEvidenceSync=()=>({available:true,exists:true,pid:87654321,processStartIdentity:"638962990000000000",
+  await assert.rejects(()=>producer.prepareOperationChildEvidence(context,failed,"second"),/unresolved identity/);
+  const child=fresh();await producer.prepareOperationChildEvidence(context,child,"fixture_spawn_admitted");
+  sandbox.getProcessEvidence=async()=>({available:true,exists:true,pid:87654321,processStartIdentity:"638962990000000000",
     executablePath:process.execPath,argvSha256:crypto.createHash("sha256").update('["fixture"]').digest("hex"),commandLineSha256:"9".repeat(64)});
-  producer.recordChildEvidence(context,child,process.execPath,["fixture"],{pid:87654321});
+  await producer.recordChildEvidence(context,child,process.execPath,["fixture"],{pid:87654321});
   const prior=JSON.stringify(child.child);
-  assert.throws(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
+  await assert.rejects(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
   assert.equal(JSON.stringify(child.child),prior);
-  sandbox.getProcessEvidenceSync=()=>({available:false,exists:true});
-  assert.throws(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
+  sandbox.getProcessEvidence=async()=>({available:false,exists:true});
+  await assert.rejects(()=>producer.prepareOperationChildEvidence(context,child,"second"),/live or unknown/);
   assert.equal(JSON.stringify(child.child),prior);
   await producer.finishOperation(child,{code:0,stdout:"complete",stderr:"",timedOut:false});
   await save("identified-child",child);
-  child.state="running";sandbox.getProcessEvidenceSync=()=>({available:true,exists:false});
-  producer.prepareOperationChildEvidence(context,child,"second-after-proved-exit");
+  child.state="running";sandbox.getProcessEvidence=async()=>({available:true,exists:false});
+  await producer.prepareOperationChildEvidence(context,child,"second-after-proved-exit");
   assert.equal(child.execution_disposition,"CHILD_ADMITTED");assert.equal(child.child,null);
   await producer.finishOperation(child,{code:1,stdout:"",stderr:"second capture missing",timedOut:false});
   await save("second-capture-missing",child);
