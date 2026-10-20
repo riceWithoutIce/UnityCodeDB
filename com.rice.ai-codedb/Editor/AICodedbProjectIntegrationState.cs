@@ -560,7 +560,9 @@ namespace Rice.AI.Codedb.Editor
                 {
                     AICodedbPackageRuntimeContractStore.ValidateProjectStableWrapper(
                         root,
-                        runtimeContract.GetExpectedStableWrapperSha256(selectedIdentity));
+                        runtimeContract.GetExpectedStableWrapperSha256(selectedIdentity),
+                        generationRoot,
+                        legacyOwnerIdentity);
                 }
 
                 AICodedbCurrentInstanceState state;

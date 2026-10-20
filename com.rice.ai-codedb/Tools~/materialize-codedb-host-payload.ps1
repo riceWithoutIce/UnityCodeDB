@@ -8858,7 +8858,6 @@ function Get-ValidatedLegacyFlatRetirement {
     if (-not $Manifest.TargetMap.ContainsKey($wrapperTarget) -or -not $marker.Map.ContainsKey($wrapperTarget)) {
         throw "Legacy flat retirement has no reviewed stable-wrapper identity."
     }
-    $expectedWrapperHash = ([string]$Manifest.TargetMap[$wrapperTarget].Sha256).ToLowerInvariant()
     $retiredFiles = New-Object System.Collections.Generic.List[object]
     foreach ($file in @($marker.Files | Sort-Object Target)) {
         if (-not $file.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -8868,8 +8867,9 @@ function Get-ValidatedLegacyFlatRetirement {
         if (-not (Test-Path -LiteralPath $file.TargetPath -PathType Leaf)) {
             throw "Legacy flat retirement target is missing: $($file.Target)"
         }
-        if ([string]::Equals($file.Target, $wrapperTarget, [StringComparison]::OrdinalIgnoreCase)) {
-            if (-not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), $expectedWrapperHash, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($file.Target -cin @(Get-InstanceBootstrapTargets)) {
+            $expectedBootstrapHash = [string]$Manifest.TargetMap[$file.Target].Sha256
+            if (-not [string]::Equals((Get-FileSha256 -Path $file.TargetPath), $expectedBootstrapHash, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Stable instance wrapper no longer matches the Package-owned activation identity."
             }
             continue
@@ -8968,7 +8968,7 @@ function Invoke-AutomaticGenerationCleanup {
     if ($null -eq $legacyRetirement -and -not $currentFlatPayload) {
         $legacyResidue = @($Manifest.Files | Where-Object {
             $_.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-            -not [string]::Equals($_.Target, "$($script:TargetPrefix)wrapper/codedb-project-wrapper.mjs", [StringComparison]::OrdinalIgnoreCase) -and
+            $_.Target -cnotin @(Get-InstanceBootstrapTargets) -and
             (Test-Path -LiteralPath (ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $_.Target -Label "legacy flat residue"))
         } | Select-Object -First 1)
         if ($legacyResidue.Count -gt 0) {

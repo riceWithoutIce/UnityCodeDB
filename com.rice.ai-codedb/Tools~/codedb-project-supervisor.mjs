@@ -3376,6 +3376,16 @@ function readSelectedInstance(root, contract) {
       || workerHash !== requiredHash(instance, "worker_sha256", "selected instance manifest")) {
     throw new Error("Selected instance does not match the Package-owned immutable generation closure.");
   }
+  if (fs.readFileSync(stableWrapperPath, "utf8").includes("../shared/codedb-instance-manifest-contract.mjs")) {
+    const relative = "shared/codedb-instance-manifest-contract.mjs";
+    const dependency = path.resolve(root, "AIWork/codedb", relative);
+    const source = path.resolve(generationRoot, relative);
+    assertReviewedPath(root, dependency, "stable bootstrap dependency", "file");
+    if (hashBytes(readBoundedBytes(dependency, MAX_INSTANCE_WORKER_BYTES, "stable bootstrap dependency"))
+        !== hashBytes(readBoundedBytes(source, MAX_INSTANCE_WORKER_BYTES, "authenticated generation dependency"))) {
+      throw new Error("Stable bootstrap dependency differs from its authenticated generation.");
+    }
+  }
   return {
     instanceId,
     instanceRoot,

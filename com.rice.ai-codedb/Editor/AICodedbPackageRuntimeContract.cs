@@ -438,7 +438,9 @@ namespace Rice.AI.Codedb.Editor
 
         internal static void ValidateProjectStableWrapper(
             string projectRoot,
-            string expectedSha256)
+            string expectedSha256,
+            string generationRoot,
+            bool allowMissingDependencyForHistoricalRemoval = false)
         {
             ValidateSha256(expectedSha256, "Project stable wrapper");
             var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/');
@@ -452,6 +454,36 @@ namespace Rice.AI.Codedb.Editor
                 throw new InvalidOperationException(
                     "Project stable wrapper bytes do not match the Package-owned runtime identity.");
             }
+            if (!File.ReadAllText(wrapperPath).Contains("../shared/codedb-instance-manifest-contract.mjs"))
+                return; // Authenticated historical launchers may be self-contained.
+
+            const string relative = "shared/codedb-instance-manifest-contract.mjs";
+            var dependency = Path.Combine(normalizedRoot, "AIWork/codedb", relative);
+            var source = Path.Combine(generationRoot, relative);
+            var manifestPath = Path.Combine(generationRoot, "generation-manifest.json");
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, dependency);
+            if (allowMissingDependencyForHistoricalRemoval && !File.Exists(dependency) && !Directory.Exists(dependency))
+                return;
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, source);
+            AICodedbProjectIntegrationStateStore.AssertNoReparsePoint(normalizedRoot, manifestPath);
+            if (!File.Exists(manifestPath) || new FileInfo(manifestPath).Length > 1024 * 1024)
+                throw new InvalidOperationException("Stable bootstrap generation manifest is missing or oversized.");
+            var manifest = AICodedbStrictJson.ParseObject(File.ReadAllText(manifestPath), "bootstrap generation manifest");
+            string dependencyHash = null;
+            foreach (var value in AICodedbStrictJson.GetRequiredArray(manifest, "files", "bootstrap generation manifest"))
+            {
+                var entry = AICodedbStrictJson.RequireObject(value, "bootstrap generation file");
+                if (AICodedbStrictJson.GetRequiredString(entry, "path", "bootstrap generation file") != relative)
+                    continue;
+                if (dependencyHash != null)
+                    throw new InvalidOperationException("Stable bootstrap dependency is declared more than once.");
+                dependencyHash = AICodedbStrictJson.GetRequiredString(entry, "sha256", "bootstrap generation file");
+            }
+            ValidateSha256(dependencyHash, "Stable bootstrap dependency");
+            if (!File.Exists(dependency) || !File.Exists(source)
+                || !string.Equals(GetSha256(source), dependencyHash, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(GetSha256(dependency), dependencyHash, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Stable bootstrap dependency is missing or differs from its authenticated generation.");
         }
 
         private static void ValidateSha256(string value, string label)

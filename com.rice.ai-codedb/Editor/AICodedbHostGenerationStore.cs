@@ -155,7 +155,8 @@ namespace Rice.AI.Codedb.Editor
                         packagePointer.payload_version,
                         packagePointer.payload_sequence,
                         packagePointer.generation_id,
-                        packagePointer.bootstrap_protocol)));
+                        packagePointer.bootstrap_protocol)),
+                    generationRoot);
                 ValidatePackageOwnedCurrentGeneration(
                     packagePointer,
                     installedManifestPath,
@@ -294,7 +295,9 @@ namespace Rice.AI.Codedb.Editor
                             pointer.payload_version,
                             pointer.payload_sequence,
                             pointer.generation_id,
-                            pointer.bootstrap_protocol)));
+                            pointer.bootstrap_protocol)),
+                        generationRoot,
+                        allowMissingStableWrapperForObsoleteV1);
                 }
                 if (state == AICodedbHostGenerationState.Current)
                     ValidatePackageOwnedCurrentGeneration(

@@ -1967,9 +1967,10 @@ function Get-FailedPreparationEffects {
                 $queue.Enqueue($relative + '/' + $child.Name)
             }
         }
-        # The stable launcher is shared activation state. Its original observation
-        # is recorded separately; all other retained effects remain immutable.
-        if (-not $item.PSIsContainer -and $relative -ceq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs') { continue }
+        # Bootstrap files are shared activation state, authenticated above against
+        # Package/selected-generation bytes, rather than immutable candidate effects.
+        # The launcher's original observation is also recorded separately.
+        if (-not $item.PSIsContainer -and $relative -cin @(Get-InstanceBootstrapTargets)) { continue }
         $entries[$relative] = [ordered]@{ relative_path = $relative; kind = $(if ($item.PSIsContainer) { 'DIRECTORY' } else { 'FILE' }); sha256 = $hash }
     }
     # Bind all ancestors without traversing their unrelated siblings.
@@ -2056,7 +2057,7 @@ function Assert-FailedPreparationWrapper {
 }
 
 function Assert-FailedPreparationEffects {
-    param([string]$ProjectRoot, $Document)
+    param([string]$ProjectRoot, $Document, [Parameter(Mandatory = $true)]$Manifest)
     $effects = Get-RequiredJsonArray -Object $Document -Name 'retained_effects' -Label 'failed preparation intent'
     if ($effects.Count -eq 0 -or $effects.Count -gt 512) { throw 'Failed preparation effect count is invalid.' }
     $seen = @{}; $previous = ''
@@ -2070,14 +2071,23 @@ function Assert-FailedPreparationEffects {
             ($effect.kind -ceq 'DIRECTORY' -and $effect.sha256 -cne '') -or $effect.kind -cnotin @('FILE', 'DIRECTORY')) { throw 'Failed preparation effect type or hash is invalid.' }
     }
     if ((Get-FailedPreparationFingerprint -Document $Document) -cne $Document.authority_fingerprint) { throw 'Failed preparation authority fingerprint changed.' }
-    $actual = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $Document.retained_instance_id -GenerationId $Document.retained_generation_id)
-    # Only fixed launcher ancestors may be created by the shared handoff.
+    $generationRoot = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath ("AIWork/.runtime/codedb/host/generations/" + $Document.retained_generation_id) -Label 'retained bootstrap generation'
+    $generation = [pscustomobject]@{ GenerationRoot = $generationRoot; StableWrapperSha256 = $Document.retained_wrapper_sha256 }
+    # Reauthenticate shared bytes on every observation, including when they are
+    # excluded from the immutable snapshot. The caller also verifies this retained
+    # generation against the Package and the original generation-manifest hash.
+    $actual = @(Get-FailedPreparationEffects -ProjectRoot $ProjectRoot -InstanceId $Document.retained_instance_id -GenerationId $Document.retained_generation_id -Manifest $Manifest -Generation $generation)
+    # Only fixed bootstrap ancestors may be created by the shared handoff.
     $actual = @($actual | Where-Object {
         if ($seen.ContainsKey($_.relative_path)) { return $true }
-        if ($_.kind -ceq 'DIRECTORY' -and $_.relative_path -cin @('AIWork/codedb', 'AIWork/codedb/wrapper')) { return $false }
+        if ($_.kind -ceq 'DIRECTORY' -and $_.relative_path -cin @('AIWork/codedb', 'AIWork/codedb/wrapper', 'AIWork/codedb/shared')) { return $false }
         return $true
     })
-    if ((ConvertTo-InstanceJsonText -Value $actual) -cne (ConvertTo-InstanceJsonText -Value @($effects | ForEach-Object { [ordered]@{ relative_path = $_.relative_path; kind = $_.kind; sha256 = $_.sha256 } }))) {
+    # Preserve historical serialized observations/fingerprints. Older snapshots
+    # included this now-shared dependency; its current bytes were authenticated
+    # above rather than silently trusting or rewriting the historical hash.
+    $immutableEffects = @($effects | Where-Object { $_.relative_path -cne 'AIWork/codedb/shared/codedb-instance-manifest-contract.mjs' })
+    if ((ConvertTo-InstanceJsonText -Value $actual) -cne (ConvertTo-InstanceJsonText -Value @($immutableEffects | ForEach-Object { [ordered]@{ relative_path = $_.relative_path; kind = $_.kind; sha256 = $_.sha256 } }))) {
         throw 'Failed preparation retained effect snapshot changed.'
     }
     $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($Document.retained_instance_id)" -Label 'failed preparation instance'
@@ -2238,7 +2248,7 @@ function Get-InstanceRemovalIntent {
             $retainedManifest.verified_at_utc -cne '' -or $null -eq $retainedManifest.PSObject.Properties['originating_action'] -or $retainedManifest.originating_action.action -cne 'INSTALL') {
             throw 'Failed preparation removal identity is invalid.'
         }
-        Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $document
+        Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $document -Manifest $Manifest
         if ($null -eq $Manifest) { throw 'Failed preparation intent requires current Package authority.' }
         $null = Get-ValidatedRetiredInstance -ProjectRoot $ProjectRoot -Manifest $Manifest -InstanceRoot $instanceRoot -AllowProvisioning -FailedPreparation
         $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $document -Manifest $Manifest -AllowActivationHandoff -HistoricalObservation:$HistoricalObservation
@@ -2399,7 +2409,8 @@ function Get-ValidatedCurrentInstance {
     $generation = Assert-InstanceGenerationClosure -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceManifest $instanceManifestDocument
     Assert-InstanceStableWrapper `
         -ProjectRoot $ProjectRoot `
-        -ExpectedSha256 ([string]$generation.StableWrapperSha256)
+        -ExpectedSha256 ([string]$generation.StableWrapperSha256) `
+        -GenerationRoot $generation.GenerationRoot
     return [pscustomobject]@{
         InstanceId = $instanceId
         InstanceRelativePath = $instanceRelativePath
@@ -2645,7 +2656,7 @@ function Invoke-InstanceCandidateProbe {
             codedb_text_search_callable = $true
         }
     }
-    $node = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $probePath = Join-Path $PSScriptRoot $script:McpAvailabilityProbeName
     $workerTarget = $script:GenerationTargetPrefix + $script:InstanceWorkerRelativePath
     $workerPath = ConvertTo-AbsoluteChildPath -Root $ProjectRoot -RelativePath $workerTarget -Label "candidate instance worker"
@@ -2678,6 +2689,30 @@ function Invoke-InstanceCandidateProbe {
     }
     Write-Host "[PHASE CANDIDATE_VERIFY] READY - initialize, exact tools, usable status, and bounded query succeeded."
     return $document
+}
+
+function Invoke-InstanceStableEntryProbe {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    if ($PocFixture) { return }
+    $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    # No --instance-root: exercise the registered stable launcher, not a candidate worker.
+    $result = Invoke-BoundedNativeProcess -FilePath $node -Arguments @(
+        (Join-Path $PSScriptRoot $script:McpAvailabilityProbeName),
+        '--project-root', $ProjectRoot
+    ) -TimeoutMilliseconds 180000
+    if ($result.TimedOut -or -not $result.TerminationConfirmed -or $result.OutputDrainIncomplete -or $result.ExitCode -ne 0) {
+        throw "Activated stable-entry MCP verification failed: $($result.StandardError) $($result.StandardOutput)"
+    }
+    $lines = @($result.StandardOutput -split "`r?`n" | Where-Object { $_.TrimStart().StartsWith('{') })
+    if ($lines.Count -ne 1) { throw 'Activated stable-entry probe returned an ambiguous result.' }
+    $document = ConvertFrom-StrictJsonText -Text $lines[0] -Label 'activated stable-entry probe'
+    if ((Get-RequiredJsonString -Object $document -Name availability -Label 'activated stable-entry probe') -cne 'AVAILABLE' -or
+        -not (Get-RequiredJsonBoolean -Object $document -Name codedb_status_usable -Label 'activated stable-entry probe') -or
+        -not (Get-RequiredJsonBoolean -Object $document -Name codedb_text_search_callable -Label 'activated stable-entry probe')) {
+        throw 'Activated stable entry did not prove usable status and bounded query.'
+    }
+    Write-Host '[PHASE MCP_AVAILABLE] READY - registered stable entry initialize, tools, status and query succeeded.'
 }
 
 function Write-InstanceAvailabilityEvidence {
@@ -3479,6 +3514,7 @@ function Assert-InstancePreflight {
                 throw "Stable instance wrapper target contains unowned or drifted bytes."
             }
         }
+        Assert-InstanceBootstrapPublication -Manifest $Manifest -ProjectRoot $ProjectRoot -PreviousInstance $PreviousInstance
         return $null
     }
 
@@ -3516,6 +3552,7 @@ function Get-InstanceActivationEntries {
     $entries = New-Object System.Collections.Generic.List[object]
     $wrapperTarget = "$($script:TargetPrefix)wrapper/codedb-project-wrapper.mjs"
     $wrapperBytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $wrapperTarget
+    Assert-InstanceBootstrapPublication -Manifest $Manifest -ProjectRoot $ProjectRoot -PreviousInstance $PreviousInstance
 
     $generationPointerBytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $script:CurrentPointerRelativePath
     foreach ($pointerTarget in @($script:CurrentPointerRelativePath, $script:LastKnownGoodPointerRelativePath)) {
@@ -3575,6 +3612,10 @@ function Get-InstanceActivationEntries {
     # Publish the stable launcher before the selection pointer. During this
     # short window a new launcher fails closed because no new selection exists;
     # the pointer is the final activation commit point.
+    foreach ($target in @(Get-InstanceBootstrapTargets | Where-Object { $_ -cne $wrapperTarget })) {
+        $bytes = Get-InstanceActivationBytes -Manifest $Manifest -Target $target
+        Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $target -Mutation 'Write' -DesiredBytes $bytes
+    }
     Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $wrapperTarget -Mutation "Write" -DesiredBytes $wrapperBytes
     Add-InstanceTransactionEntryIfNeeded -Entries $entries -ProjectRoot $ProjectRoot -OperationRoot $OperationRoot -Target $script:InstanceCurrentRelativePath -Mutation "Write" -DesiredBytes $selectionBytes
 
@@ -3597,10 +3638,38 @@ function Get-InstanceManifestExpectedHash {
     return $hash.ToLowerInvariant()
 }
 
+function Get-InstanceBootstrapTargets {
+    # Fixed direct dependency closure; hashes and source bytes remain manifest-owned.
+    return @('AIWork/codedb/wrapper/codedb-project-wrapper.mjs',
+        'AIWork/codedb/shared/codedb-instance-manifest-contract.mjs')
+}
+
+function Assert-InstanceBootstrapPublication {
+    param($Manifest, [string]$ProjectRoot, [AllowNull()]$PreviousInstance)
+
+    foreach ($target in @(Get-InstanceBootstrapTargets | Select-Object -Skip 1)) {
+        $expected = Get-InstanceManifestExpectedHash -Manifest $Manifest -Target $target
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $target -Label 'stable bootstrap dependency'
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'stable bootstrap dependency'
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Stable bootstrap dependency is not a regular file.' }
+        $actual = Get-FileSha256 -Path $path
+        if ($actual -ceq $expected) { continue }
+        if ($null -ne $PreviousInstance) {
+            $relative = $target.Substring('AIWork/codedb/'.Length)
+            $previousPath = Join-Path $PreviousInstance.Generation.GenerationRoot $relative
+            Assert-NoReparsePoint -Path $previousPath -Root $ProjectRoot -Label 'previous bootstrap dependency'
+            if ((Test-Path -LiteralPath $previousPath -PathType Leaf) -and $actual -ceq (Get-FileSha256 -Path $previousPath)) { continue }
+        }
+        throw "Stable bootstrap dependency contains unowned or drifted bytes: $target"
+    }
+}
+
 function Assert-InstanceStableWrapper {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [string]$GenerationRoot
     )
 
     $expected = $ExpectedSha256.ToLowerInvariant()
@@ -3616,6 +3685,21 @@ function Assert-InstanceStableWrapper {
     }
     if (-not [string]::Equals((Get-FileSha256 -Path $wrapperPath), $expected, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Selected stable wrapper does not match the Package-declared runtime identity."
+    }
+    Assert-NoReparsePoint -Path $wrapperPath -Root $ProjectRoot -Label 'selected stable wrapper'
+    # Authenticated historical launchers without this import retain their original closure.
+    if ([IO.File]::ReadAllText($wrapperPath).Contains('../shared/codedb-instance-manifest-contract.mjs')) {
+        $relative = 'shared/codedb-instance-manifest-contract.mjs'
+        $dependency = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath ('AIWork/codedb/' + $relative) -Label 'stable bootstrap dependency'
+        if (-not $GenerationRoot) { throw 'Stable bootstrap dependency has no authenticated generation.' }
+        $source = Join-Path $GenerationRoot $relative
+        Assert-NoReparsePoint -Path $dependency -Root $ProjectRoot -Label 'stable bootstrap dependency'
+        Assert-NoReparsePoint -Path $source -Root $ProjectRoot -Label 'generation bootstrap dependency'
+        if (-not (Test-Path -LiteralPath $dependency -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf) -or
+            (Get-FileSha256 -Path $dependency) -cne (Get-FileSha256 -Path $source)) {
+            throw 'Stable bootstrap dependency is missing or differs from its authenticated generation.'
+        }
     }
 }
 
@@ -5063,6 +5147,7 @@ function Invoke-InstanceConvergence {
     $lock = $null
     $candidate = $null
     $candidateAttempt = $null
+    $activationCommitted = $false
     $originOperation = [string](Get-Variable -Name OriginatingOperationId -ValueOnly -ErrorAction SilentlyContinue)
     if ([string]::IsNullOrEmpty($originOperation)) { $originOperation = [guid]::NewGuid().ToString('N') }
     $originAction = [string](Get-Variable -Name OriginatingActionId -ValueOnly -ErrorAction SilentlyContinue)
@@ -5297,6 +5382,10 @@ function Invoke-InstanceConvergence {
             }.GetNewClosure() `
             -VerifyBeforeCommit $verification
 
+        $activationCommitted = $true
+        Set-MaterializerCommandPhase -Phase 'MCP_AVAILABLE'
+        Invoke-InstanceStableEntryProbe -ProjectRoot $ProjectRoot
+
         $cleanupState = "PENDING"
         $requestedExitCodeBeforeCleanup = $script:RequestedExitCode
         try {
@@ -5339,7 +5428,7 @@ function Invoke-InstanceConvergence {
         Set-MaterializerCommandOutcome -Outcome $outcome -ReasonCode "INSTANCE_ACTIVATED" -CleanupState $cleanupState -NextAction $nextAction
     } catch {
         $originalError = $_.Exception
-        if ($null -ne $candidate) {
+        if (-not $activationCommitted -and $null -ne $candidate) {
             $current = $null
             $currentKnown = $false
             try {
@@ -5372,7 +5461,9 @@ function Invoke-InstanceConvergence {
         $rollbackUnproven = $originalError.Message.IndexOf(
             "rollback was not proven",
             [StringComparison]::OrdinalIgnoreCase) -ge 0
-        $reasonCode = if ($originalError.Data['InstanceExecutionObservationIncomplete']) {
+        $reasonCode = if ($activationCommitted) {
+            'INSTANCE_STABLE_ENTRY_FAILED'
+        } elseif ($originalError.Data['InstanceExecutionObservationIncomplete']) {
             'INSTANCE_EXECUTION_OBSERVATION_INCOMPLETE'
         } elseif ($rollbackUnproven) {
             "INSTANCE_ROLLBACK_UNPROVEN"
@@ -5383,15 +5474,18 @@ function Invoke-InstanceConvergence {
         } else {
             "INSTANCE_CONVERGENCE_FAILED"
         }
-        $cleanupState = Get-InstanceCandidateCleanupState -Attempt $candidateAttempt -Error $originalError
+        $cleanupState = if ($activationCommitted) { 'PENDING' } else { Get-InstanceCandidateCleanupState -Attempt $candidateAttempt -Error $originalError }
         Set-MaterializerCommandOutcome `
             -Outcome "BLOCKED" `
             -ReasonCode $reasonCode `
             -CleanupState $cleanupState `
             -NextAction "Review the original failure and retained or unknown candidate effects before another confirmed project change; no automatic replay is authorized."
         if ($script:RequestedExitCode -ne 0) { throw $originalError }
+        $failureDetail = if ($activationCommitted) {
+            "Instance $ActionName activation is COMMITTED but the stable-entry check failed; selected instance and effects are retained. $($originalError.Message)"
+        } else { "Instance $ActionName failed without selecting an unverified candidate. $($originalError.Message)" }
         Throw-MaterializerError `
-            -Message "Instance $ActionName failed without selecting an unverified candidate. $($originalError.Message)" `
+            -Message $failureDetail `
             -ExitCode $(if ($rollbackUnproven) { 7 } else { 6 })
     } finally {
         if ($null -ne $generationTransactionRoot) { Remove-Item -LiteralPath $generationTransactionRoot -Recurse -Force -ErrorAction SilentlyContinue }
@@ -5580,7 +5674,7 @@ function Invoke-InstanceUninstall {
             # the last desired-state write; no readiness/worker script is called.
             $parsedIntent = ConvertFrom-StrictJsonText -Text (ConvertTo-InstanceJsonText -Value $removalIntent) -Label 'emitted failed preparation intent'
             {
-                Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $parsedIntent
+                Assert-FailedPreparationEffects -ProjectRoot $ProjectRoot -Document $parsedIntent -Manifest $Manifest
                 $null = Assert-FailedPreparationWrapper -ProjectRoot $ProjectRoot -Document $parsedIntent
             }.GetNewClosure()
         } else { $null }
