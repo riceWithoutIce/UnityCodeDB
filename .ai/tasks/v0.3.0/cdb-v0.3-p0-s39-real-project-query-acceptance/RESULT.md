@@ -253,3 +253,73 @@ adjusted to keep extracted-candidate fixtures inside the enclosing repository.
 Current status: `SOURCE_AND_CANDIDATE_FOCUSED_PASS / DELIVERY_AUTHORIZATION_PENDING /
 REAL_CLIENT_QUERY_BLOCKED`. No commit, export, external reference switch,
 bootstrap restoration, Unity execution, MCP attempt or process stop occurred.
+
+## Approved source diagnostics completed; real-client gate unchanged
+
+The user selected static analysis, then approved the bounded bootstrap
+diagnostics proposal. The stable wrapper now writes one best-effort record at
+wrapper error or worker exit, with no startup writes or protocol inspection.
+The availability probe preserves bounded child stderr and exit/termination
+attribution on failure. Worker exit, requested wrapper exit code and externally
+observed child-process exit are distinct facts; zero does not prove initialize.
+
+BOOTSTRAP-DIAGNOSTICS-RESULT.md records the source snapshot and 15 passing
+isolated scenarios, syntax, scoped whitespace and Package path provenance.
+The initial fixture's natural-exit expectation was corrected without changing
+the existing stdin connection behavior. Final evidence:
+.artifacts/tests/s39-bootstrap-diagnostics/r-b90d9fa3-6c2d-4722-8c3c-21a635f884d2/.
+
+This supersedes prior next-action suggestions to activate the capture shim or
+system tracing. Both remain deferred. No real project, delivery or registration
+was changed; no Unity/Provider/real MCP, commit/export or retry occurred. Existing
+dirty generation/manifests remain protected and no new release closure is
+claimed. Current status: BOOTSTRAP_DIAGNOSTICS_SOURCE_FOCUSED_PASS / NOT_DELIVERED /
+REAL_CLIENT_QUERY_BLOCKED. Next: User disposition on source result; delivery and
+human-owned real-client acceptance retain separate authority.
+
+## Local diagnostic delivery preparation complete; fresh project recommended
+
+A HEAD-based repository-local candidate contains exactly six Package deltas,
+with canonical regenerated metadata and unchanged immutable generation and
+host-current bytes. Candidate release closure (60/60), materializer/native
+bindings, candidate-own 15 diagnostic scenarios and path provenance PASS.
+The harness gained only explicit enclosing-repository portability support;
+production wrapper/probe bytes are unchanged from the prior source result.
+
+Production-reader proof rejects the old wrapper under the candidate Package.
+A fixture-only wrapper replacement preserves selected instance/epoch but its
+old activation contract is still refused. Protected fixture records stay
+unchanged. A separate fresh synthetic Install commits and both readers admit
+it. These fixtures do not establish real Install/Ready or the startup root cause.
+
+DIAGNOSTICS-DELIVERY-PREPARATION-RESULT.md records hashes and evidence;
+DIAGNOSTICS-DELIVERY-PLAN.md proposes an exact local commit/export/package-copy
+grant, followed by separately aligned human CodedbTest_1 creation and first
+Install. Original CodedbTest_0 and delivery remain protected. No external write,
+staging, commit, formal export, process inventory/control, real runtime or MCP
+retry occurred. Current status: LOCAL_CANDIDATE_CLOSURE_PASS /
+SAME_GENERATION_HANDOFF_NOT_ADMITTED / FRESH_INSTALL_FIXTURE_PASS /
+NOT_DELIVERED / REAL_CLIENT_QUERY_BLOCKED. Next decision belongs to User.
+
+## Fresh diagnostic project created by human; preflight complete
+
+The user chose CodedbTest_1, supplied its root and reported Unity closed.
+Read-only checks confirm 2022.3.62f3, no CodeDB dependency/AIWork/project MCP
+config, and no UnityLockfile. Baseline manifest/lock/version hashes are recorded
+in DIAGNOSTICS-DELIVERY-PLAN.md. No external writes or process inventory occurred.
+All six candidate hashes still match; HEAD is unchanged and the index is empty.
+
+The plan now concretely proposes grant B: after grant A delivery, add the exact
+Package dependency and a query sample only; let normal human Unity import
+generate the lock/.meta state. Grants A/B can be explicitly initiated together,
+then execution stops before human compilation/first Install. Project selection
+and creation do not independently authorize the repository-required exact
+commit. No commit/delivery/project preparation has yet been performed.
+
+## Exact diagnostic delivery and fresh-project preparation authorized
+
+The human replied `批准` to the exact local commit, Package export/validation/
+external copy and CodedbTest_1 manifest/sample preparation sequence described
+in DIAGNOSTICS-DELIVERY-PLAN.md grants A/B. Execution is in progress. No push,
+old-project write, automated Unity/Install or real MCP retry is authorized.
+The terminal gate is the human's compile/first-Install observation.

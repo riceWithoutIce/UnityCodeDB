@@ -15,10 +15,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let child = null;
+let diagnosticRoot = null;
+let diagnosticStage = "entry";
+let diagnosticSelection = null;
+let diagnosticError = null;
+let diagnosticWritten = false;
+let workerThreadId = null;
+let startupCwd = null;
+try { startupCwd = process.cwd(); } catch { /* Diagnostic context is optional. */ }
 
 try {
   const unityRoot = resolveUnityRoot(process.argv.slice(2));
   const selection = resolveSelectedInstance(unityRoot);
+  diagnosticSelection = selection.identity;
+  diagnosticStage = "selection_validated";
   process.chdir(unityRoot);
   child = new Worker(selection.workerPath, {
     argv: [
@@ -32,12 +42,15 @@ try {
     stdout: true,
     stderr: true
   });
+  workerThreadId = child.threadId;
+  diagnosticStage = "worker_created";
   child.stdout.pipe(process.stdout);
   child.stderr.pipe(process.stderr);
   process.stdin.pipe(child.stdin);
   child.once("error", fail);
   child.once("exit", (code) => {
     process.exitCode = Number.isInteger(code) ? code : 1;
+    writeTerminationDiagnostic("worker_exit", code);
   });
 } catch (error) {
   fail(error);
@@ -47,6 +60,73 @@ function fail(error) {
   const detail = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${detail}\n`);
   process.exitCode = 1;
+  diagnosticError = error;
+  // Worker 'error' is followed by 'exit'; combine both into one terminal record.
+  if (!child) writeTerminationDiagnostic("wrapper_error", null);
+}
+
+function writeTerminationDiagnostic(event, workerExitCode) {
+  if (diagnosticWritten || !diagnosticRoot) return;
+  diagnosticWritten = true;
+  try {
+    const directory = path.join(diagnosticRoot, "AIWork", ".runtime", "codedb", "diagnostics", "bootstrap");
+    assertDiagnosticAncestors(directory);
+    fs.mkdirSync(directory, { recursive: true });
+    assertDiagnosticAncestors(directory);
+    const id = crypto.randomUUID();
+    const localAppData = process.env.LOCALAPPDATA;
+    const record = {
+      schema_version: 1,
+      managed_by: MANAGED_BY,
+      correlation_id: id,
+      observed_at_utc: new Date().toISOString(),
+      event,
+      last_completed_stage: diagnosticStage,
+      pid: process.pid,
+      worker_thread_id: workerThreadId,
+      node_version: process.versions.node,
+      node_executable: process.execPath,
+      startup_cwd: startupCwd,
+      project_root: diagnosticRoot,
+      selected_identity: diagnosticSelection,
+      localappdata: {
+        present: typeof localAppData === "string" && localAppData.length > 0,
+        absolute: typeof localAppData === "string" && path.isAbsolute(localAppData)
+      },
+      worker_exit_code: Number.isInteger(workerExitCode) ? workerExitCode : null,
+      // The parent may still own stdin; this is its requested exit code, not
+      // independent evidence that the wrapper process has already terminated.
+      wrapper_exit_code_requested: process.exitCode,
+      error: diagnosticError ? {
+        code: boundedDiagnosticText(diagnosticError.code ?? ""),
+        message: boundedDiagnosticText(diagnosticError.message ?? diagnosticError)
+      } : null
+    };
+    const fd = fs.openSync(path.join(directory, `${process.pid}-${id}.json`), "wx", 0o600);
+    try { fs.writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`, "utf8"); }
+    finally { fs.closeSync(fd); }
+  } catch {
+    // Observability must never replace the primary stderr or exit outcome.
+  }
+}
+
+function assertDiagnosticAncestors(directory) {
+  assertPathInside(directory, diagnosticRoot, "bootstrap diagnostics");
+  let current = directory;
+  while (true) {
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error("Bootstrap diagnostics traverses a symbolic link or junction.");
+    }
+    if (samePath(current, diagnosticRoot)) return;
+    current = path.dirname(current);
+  }
+}
+
+function boundedDiagnosticText(value) {
+  return String(value)
+    .replace(/\bBearer\s+[^\s"',;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b((?:api[_-]?key|auth[_-]?token|access[_-]?token|password|secret)\s*[:=]\s*)[^\s"',;]+/gi, "$1[REDACTED]")
+    .slice(0, 2048);
 }
 
 function resolveUnityRoot(args) {
@@ -62,6 +142,8 @@ function resolveUnityRoot(args) {
     }
   }
   const ownedRoot = validateUnityRoot(path.resolve(__dirname, "..", "..", ".."));
+  diagnosticRoot = ownedRoot;
+  diagnosticStage = "project_root_validated";
   if (assertedRoot === undefined) return ownedRoot;
   const requestedRoot = validateUnityRoot(path.resolve(process.cwd(), assertedRoot));
   if (!samePath(ownedRoot, requestedRoot)) {
@@ -145,7 +227,17 @@ function resolveSelectedInstance(unityRoot) {
       !== requiredHash(instance, "worker_sha256", "selected CodeDB instance manifest")) {
     throw new Error("[CHECK_FAILED] Selected CodeDB instance worker hash is invalid.");
   }
-  return { instanceRelativePath, workerPath };
+  return {
+    instanceRelativePath,
+    workerPath,
+    identity: {
+      project_identity: expectedProjectIdentity,
+      instance_id: instanceId,
+      generation_id: generationId,
+      activation_epoch: typeof selection.activation_epoch === "string"
+        && /^[a-f0-9]{32}$/.test(selection.activation_epoch) ? selection.activation_epoch : null
+    }
+  };
 }
 
 function assertOwnedPath(candidate, root, label, expectedType) {

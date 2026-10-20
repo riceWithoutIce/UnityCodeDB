@@ -27,6 +27,7 @@ const EXPECTED_READ_ONLY_ANNOTATIONS = Object.freeze({
 });
 
 let wrapperWorker = null;
+let childObservation = null;
 const probeEvidence = createProbeEvidence();
 
 try {
@@ -50,10 +51,23 @@ try {
     }
   }
   const detail = error instanceof Error ? error.message : String(error);
-  probeEvidence.detail = detail;
+  captureChildEvidence(probeEvidence);
+  probeEvidence.detail = probeEvidence.child_stderr
+    ? `${detail}\nChild stderr:\n${probeEvidence.child_stderr}`
+    : detail;
   process.stdout.write(`${JSON.stringify(probeEvidence)}\n`);
-  process.stderr.write(`${detail}\n`);
+  process.stderr.write(`${probeEvidence.detail}\n`);
   process.exitCode = 1;
+}
+
+function captureChildEvidence(evidence) {
+  if (!childObservation) return;
+  evidence.child_exit_observed = childObservation.exited;
+  evidence.child_exit_code = childObservation.code;
+  evidence.child_exit_signal = childObservation.signal;
+  evidence.child_termination_requested = childObservation.terminationRequested;
+  evidence.child_stderr = childObservation.stderrParts.join("");
+  evidence.child_stderr_truncated = childObservation.stderrTruncated;
 }
 
 function createProbeEvidence() {
@@ -69,6 +83,12 @@ function createProbeEvidence() {
     codedb_status_usable: false,
     codedb_text_search_callable: false,
     status_summary: "",
+    child_exit_observed: false,
+    child_exit_code: null,
+    child_exit_signal: null,
+    child_termination_requested: false,
+    child_stderr: "",
+    child_stderr_truncated: false,
     detail: "The Package-owned MCP availability probe did not complete."
   };
 }
@@ -152,6 +172,15 @@ function assertOwnedWrapper(projectRoot, relativePath, instanceRoot) {
 async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
   const stderrParts = [];
   let stderrLength = 0;
+  childObservation = {
+    stderrParts,
+    stderrTruncated: false,
+    exited: false,
+    code: null,
+    signal: null,
+    terminationRequested: false,
+    spawnFailed: false
+  };
   let nextId = 1;
   let protocolFailure = null;
   const pending = new Map();
@@ -174,13 +203,18 @@ async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
       });
 
   wrapperWorker.stderr.setEncoding("utf8");
+  if (!instanceRoot) {
+    childObservation.closed = new Promise((resolve) => wrapperWorker.once("close", resolve));
+  }
   wrapperWorker.stderr.on("data", (chunk) => {
     if (stderrLength >= MAX_STDERR_CHARS) {
+      childObservation.stderrTruncated = true;
       return;
     }
     const text = String(chunk);
     const remaining = MAX_STDERR_CHARS - stderrLength;
     stderrParts.push(text.slice(0, remaining));
+    if (text.length > remaining) childObservation.stderrTruncated = true;
     stderrLength += Math.min(text.length, remaining);
   });
 
@@ -212,9 +246,19 @@ async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
     }
   });
 
-  wrapperWorker.once("error", (error) => rejectPending(new Error(`CodeDB wrapper worker could not start: ${error.message}`)));
-  wrapperWorker.once("exit", (code) => {
+  wrapperWorker.once("error", (error) => {
+    childObservation.spawnFailed = !instanceRoot && wrapperWorker.pid === undefined;
+    rejectPending(new Error(`CodeDB wrapper worker could not start: ${error.message}`));
+  });
+  wrapperWorker.once("exit", (code, signal) => {
+    childObservation.exited = true;
+    childObservation.code = Number.isInteger(code) ? code : null;
+    childObservation.signal = signal ?? null;
     resolveWorkerExit(code);
+  });
+  // ChildProcess 'close' follows stdio drain; retain stderr before reporting an
+  // initialize failure. Worker threads have no 'close' event.
+  wrapperWorker.once(instanceRoot ? "exit" : "close", (code) => {
     if (pending.size > 0) {
       rejectPending(new Error(`CodeDB wrapper exited during availability probe (code=${code}).`));
     }
@@ -316,6 +360,7 @@ async function probeWrapper(projectRoot, wrapperPath, instanceRoot, evidence) {
   if (exitCode !== 0) {
     throw new Error(`CodeDB wrapper exited with code ${exitCode}. ${stderr}`.trim());
   }
+  captureChildEvidence(evidence);
   wrapperWorker = null;
 
   evidence.availability = "AVAILABLE";
@@ -348,12 +393,21 @@ async function waitForExit(worker, exitPromise, timeoutMs) {
 
 async function terminateWrapper(worker) {
   if (typeof worker.terminate === "function") {
-    if (worker.threadId !== -1) await worker.terminate();
+    if (worker.threadId !== -1) {
+      if (childObservation) childObservation.terminationRequested = true;
+      await worker.terminate();
+    }
     return;
   }
   if (worker.exitCode === null && worker.signalCode === null) {
+    if (childObservation?.spawnFailed) return;
+    if (childObservation) childObservation.terminationRequested = true;
+    const closed = childObservation?.closed;
     worker.kill();
-    await new Promise((resolve) => worker.once("exit", resolve));
+    if (closed) await closed;
+    else await new Promise((resolve) => worker.once("exit", resolve));
+  } else if (childObservation?.closed) {
+    await childObservation.closed;
   }
 }
 
