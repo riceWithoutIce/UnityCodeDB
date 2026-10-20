@@ -388,3 +388,31 @@ This source snapshot does not rewrite S35's existing malformed
 `ce169d22b8544299b01407cef5d9b70b.json`, does not retry Install, and is not yet
 committed or exported. Delivery and a new human lifecycle attempt require a
 separate explicit authorization.
+
+## S37 terminal-result package human smoke — 2026-10-20
+
+Against the exact package referenced by S35 after the `d856a8f` delivery, the
+user reports focused Test Runner PASS, normal Manager and Unity open/close
+behavior, and no compile error. The Manager was in `Uninstalled` state with
+`Install CodeDB` visible. Only the Overview content was present, so there were
+no additional tabs available; tab switching is N/A for this sample.
+
+This closes the package compile, focused-test and UI-smoke gate as
+`PASS_WITH_LIMITS`. Install was not retried, so the same-version lifecycle gate
+remains separately blocked by the retained fail-closed historical record.
+
+## Authorized Install attempt after S37 delivery — 2026-10-20
+
+One human Install attempt was performed against the exact S37 package. It
+returned `BLOCKED / PREFLIGHT / INSTANCE_CONVERGENCE_FAILED`, exit code `6`,
+with `mutated_scopes=[]`; no candidate was selected and desired state remains
+`UNINSTALLED`.
+
+The newly written action receipt is complete and contains both output evidence
+fields. The blocker is the retained historical operation
+`ce169d22b8544299b01407cef5d9b70b.json`, whose old failed result omits
+`output_overflow` and `output_drain_incomplete` while retaining unresolved child
+identity (`CHILD_ADMITTED`, `child=null`). The source delivery deliberately does
+not rewrite or infer that historical identity. No retry or manual cleanup was
+performed; S35 now requires a separate decision on migration, archival, or
+leaving the historical acceptance project blocked.

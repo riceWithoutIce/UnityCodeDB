@@ -66,6 +66,41 @@ The [CodeDB Responsibility Contract](v0.3.0-p0-codedb-responsibility-contract.md
 defines product scope, resource ownership, and the separation of command
 outcome, current status, and new-change admission. Its 2026-10-02 approval is
 documentation/design alignment, not runtime or release acceptance.
+S29 was archived by user decision on 2026-10-15 as
+**ARCHIVED / PARTIAL / NOT_RELEASE_ACCEPTED**. See the
+[archive decision](../../.ai/tasks/v0.3.0/cdb-v0.3-p0-s29-fresh-project-integration-golden-path/ARCHIVE-DECISION-2026-10-15.md)
+and [current roadmap disposition](v0.3.0-roadmap.md#current-disposition--2026-10-15).
+Accepted results are retained; historical recovery is no longer an active-route
+prerequisite. Current-version lifecycle and controlled Remove → target Install
+acceptance need separate bounded tasks. The following S29 account is historical
+and does not authorize continuation.
+
+The historical planned integration unit was the
+[S29 fresh-project golden path](../../.ai/tasks/v0.3.0/cdb-v0.3-p0-s29-fresh-project-integration-golden-path/TASK.md):
+Install, Ready, confirmed project-integration removal, fresh reinstall and
+Ready as one continuous outcome. Its new target directory is approved;
+the exact candidate preparation/closure is complete and its human checklist
+is ready. One human-owned new-project golden-path session and strictly
+new-target read-only evidence are authorized. The new project is opened/imported,
+but its initial installation is blocked by an unbound PROVISIONING candidate
+left by automatic preparation. Candidate execution attribution, failure
+recovery and initial-action UI require one same-S29 reassessment; no runtime
+cleanup or product repair is authorized by that observation.
+Its 2026-10-05 contract alignment reduces cross-stage hard gates and separates
+first Install, reinstall, preparation attribution and verified activation.
+The [responsibility contract](v0.3.0-p0-codedb-responsibility-contract.md#constraint-reduction-and-shared-semantics---2026-10-05)
+owns the common meanings; Host Action and reinstall apply them within their
+existing responsibilities. That documentary clarification alone grants no
+implementation or retained-candidate recovery; no additional contract or
+execution owner is introduced.
+The subsequent user grant activates one same-S29 source-repair/focused-test
+window and one existing-Coder dispatch. No real candidate recovery, artifact
+delivery, Unity operation or independent review is included.
+One existing-Coder delivery is confirmed; the source repair is awaiting its
+stable handoff, with no implementation or integration PASS yet claimed.
+Client exposure, independent review and release remain separate gates. S28 remains
+PARTIAL with legacy recovery deferred; fresh-project success would not close
+the old S25 gate or constitute release acceptance.
 The active project-tool availability blocker is frozen in the
 [v0.3.0 P0 project-local Codex MCP discovery task](v0.3.0-p0-codex-client-discovery.md).
 The first active runtime-isolation slice is documented in the
@@ -75,9 +110,10 @@ The project-local command-owner implementation is documented in the
 Play/Domain Reload continuity and authenticated final shutdown are documented
 in [v0.3.0 P1-C Supervisor lifecycle ownership](v0.3.0-p1-supervisor-lifecycle.md).
 The reusable development and validation process is defined in the
-[development workflow](development-workflow.md); version roadmaps may add
-narrower, version-specific gates without duplicating the workflow.
-
+[development workflow](development-workflow.md), whose normative modules are
+listed in its [workflow module index](development-workflow.md#workflow-modules);
+version roadmaps may add narrower, version-specific gates without duplicating
+the workflow.
 Development/test temporary directory ownership and cleanup are defined in the
 [test workspace contract](test-workspace-contract.md).
 
@@ -96,7 +132,8 @@ an old `v0.2.x` artifact remain historical context only.
 
 ## Supported Environment
 
-- Unity `2022.3`
+- Unity `2022.3.x` recommended; actual version is recorded, not a CodeDB
+  installation admission gate or evidence that untested versions passed.
 - Windows Editor
 - Windows PowerShell 5.1
 - Node.js `22.x` or `24.x`

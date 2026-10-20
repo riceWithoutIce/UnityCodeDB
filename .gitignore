@@ -2,6 +2,12 @@
 /.codex_tmp/
 .utmp/
 /AIWork/.runtime/
+/UnityFreshInstallValidationProject/
+
+# Repository-owned development exports and protected recovery copies.
+# Ignored does not mean disposable; retention is defined by the workflow.
+/.artifacts/
+/.backups/
 
 # Unity-generated files, retained for disposable package validation projects.
 # Based on https://github.com/github/gitignore/blob/main/Unity.gitignore.
