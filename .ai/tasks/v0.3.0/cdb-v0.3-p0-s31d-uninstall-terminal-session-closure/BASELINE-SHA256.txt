@@ -1,0 +1,11 @@
+Base HEAD cc49c95e84945308385f64640963716d93d070ea
+Incoming working-file SHA256; unrelated dirty hunks remain protected.
+6f721f10ec16e05676e8ebf220d0e44aadf3250b31cddffdc71b8c8820f1e5ef  com.rice.ai-codedb/Editor/AICodedbSupervisorBridge.cs
+86dc783bd612c35d6c973007e665688785b9465d479186398a268ca3865f71bf  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+d812bd9ee59a1a9518eebb4a5918b8877e6dc8ca834275fa2107433df936947e  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+7d26f18d4c4ee5c94e59417119209383f425da226c9c4f042c843bfd7d5335c0  com.rice.ai-codedb/Editor/AICodedbProcessRunner.cs
+e12dcf9c16e5e435b68da6a964aaa295a1fae0d55ffea5de6d8c8a0c41a451f5  com.rice.ai-codedb/Tools~/codedb-project-supervisor.mjs
+634100865e8e7410b6d35cfb4bb6ff526cc383c0d8cdbfbe70e9682f3354662e  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+abf690e017b4343b0dfda8d26b7cd71a4744831cfd52ee5126b954dc7e745fd5  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+786816566cc7e5314b89139703fbd8c793988690ea61fc9a952ff892cff9b4ab  com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs
+01097b802510d4ed7df0704bc4faba9f9b98198e7d2a6bb59ad1c55d73f2c220  com.rice.ai-codedb/Documentation~/v0.3.0-p0-host-action-execution.md

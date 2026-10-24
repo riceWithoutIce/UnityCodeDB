@@ -1,0 +1,5 @@
+d554dc37ce80d9336de58e60efd01c1f12d4ce95c48fc348ec5d2f2cdef46d01  com.rice.ai-codedb/Editor/AICodedbControlContract.cs
+386790741bca240e1cf19bee06df8cce9a16cdb3c39969f39d916cbdab39aa69  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+ece23060d2c4fc86f69521f436a9b7eaacd056833f1fefd12b664802a4676ca3  com.rice.ai-codedb/Editor/AICodedbManagerActionJournal.cs
+dddab0e34ea36b33f9982e7aba33770824246860821ea62f1eb23c92907ccf5d  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+ed49c4f2c48ccf2d9cec167dd75184fd434dd79ad4b3fc971bd496a0376e998d  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs

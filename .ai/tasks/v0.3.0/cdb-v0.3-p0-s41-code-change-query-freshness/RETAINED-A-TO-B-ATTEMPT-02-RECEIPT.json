@@ -1,0 +1,207 @@
+{
+  "status": "PASS_RECORDED_A_TO_B_OBSERVATION",
+  "first_anomaly": null,
+  "authorization": "Human execution instruction for RETAINED-A-TO-B-ATTEMPT-02-TASK.md; once, conditional, no retry",
+  "current_chat_id": "NOT_PROVIDED_BY_HOST",
+  "human_starting_state": "Task records human-open Unity, no errors, Manager Ready; no newer conflicting human feedback. Not independently verified via Unity/status/process scan.",
+  "namespace": "mcp__codedb_codedbtest_2__codedb_text_search",
+  "counts": {
+    "text_search": 3,
+    "status": 0,
+    "other_codedb": 0,
+    "helper_apply": 1,
+    "source_saves": 1,
+    "waits": 1,
+    "retries": 0,
+    "recovery": 0,
+    "meta_edits": 0
+  },
+  "preflight": {
+    "captured_at_utc": "2026-10-22T07:11:04.4241234Z",
+    "cwd": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2",
+    "probe_base64": "bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19BXzIwMjYxMDIyIjsKICAgIH0KfQo=",
+    "instance_raw": "{\n    \"schema_version\":  1,\n    \"managed_by\":  \"com.rice.ai-codedb\",\n    \"project_identity\":  \"sha256:c49485bc88bd6e5cab2f8a45e04f3f5bd4dff15aaac2969cd7758bab976ff59c\",\n    \"instance_id\":  \"a492a5e936c14e4da3ed7e4cc7c8c16c\",\n    \"instance_relative_path\":  \"AIWork/.runtime/codedb/instances/a492a5e936c14e4da3ed7e4cc7c8c16c\",\n    \"state\":  \"READY\",\n    \"package_version\":  \"0.3.0-preview.5\",\n    \"payload_version\":  \"poc.44\",\n    \"payload_sequence\":  44,\n    \"generation_id\":  \"poc.44\",\n    \"generation_relative_path\":  \"AIWork/.runtime/codedb/host/generations/poc.44\",\n    \"generation_manifest_sha256\":  \"f7ff1d0777b6d7e4daa846139b22bdf86686e7778234a2a7e8264f6d61694fbb\",\n    \"bootstrap_protocol\":  1,\n    \"worker_relative_path\":  \"wrapper/codedb-project-instance-worker.mjs\",\n    \"worker_sha256\":  \"5578c9baec9968402296351c86dbecd14691871488aa73539a99e98735a94ea1\",\n    \"created_at_utc\":  \"2026-10-22T02:08:19.9429223Z\",\n    \"verified_at_utc\":  \"2026-10-22T02:08:28.7205067Z\",\n    \"originating_action\":  {\n                               \"action\":  \"INSTALL\",\n                               \"action_id\":  \"63a1cc9fc5fa4e4eb18f67b0442c5685\",\n                               \"operation_id\":  \"34b8fc71fb664c0ba5adc5af4294562a\"\n                           }\n}\n",
+    "instance_sha256": "61d2de93a0d19f9ae1ef68cc2b7d9f71645b81145c501fafb9ebb41aa344dced",
+    "package_manifest_reference": "file:../../Packages/4589249-s42-codedbtest2/com.rice.ai-codedb",
+    "package_lock_reference": "file:../../Packages/4589249-s42-codedbtest2/com.rice.ai-codedb",
+    "registration": {
+      "name": "codedb-codedbtest-2",
+      "command": "node",
+      "cwd": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2",
+      "args": [
+        "AIWork/codedb/wrapper/codedb-project-wrapper.mjs",
+        "--root",
+        "."
+      ],
+      "startup_timeout_sec": 120
+    },
+    "pointer": {
+      "schema_version": 1,
+      "managed_by": "com.rice.ai-codedb",
+      "project_identity": "sha256:c49485bc88bd6e5cab2f8a45e04f3f5bd4dff15aaac2969cd7758bab976ff59c",
+      "instance_id": "a492a5e936c14e4da3ed7e4cc7c8c16c",
+      "instance_relative_path": "AIWork/.runtime/codedb/instances/a492a5e936c14e4da3ed7e4cc7c8c16c",
+      "instance_manifest_sha256": "61d2de93a0d19f9ae1ef68cc2b7d9f71645b81145c501fafb9ebb41aa344dced",
+      "generation_id": "poc.44",
+      "owner_identity_version": 2,
+      "activation_epoch": "063aa347f49a4b9f955a5447f293a0ac",
+      "activated_at_utc": "2026-10-22T02:08:32.8078250Z"
+    },
+    "pointer_sha256": "1637870d57dcf07c3817505ebd8516236d5af16521d4d12475463fa8bed50f1a",
+    "a_sha256": "2827d0f71db580099a13daad9c301407adeed331c8e4d0aa5413dfcebe2ce11c",
+    "protected_probe_sha256": "d96bc90c3f207664fa426a3ea975a19cdcbc7802a65759384607256fc62d3432",
+    "helper_sha256": "2ef26660c75e10d5d0973cdbfeba393702c5cd6b5447272a58d0fafe33d0ac24",
+    "all_required_fields_matched": true
+  },
+  "calls": [
+    {
+      "step": "A_baseline",
+      "tool": "mcp__codedb_codedbtest_2__codedb_text_search",
+      "args": {
+        "query": "CODEDB_S41_FRESHNESS_A_20261022",
+        "path_glob": "Assets/CodeDBValidation/CodeDBFreshnessProbeS41.cs",
+        "regex": false,
+        "limit": 5
+      },
+      "call_started_at_utc": "2026-10-22T07:11:14.095Z",
+      "call_completed_at_utc": "2026-10-22T07:11:14.150Z",
+      "elapsed_ms": 55,
+      "raw": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[OK] codedb_text_search found 1 unique hit(s) for: CODEDB_S41_FRESHNESS_A_20261022\n[HIT] Assets/CodeDBValidation/CodeDBFreshnessProbeS41.cs:5 [provider]\n    internal const string Marker = \"CODEDB_S41_FRESHNESS_A_20261022\";\n[TIMING] {\"schema_version\":1,\"tool\":\"codedb_text_search\",\"total_ms\":31.52,\"queue_ms\":0.11,\"provider_process_ms\":1.49,\"provider_core_ms\":null,\"adapter_ms\":0,\"merge_ms\":0.42,\"read_ms\":0,\"provider_attempts\":1,\"provider_route\":\"coordinator\",\"provider_shared\":false,\"output_bytes\":222}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "step": "B_checkpoint",
+      "tool": "mcp__codedb_codedbtest_2__codedb_text_search",
+      "args": {
+        "query": "CODEDB_S41_FRESHNESS_B_20261022",
+        "path_glob": "Assets/CodeDBValidation/CodeDBFreshnessProbeS41.cs",
+        "regex": false,
+        "limit": 5
+      },
+      "call_started_at_utc": "2026-10-22T07:12:14.273Z",
+      "call_completed_at_utc": "2026-10-22T07:12:14.295Z",
+      "elapsed_ms": 22,
+      "raw": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[OK] codedb_text_search found 1 unique hit(s) for: CODEDB_S41_FRESHNESS_B_20261022\n[HIT] Assets/CodeDBValidation/CodeDBFreshnessProbeS41.cs:5 [provider]\n    internal const string Marker = \"CODEDB_S41_FRESHNESS_B_20261022\";\n[TIMING] {\"schema_version\":1,\"tool\":\"codedb_text_search\",\"total_ms\":8.79,\"queue_ms\":0.04,\"provider_process_ms\":2.25,\"provider_core_ms\":null,\"adapter_ms\":0,\"merge_ms\":0.09,\"read_ms\":0,\"provider_attempts\":1,\"provider_route\":\"coordinator\",\"provider_shared\":false,\"output_bytes\":222}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "step": "old_A_absence",
+      "tool": "mcp__codedb_codedbtest_2__codedb_text_search",
+      "args": {
+        "query": "CODEDB_S41_FRESHNESS_A_20261022",
+        "path_glob": "Assets/CodeDBValidation/CodeDBFreshnessProbeS41.cs",
+        "regex": false,
+        "limit": 5
+      },
+      "call_started_at_utc": "2026-10-22T07:12:24.776Z",
+      "call_completed_at_utc": "2026-10-22T07:12:24.794Z",
+      "elapsed_ms": 18,
+      "raw": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[NO HIT] codedb_text_search found no match for: CODEDB_S41_FRESHNESS_A_20261022\n[TIMING] {\"schema_version\":1,\"tool\":\"codedb_text_search\",\"total_ms\":4.52,\"queue_ms\":0.04,\"provider_process_ms\":0.82,\"provider_core_ms\":null,\"adapter_ms\":0,\"merge_ms\":0,\"read_ms\":0,\"provider_attempts\":1,\"provider_route\":\"coordinator\",\"provider_shared\":false,\"output_bytes\":79}"
+          }
+        ],
+        "isError": false
+      }
+    }
+  ],
+  "helper": {
+    "invoked_at_utc": "2026-10-22T07:11:40.7832919Z",
+    "completed_at_utc": "2026-10-22T07:11:40.8485191Z",
+    "helper_exit_code": 0,
+    "helper_stdout_raw": "{\"mode\":\"--apply\",\"before_sha256\":\"2827d0f71db580099a13daad9c301407adeed331c8e4d0aa5413dfcebe2ce11c\",\"expected_b_sha256\":\"496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc\",\"bytes\":167,\"writes\":1,\"saved_at_utc\":\"2026-10-22T07:11:40.839Z\",\"status\":\"B_SAVED\"}",
+    "actual_probe_sha256": "496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc",
+    "actual_probe_base64": "bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19CXzIwMjYxMDIyIjsKICAgIH0KfQo="
+  },
+  "wait": {
+    "requested_ms": 15000,
+    "wait_started_at_utc": "2026-10-22T07:11:52.6270518Z",
+    "wait_completed_at_utc": "2026-10-22T07:12:07.7626198Z",
+    "elapsed_ms": 15130.0241
+  },
+  "intervals_ms": {
+    "save_to_wait_start": 11788,
+    "wait_end_to_B_call": 6511,
+    "save_to_B_call": 33434,
+    "B_response_to_A_absence_call": 10481
+  },
+  "final": {
+    "captured_at_utc": "2026-10-22T07:12:48.8409682Z",
+    "cwd": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2",
+    "probe_bytes": 167,
+    "probe_base64": "bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19CXzIwMjYxMDIyIjsKICAgIH0KfQo=",
+    "probe_sha256": "496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc",
+    "probe_equals_expected_B": true,
+    "pointer_sha256": "1637870d57dcf07c3817505ebd8516236d5af16521d4d12475463fa8bed50f1a",
+    "pointer_raw": "{\n    \"schema_version\":  1,\n    \"managed_by\":  \"com.rice.ai-codedb\",\n    \"project_identity\":  \"sha256:c49485bc88bd6e5cab2f8a45e04f3f5bd4dff15aaac2969cd7758bab976ff59c\",\n    \"instance_id\":  \"a492a5e936c14e4da3ed7e4cc7c8c16c\",\n    \"instance_relative_path\":  \"AIWork/.runtime/codedb/instances/a492a5e936c14e4da3ed7e4cc7c8c16c\",\n    \"instance_manifest_sha256\":  \"61d2de93a0d19f9ae1ef68cc2b7d9f71645b81145c501fafb9ebb41aa344dced\",\n    \"generation_id\":  \"poc.44\",\n    \"owner_identity_version\":  2,\n    \"activation_epoch\":  \"063aa347f49a4b9f955a5447f293a0ac\",\n    \"activated_at_utc\":  \"2026-10-22T02:08:32.8078250Z\"\n}\n",
+    "protected_probe_sha256": "d96bc90c3f207664fa426a3ea975a19cdcbc7802a65759384607256fc62d3432"
+  },
+  "checks": {
+    "a_baseline_unique_line5": true,
+    "b_unique_line5": true,
+    "old_a_successful_zero_hits": true,
+    "final_expected_B_bytes": true,
+    "pointer_stable": true,
+    "protected_probe_stable": true
+  },
+  "response_identity": "project_identity, instance_id, activation_epoch not provided in any formal query response; disk preflight identity is separate.",
+  "limitations": [
+    "Not a convergence-instant or 15-second SLA proof.",
+    "Sequential B and A observations are not atomic.",
+    "Does not prove heartbeat/timeout repair, complete freshness signaling, performance or release readiness."
+  ],
+  "raw_shell_captures": {
+    "preflight": {
+      "chunk_id": "e989fc",
+      "wall_time_seconds": 0.4572579,
+      "exit_code": 0,
+      "original_token_count": 459,
+      "output": "{\r\n  \"captured_at_utc\": \"2026-10-22T07:11:04.4241234Z\",\r\n  \"cwd\": \"G:\\\\RiceProgram\\\\Test\\\\CodedbTest\\\\CodedbTest_2\",\r\n  \"probe_base64\": \"bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19BXzIwMjYxMDIyIjsKICAgIH0KfQo=\",\r\n  \"instance_raw\": \"{\\n    \\\"schema_version\\\":  1,\\n    \\\"managed_by\\\":  \\\"com.rice.ai-codedb\\\",\\n    \\\"project_identity\\\":  \\\"sha256:c49485bc88bd6e5cab2f8a45e04f3f5bd4dff15aaac2969cd7758bab976ff59c\\\",\\n    \\\"instance_id\\\":  \\\"a492a5e936c14e4da3ed7e4cc7c8c16c\\\",\\n    \\\"instance_relative_path\\\":  \\\"AIWork/.runtime/codedb/instances/a492a5e936c14e4da3ed7e4cc7c8c16c\\\",\\n    \\\"state\\\":  \\\"READY\\\",\\n    \\\"package_version\\\":  \\\"0.3.0-preview.5\\\",\\n    \\\"payload_version\\\":  \\\"poc.44\\\",\\n    \\\"payload_sequence\\\":  44,\\n    \\\"generation_id\\\":  \\\"poc.44\\\",\\n    \\\"generation_relative_path\\\":  \\\"AIWork/.runtime/codedb/host/generations/poc.44\\\",\\n    \\\"generation_manifest_sha256\\\":  \\\"f7ff1d0777b6d7e4daa846139b22bdf86686e7778234a2a7e8264f6d61694fbb\\\",\\n    \\\"bootstrap_protocol\\\":  1,\\n    \\\"worker_relative_path\\\":  \\\"wrapper/codedb-project-instance-worker.mjs\\\",\\n    \\\"worker_sha256\\\":  \\\"5578c9baec9968402296351c86dbecd14691871488aa73539a99e98735a94ea1\\\",\\n    \\\"created_at_utc\\\":  \\\"2026-10-22T02:08:19.9429223Z\\\",\\n    \\\"verified_at_utc\\\":  \\\"2026-10-22T02:08:28.7205067Z\\\",\\n    \\\"originating_action\\\":  {\\n                               \\\"action\\\":  \\\"INSTALL\\\",\\n                               \\\"action_id\\\":  \\\"63a1cc9fc5fa4e4eb18f67b0442c5685\\\",\\n                               \\\"operation_id\\\":  \\\"34b8fc71fb664c0ba5adc5af4294562a\\\"\\n                           }\\n}\\n\",\r\n  \"instance_sha256\": \"61d2de93a0d19f9ae1ef68cc2b7d9f71645b81145c501fafb9ebb41aa344dced\"\r\n}\r\n"
+    },
+    "helper": {
+      "chunk_id": "70a34d",
+      "wall_time_seconds": 0.5699898,
+      "exit_code": 0,
+      "original_token_count": 203,
+      "output": "{\r\n  \"invoked_at_utc\": \"2026-10-22T07:11:40.7832919Z\",\r\n  \"completed_at_utc\": \"2026-10-22T07:11:40.8485191Z\",\r\n  \"helper_exit_code\": 0,\r\n  \"helper_stdout_raw\": \"{\\\"mode\\\":\\\"--apply\\\",\\\"before_sha256\\\":\\\"2827d0f71db580099a13daad9c301407adeed331c8e4d0aa5413dfcebe2ce11c\\\",\\\"expected_b_sha256\\\":\\\"496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc\\\",\\\"bytes\\\":167,\\\"writes\\\":1,\\\"saved_at_utc\\\":\\\"2026-10-22T07:11:40.839Z\\\",\\\"status\\\":\\\"B_SAVED\\\"}\",\r\n  \"actual_probe_sha256\": \"496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc\",\r\n  \"actual_probe_base64\": \"bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19CXzIwMjYxMDIyIjsKICAgIH0KfQo=\"\r\n}\r\n"
+    },
+    "wait_dispatch": {
+      "chunk_id": "21d14e",
+      "wall_time_seconds": 10.0015872,
+      "session_id": 62707,
+      "original_token_count": 0,
+      "output": ""
+    },
+    "wait_completion": {
+      "chunk_id": "b4effb",
+      "wall_time_seconds": 0.0000091,
+      "exit_code": 0,
+      "original_token_count": 45,
+      "output": "{\r\n  \"requested_ms\": 15000,\r\n  \"wait_started_at_utc\": \"2026-10-22T07:11:52.6270518Z\",\r\n  \"wait_completed_at_utc\": \"2026-10-22T07:12:07.7626198Z\",\r\n  \"elapsed_ms\": 15130.0241\r\n}\r\n"
+    },
+    "final": {
+      "chunk_id": "07d8a7",
+      "wall_time_seconds": 0.4367024,
+      "exit_code": 0,
+      "original_token_count": 345,
+      "output": "{\r\n  \"captured_at_utc\": \"2026-10-22T07:12:48.8409682Z\",\r\n  \"cwd\": \"G:\\\\RiceProgram\\\\Test\\\\CodedbTest\\\\CodedbTest_2\",\r\n  \"probe_bytes\": 167,\r\n  \"probe_base64\": \"bmFtZXNwYWNlIENvZGVEQlZhbGlkYXRpb24KewogICAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIENvZGVEQkZyZXNobmVzc1Byb2JlUzQxCiAgICB7CiAgICAgICAgaW50ZXJuYWwgY29uc3Qgc3RyaW5nIE1hcmtlciA9ICJDT0RFREJfUzQxX0ZSRVNITkVTU19CXzIwMjYxMDIyIjsKICAgIH0KfQo=\",\r\n  \"probe_sha256\": \"496ebae5e49d4970a938632b289701427e8d93d90572ea64be67650d747c47cc\",\r\n  \"probe_equals_expected_B\": true,\r\n  \"pointer_sha256\": \"1637870d57dcf07c3817505ebd8516236d5af16521d4d12475463fa8bed50f1a\",\r\n  \"pointer_raw\": \"{\\n    \\\"schema_version\\\":  1,\\n    \\\"managed_by\\\":  \\\"com.rice.ai-codedb\\\",\\n    \\\"project_identity\\\":  \\\"sha256:c49485bc88bd6e5cab2f8a45e04f3f5bd4dff15aaac2969cd7758bab976ff59c\\\",\\n    \\\"instance_id\\\":  \\\"a492a5e936c14e4da3ed7e4cc7c8c16c\\\",\\n    \\\"instance_relative_path\\\":  \\\"AIWork/.runtime/codedb/instances/a492a5e936c14e4da3ed7e4cc7c8c16c\\\",\\n    \\\"instance_manifest_sha256\\\":  \\\"61d2de93a0d19f9ae1ef68cc2b7d9f71645b81145c501fafb9ebb41aa344dced\\\",\\n    \\\"generation_id\\\":  \\\"poc.44\\\",\\n    \\\"owner_identity_version\\\":  2,\\n    \\\"activation_epoch\\\":  \\\"063aa347f49a4b9f955a5447f293a0ac\\\",\\n    \\\"activated_at_utc\\\":  \\\"2026-10-22T02:08:32.8078250Z\\\"\\n}\\n\",\r\n  \"protected_probe_sha256\": \"d96bc90c3f207664fa426a3ea975a19cdcbc7802a65759384607256fc62d3432\"\r\n}\r\n"
+    }
+  }
+}
+

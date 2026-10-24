@@ -2,7 +2,7 @@
 
 ## Status
 
-`POLICY_RECORDED / INVENTORY_COMPLETE / DELETION_NOT_AUTHORIZED`
+`POLICY_RECORDED / BATCH_01_COMPLETE / BROADER_REVIEW_OPEN`
 
 This is a read-only organization task created after S35 was logically archived.
 It records the first bounded inventory and the proposed retention groups. It
@@ -60,3 +60,11 @@ failure evidence must be checked first.
 
 No deletion or bulk relocation is part of this inventory. A later cleanup pass
 must use an explicit target list and separate authorization.
+
+## Subsequent cleanup - 2026-10-20
+
+The user separately authorized the exact first batch in
+`CLEANUP-BATCH-01-PROPOSAL.md`. Its 27 targets were removed and verified; see
+`CLEANUP-BATCH-01-RESULT.md` and its per-target execution log. The initial
+inventory and proposal above remain historical context, not standing cleanup
+authority for any other child.

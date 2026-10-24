@@ -1,0 +1,5 @@
+[mcp_servers.codedb-unityvalidationproject]
+command = "node"
+cwd = "."
+args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]
+startup_timeout_sec = 120

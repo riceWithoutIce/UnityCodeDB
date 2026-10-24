@@ -1,0 +1,21 @@
+{
+  "base": "267b921dee0385962885e8e3142b4e4903ab711b",
+  "branch": "codex/coordinator-query-readiness",
+  "prepared_tree": "2ccee6fa1e29b597c0c87397dec4c8703036e0cf",
+  "sources": [
+    {
+      "path": "com.rice.ai-codedb/Tools~/codedb-project-supervisor.mjs",
+      "sha256": "50260e1a355907a163e7841dc7a076e1917c0cec1e4b0d3f4f6f4a7186e59aca",
+      "git_blob": "df59f0f20a34b3d42ea2971591f293e49f97ba14"
+    },
+    {
+      "path": "com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs",
+      "sha256": "dcfb3008eac55880b0ba5eae26f7acb962dcb345b3d92cab467d279b02b41e06",
+      "git_blob": "3bdd7e97275ef11f506f0c5456883ff67be01ead"
+    }
+  ],
+  "title": "Bind watch manager child to selected instance context",
+  "evidence_relative": ".artifacts/tests/s42-context-commit-export/execution-a",
+  "export_prefix": ".artifacts/exports/s42-instance-context-",
+  "focused_source_receipt_sha256": "2a7d910f6472668a1204dc5e9e26e4e21f8e33117f7ed4c9ceb4df6a885eb123"
+}

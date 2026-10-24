@@ -1,0 +1,40 @@
+{
+  "status": "CODER_READY_FOR_TARGETED_REVIEW",
+  "base": "c848049d90fbdf618905be25225580642d98d987",
+  "head": "c848049d90fbdf618905be25225580642d98d987",
+  "branch": "codex/retained-mcp-install-admission",
+  "checkout": "<repository-root>/.worktrees/cdb-v0.3-p0-s40-retained-mcp-install-admission",
+  "uncommitted": true,
+  "sources": [
+    {
+      "path": "com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1",
+      "sha256": "b8931439f2f77fbebc65f81a3614cedf94b0c5b62f1ddac0e62ae402bf8b045f"
+    },
+    {
+      "path": "com.rice.ai-codedb/Documentation~/v0.3.0-p0-project-integration-reinstall-contract.md",
+      "sha256": "3b09c957860533b3fd82141f564a32f9147123637843755aa748f824fba93b7e"
+    },
+    {
+      "path": "com.rice.ai-codedb/Tests~/test-codedb-retained-mcp-install.ps1",
+      "sha256": "35512d17a087fe23955b4aae444a7d5afc83225726f2d0947e4da227d3f3411c"
+    },
+    {
+      "path": "com.rice.ai-codedb/Tests~/test-codedb-retained-mcp-install.mjs",
+      "sha256": "6dfae913d97e220b3bad0309e64a6b647d3dbb6648e4f5a9fd60f41e9b296df2"
+    }
+  ],
+  "tools": [
+    {
+      "name": "powershell.exe",
+      "sha256": "9785001b0dcf755eddb8af294a373c0b87b2498660f724e76c4d53f9c217c7a3"
+    },
+    {
+      "name": "pwsh.exe",
+      "sha256": "362a356ce7f0940ec74f73a8fc2c990a2cc24a38a11c90bbd8eca947110ad139"
+    },
+    {
+      "name": "node.exe",
+      "sha256": "58e74bf02fc5bbacc41dcb8bef089961cd5bddd37830b87784e4fc624d145d1f"
+    }
+  ]
+}

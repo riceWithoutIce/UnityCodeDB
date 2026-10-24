@@ -112,6 +112,9 @@ INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-HUMAN-CHECKLIST.md.
 ## Remaining gates
 
 No independent Verifier result is claimed. Repaired-package human compilation,
-focused EditMode, Manager/tabs/normal close, real Remove/Install and release
-acceptance remain unrun. Do not patch either Package in place or regenerate
-Payload. S29/release remain PARTIAL.
+focused EditMode and Manager/tabs pass. First-close normal shutdown is
+PARTIAL: the first close displayed an 11-second `CleanupMono` hold while the
+second close completed normally. See
+INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-HUMAN-RESULT.md. Real
+Remove/Install and release acceptance remain unrun. Do not patch either
+Package in place or regenerate Payload. S29/release remain PARTIAL.

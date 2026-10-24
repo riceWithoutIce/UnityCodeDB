@@ -5,6 +5,7 @@ param()
 
 Set-StrictMode -Version Latest
 . "$PSScriptRoot\codedb-project-common.ps1"
+. (Join-Path $PSScriptRoot '..\shared\codedb-mcp-registration-contract.ps1')
 
 $context = Get-ProjectCodedbContext
 
@@ -35,10 +36,11 @@ $relativeExePath = ConvertTo-CodedbDisplayPath -Context $context -Path $provider
 $relativeConfigPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $providerPaths.ConfigPath
 $relativeWrapperPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $context.WrapperScriptPath
 $projectConfigPath = ".codex/config.toml"
+$workingDirectoryValue = ConvertTo-CodedbMcpWorkingDirectoryValue -ProjectRoot $context.UnityRoot
 $projectConfigDraft = @"
 [mcp_servers.$($context.ProviderName)]
 command = "node"
-cwd = "."
+cwd = $workingDirectoryValue
 args = ["$relativeWrapperPath", "--root", "."]
 startup_timeout_sec = 120
 "@
@@ -64,7 +66,8 @@ Write-Host "- Do not commit this printed draft if it contains machine-local abso
 Write-Host ""
 Write-Host "Workspace-local/project-level Codex draft:"
 Write-Host "- Target file: $projectConfigPath"
-Write-Host "- This project-level snippet uses Unity-root-relative paths and may be committed only after review."
+Write-Host "- cwd is generated from this Unity project root. Regenerate after moving the project."
+Write-Host "- This generated snippet contains a machine-local cwd; do not commit it as a portable template."
 Write-Host $projectConfigDraft
 Write-Host ""
 Write-Host "Machine-local review draft:"

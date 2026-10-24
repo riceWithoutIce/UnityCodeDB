@@ -1,0 +1,4 @@
+Base d88a101f15d21f916cbee9578ab887aa1ea862cd
+Follow-up delta: forward existing Package Manifest at Install and Uninstall recovery entrances; focused source-shape assertions.
+b80cccb974c4c30385ee9fe6be6106b5e8e5d17f1da2498a943a3e9f0786becf  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+e014f3399bb83b97b69c7f4454d000fa6b2dd69db860e9644ce2cd2e066d2ba8  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1

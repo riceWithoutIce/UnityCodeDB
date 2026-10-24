@@ -4595,6 +4595,15 @@ function Get-CombinedInstanceCleanupState {
         -ProjectRoot $ProjectRoot `
         -Manifest $Manifest `
         -PerformCleanup:$PerformCleanup
+    if ($instanceState -eq "COMPLETE") {
+        # Normal removal intents can retain instances outside the new
+        # activation's retirement intent. Account for them without granting
+        # additional deletion authority or reclaiming their live leases.
+        $instanceState = Get-InstanceCleanupState `
+            -ProjectRoot $ProjectRoot `
+            -Manifest $Manifest `
+            -CurrentInstance $CurrentInstance
+    }
     $legacyState = "COMPLETE"
     $requestedExitCodeBeforeCleanup = $script:RequestedExitCode
     if ($instanceState -eq "PENDING") {
@@ -4926,6 +4935,73 @@ function Test-InstanceFirstInstall {
     return $true
 }
 
+function Get-InstanceRetainedMcpInstallHolders {
+    # Installation admission is not deletion authority. Only this Package's
+    # authenticated, logically removed READY instance may keep known MCP readers.
+    # Unknown identity, failed preparation and runtime writers remain blockers.
+    param($Manifest, [string]$ProjectRoot, $Evidence, [string]$RemovalStateId)
+
+    $desired = Get-InstanceDesiredState -ProjectRoot $ProjectRoot
+    if (-not $desired.Present -or $desired.Legacy -or
+        $desired.DesiredState -cne 'UNINSTALLED' -or $desired.CleanupState -cne 'PENDING' -or
+        $Evidence.Manifest.state -cne 'READY' -or
+        [string]$Evidence.Manifest.generation_id -cne [string]$Manifest.GenerationId -or
+        $null -ne (Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -AllowMissing) -or
+        $null -ne (Get-ValidatedCurrentInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -LastKnownGood -AllowMissing)) {
+        throw 'Retained MCP Install admission requires the exact logically uninstalled current-Package instance.'
+    }
+    # Current deactivation still needs its own valid intent. Older readers
+    # retain the independently validated intent for their instance, not this
+    # latest desired-state identity.
+    $currentIntent = Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $desired.StateId
+    $intent = if ($RemovalStateId -ceq $desired.StateId) { $currentIntent }
+        elseif (-not [string]::IsNullOrWhiteSpace($RemovalStateId)) {
+            Get-InstanceRemovalIntent -Manifest $Manifest -ProjectRoot $ProjectRoot -StateId $RemovalStateId
+        } else { $null }
+    if ($null -eq $intent -or $intent.Document.schema_version -ne 1 -or $intent.InstanceId -cne $Evidence.InstanceId -or
+        [string]$intent.Document.retained_instance_manifest_sha256 -cne (Get-FileSha256 -Path $Evidence.ManifestPath) -or
+        [string]$intent.Document.retained_wrapper_sha256 -cne [string]$Manifest.TargetMap['AIWork/codedb/wrapper/codedb-project-wrapper.mjs'].Sha256) {
+        throw 'Retained MCP Install admission has no matching normal-uninstall closure.'
+    }
+    $registration = Get-RepairMcpConfigPlan -ProjectRoot $ProjectRoot -RemoveManagedKeys -UninstallStateId $desired.StateId
+    if (-not $registration.Current) { throw 'Retained MCP Install admission requires inactive project registration.' }
+
+    $leases = Get-InstanceLeaseEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    $editor = Get-InstanceEditorLeaseEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    $coordinator = Get-InstanceCoordinatorEvidence -Evidence $Evidence -ProjectRoot $ProjectRoot
+    if ($leases.Invalid.Count -gt 0 -or $editor.Invalid.Count -gt 0 -or
+        $editor.Live.Count -gt 0 -or $coordinator.State -notin @('ABSENT', 'STALE')) {
+        throw 'Retained instance has invalid holders or an active runtime writer; Install remains blocked.'
+    }
+    foreach ($lease in $leases.Live) {
+        $document = (Read-BoundedJsonDocument -Path $lease.Path -Label 'retained MCP Install lease' -MaximumBytes 65536).Document
+        $identity = Get-MaterializerProcessIdentity -ProcessId $lease.ProcessId
+        # Get-InstanceLeaseEvidence conservatively groups unknown starts with live
+        # owners. That classification cannot grant this installation exception.
+        if (-not $identity.Alive -or
+            (Test-MaterializerGenerationProcessIdentity -ProcessIdentity $identity -LeaseIdentity ([string]$document.process_start_identity)) -ne $true) {
+            throw 'Retained MCP process start identity is unknown or changed; Install remains blocked.'
+        }
+        $command = Get-MaterializerWindowsProcessCommandIdentity -ProcessId $lease.ProcessId
+        if ($null -eq $command -or -not (Test-MaterializerProcessExecutableIdentity -ProcessIdentity $command) -or
+            [IO.Path]::GetFileName($command.ExecutablePath) -ine 'node.exe' -or $command.Arguments.Count -ne 4 -or
+            $command.Arguments[2] -cne '--root') {
+            throw 'Retained MCP invocation is unknown; Install remains blocked.'
+        }
+        $wrapper = [string]$command.Arguments[1]
+        $root = [string]$command.Arguments[3]
+        $wrapperMatches = if ([IO.Path]::IsPathRooted($wrapper)) {
+            Test-MaterializerArgumentPathIdentity -Actual $wrapper -Expected (Join-Path $ProjectRoot 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs')
+        } else { $wrapper.Replace('\', '/') -ieq 'AIWork/codedb/wrapper/codedb-project-wrapper.mjs' }
+        $rootMatches = $root -eq '.' -or ([IO.Path]::IsPathRooted($root) -and
+            (Test-MaterializerArgumentPathIdentity -Actual $root -Expected $ProjectRoot))
+        if (-not $wrapperMatches -or -not $rootMatches) {
+            throw 'Retained MCP invocation does not bind the registered project wrapper; Install remains blocked.'
+        }
+        [int]$lease.ProcessId
+    }
+}
+
 function Assert-ProjectInstallExecutionAdmission {
     # Called only by the existing project-lock owner, before recovery or a
     # candidate is created. History is observation, never a replacement owner.
@@ -4954,8 +5030,28 @@ function Assert-ProjectInstallExecutionAdmission {
     if ($self.Count -ne 1 -or [int]$self[0].ParentProcessId -ne [int]$claim.writer_pid) {
         throw 'Project Install child is not owned by its authenticated writer.'
     }
+    $bound = @{}
+    $removalStateIds = @{}
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        $evidence = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $intent.InstanceRoot -AllowProvisioning:($intent.Document.schema_version -eq 2) -FailedPreparation:($intent.Document.schema_version -eq 2)
+        $bound[$evidence.InstanceId] = $evidence
+        $removalStateIds[$evidence.InstanceId] = [string]$intent.Document.state_id
+    }
+    foreach ($retired in @(Get-ValidatedInstanceRetirementControls -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($retired.InstanceId)" -Label 'Install retired instance'
+        $bound[$retired.InstanceId] = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $root
+    }
+    $retainedMcp = @{}
+    foreach ($evidence in $bound.Values) {
+        if (-not (Get-InstanceRetirementHolderEvidence -Evidence $evidence -ProjectRoot $ProjectRoot).Clear) {
+            foreach ($holderPid in @(Get-InstanceRetainedMcpInstallHolders -Manifest $Manifest -ProjectRoot $ProjectRoot -Evidence $evidence -RemovalStateId $removalStateIds[$evidence.InstanceId])) {
+                $retainedMcp[$holderPid] = $true
+            }
+        }
+    }
     foreach ($process in $processes) {
         if ([int]$process.ProcessId -in @($PID, [int]$claim.writer_pid)) { continue }
+        if ($retainedMcp.ContainsKey([int]$process.ProcessId)) { continue }
         $line = [string]$process.CommandLine
         # Executable name is not project ownership. Inaccessible unrelated
         # metadata supplies no global absence proof and is not a project veto.
@@ -4973,20 +5069,6 @@ function Assert-ProjectInstallExecutionAdmission {
             Assert-NoReparsePoint -Path $otherPath -Root $receiptRoot -Label 'live writer admission'
             $other = (Read-BoundedJsonDocument -Path $otherPath -Label 'live writer admission' -MaximumBytes 262144).Document
             if ($other.project_identity -ceq $admitted.project_identity) { throw 'Another project Manager writer is live.' }
-        }
-    }
-    $bound = @{}
-    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
-        $evidence = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $intent.InstanceRoot -AllowProvisioning:($intent.Document.schema_version -eq 2) -FailedPreparation:($intent.Document.schema_version -eq 2)
-        $bound[$evidence.InstanceId] = $evidence
-    }
-    foreach ($retired in @(Get-ValidatedInstanceRetirementControls -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
-        $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath "$($script:InstancesRelativePath)/$($retired.InstanceId)" -Label 'Install retired instance'
-        $bound[$retired.InstanceId] = Get-ValidatedRetiredInstance -Manifest $Manifest -ProjectRoot $ProjectRoot -InstanceRoot $root
-    }
-    foreach ($evidence in $bound.Values) {
-        if (-not (Get-InstanceRetirementHolderEvidence -Evidence $evidence -ProjectRoot $ProjectRoot).Clear) {
-            throw 'Retained instance execution is live or unknown; Install remains blocked.'
         }
     }
     $runtime = Join-Path (Get-InstanceActivationContractRoot -Manifest $Manifest -ProjectRoot $ProjectRoot) 'supervisor'

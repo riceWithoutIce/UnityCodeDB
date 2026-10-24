@@ -4880,6 +4880,124 @@ Current status: `COMPLETE / FIX_03_P1_EVIDENCE_PASS`.
 Next action: Planner may route the unchanged frozen FIX 03 P1 repair identity
 to Verifier for targeted read-only re-review.
 
+## Bootstrap Admission Refactor Checkpoint - 2026-09-22
+
+The authorized S18 Bootstrap Admission Refactor was implemented as one
+continuous five-path checkpoint on frozen base HEAD
+`8313d0902945632f72cce3b07ea4eda92da59631`. No allowlist expansion was
+required and inherited workflow, task records, and UnityValidationProject
+state were preserved.
+
+### Implementation
+
+- `AICodedbEditorLifecycle.cs` now owns a typed post-Provider reconcile gate.
+  It records a reconcile epoch, waits for a forced follow-up when an older
+  epoch is already in flight, and completes only after the authoritative
+  lifecycle cache revision is published. Terminal outcomes carry epoch,
+  `Ready`/`Uninstalled`/`MissingPrerequisite`/`NeedsAttention`/`Deferred`,
+  product status, last command result, cache revision, and bounded detail.
+- Compilation, Play, domain reload, shutdown, cancellation, and bounded wait
+  boundaries return `Deferred`; they do not claim success or terminate a
+  Supervisor-owned operation.
+- Invalid integration, invalid current instance, and unsupported selected
+  instance branches now publish the matching `NeedsAttention` cache before
+  terminal completion. Existing `Uninstalled` and current-instance
+  idempotence behavior remains lifecycle-owned.
+- `AICodedbActions.cs` no longer parses Host stdout/stderr or chooses Probe or
+  Install for Configure Dependencies. Provider failure short-circuits; Provider
+  success requests the typed Lifecycle reconcile. Explicit user Install/
+  Uninstall paths retain their existing explicit mutation boundary.
+- `AICodedbManagerWindow.cs` awaits the typed post-Provider outcome and applies
+  the already-published Lifecycle cache. Configure completion does not start a
+  second status worker or directly access the Materializer.
+- Adjacent Editor and Manager tests cover Provider failure/success routing,
+  outcome identity, old-epoch follow-up ownership, Deferred boundary behavior,
+  and the absence of Configure-side output parsing/mutation selection.
+
+### Bounded evidence
+
+- Static/source batch: `PASS`, exit `0`, `14/14` assertions.
+- Five-path scoped `git diff --check`: `PASS`, exit `0`.
+- HEAD remained:
+  `8313d0902945632f72cce3b07ea4eda92da59631`.
+- Worktree SHA-256:
+  - `AICodedbActions.cs`:
+    `b987efa1010b612fb4019109b43bd7574c05aa571d8b299f7febd32f566eea87`;
+  - `AICodedbEditorLifecycle.cs`:
+    `a2bee0a036dde2f051c9b1d1468dcb6a8a71271955e3908ff60e06444f30119f`;
+  - `AICodedbManagerWindow.cs`:
+    `15b3a144bb6078c7044bce8c7897edd09fb9282d2fffb2c9450cd974bcb0757f`;
+  - `AICodedbEditorLifecycleTests.cs`:
+    `98b49cc039d5f088e009f8882d533c37fb4292570a4ff5e46d699e88bc56c719`;
+  - `AICodedbManagerUiTests.cs`:
+    `9371644718cd0e550072b1709f084bd4ec5ee60faec29eead0ef47862de9178e`.
+
+### Deferred boundaries
+
+C# compile, EditMode, Unity, Unity MCP/CUA/BatchMode, Provider installer,
+external runtime/process, Package/consumer validation, broad tests, Verifier,
+commit, export, tag, push, publication, and promotion were not run. No
+Supervisor, Bridge, PowerShell, Provider, Package, Payload, or external
+project file was changed.
+
+Current status: `COMPLETE / BOOTSTRAP_ADMISSION_REFACTOR_PLANNER_REVIEW_REQUIRED`.
+Next action: Planner reviews the stable five-path snapshot and routes one
+independent sub-Verifier targeted review; no Unity or external retry is implied.
+
+## Bootstrap Admission Refactor Final Snapshot Correction - 2026-09-22
+
+The immediately preceding five-path hashes were an intermediate implementation
+snapshot, not the final verifier input. A final in-allowlist review found that
+the synchronous Provider installer entry must not synchronously wait on an
+async Unity Lifecycle reconcile. That entry now retains a non-blocking
+best-effort request only on Provider success; Configure Dependencies continues
+to use the awaitable async entry. Adjacent tests were corrected so the
+post-Provider request occurs during a genuinely older in-flight epoch, with
+an additional idle-start case and the observed nonzero-exit/prerequisite-
+stdout/Host-runtime-stderr shape. No outside-allowlist code was edited.
+
+Final bounded evidence on the exact snapshot below:
+
+```powershell
+# One final bounded source assertion command read only the five admitted files,
+# built a named ordered table of 17 source-contract assertions, and failed on
+# any false entry.
+[PASS] S18 Bootstrap Admission Refactor final static/source assertions passed.
+ASSERTIONS=17/17
+
+git diff --check -- com.rice.ai-codedb/Editor/AICodedbActions.cs com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+[PASS] S18 Bootstrap Admission Refactor final five-path scoped diff-check passed.
+```
+
+Both final commands exited `0`; the static command took approximately `0.7s`
+and the scoped diff-check approximately `0.6s` tool-observed. The prior
+`14/14` static and diff-check passed on the intermediate snapshot but are not
+the final evidence identity. No runnable non-Unity C# test harness exists;
+the adjacent NUnit methods were source-checked, not executed.
+
+- Final HEAD:
+  `8313d0902945632f72cce3b07ea4eda92da59631`.
+- Final five-path SHA-256:
+  - `com.rice.ai-codedb/Editor/AICodedbActions.cs`:
+    `20dd66d7a5983de4fe359fd0d71989e84017191c569a3b81422e3c300aeed9b9`;
+  - `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs`:
+    `a2bee0a036dde2f051c9b1d1468dcb6a8a71271955e3908ff60e06444f30119f`;
+  - `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`:
+    `15b3a144bb6078c7044bce8c7897edd09fb9282d2fffb2c9450cd974bcb0757f`;
+  - `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`:
+    `2d8f3c3c4878aa2c3fa0b9a15ca119c4884e846f5a6341f6f7cf8519e6d5a91a`;
+  - `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`:
+    `a840d696dbfd3693187ae51cfc9bcfe5d07e43c9ae3a263ce740ee0d72353802`.
+
+Unity, EditMode, C# compile, Unity MCP/CUA/BatchMode, Provider installer,
+external runtime/process, full regression, Verifier, commit/export/tag/push,
+publication, and promotion remain `NOT RUN / DEFERRED`. The five-path source
+snapshot is stable; only this RESULT evidence record was appended afterward.
+
+Current status: `COMPLETE / FINAL_FIVE_PATH_SNAPSHOT_READY_FOR_PLANNER`.
+Next action: Planner admits the final hashes and separately routes a targeted
+read-only sub-Verifier review. Coder does not contact Verifier.
+
 ## Planner/User Disposition - FIX 03 - 2026-09-22
 
 Disposition: `ACCEPT`.
@@ -4896,3 +5014,682 @@ commit, tag, push, publication, and promotion remain `NOT RUN / DEFERRED` and
 require separate authorization.
 
 Current status: `ACCEPTED_FIX_03 / EXTERNAL_PACKAGE_REVALIDATION_PENDING`.
+
+## Bootstrap Admission Refactor Authorization - 2026-09-22
+
+The external Package revalidation still failed after Provider success with
+`MCP availability requires the current Package-owned Host runtime.` The human
+accepted Planner's architecture reassessment and froze a same-S18 continuous
+refactor rather than another incremental fallback.
+
+Authorized implementation: Provider success must enter one awaitable,
+post-Provider Lifecycle reconcile; the existing Lifecycle worker exclusively
+owns admission and default-`INSTALLED` `Upgrade -> Probe` convergence. Actions
+and Manager must not parse stderr or select a Host mutation. Explicit
+`UNINSTALLED`, invalid/ambiguous fail-closed behavior, current-instance
+idempotence, Supervisor ownership, and Manager cache-only behavior remain
+mandatory.
+
+Writable source/test allowlist is exactly the five paths recorded in
+`TASK.md`. All other production, test, Package, payload, Provider, external
+project, and workflow paths are read-only. Bounded non-Unity evidence is
+authorized; Unity/EditMode, external validation, artifact export, commit, tag,
+push, publication, and promotion are not.
+
+Frozen implementation base HEAD:
+`8313d0902945632f72cce3b07ea4eda92da59631`.
+
+Current status: `BOOTSTRAP_ADMISSION_REFACTOR_AUTHORIZED / CODER_NOT_STARTED`.
+Next actor: sub-Coder returns one consolidated stable snapshot and evidence to
+Planner without contacting Verifier.
+
+## Bootstrap Admission Refactor Follow-up FIX - 2026-09-22
+
+The user chose `FIX` for the sole non-blocking FOLLOW-UP in
+`verifications/VERIFICATION-07.md`. The repair is limited to the race between
+`PostProviderReconcile.Complete` and release of `_reconcileInFlight`.
+
+After releasing the in-flight flag, the Lifecycle worker now checks whether
+the gate contains an unstarted post-Provider waiter. If a request arrived
+after the previous epoch completed but its own start was rejected by the old
+in-flight flag, the worker starts the forced follow-up. A request arriving
+after this check sees an idle worker and starts its own epoch. The existing
+Supervisor authority, cancellation boundaries, result/cache contract, and
+normal old-epoch follow-up remain unchanged.
+
+One adjacent test models `Complete -> Request -> worker-release check` and
+asserts that the waiter remains pending until the new forced epoch completes.
+Only these source/test paths changed in this FIX:
+
+- `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+
+Evidence on HEAD `8313d0902945632f72cce3b07ea4eda92da59631`:
+
+- Targeted source-order assertion: PASS, exit `0`.
+- Two-path scoped `git diff --check`: PASS, exit `0`.
+- Final worktree SHA-256: Lifecycle
+  `33dcc9feefbf4bf7f63e16b0d24542471ccae11ed483cb2cc0a8b7d84eb8f2f8`;
+  Lifecycle tests
+  `9d93e7ef5125e0cc50febb70420b138c9b3f7853bbeed8766e1f8ef8ac9`.
+
+The new NUnit test was not executed. C# compilation, EditMode, Unity,
+Unity MCP/CUA/BatchMode, external project/runtime/Provider validation, full
+regression, commit, export, tag, push, publication, and promotion remain
+`NOT RUN / DEFERRED`. The preceding five-path 17/17 static evidence belongs
+to the pre-FIX snapshot and is not represented as a run on these final bytes.
+
+Current status: `FOLLOW_UP_FIX_IMPLEMENTED / TARGETED_REVIEW_PENDING`.
+Next actor: Planner admits this two-path identity and decides whether to
+request a read-only re-review of the original FOLLOW-UP and its adjacent
+old-epoch, cancellation, and cache-publication behavior.
+
+## Planner/User Disposition - Bootstrap Admission Refactor - 2026-09-22
+
+Disposition: `ACCEPT` for the frozen five-path Bootstrap Admission Refactor
+including the two-path FOLLOW-UP FIX. The replacement admission and targeted
+re-review appended to `verifications/VERIFICATION-07.md` returned `PASS`;
+the original FOLLOW-UP is closed and there are no remaining in-scope findings.
+The accepted source snapshot remains uncommitted on HEAD
+`8313d0902945632f72cce3b07ea4eda92da59631`. The final Lifecycle and
+Lifecycle-test SHA-256 values are those recorded immediately above; the other
+three frozen paths retain the identities in the targeted Verifier report.
+
+This acceptance covers source-level contract review, the targeted static
+checks, and scoped diff-check only. The new NUnit test, C# compilation,
+EditMode, Unity, external Package golden path, artifact export, commit, tag,
+push, publication, and promotion are `NOT RUN / DEFERRED`. No actual external
+`Configure Dependencies` success is claimed.
+
+Current status: `ACCEPTED_BOOTSTRAP_ADMISSION_REFACTOR / UNITY_GATE_PENDING`.
+Next actor: Planner/User separately authorizes the human-owned
+`UnityValidationProject` compilation and focused EditMode gate before any
+local Package export or external consumer retry.
+
+## Human Focused Unity Gate - 2026-09-22
+
+The human opened the relative `UnityValidationProject` against the local
+Package source. The supplied Console screenshot showed compilation with zero
+current C# errors. It also showed two `CS4014` warnings at the Configure
+Dependencies Manager callbacks, one existing unused-field warning, and a
+prerequisite-current log warning; these were recorded but did not block the
+focused test gate. No warning cleanup was authorized or performed.
+
+The human then reported all eight requested EditMode tests passed: four
+`PostProviderReconcileGate_` tests, three `ConfigureDependencies` tests, and
+`ActionsSource_DoesNotParseHostOutputOrSelectBootstrapMutation`. This is a
+human-reported `8/8 PASS`; no Test Runner screenshot or machine-readable
+result was supplied, and the Planner did not rerun or independently observe
+the tests. The five source/test identities remained unchanged on HEAD
+`8313d0902945632f72cce3b07ea4eda92da59631` during this record.
+
+The project is still human-open pending normal closure. No external Package
+golden-path retry, `Configure Dependencies` click, full EditMode suite,
+Unity MCP/CUA/BatchMode, artifact export, commit, tag, push, publication, or
+promotion was performed by Planner.
+
+Current status: `HUMAN_FOCUSED_EDITMODE_PASS / HUMAN_PROJECT_CLOSE_PENDING`.
+Next actor: human owner closes `UnityValidationProject` normally and confirms
+closure. Planner then proposes the exact commit-derived local Package export
+and separately authorized external consumer retry.
+
+## Human Validation Project Closure - 2026-09-22
+
+The human confirmed that the relative `UnityValidationProject` was closed
+normally after the focused `8/8` EditMode PASS report. Planner did not launch,
+inspect processes in, or terminate the Unity Editor. The compile/Test Runner
+claims remain scoped to the supplied Console screenshot and human report.
+
+The proposed next local checkpoint is one exact five-path source/test commit
+for the accepted Bootstrap Admission Refactor, followed by a Package export
+derived from that commit under the local artifact root. The proposed commit
+contains only:
+
+- `com.rice.ai-codedb/Editor/AICodedbActions.cs`
+- `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs`
+- `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+Inherited task/workflow documentation, verification reports, and
+`UnityValidationProject` settings remain unstaged. Package metadata remains
+`0.3.0-preview.4`; the artifact must be uniquely identified by the resulting
+commit and ZIP SHA-256. An external consumer retry is a separate human-owned
+gate after the artifact bytes are verified; tag, push, publication, and
+promotion remain unauthorized.
+
+Current status: `HUMAN_FOCUSED_GATE_COMPLETE / LOCAL_COMMIT_EXPORT_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize the exact five-path
+local commit and commit-derived Package export. No Git or artifact mutation
+was performed by this closure record.
+
+## Bootstrap Admission Refactor Local Commit - 2026-09-22
+
+The human authorized a local commit of the exact five-path accepted source/test
+snapshot. The staged path set and staged blobs matched the reviewed worktree
+bytes; scoped staged diff-check passed. The commit is
+`cf51cfa3500bb16074e0477632be360d0ec0d5f8`, subject
+`fix(v0.3): unify provider host admission in lifecycle`.
+
+The committed tree changes exactly the five paths listed above. Post-commit
+staging is empty and those five paths have no remaining worktree diff. Existing
+task/workflow records, verification reports, documentation, and validation
+project settings remain outside this commit and were preserved. No Package
+artifact was exported; no tag, push, publication, external Unity action, or
+promotion was performed.
+
+Current status: `LOCAL_SOURCE_COMMIT_COMPLETE / PACKAGE_EXPORT_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User separately authorizes one Package export derived
+from this exact commit and verifies its artifact identity before any
+human-owned external consumer retry.
+
+## Bootstrap Admission Refactor Local Package Export - 2026-09-22
+
+The human authorized one local Package export from the five-path commit
+`cf51cfa3500bb16074e0477632be360d0ec0d5f8`. The output is under
+`<local-artifact-root>/v0.3.0-preview.4-cf51cfa/`, with Unity Package Manager
+entry `package/com.rice.ai-codedb/package.json` and ZIP
+`com.rice.ai-codedb-v0.3.0-preview.4.zip`. The ZIP is 2,047,317 bytes with
+SHA-256 `26d347d30b7b616e9a350470640620ac4c7c28f109ad593f95d84c9877786916`.
+
+The ZIP contains 533 entries and 452 files. All 452 extracted Package file
+blobs match the committed Package tree, with no extra files. Package metadata
+parses as `com.rice.ai-codedb / 0.3.0-preview.4`. A comparison against the
+older `8313d090` local export found that its `package.json` has 19 CRLF line
+endings while the new committed file uses LF; the text is identical after
+newline normalization. The payload manifest, Host pointer, and `poc.38`
+generation manifest have identical SHA-256 values in both exports. The new
+`package.json` Git blob matches the commit tree (`54d72a7f26993347fac57cce0cf1a21818d8ee5d`).
+
+Existing local artifacts and inherited worktree changes were preserved. No
+installation, external Unity consumer retry, tag, push, publication, or
+promotion was performed. The human-reported focused EditMode `8/8 PASS` is
+not evidence of this exported artifact in an external consumer project.
+
+Current status: `LOCAL_PACKAGE_EXPORT_COMPLETE / EXTERNAL_CONSUMER_GATE_PENDING`.
+Next actor: Planner/User separately authorizes the human-owned external
+consumer retry using this commit-identified local Package.
+
+## External Bootstrap Retry Blocker And Continuous FIX - 2026-09-22
+
+The human changed `<external-consumer-project>/Packages/manifest.json` to the
+commit-derived `cf51cfa` local Package, opened Unity, and supplied Manager
+screenshots. Planner read-only confirmation showed both `manifest.json` and
+Unity-generated `packages-lock.json` resolved the exact
+`<local-artifact-root>/v0.3.0-preview.4-cf51cfa/package/com.rice.ai-codedb`
+source. Before the action, Provider was `Inactive`, project-local Runtime was
+`Ready`, Configuration was `Current`, and Host payload was `Needs Setup / Not
+evaluated`.
+
+The human clicked `Configure Dependencies` exactly once. It terminated after
+approximately 16.2 seconds with exit `4`; the visible result contained only
+`[PRODUCT_LAYER PREREQUISITE] CURRENT - Node.js v24.14.1 and CodeDB Provider
+0.5.0-28e3912-c2 are verified.` The Manager remained `Needs attention`. No
+second action, manual cleanup, protected runtime read, process probe, Unity
+MCP, or substitute validation was performed. The human then closed Unity.
+
+Targeted source diagnosis found one circular cold-start gate. A trustworthy
+current prerequisite with an exact missing current instance cannot publish an
+Editor lease; the absent lease blocked Coordinator admission and returned
+before the existing Bridge-authenticated empty-bootstrap Probe/Upgrade path.
+After a fallback Upgrade creates the first current instance, the lease must
+also be published before the following coordinator-backed Probe. This is a
+normal-user-path blocker, not a Provider or consumer-environment failure.
+
+The same continuous FIX changes exactly four source/test paths on base HEAD
+`cf51cfa3500bb16074e0477632be360d0ec0d5f8`:
+
+- `Editor/AICodedbEditorLifecycle.cs` allows only `Installed` + trustworthy
+  current prerequisite + exact `CurrentInstanceMissing` to continue without a
+  pre-existing Coordinator lease. It reuses the existing authenticated Bridge
+  fallback, then publishes the first instance lease after successful Upgrade
+  and before the verification Probe. Missing prerequisite, Uninstalled,
+  Invalid, current-instance invalid/ineligible, ambiguous ownership, and lease
+  publication failure remain fail-closed.
+- `Editor/AICodedbActivityPanel.cs` clears progress at terminal completion and
+  reserves the Header action strip for `Running`. Completed/failed command
+  evidence remains in Last activity and the existing notification.
+- `Tests/Editor/AICodedbEditorLifecycleTests.cs` covers the exact bootstrap
+  admission matrix and Upgrade -> lease -> Probe order.
+- `Tests/Editor/AICodedbManagerUiTests.cs` covers terminal Header suppression
+  and terminal progress clearing while preserving result classification.
+
+Final four-file SHA-256 values are Lifecycle
+`c3cc53373451b5260fe743504d81494e183cc486ebd0c14bf37ccbe1c0023c57`,
+Activity panel
+`721fc27b65e2270fbed52e719fcc1c01f7bf3a2bb666badbb328c1d2d5b68636`,
+Lifecycle tests
+`4a50d25363530e7807aa4e31760905c2f0314febb5c70cf16fbccc0f61a5213d`,
+and Manager UI tests
+`4e7e346c05a109e34c03feaf91efaa366ba5113141fe41ed017ad3556e58c3b8`.
+
+One initial author-written static command failed only because two assertions
+assumed a fixed newline representation. No source bytes changed for that
+failure. The corrected newline-insensitive static contract batch passed all
+11 checks, including the exact bootstrap boundary, existing Probe/Upgrade
+fallback, lease-before-verification order, terminal progress clearing, hidden
+terminal Header state, and adjacent tests. One four-path scoped
+`git diff --check` passed with exit `0` and no output.
+
+C# compilation, focused EditMode, Unity runtime revalidation, external Package
+retry, Verifier review, commit, Package rebuild, tag, push, publication, and
+promotion are `NOT RUN / DEFERRED`. Existing unrelated task/workflow and
+validation-project changes remain preserved.
+
+Current status: `CONTINUOUS_FIX_IMPLEMENTED / FOCUSED_CSHARP_GATE_REQUIRED`.
+Next actor: Planner/User separately authorizes the human-owned relative
+`UnityValidationProject` compile and focused EditMode gate before Verifier,
+commit, Package rebuild, or another external consumer retry.
+
+## Continuous FIX Focused Unity Gate Checkpoint 01 - 2026-09-22
+
+The human confirmed that the relative `UnityValidationProject` was open. The
+gate admitted the frozen source identity before any Unity interaction:
+
+- HEAD matched `cf51cfa3500bb16074e0477632be360d0ec0d5f8`.
+- The uncommitted FIX source/test delta was limited to the authorized four
+  paths: `AICodedbEditorLifecycle.cs`, `AICodedbActivityPanel.cs`,
+  `AICodedbEditorLifecycleTests.cs`, and `AICodedbManagerUiTests.cs`.
+- Inherited task/workflow documentation and validation-project state remained
+  protected and unchanged.
+
+The visible Unity window was uniquely identified as `UnityValidationProject`
+on Unity `2022.3.47f1`. The first read-only window-state capture failed before
+any screenshot, accessibility state, or Unity input was produced:
+
+`SetIsBorderRequired failed: not supported by this interface (0x80004002)`.
+
+The one permitted lightweight window-handle recovery was then stopped by the
+human with the physical Escape key. Computer Use was stopped immediately and
+no further UI action was attempted.
+
+Consequently, compilation completion and current C# error count were not
+observed. None of the nine authorized focused EditMode tests was selected or
+run. No production/test file, Unity state, external consumer, Unity MCP,
+protected runtime, process, artifact, commit, push, or publication was
+modified or invoked. This checkpoint does not infer any Unity or EditMode
+result from the non-Unity evidence.
+
+Current status: `BLOCKED / COMPUTER_USE_STOPPED_BEFORE_FOCUSED_UNITY_GATE`.
+Next actor: the human owner and Planner decide whether to authorize a new
+visible Unity checkpoint after confirming the window can be observed. The
+required next successful checkpoint must first prove compilation complete and
+zero current C# errors, then run only the nine named focused EditMode tests.
+
+## Continuous FIX Human Focused EditMode Evidence - 2026-09-22
+
+The human owner took over the Unity interaction because other local desktop
+work made exclusive Computer Use inappropriate. The owner reported that all
+nine authorized focused EditMode test methods passed. The supplied screenshot
+shows the Unity Test Runner in `EditMode`, an aggregate `18` passed and `0`
+failed, and the filtered final method
+`UserActionStatus_FailedActionRetainsFailureAndClearHidesIt` with a green pass
+result. The aggregate count includes expanded parameterized cases from the
+nine named methods.
+
+The authorized focused set was:
+
+- `InstanceBootstrapWithoutCoordinator_RequiresExactMissingInstanceAdmission`
+- `InstanceBootstrap_PublishesLeaseAfterDeployBeforeCoordinatorProbe`
+- `CoordinatorAdmission_RequiresCurrentPrerequisiteAndPublishedLease`
+- `SupervisorOneShotFallback_RequiresBridgeBootstrapAuthorization`
+- `SupervisorBridge_BootstrapFallbackRequiresReviewedCommandAndOwnedRuntimeEvidence`
+- `ConfigureDependenciesSource_RechecksHostAdmissionAfterProviderSuccess`
+- `ConfigureDependenciesAdmission_ProviderSuccessAwaitsLifecycleOutcome`
+- `UserActionStatus_DistinguishesCompletedCommandFromNeedsAttentionProduct`
+- `UserActionStatus_FailedActionRetainsFailureAndClearHidesIt`
+
+This is human-owned focused EditMode evidence for the current four-file FIX,
+not a full EditMode suite, PlayMode, runtime, exported-Package, or external
+consumer acceptance. The screenshot does not expose the Unity Console, so a
+separate observed current C# error count is not claimed; successful execution
+of the loaded focused tests proves that the relevant assemblies compiled well
+enough to run this gate. No additional Unity action, source/test modification,
+external retry, Unity MCP, protected runtime read, commit, export, push, or
+publication was performed by the Planner.
+
+Current status: `FOCUSED_EDITMODE_PASS / VERIFIER_REVIEW_PENDING`.
+Next actor: after the human closes `UnityValidationProject`, Planner may route
+the unchanged four-file snapshot and this bounded evidence to an independent
+Verifier. Commit, Package rebuild, and external consumer retry remain separate
+authorization gates.
+
+## Continuous FIX 01 - Post-Upgrade Lease Admission Gate - 2026-09-22
+
+The bounded correction for the sole `VERIFICATION-08` P1 is implemented on
+frozen HEAD `cf51cfa3500bb16074e0477632be360d0ec0d5f8`. The implementation
+changed exactly these two authorized paths:
+
+- `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+
+The deployment route now preserves the first post-Upgrade lease-admission
+disposition. A successful bootstrap Upgrade continues to its coordinator-backed
+verification Probe only for `EditorLeasePublished`. Every other disposition
+returns before Probe, records the disposition, and publishes a bounded
+authoritative `NeedsAttention` lifecycle cache/terminal result bound to the
+Upgrade command. The correction reuses the existing
+`AICodedbCoordinatorAdmissionDisposition`; it adds no classifier or authority.
+
+The prior text-position assertion was replaced by a direct delegate-backed
+behavior seam. The tests cover `LeasePublicationFailed`,
+`CurrentInstanceInvalid`, and `CurrentInstanceIneligible` with exactly one lease
+attempt, zero verification Probes, and a null verification result. The adjacent
+success case proves `EditorLeasePublished` performs exactly one lease attempt,
+one verification Probe, and returns the exact Probe result.
+
+Final SHA-256 values:
+
+- `AICodedbEditorLifecycle.cs`:
+  `73ea30b59d2263cf4b3bdb231d4480769d4c30fa011df0b5054c425a632887ee`
+- `AICodedbEditorLifecycleTests.cs`:
+  `0971aa0a530e4b07f8430038661a4f68ae5a26e1f66a90c6eb8bea8f5951e02e`
+
+The single authorized bounded source/static batch returned exit `1`: 10 of 11
+Coder-authored assertions passed. The only failure was the assertion named
+`failure records authoritative disposition`; it used an unsuitable exact
+newline/indentation string. Targeted source reading confirms the production
+call is present, but no corrected batch was run because this checkpoint allowed
+exactly one source/static batch. The single authorized two-file scoped
+`git diff --check` passed with exit `0` and no output.
+
+Unity, focused/full EditMode, C# compilation, Unity MCP/CUA/BatchMode, Provider
+installer, external consumer/runtime/process validation, commit, export, tag,
+push, publication, and Verifier contact were `NOT RUN / DEFERRED`. No
+read-only comparison file was modified.
+
+Current status:
+`BLOCKED / CORRECTED_STATIC_EVIDENCE_REQUIRED`.
+
+Next actor: Planner reviews the stable two-file correction and decides whether
+to authorize one independent corrected source/static evidence-only checkpoint
+on the same final hashes. Do not route Verifier until that disposition is made.
+
+## Continuous FIX 01 - Corrected Static Evidence Checkpoint - 2026-09-22
+
+The independently authorized evidence-only checkpoint admitted the frozen
+snapshot before reading source:
+
+- HEAD pre/post:
+  `cf51cfa3500bb16074e0477632be360d0ec0d5f8`
+- `AICodedbEditorLifecycle.cs` SHA-256 pre/post:
+  `73ea30b59d2263cf4b3bdb231d4480769d4c30fa011df0b5054c425a632887ee`
+- `AICodedbEditorLifecycleTests.cs` SHA-256 pre/post:
+  `0971aa0a530e4b07f8430038661a4f68ae5a26e1f66a90c6eb8bea8f5951e02e`
+
+No production or test byte changed. The only correction was inside the
+ephemeral PowerShell evidence command: the previous exact newline/indentation
+marker for `RecordCoordinatorAdmissionDisposition` was replaced by a
+newline-insensitive regular expression that requires the call structure and
+`postUpgradeAdmissionDisposition` argument.
+
+Exactly one corrected bounded source/static batch ran and passed with exit `0`.
+All 11 checks passed:
+
+1. production invokes the post-Upgrade admission seam;
+2. the seam admits only `EditorLeasePublished` to Probe;
+3. failure records the authoritative disposition;
+4. failure publishes bounded `NeedsAttention` detail;
+5. failure caches status against the Upgrade result;
+6. failure returns before verification status construction;
+7. the failure behavior test exists;
+8. the failure behavior test asserts zero Probe calls;
+9. invalid and ineligible dispositions are covered;
+10. the success behavior test exists; and
+11. the success behavior test asserts one Probe and the exact returned result.
+
+The already-passed two-file scoped `git diff --check` was not rerun. Unity,
+focused/full EditMode, C# compilation, Unity MCP/CUA/BatchMode, Provider
+installer, external consumer/runtime/process validation, commit, export, tag,
+push, publication, and Verifier contact were `NOT RUN / DEFERRED`.
+
+Current status: `COMPLETE / CORRECTED_STATIC_11_OF_11_PASS`.
+
+Next actor: Planner/User may authorize the human-owned focused EditMode gate
+for the changed lifecycle behavior tests on this unchanged frozen snapshot.
+Verifier routing remains later and separately authorized.
+
+## Continuous FIX 01 Human Focused EditMode Evidence - 2026-09-22
+
+The human owner opened the relative `UnityValidationProject` and reported that
+both authorized focused EditMode methods passed:
+
+- `InstanceBootstrap_LeaseAdmissionFailureSkipsCoordinatorProbe`, including
+  its three expanded cases for `LeasePublicationFailed`,
+  `CurrentInstanceInvalid`, and `CurrentInstanceIneligible`; and
+- `InstanceBootstrap_PublishedLeaseRunsCoordinatorProbe`.
+
+The supplied Unity Test Runner screenshot shows `EditMode`, an aggregate `21`
+passed and `0` failed, and the filtered successful-lease method with a green
+result. The aggregate is consistent with replacing the prior one source-order
+test by four behavior cases, a net increase of three over the preceding
+`18/0` focused result.
+
+This human-owned checkpoint closes the focused C# behavior gate for the sole
+`VERIFICATION-08` P1. It is not a full EditMode suite, PlayMode, exported
+Package, or external-consumer retry. The Planner did not operate Unity, rerun
+tests, read protected runtime state, modify source/test bytes, or perform a
+commit, export, push, publication, or promotion.
+
+Current status: `FIX_01_FOCUSED_EDITMODE_PASS / TARGETED_REVIEW_PENDING`.
+Next actor: after the human closes `UnityValidationProject`, Planner may route
+the unchanged two-file FIX to the independent Verifier for review limited to
+the original P1 and the adjacent successful bootstrap path.
+
+## Planner/User Disposition - 2026-09-22
+
+The user accepted the targeted FIX closure after `VERIFICATION-09` returned
+`PASS / P1_LEASE_PUBLICATION_FAILURE_CLOSED`. The accepted scope is limited to
+the reviewed bootstrap lease-admission failure boundary and its adjacent
+successful path. Full EditMode, PlayMode, exported Package, external consumer,
+publication, tag, push, and release promotion remain deferred and require
+separate authorization.
+
+Current status: `ACCEPTED / COMMIT_AND_PACKAGE_GATE_PENDING`.
+
+## Accepted FIX Commit And Local Package Export - 2026-09-22
+
+Following the user ACCEPT and explicit commit/export authorization, the
+accepted four-file source/test FIX was committed without staging inherited
+workflow, task-document, validation-project, or verification-report changes:
+
+- Commit: `7bd3eaca0243b17fbc60cd3d3a624f755846408b`
+- Subject: `fix(v0.3): close bootstrap lease admission failure`
+- Changed paths: exactly the four accepted FIX source/test paths.
+
+A commit-derived local Package was then exported from the commit tree using
+`git archive`:
+
+- Package directory:
+  `<local-artifact-root>/v0.3.0-preview.4-7bd3eac/package/com.rice.ai-codedb/`
+- ZIP:
+  `<local-artifact-root>/v0.3.0-preview.4-7bd3eac/com.rice.ai-codedb-v0.3.0-preview.4.zip`
+- Package metadata: `com.rice.ai-codedb / 0.3.0-preview.4`
+- Extracted files: `452`
+- ZIP entries: `533` (`81` explicit directories)
+- ZIP bytes: `2,076,933`
+- ZIP SHA-256:
+  `45e07829a625b09777a0f34a172cf39bbd0160fd81a0f53a8e08d5706f5f4e3e`
+
+The export is commit-derived and contains no uncommitted worktree bytes. No
+tag, push, publication, promotion, Unity operation, or external consumer
+retry was performed. Existing unrelated dirty state remains preserved.
+
+Current status: `LOCAL_PACKAGE_READY / EXTERNAL_CONSUMER_GATE_PENDING`.
+Next actor: the human owner may separately authorize updating the external
+consumer to this exact local Package and running one golden-path retry.
+
+## External Consumer Retry - Payload Sequence Contract Blocker - 2026-09-22
+
+The human ran the single authorized external golden-path
+`Configure Dependencies` action against the commit-derived Package and the
+action failed with exit `4`. The bounded failure chain was:
+
+`automatic instance convergence` exit `6` -> `Instance Upgrade` ->
+`prepare-codedb-project-runtime.ps1` exit `1` ->
+`Instance manifest identity or provisioning state is invalid`.
+
+After the Unity project was closed, a read-only diagnosis compared the
+Package-owned generation contract with the newly created external instance
+manifests. The failure is a deterministic internal contract mismatch, not a
+stale old instance or Provider admission issue:
+
+- `Payload~/Generations/poc.38/generation-manifest.json` declares
+  `payload_sequence: 38`.
+- The same generation's
+  `scripts/codedb-project-common.ps1` declares
+  `$script:CodedbHostPayloadSequence = 35`.
+- All nine instance manifests created during the failed attempts agree on
+  package `0.3.0-preview.4`, payload `poc.38`, generation path, generation
+  manifest hash, worker path/hash, project identity, and bootstrap protocol;
+  they remain `PROVISIONING` because preparation fails at the sequence check.
+- The external project therefore contains nine uncompleted provisioning
+  instance directories. No cleanup or mutation was performed by the
+  Planner.
+
+This is a release-blocking Package contract finding. Retrying the action would
+only create another failed provisioning candidate and is prohibited until the
+sequence identity is corrected and independently verified. The external Unity
+project remains closed; no source, consumer manifest, runtime state, or
+instance directory was modified during diagnosis.
+
+Current status: `BLOCKED / PACKAGE_PAYLOAD_SEQUENCE_CONTRACT_MISMATCH`.
+Next actor: Planner/User decides whether to authorize a bounded Coder FIX that
+restores one authoritative payload sequence across the generation manifest,
+common script, package-boundary evidence, and commit-derived export. Existing
+external provisioning directories require a separately authorized cleanup or
+reinstall action and must not be silently deleted.
+
+## Preview.5 Non-Unity Pre-Commit Checkpoint 01 - 2026-09-23
+
+Frozen HEAD `7bd3eaca0243b17fbc60cd3d3a624f755846408b` and active tuple
+`0.3.0-preview.5 / poc.39 / 39` were admitted without reading or mutating
+protected external runtime state.
+
+The initial focused Materializer command
+`test-codedb-host-payload-materializer.ps1 -PayloadContractOnly` exited `1`:
+the test-local fixture expected the Provider contract under `poc.36`, while
+the canonical payload closure is `poc.39`. One authorized test-only correction
+replaced the top-level static generation with a validated generation id read
+from Package `payload-manifest.json`. The single corrected attempt also exited
+`1`, at the next stale assertion: `Canonical package version mismatch.
+Expected '0.3.0-preview.2', got '0.3.0-preview.5'.`
+
+Per the same-scenario corrected-failure stop condition, no second correction
+was made. Provider-installer L0 was NOT RUN; deterministic release-byte
+identity and final scoped `git diff --check` were NOT RUN because both L0
+scenarios did not pass. Materializer test blob changed from
+`b2e0abb5df2f575f00b588269b0b20c6178f4f42` to
+`dfbc763a09800ec7df4a0c635a54c26d04180c16`. Production, Package metadata,
+payload/current pointer/generation, Provider contract/installer, C#, `poc.38`,
+external state, Unity, Unity MCP/CUA, commit/export/push/publication, and
+Verifier routing were not modified or executed.
+
+Current status: `ROUTE_REASSESSMENT_REQUIRED / MATERIALIZER_CORRECTED_ATTEMPT_FAILED`.
+Next actor: Planner/User decides whether to authorize one coherent test-only
+canonical-tuple alignment for the focused Materializer scenario; this snapshot
+is not pre-commit or Verifier ready.
+
+## Preview.5 Non-Unity Pre-Commit Checkpoint 02 - 2026-09-23
+
+Planner authorized one coherent canonical-tuple alignment inside the
+Materializer harness. The second and final allowed test-only correction updated
+the current-canonical initialization assertions to compare package version and
+payload sequence with the loaded Package `payload-manifest.json`; historical
+predecessor/negative fixtures were unchanged. Materializer test blob is now
+`629946dcb8ad30b496e1cc9d71ed85b01c406403` (HEAD remains
+`7bd3eaca0243b17fbc60cd3d3a624f755846408b`).
+
+The single corrected `-PayloadContractOnly` run exited `1` at the first
+synthetic payload contract scenario. The fixture-generated manifest omitted
+the production-required `owner_identity_version` property, producing
+`payload manifest is missing required property: owner_identity_version` before
+any payload mutation. This is a new independent harness contract failure;
+the two authorized test-only corrections are exhausted. No further correction
+or retry was attempted.
+
+Provider-installer L0, release-byte identity, final scoped diff-check, Unity,
+Unity MCP/CUA, external runtime, commit/export/push/publication, and Verifier
+routing were NOT RUN/DEFERRED. Production, Package metadata, payload/current
+pointer/generation, Provider, C#, `poc.38`, and external state were unchanged.
+Final status: `ROUTE_REASSESSMENT_REQUIRED / SYNTHETIC_PAYLOAD_CONTRACT_MISSING_OWNER_IDENTITY`.
+
+## Preview.5 Non-Unity Pre-Commit Checkpoint 03 - 2026-09-23
+
+Under the new single-point authorization, `New-SyntheticPayload` now projects
+the canonical `owner_identity_version` from `$canonicalPayloadManifest` into
+synthetic payload manifests. No production, Package metadata, generation,
+Provider, C#, predecessor fixture, or external runtime file changed.
+
+The one corrected `-PayloadContractOnly` invocation passed (exit 0):
+`[OK] Synthetic payload manifest and marker identity match the production
+bootstrap transition contract.` and
+`[OK] Focused payload manifest contract scenarios passed.` The one Provider
+installer L0 invocation then passed (exit 0), including its fixed identity,
+download/signature, install, idempotence, rejection, rollback, and cleanup
+regressions; final output included
+`[OK] Provider installer focused regression passed.` No test was rerun after
+these PASS results.
+
+The exact 32-path task-owned release-byte identity used ordinal-sorted
+`path<TAB>git hash-object` lines, UTF-8 without BOM, terminal LF, and one
+`git hash-object --stdin` calculation: path count `32`, identity
+`ff675b3f9c309632c64907e3b860586bbd28d083`, frozen HEAD
+`7bd3eaca0243b17fbc60cd3d3a624f755846408b`. The final scoped
+`git diff --check` ran once and passed (exit 0; only existing JSON/package
+CRLF-to-LF warnings). Materializer harness blob is
+`d554a73f2bd97ad648ed00d3811b5920e3730a71`; Provider test blob remains
+`8008745f277a9454d4b13e6eddd747d35cdada30`.
+
+Unity, Unity MCP/CUA/BatchMode, external consumer/runtime, real Provider
+installation, commit/export/tag/push/publication, promotion, and Verifier
+routing remain NOT RUN/DEFERRED. Status:
+`COMPLETE / PRECOMMIT_NON_UNITY_GATES_PASS`; Planner may review this exact
+snapshot and separately authorize Verifier or later release actions.
+
+## Preview.5 Non-Unity RELEASE Verifier - 2026-09-23
+
+The bounded RELEASE Verifier recorded in `verifications/VERIFICATION-10.md`
+returned `PASS / GUARDED_RELEASE_NON_UNITY_GATES_CLOSED` with no in-scope
+findings. The review reused the recorded Materializer and Provider L0 PASS
+results, canonical synthetic-schema alignment, the 32-path release-byte
+identity `ff675b3f9c309632c64907e3b860586bbd28d083`, and the final scoped
+diff-check. No tests were rerun and Verifier changed no source/test bytes.
+
+## Planner/User Disposition - 2026-09-23
+
+The user accepted the bounded preview.5 non-Unity RELEASE gate.
+
+Final disposition: `ACCEPTED / NON_UNITY_RELEASE_GATES_CLOSED`.
+
+This acceptance does not claim Unity, Unity MCP/CUA/BatchMode, external
+consumer/runtime, real Provider installation, commit, export, tag, push,
+publication, promotion, or full-regression evidence. Those remain separate
+human-authorized gates.
+
+## Commit-Derived Local Package Export - 2026-09-23
+
+The accepted 32-path release snapshot was committed as `68200bce68855664c50087e0cbe5281fcf47ab59`
+(`feat(v0.3): centralize preview.5 package identity`). A first export attempt
+was retained as an invalid artifact because it contained a duplicated package
+prefix; it is not a deliverable and is not referenced below.
+
+A corrected export was created from the commit only, without including the
+working-tree `.ai`, Workflow, Unity project, or other dirty files. The package
+directory is:
+`<local-artifact-root>/v0.3.0-preview.5-68200bc-final/package/com.rice.ai-codedb`
+
+Export evidence:
+
+- `package.json` name: `com.rice.ai-codedb`
+- `package.json` version: `0.3.0-preview.5`
+- extracted file count: `475`
+- extracted bytes: `9424100`
+- ZIP entry count: `561`
+- ZIP bytes: `2147268`
+- ZIP SHA-256: `8b9d2ff678aafb090cdd86bea49d9d423e0f5263112ddc2cfe2d9b2b1275238f`
+- ZIP artifact: `<local-artifact-root>/v0.3.0-preview.5-68200bc-final/com.rice.ai-codedb-v0.3.0-preview.5.zip`
+
+This export is commit-derived and structurally valid. Unity installation or
+`Packages/manifest.json` changes were not performed; those remain a separate
+human-owned validation action.

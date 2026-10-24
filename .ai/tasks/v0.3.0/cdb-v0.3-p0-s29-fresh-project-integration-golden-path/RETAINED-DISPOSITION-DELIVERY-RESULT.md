@@ -1,7 +1,7 @@
 # S29 retained-disposition exact delivery result
 
 Date: 2026-10-12.
-Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_GATE_PENDING.
+Status: REFERENCE_SWITCH_COMPLETE / HUMAN_TESTS_UI_PASS / SHUTDOWN_HANG_DEFERRED_OBSERVATION.
 Authorization: RETAINED-DISPOSITION-DELIVERY-GRANT.md and user's explicit
 commit -> exact export -> project reference switch -> human Unity request.
 
@@ -82,3 +82,18 @@ No Install/Uninstall/Configure/removal, cleanup, process stop, Unity/MCP/CUA/
 BatchMode, true first-install, migration or release acceptance was performed.
 After human report, bounded read-only attribution remains authorized.
 S29/release PARTIAL; do not repeat export or reference switch.
+
+## Subsequent human report
+
+User reported 26 focused tests, compile and Manager reopen/tabs passing, then
+normal-close hang at CleanupMono; user manually force-terminated PID 16436.
+Windows AppHangB1 corroborates the hang. Read-only triage found the synchronous
+CodeDB quitting callback returned in 1322 microseconds with no queue/reconcile/
+Manager refresh in flight, but no blocking stack establishes the teardown owner.
+See RETAINED-DISPOSITION-HUMAN-RESULT-2026-10-12.md. A subsequent authorized
+no-test session closed normally. User then explicitly deferred the unresolved
+hang for observation during future tests because attribution is unsupported by
+the small sample. It no longer blocks this slice; the original failed-close
+evidence remains a failure, not a retroactive PASS. No dedicated investigation,
+source repair or extra Unity retry is authorized by this disposition.
+Installed-generation alignment and overall S29/release remain separately PARTIAL.

@@ -567,3 +567,630 @@ the human open the project for compile and focused EditMode validation.
 Human decision or authorization required: manifest switch while Unity is
 closed; human compile/EditMode; later real removal, fresh Install, Verifier,
 commit/publication gates.
+
+## FIX 02 - Validation Project Package Reference Prepared
+
+The human confirmed `UnityValidationProject` was closed before maintenance.
+Only the CodeDB dependency value in
+`UnityValidationProject/Packages/manifest.json` was changed to
+`file:../../.artifacts/v0.3.0-preview.5-s25-receipt-path-6942c62-final/package/com.rice.ai-codedb`.
+The previous S25 artifact was preserved. Other dependencies, `testables`,
+the inherited dirty lockfile, and ProjectSettings were not edited by this
+checkpoint.
+The manifest parsed as JSON; the relative Package target resolved and
+declared `com.rice.ai-codedb@0.3.0-preview.5` with Unity `2022.3`.
+The artifact ZIP hash independently matched the FIX 02 export record, and
+scoped `git diff --check` passed with no output.
+
+This prepares the human-owned Unity import and compile gate; it does not
+establish C# compilation or a successful removal. The old Package's real
+removal attempt remains unconfirmed and consumed. No Manager action, Unity
+MCP, retry, or fresh Install was performed here.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: FIX_02_MANIFEST_READY / HUMAN_UNITY_GATE_PENDING
+Next notification: human operator
+Next action: visibly open `UnityValidationProject`, allow Package import and
+compilation to settle, then report CodeDB C# errors before any Manager action.
+Human decision or authorization required: later real removal retry and fresh
+Install, Verifier, push, tag, and publication.
+
+## FIX 02 - Human Import Observation: Unity Scheduler Error
+
+After the validation project was opened against the new Package, the human
+reported one Unity Console error: `On demand scheduler protocol error`.
+Read-only inspection of the project `Editor.log` found that the Package
+compiled successfully; the only compiler diagnostics were three existing C#
+warnings (`CS4014` twice and `CS0414` once), with no CodeDB C# error. The log
+contains CodeDB `scripts_reloaded`, `reconcile_completed`, and
+`manager_closed` evidence; each reports `main_thread_violation_count=0` and
+`manager_status_refresh_failed_count=0`.
+
+The scheduler message occurs in Unity's own Asset Pipeline sequence around
+`OnDemandSchedulerStart`, `TrimDiskCacheJob`, and `RefreshV2`. No repository
+source contains this message or an OnDemand scheduler call, so this observation
+does not identify a receipt-path or CodeDB Package failure. It is recorded as
+an external Unity Editor/Asset Pipeline diagnostic, not as C# compile success
+for the focused tests and not as a release PASS. No source, project settings,
+runtime state, Manager action, or test selection was changed in response.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: FIX_02_HUMAN_IMPORT_EXTERNAL_SCHEDULER_DIAGNOSTIC /
+FOCUSED_TEST_GATE_PAUSED
+Next notification: human operator / UnityCodeDB v0.3 Planner
+Next action: if the Console error repeats or blocks Test Runner, capture its
+expanded Unity stack and stop; otherwise the human may run the two predeclared
+focused EditMode selections once each. Do not click Remove or Install until
+the focused test result and Manager state are separately recorded.
+Human decision or authorization required: focused EditMode gate and later
+real removal retry; fresh Install, Verifier, push, tag, and publication remain
+separate.
+
+## FIX 02 - Human Focused EditMode Result
+
+In the same visible Unity session, after the new Package import, the human
+reported both predeclared EditMode selections passed with no additional
+error:
+
+- `AICodedbLifecycleControlTests` entire class: PASS, one run.
+- `ControlContractMigration_PartialV1RequiresBoundCommittedEvidence` single
+  test: PASS, one run.
+
+This is human-observed evidence for the exact local Package and is not an
+independent Verifier run. The earlier Unity Asset Pipeline scheduler message
+remains recorded as an external diagnostic; no new CodeDB C# error was
+reported. No Manager mutation, removal retry, fresh Install, Unity MCP,
+source change, or runtime cleanup was performed.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: GATE_B_HUMAN_PASS / GATE_C_READ_ONLY_PREFLIGHT_PENDING
+Next notification: human operator / UnityCodeDB v0.3 Planner
+Next action: observe the settled CodeDB Manager state and read-only removal
+admission only. Stop on a blocked or ambiguous state; do not click Remove or
+Install without separate authorization.
+Human decision or authorization required: real removal retry, fresh Install,
+Verifier routing, push, tag, and publication.
+
+## Gate C - Read-Only Removal Admission Reconfirmed
+
+The human supplied a 1585x966 screenshot from the same Unity session
+(SHA-256
+`4a187535732551ea6c1586cd5b2bc9a20bc903cdb8fb679862ca1de0113156a8`).
+Manager Overview shows `CodeDB needs attention` and the verified
+`Remove CodeDB Integration` action. Diagnostics show `Control contract
+migration` as `Needs Setup / Removal required`; current instance and the
+other runtime checks are `Inactive / Not evaluated`, with no active Checking
+state or terminal uninstall result visible. This confirms only the cached,
+read-only removal admission for the current Package. It does not prove that a
+mutation was executed or that the project is `UNINSTALLED / PENDING`.
+
+No button was clicked and no Manager action, runtime cleanup, Unity MCP, or
+fresh Install was performed. The previous real-removal attempt remains
+consumed and unconfirmed.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: GATE_C_READ_ONLY_PREFLIGHT_PASS / REAL_REMOVAL_RETRY_PENDING
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: decide separately whether to authorize one new real removal
+attempt against this corrected Package; do not click Install before an
+independent `UNINSTALLED / PENDING` result is proved.
+Human decision or authorization required: real removal retry, fresh Install,
+Verifier routing, push, tag, and publication.
+
+## Gate C - Corrected Package Real Removal Authorized
+
+The human separately authorized one new real `Remove CodeDB Integration`
+attempt after the FIX 02 Package import, focused EditMode PASS, and visible
+read-only removal admission. `UnityValidationProject/Packages/manifest.json`
+still points to the relative
+`.artifacts/v0.3.0-preview.5-s25-receipt-path-6942c62-final/package/com.rice.ai-codedb`
+artifact. The earlier attempt against the previous Package remains consumed
+and unconfirmed; it is not replayed.
+
+The human operates the visible Unity Manager and confirms the project mutation
+dialog once. This authorization permits one attempt only, with up to 300
+seconds for a terminal result and no automatic retry. Stop on failure,
+timeout, or ambiguity and retain the exact visible output. Do not click
+`Install CodeDB`, run Unity MCP, manually edit project runtime state, or stop
+holder/external processes. A visible `Uninstalled` result and independent
+`UNINSTALLED / PENDING` technical state must be reviewed before any separate
+fresh Install authorization.
+
+At this record point, the corrected-Package removal attempt has not been
+reported as executed (0/1); fresh Install remains 0/1. No release PASS is
+inferred from this authorization.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: GATE_C_CORRECTED_REMOVAL_AUTHORIZED / HUMAN_ACTION_PENDING
+Next notification: human operator
+Next action: click `Remove CodeDB Integration` once, confirm once, and report
+the terminal Manager state or exact error; do not proceed to Install.
+Human decision or authorization required: fresh Install after proven removal,
+Verifier routing, push, tag, and publication.
+
+## Gate C - Corrected Package Removal Outcome Unconfirmed
+
+The human supplied a 1597x969 Manager screenshot after the one authorized
+corrected-Package removal attempt (SHA-256
+`eb341b1ce92274b2d69ff2b0306942ce4e0df61da24cd3b6f55dc93ad4bc80bc`).
+Manager reports `CodeDB status unconfirmed` and `Outcome unconfirmed`:
+`The direct command has admitted or claimed evidence but no matching terminal
+receipt; no replay was attempted.` The Host payload detail visibly contains
+only a truncated, corrupted `Add-Type` error fragment.
+
+Read-only inspection of the current project/Package receipt partition found
+one action and one stage with `admitted.json` and `claim.json`, but no
+`terminal.json`. The admission binds a confirmed project mutation to the
+Package materializer; the writer claim was published. In the Package writer,
+the `Add-Type` construction of the bounded child runner occurs after the claim
+and before starting the child command or publishing a terminal receipt. This
+places the observed failure within that handoff interval, but the exact
+`Add-Type` cause is not established by the screenshot alone.
+
+The project control state remains `INSTALLED / COMPLETE`, the previous current
+selection remains present, and no removal-intent directory exists. Project
+MCP config is absent, which alone is not evidence of logical uninstall. No
+`UNINSTALLED / PENDING` result was proved. The corrected-Package attempt is
+1/1 used and its outcome is UNCONFIRMED; fresh Install remains 0/1 and is
+BLOCKED. No replay, new action, Unity MCP, runtime modification, or process
+termination was performed by this inspection.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: BLOCKED / GATE_C_WRITER_CLAIM_WITHOUT_TERMINAL
+Next notification: human operator / UnityCodeDB v0.3 Planner
+Next action: obtain the complete Host payload `Copy` detail, preserving the
+exception type and `Add-Type` diagnostics while redacting local path prefixes.
+Then decide a bounded cause-specific fix; do not retry Remove or click Install.
+Human decision or authorization required: any fix/new Package, removal retry,
+fresh Install, Verifier routing, push, tag, and publication.
+
+## Gate A - S26 Commit-Derived Package Closure
+
+The user authorized the S25 route update and one commit-derived Package
+closure after accepting S26. The canonical exporter ran against exact commit
+`1be11d911c05db4b7752122bf761e61fac47ef3c` and created a new artifact without
+replacing any prior S23/S25 artifact:
+
+- Relative root:
+  `.artifacts/v0.3.0-preview.5-s26-host-action-1be11d-final/`
+- Package:
+  `.artifacts/v0.3.0-preview.5-s26-host-action-1be11d-final/package/com.rice.ai-codedb`
+- ZIP: `com.rice.ai-codedb.zip` under that root
+- ZIP SHA-256:
+  `1fb85dc9bcca8405d688c487e1def6d2ebfe75fd17979f06dfdebfb93d0884c5`
+- Staged closure: PASS, `source_count=46`, `mismatch_count=0`
+- Exact-ZIP closure: PASS, `source_count=46`, `mismatch_count=0`
+- Export summary: `files=482`, `bytes=9864772`, `zip_entries=482`
+- Cross-hashes: generation
+  `b634d66584c84f4855fb4b29a1c16f9ecc6898cca670258454d9c9c12d794666`,
+  host-current
+  `9f5b72e8ee2992e69172c9f4727d578f5a9ec35e8bab61b084ed1ee281f0612b`,
+  runtime contract
+  `df329facd024dd45b8753cff921cf340543e31798be5a485f99421e523402303`.
+
+The exporter and release-closure validator were run once for this artifact;
+no repair mode, manual metadata edit, Package replacement, Unity launch,
+manifest switch, project mutation, or real Remove/Install was performed.
+The old S25 attempt remains consumed and unconfirmed.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_A_PACKAGE_CLOSURE_PASS / GATE_B_AUTHORIZATION_PENDING`
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: separately authorize the human-owned Gate B dependency switch,
+compile, and focused EditMode check against this exact artifact while Unity is
+closed. Do not click Remove or Install at Gate B.
+Human decision or authorization required: Gate B validation-project change and
+human Unity acceptance; later real removal, fresh Install, Verifier, push, and
+publication remain separate.
+
+## Gate B - Human Unity Validation Result
+
+The user opened `UnityValidationProject` against the exact S26 commit-derived
+Package after the authorized manifest switch and reported:
+
+- CodeDB C# compile errors: `0`;
+- `AICodedbLifecycleControlTests`: full class PASS;
+- `ControlContractMigration_PartialV1RequiresBoundCommittedEvidence`: single
+  test PASS;
+- no Remove or Install action was performed.
+
+The user then closed Unity. Planner restored only the CodeDB dependency in
+`UnityValidationProject/Packages/manifest.json` to the pre-Gate-B S25 value
+`file:../../.artifacts/v0.3.0-preview.5-s25-receipt-path-6942c62-final/package/com.rice.ai-codedb`.
+The restored manifest SHA-256 is
+`a3fce2719778387ab423a6c17ab18c1c07e27a6109c5a404bf8382a234f7d780`, matching
+the recorded pre-switch hash. No lockfile, ProjectSettings, other dependency,
+source, runtime state, or artifact was changed by the restore.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_B_HUMAN_PASS / GATE_C_READ_ONLY_PREFLIGHT_PENDING`
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: authorize one human-visible Gate C read-only removal preflight
+against the exact accepted Package state. Do not click Remove until the
+preflight is reviewed and separately authorized; do not click Install.
+Human decision or authorization required: Gate C removal attempt, later fresh
+Install, Verifier, push, and publication remain separate.
+
+## Gate B - Human Unity Validation Authorization
+
+The user confirmed that `UnityValidationProject` was closed and separately
+authorized Gate B against the exact S26 commit-derived artifact. Before the
+switch, the existing CodeDB dependency was recorded as
+`file:../../.artifacts/v0.3.0-preview.5-s25-receipt-path-6942c62-final/package/com.rice.ai-codedb`;
+the manifest SHA-256 was
+`a3fce2719778387ab423a6c17ab18c1c07e27a6109c5a404bf8382a234f7d780`.
+
+Planner changed only the `com.rice.ai-codedb` dependency in
+`UnityValidationProject/Packages/manifest.json` to:
+
+`file:../../.artifacts/v0.3.0-preview.5-s26-host-action-1be11d-final/package/com.rice.ai-codedb`
+
+The JSON was parsed successfully and the target Package directory exists. No
+lockfile, ProjectSettings, other dependency, source, or runtime state was
+changed by this setup. Unity is still closed at this handoff.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_B_AUTHORIZED / HUMAN_UNITY_OPEN_PENDING`
+Next notification: human operator
+Next action: open the existing `UnityValidationProject`, allow Package import
+and compilation to settle, report CodeDB C# compile errors, then run exactly
+the predeclared focused EditMode selections: `AICodedbLifecycleControlTests`
+as a class and `ControlContractMigration_PartialV1RequiresBoundCommittedEvidence`
+as a single test. Do not click Remove or Install in Gate B.
+Human decision or authorization required: later Gate C removal and fresh
+Install remain separate; stop at the first compile or focused-test failure.
+
+## Gate B - Final Reconciliation - 2026-09-29
+
+The human completed the authorized Gate B session against the S26
+commit-derived Package and reported no C# compile errors. The full
+`AICodedbLifecycleControlTests` class and the single
+`ControlContractMigration_PartialV1RequiresBoundCommittedEvidence` test both
+passed. No Remove or Install action was clicked.
+
+Unity was then closed. Planner restored the CodeDB dependency in
+`UnityValidationProject/Packages/manifest.json` to the pre-Gate-B S25 artifact
+value. The restored manifest SHA-256 is
+`a3fce2719778387ab423a6c17ab18c1c07e27a6109c5a404bf8382a234f7d780`, matching
+the recorded pre-switch hash. No lockfile, ProjectSettings, other dependency,
+source, runtime state, or artifact was changed during restoration.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_B_HUMAN_PASS / GATE_C_READ_ONLY_PREFLIGHT_PENDING`
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: separately authorize one human-visible Gate C read-only removal
+preflight. Do not click Remove until that preflight is reviewed and separately
+authorized; do not click Install.
+Human decision or authorization required: Gate C removal attempt, later fresh
+Install, Verifier, push, and publication remain separate.
+
+## Gate C - Read-Only Preflight Prepared - 2026-09-29
+
+The user authorized only the Gate C read-only removal preflight. Unity remained
+closed at setup. Planner changed the CodeDB dependency in
+`UnityValidationProject/Packages/manifest.json` from the recorded S25 artifact
+to the same S26 commit-derived Package that passed Gate B:
+
+`file:../../.artifacts/v0.3.0-preview.5-s26-host-action-1be11d-final/package/com.rice.ai-codedb`
+
+The manifest parsed successfully; its setup SHA-256 is
+`e6360ddb341a018286e64ca433da917ddfe57ca6dc3d59372e427af1929d8ebc`.
+The artifact ZIP SHA-256 still matched the Gate A value
+`1fb85dc9bcca8405d688c487e1def6d2ebfe75fd17979f06dfdebfb93d0884c5`.
+`packages-lock.json` was observed modified in the worktree during setup but was
+not edited or restored by Planner. No real project runtime or receipt state was
+read or changed; no Unity, test, Remove, or Install action was run by Planner.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_C_READ_ONLY_PREFLIGHT_PREPARED / HUMAN_OBSERVATION_PENDING`
+Next notification: human operator
+Next action: open the existing `UnityValidationProject`, wait for import and
+compilation to settle, then observe Manager Overview and Diagnostics for a
+stable state and the read-only removal admission. Report exact visible state
+and any error; do not click Remove, Install, or another maintenance action.
+Human decision or authorization required: any real Remove attempt, later fresh
+Install, Verifier, push, and publication remain separate.
+
+## Gate C - Read-Only Preflight Blocked - 2026-09-29
+
+The human opened `UnityValidationProject` against the S26 commit-derived
+Package and supplied a CodeDB Manager screenshot. The visible Overview reports
+`CodeDB status unconfirmed`: `The direct command has admitted or claimed
+evidence but no matching terminal receipt; no replay was attempted.` Diagnostics
+shows `Control contract migration: Removal required`, while Host payload and
+Current instance are not evaluated. This does not establish the outcome of the
+earlier action or admit a new removal attempt. The human was instructed not to
+click Remove or Install; no new action result was supplied.
+
+The human then confirmed Unity was closed. Planner restored only the CodeDB
+dependency in `UnityValidationProject/Packages/manifest.json` to its recorded
+pre-preflight S25 artifact value. No old action evidence, receipt, project
+runtime state, lockfile, or ProjectSettings was changed by this reconciliation.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `GATE_C_READ_ONLY_PREFLIGHT_BLOCKED / PRIOR_ACTION_UNCONFIRMED`
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: decide whether to authorize a separately bounded, read-only
+diagnosis of the exact prior admitted/claimed action and missing terminal
+receipt. Do not replay the old action or start a fresh Remove/Install from this
+state.
+Human decision or authorization required: prior-action evidence diagnosis,
+real removal, fresh Install, Verifier, push, and publication remain separate.
+
+## Gate C - Prior Action Read-Only Diagnosis - 2026-09-29
+
+The user separately authorized a bounded read-only diagnosis after closing
+Unity. The project-scoped Manager action partition contains exactly one
+historical Package directory, action `3049af7cfc9f4260928e3f89d18672c0`,
+and stage `b571e3a38c0f134306d1df4d412804de66048b32de371c95112d363e6b664b56`.
+That stage has `admitted.json` and `claim.json`, but no `terminal.json` or
+`start-failure.json`. Both records bind the same full project and Package keys,
+action id, and stage id. The admission names the S25 receipt-path Package's
+materializer, a confirmed project mutation, and a terminal-for-action command.
+The admitted S25 writer still exists and its SHA-256 matches the admission's
+`writer_sha256`.
+The project action-index directory has no current or resolved action marker;
+the current journal's legacy scan therefore encounters this pending receipt.
+
+The S25 Package writer published `claim.json` before its `Add-Type` runner
+construction. The human-reported `Add-Type` failure is consistent with that
+claim-without-terminal interval. The S26 writer instead constructs the child
+runner without that `Add-Type` step, but its recovery path does not convert a
+historical pending claim into a terminal or pre-effect refusal. The exact
+Windows temporary-source failure cause and a trustworthy terminal command
+outcome cannot be reconstructed from these records alone.
+
+The project desired-state record still says `INSTALLED / COMPLETE`, and the
+previous `poc.34` current-instance selection remains. There is no proved
+`UNINSTALLED / PENDING` transition. This read-only diagnosis does not claim
+that an absent terminal receipt alone proves the child never started, and it
+does not authorize fabricating a start-failure or resolved marker. The Gate C
+preflight remains blocked by the earlier action, not by a newly attempted
+Remove. No Unity, Unity MCP, process probe or termination, replay, runtime
+mutation, receipt cleanup, source edit, test, commit, or push was performed.
+
+Current task: `cdb-v0.3-p0-s25-s24-package-unity-reinstall-acceptance`
+Current status: `BLOCKED / PRIOR_ACTION_CLAIM_WITHOUT_TERMINAL`
+Next notification: UnityCodeDB v0.3 Planner/User
+Next action: decide a separately scoped resolution contract for this exact
+legacy pending action, with authenticated proof of pre-effect refusal or a
+terminal outcome before any fresh removal admission. Do not click Remove or
+Install, replay the old command, or manually clear its evidence.
+Human decision or authorization required: resolution design/implementation,
+later real removal, fresh Install, Verifier, push, and publication.
+
+## Gate C - Historical Unknown Action Reconciled - 2026-09-30
+
+S27 FIX 01 produced commit-derived Package
+`.artifacts/v0.3.0-preview.5-s27-reconciliation-fix01-5cb4862-final/package/com.rice.ai-codedb`.
+Using that Package, the separately authorized exact historical reconciliation
+for action `3049af7cfc9f4260928e3f89d18672c0` completed with exit `0` and
+published `HistoricalUnknownReconciled`.
+
+The administrative marker retains `command_outcome=unknown`; it does not
+claim the old Remove succeeded or failed. The original stage remains
+byte-preserved with only `admitted.json` and `claim.json`; no terminal or
+start-failure receipt was created. The proof rechecked the writer and exact
+PowerShell command census, the project state under the materializer lock, and
+the Manager index state before publication. The project remains
+`INSTALLED / COMPLETE` with current selection `poc.34`; no operation journal,
+operation directory, or removal intent remains. No process was stopped and no
+old command was replayed.
+
+Current status: `GATE_C_HISTORICAL_RECONCILED / FRESH_REMOVAL_PENDING`.
+The historical unknown-action block is closed. A fresh Remove still requires
+one separate human confirmation and backend preflight; fresh Install remains
+blocked until authenticated `UNINSTALLED / PENDING` evidence exists.
+
+## Gate C - Fresh Remove Ready - 2026-09-30
+
+The corrected S27 Package preflight was run read-only against the validation
+project and returned `[REMOVAL_PREFLIGHT] AVAILABLE`, exit `0`. The validation
+project's manifest was then switched only for the CodeDB dependency to:
+
+`file:../../.artifacts/v0.3.0-preview.5-s27-reconciliation-fix01-5cb4862-final/package/com.rice.ai-codedb`
+
+Before the switch, `manifest.json` matched SHA-256
+`a3fce2719778387ab423a6c17ab18c1c07e27a6109c5a404bf8382a234f7d780` and
+`packages-lock.json` matched
+`b0eae1cd7fc1a54fb82b857998cb67fbb547cf7f21cd6e3c2e67129b9bf608c5`.
+The user-owned next step is one visible Manager `Remove CodeDB Integration`
+click and one confirmation, with Unity open against this exact Package. Stop
+on any error, ambiguity, or unexpected state; do not click Install or retry.
+
+## Gate C - Fresh Remove Result And Package-Binding Restore - 2026-09-30
+
+After the user performed the single visible `Remove CodeDB Integration`
+action against the corrected S27 Package, Unity was closed before inspection.
+The exact action `4d2e8ae90f5142eb9a107f5d6e513aca` has a terminal receipt with
+`exit_code=0`, `state=terminal`, and the following authoritative result:
+
+`[RESULT] UNINSTALLED`
+
+`[CLEANUP_STATE] PENDING`
+
+The receipt's structured command result is
+`outcome=UNINSTALLED`, `phase=COMPLETE`,
+`reason_code=INTEGRATION_REMOVAL_COMPLETE`, and
+`next_action=Use Install CodeDB to create a fresh project integration.` The
+project runtime independently contains `desired_state=UNINSTALLED` and
+`cleanup_state=PENDING` with `state_id=4ba97765e6cd4f2597daa6b60db52e22`;
+the retained removal intent binds the same state id, instance `7f02adc0f68f43c3888bf9375cc865ec`,
+and generation `poc.34`. No historical Remove was replayed, no process was
+stopped, and no Install was clicked.
+
+With Unity closed, Planner restored the validation project's pre-Gate-C
+Package bindings. `UnityValidationProject/Packages/manifest.json` now matches
+the recorded S25 artifact value and SHA-256
+`a3fce2719778387ab423a6c17ab18c1c07e27a6109c5a404bf8382a234f7d780`.
+`packages-lock.json` was restored to its recorded inherited pre-gate S26
+binding and SHA-256
+`b0eae1cd7fc1a54fb82b857998cb67fbb547cf7f21cd6e3c2e67129b9bf608c5`.
+Both files parse as JSON and their scoped `git diff --check` passed with no
+output. Existing unrelated `ProjectSettings.asset` dirty state was preserved.
+
+Current status: `GATE_C_FRESH_REMOVE_PASS / FRESH_INSTALL_PENDING`.
+The real removal is now independently authenticated as `UNINSTALLED / PENDING`.
+Fresh Install remains a separate human action and must not be performed until
+the restored state and a new Install authorization are reviewed. Verifier,
+commit, push, and publication remain separate gates.
+
+## Gate C - Fresh Install Preparation - 2026-09-30
+
+The user separately authorized the fresh Install after the authenticated
+`UNINSTALLED / PENDING` result. With Unity still closed, Planner changed only
+the CodeDB dependency in `UnityValidationProject/Packages/manifest.json` to
+the closed S27 corrected Package:
+
+`file:../../.artifacts/v0.3.0-preview.5-s27-reconciliation-fix01-5cb4862-final/package/com.rice.ai-codedb`
+
+The manifest parses, the target Package directory exists, and the manifest
+SHA-256 is
+`c6b575e32016c8c0fb311df2ad7ba528716d4de44a30590a2e3e8a63db94e4f8`.
+The inherited S26 `packages-lock.json` binding was preserved unchanged. The
+runtime desired state remains `UNINSTALLED / PENDING` with state id
+`4ba97765e6cd4f2597daa6b60db52e22`; no automatic Install or other mutation
+was observed. Scoped `git diff --check` for the manifest passed with no output.
+
+Current status: `GATE_C_INSTALL_READY / HUMAN_UNITY_INSTALL_PENDING`.
+Next action is one human-visible Unity session against the exact project path:
+wait for import/compile to settle, click `Install CodeDB` once, confirm once,
+and stop on any error or ambiguous state. Do not click Remove, retry, or use
+Unity MCP/BatchMode. Afterward, record the new instance, committed activation,
+project MCP binding, Manager Ready state, and one bounded status/query check
+before any Verifier routing.
+
+## Gate C - Fresh Install Attempt Blocked Before Admission - 2026-09-30
+
+The user opened `UnityValidationProject` against the prepared S27 corrected
+Package and supplied a screenshot of the CodeDB Manager. No `Install CodeDB`
+action was exposed. The visible Overview remained `Needs attention` with the
+message `CodeDB could not finish setup for this project. Review diagnostics
+before choosing a recovery action.` The diagnostic rows showed `Host payload:
+Needs Setup`, `Current instance: Inactive`, `Coordinator startup: Inactive`,
+and `Host generation: Inactive`; the technical details state that the current
+Editor lease could not be established before coordinator admission. No
+Install confirmation or mutation was performed.
+
+This is not an Install failure and does not consume the authorized Install
+mutation attempt: admission never produced the Install action. No retry,
+Remove, Unity MCP, BatchMode, process probe, or runtime-file mutation was
+performed. The screenshot is retained as human evidence of the blocked UI
+state.
+
+Current status: `GATE_C_INSTALL_BLOCKED / INSTALL_ACTION_NOT_EXPOSED`.
+Next action requires a separately bounded diagnosis or corrected human-open
+checkpoint for the missing Editor-lease/coordinator admission. Do not click
+other recovery actions or infer a fresh instance from this screen. Verifier,
+commit, push, and publication remain deferred.
+
+## Gate C - Install Admission Lifecycle FIX 01 - 2026-09-30
+
+After Unity was closed, the user authorized a targeted source and adjacent-test
+fix. The read-only diagnosis found that an authenticated `UNINSTALLED / PENDING`
+state intentionally skips Editor-lease publication, yet `RunReconcileWorker`
+rejected the absent lease before reaching its existing uninstall cleanup and
+`Uninstalled` status branches. That cached `NeedsAttention` and hid the
+Manager's dedicated `Install CodeDB` view.
+
+The source change moves the existing uninstall cleanup/status handling before
+the no-lease rejection. It keeps automatic Supervisor reconnect disallowed,
+deletes any Editor lease, preserves the pending-cleanup `Upgrade` route, and
+publishes authoritative `Uninstalled` even when cleanup reports a warning.
+The ordinary installed-state lease gate remains in place. Adjacent EditMode
+tests now cover the current desired-state path with `UNINSTALLED / PENDING`,
+no lease eligibility, Manager Install projection, and the lifecycle source
+ordering that prevents this regression.
+
+Focused source-order assertion: PASS. Two-path scoped `git diff --check`: PASS,
+no output. The standalone package-boundary check stopped on the pre-existing
+`C:/fixture/project` literal in unchanged
+`Tests/Editor/AICodedbManagerUiTests.cs`; the same literal is present in HEAD,
+so this is not evidence of a new lifecycle failure or a package-boundary PASS.
+The added C# EditMode tests, Unity compilation, real Manager Install display,
+and fresh Install remain NOT RUN. No exported Package, runtime evidence,
+project binding, commit, push, or publication was changed by this FIX.
+
+Current status: `FIX_01_SOURCE_READY / UNITY_AND_PACKAGE_GATE_DEFERRED`.
+Next action is review of the two-file source/test diff and a separately
+authorized validation/package handoff before resuming the human Install gate.
+
+## Package Path Provenance Workflow Correction - 2026-09-30
+
+The earlier package-boundary failure exposed a repeated process gap: the S18
+test-root binding decision was task-local, while S24 introduced fixed-drive
+fixture literals and did not run the path scan before snapshot freeze. The
+two C# preflight argument tests now derive their supplied root from the test
+runtime temporary area and assert exact argument forwarding. The directly
+adjacent PowerShell historical-reconciliation fixture likewise derives its
+synthetic Package root from its test run root. A batch helper's drive-root
+usage example became a symbolic argument, and `.bat/.cmd` joined the Package
+path scan. No production behavior changed.
+
+Workflow revision 2.4 now requires a pre-freeze path-source declaration and
+focused Package path-provenance check for Package text changes. The focused
+check reuses the full package-boundary text selection and drive-root rule;
+fixture-named hard paths have no exemption. Focused path gate: PASS, exit 0.
+Both edited PowerShell scripts parsed: PASS. Scoped nine-path `git diff
+--check`: PASS, exit 0. The full package-boundary gate, C# compile/EditMode,
+Unity, fresh Install, and consumer validation remain NOT RUN; this correction
+does not advance Gate C or claim a release Package PASS.
+
+## Pre-Unity Candidate Gates - 2026-09-30
+
+On HEAD `5cf474ad9f9a823fa29cbb8a4c7121a03c0fd1bc`, the focused path
+provenance gate passed. The complete standalone Package-boundary initially
+stopped on its older blanket `poc.34` runtime-source rule. S27's reviewed
+historical-action proof intentionally binds the exact old `poc.34` selection;
+the rule now excludes only that exact predicate inside
+`Get-HistoricalUnknownProjectProof` and continues to reject the same literal
+elsewhere in runtime policy source. No production source changed for this
+gate correction.
+
+After that bounded correction, the complete standalone Package-boundary
+passed, exit 0. The directly affected `-HistoricalReconciliationOnly` L0
+passed, exit 0, including unknown-outcome publication and fail-closed live,
+incomplete, drifting, and repeated evidence. These checks do not prove C#
+compilation, EditMode, a released artifact, or real Install. The validation
+project still points at the older S27 export, so reopening Unity before a new
+candidate is bound would test the wrong Package. Commit-derived export,
+validation-project switch, human Unity gates, and real Install remain pending
+separate authorization.
+
+Pre-Unity handoff identity: HEAD
+`5cf474ad9f9a823fa29cbb8a4c7121a03c0fd1bc`; ten-path source/workflow
+stable patch identity `3bf457c7370bfe25cea078955261baec9f83be2f`.
+Eleven-path scoped `git diff --check`, including this result record, passed
+with exit 0 and no output. Current status:
+`PRE_UNITY_SOURCE_GATES_PASS / COMMIT_DERIVED_CANDIDATE_PENDING`.
+
+## Commit-Derived Candidate And Human Gate Handoff - 2026-09-30
+
+The authorized ten-path source/workflow commit is
+`a02a68c45362bb7ca60e846bacbd101c4498979f` on
+`codex/v0.3.0-legacy-workflow`. Its staged patch identity matched the recorded
+`3bf457c7370bfe25cea078955261baec9f83be2f`; staged `git diff --check`
+passed. S25 task/result history, validation-project files, and unrelated
+dirty/untracked state were not included in the commit.
+
+The canonical exporter created a new, unmodified, commit-derived candidate at
+`.artifacts/v0.3.0-preview.5-s25-install-admission-a02a68c-candidate`.
+Commit-staged and exact-ZIP closure each passed with `source_count=46` and
+`mismatch_count=0`; the ZIP has 482 entries, SHA-256
+`7717eca61ce0c53f92621c766a8279de1ecbeceae4731931fe7cc1c41cba7bbd`.
+The extracted candidate's full standalone Package-boundary passed.
+
+No `UnityValidationProject` process was visible; the only observed Unity
+process belonged to a separate `UnityResDB-clean` project and was untouched.
+Only the CodeDB value in the validation project's Package manifest was
+changed to the candidate's relative `file:` path. Its JSON parses, the target
+exists and declares `com.rice.ai-codedb@0.3.0-preview.5`, manifest SHA-256
+`35252105669b98d913f4d4e705a6491d97828e72526569e398ee323452c47a45`;
+scoped manifest `git diff --check` passed. The inherited dirty lockfile and
+ProjectSettings were preserved unchanged.
+
+Status: `GATE_B_CANDIDATE_READY / HUMAN_UNITY_PENDING`. C# compilation,
+EditMode, Manager Install visibility, actual Install, status/query, and RELEASE
+Verifier are NOT RUN for this candidate. The user should perform the bounded
+human Gate B/C observation in the current S25 task card; no Install click is
+authorized by this preflight.

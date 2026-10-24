@@ -1,0 +1,5 @@
+Base SHA: 427a42495e0fd8a5707da3adf368f895dbf524ad
+Working-tree source SHA256 (2026-10-11):
+66908ff33408fe87fc05c6c2f9ead35d26da838d158aba818947689b62ae26e0  com.rice.ai-codedb/Editor/AICodedbManagerActionJournal.cs
+19b5e36c0cf30bfbd1c97a9cda5dbff10e821b7bb3a6514b1966049e27a2172a  com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs
+bfa98b2a3805d16822082c2d5bbf15191b17b6fe1772daa985857009af22618b  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs

@@ -1,7 +1,11 @@
 # Optional bootstrap focused human acceptance
 
-2026-10-09. C#_CONSUMER_AND_MANAGER_PENDING. S29 PARTIAL.
-Source commit9e7201f, immutable package `.artifacts/s29-optional-flat-poc42`.
+2026-10-09. HUMAN_FOCUSED_CONSUMER_AND_MANAGER_PASS. S29 PARTIAL.
+User reported focused EditMode PASS and screenshot confirms Install entry, with
+original failed/incomplete history restored and incorrect Conflict gone.
+This checklist is completed; do not repeat it. Next gate is one new Manager
+Install after human confirmation; see HUMAN-RESULT.
+Corrected source commitb79fbb8, package `.artifacts/s29-optional-flat-compile-poc42`.
 Human owns Unity compile/EditMode/Manager; Parent never launches the Editor.
 
 Open UnityFreshInstallValidationProjectS29 once after Parent switches the local
@@ -22,7 +26,7 @@ one Manager screenshot. If compile/test fails or entry remains missing, stop
 and send full error/detail. Keep Unity open for diagnosis; no close/open cycle
 unless a concrete subsequent Package reference switch requires it.
 
-Do not click Install as part of this reader-only acceptance checkpoint. The
+The completed reader-only acceptance checkpoint required no Install. The
 normal fresh Install remains the next explicitly confirmed action after actual
 consumer/Manager validation. Preserve original failed/unknown action, retained
 candidates and cleanupPENDING. A historical warning may remain as an honest

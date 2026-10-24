@@ -5,7 +5,7 @@
 - Product: UnityCodeDB
 - Version: v0.3.0 / existing S29
 - Workflow: codedb-workflow-v2, revision 2.4
-- Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_GATE_PENDING
+- Status: HUMAN_TESTS_UI_PASS / NO_TEST_CLOSE_PASS / SHUTDOWN_HANG_DEFERRED_OBSERVATION
 - Planner: current parent
 - Coder: /root/retained_disposition_coder; task-specific source stage
 - Verifier: /root/retained_disposition_verifier; independent read-only stage
@@ -180,9 +180,13 @@ authorized by this clarification; installed-generation handoff stays deferred.
   ProcessRunner unchanged. Both Coder and Verifier are terminal/stopped.
 - Accepted identity: RETAINED-DISPOSITION-ADMISSION-FIX-SOURCE-SHA256.txt,
   based on b76957a9dbcae9b00eff73775a97c4e8f33ae785. Original evidence preserved.
-- Next notification: User for focused human Unity validation.
-- Next action: use RETAINED-DISPOSITION-HUMAN-CHECKLIST.md on the already switched
-  exact 74c4db0 Package. Do not repeat export or reference switch.
+- User disposition: on 2026-10-12, user deferred the shutdown hang for observation
+  during subsequent tests because the sample is too small to attribute it to
+  this development. Preserve the failed AppHang and successful comparison.
+- Next action: continue aligning the remaining S29 route; no dedicated shutdown
+  investigation, source fix or extra Unity attempt at this stage. The hang is an
+  unresolved deferred observation item, not a current slice blocker or a proven
+  CodeDB defect. See SHUTDOWN-NO-TEST-CONTROL-2026-10-12.md and human result.
 - Delivery grant: user's explicit commit -> exact export -> reference switch ->
   human Unity request; recorded in RETAINED-DISPOSITION-DELIVERY-GRANT.md.
   Local source commit, both package closure gates and reference switch complete.

@@ -1,0 +1,8 @@
+Base d88a101f15d21f916cbee9578ab887aa1ea862cd
+Overlay .artifacts/tests/s29-removal-namespace/coder-a1/com.rice.ai-codedb
+1bc989195aa14def596e16231cc2876afcedfbab4a5f342ca1384f9567de695a  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+a9cbfd456d4aa647f452d65f0eead077c3f17a863fec445fc23ebb880b96bdb4  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+958a0855562b983d7355cf3714c313314703bf481107c402a6fb74e727e6a782  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+ad9f6ab5b3a335c4c0e3ba5cc69015f8281be2327cb54c67a8d614f02bb4d84d  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+20f8ce32012cd2212013831595fc99fef9d174fd236cffaec081362e7c38892e  com.rice.ai-codedb/Tests/Editor/AICodedbHostPayloadMaterializerPreflightHandoffTests.cs
+7af9bccac0843fc49d1c0b946b43840dfe7cfa7181b850a7d779828b7028ade3  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs

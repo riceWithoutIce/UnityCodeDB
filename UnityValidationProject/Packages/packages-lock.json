@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "com.rice.ai-codedb": {
-      "version": "file:../../com.rice.ai-codedb",
+      "version": "file:../../.artifacts/0.3.0-preview.5-s28-phase-c-91a295b/package/com.rice.ai-codedb",
       "depth": 0,
       "source": "local",
       "dependencies": {}

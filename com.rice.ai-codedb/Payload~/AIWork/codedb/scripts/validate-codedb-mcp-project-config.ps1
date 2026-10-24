@@ -5,6 +5,7 @@ param()
 
 Set-StrictMode -Version Latest
 . "$PSScriptRoot\codedb-project-common.ps1"
+. (Join-Path $PSScriptRoot '..\shared\codedb-mcp-registration-contract.ps1')
 
 $context = Get-ProjectCodedbContext
 $script:hasFailure = $false
@@ -93,10 +94,17 @@ function Assert-TomlSectionValue {
     Record-Pass "$Label matches expected project-level value."
 }
 
-function Test-HasMachineLocalPath {
-    param([Parameter(Mandatory = $true)][string]$Content)
+function Assert-TomlWorkingDirectory {
+    param([Parameter(Mandatory = $true)][string]$SectionContent)
 
-    return $Content -match '(?im)"(?:[A-Za-z]:[\\/]|\\\\|~/|/)'
+    $assignments = [regex]::Matches($SectionContent, '(?im)^\s*cwd\s*=([^\r\n]*)$')
+    if ($assignments.Count -ne 1) {
+        Record-Failure "MCP working directory must appear exactly once in the project MCP section."
+    } elseif (-not (Test-CodedbMcpWorkingDirectoryValue -Value $assignments[0].Groups[1].Value -ProjectRoot $context.UnityRoot)) {
+        Record-Failure "MCP working directory must be an absolute path to the current Unity project root."
+    } else {
+        Record-Pass "MCP working directory matches the current Unity project root."
+    }
 }
 
 try {
@@ -119,7 +127,7 @@ try {
 if (-not (Test-Path -LiteralPath $projectConfigPath)) {
     Record-Failure "Missing project MCP config: $projectConfigRelativePath"
 } else {
-    $config = Get-Content -LiteralPath $projectConfigPath -Raw
+    $config = Get-Content -LiteralPath $projectConfigPath -Encoding UTF8 -Raw
     $providerPaths = Get-ProjectCodedbProviderPaths -Context $context
     $relativeExePath = ConvertTo-CodedbDisplayPath -Context $context -Path $providerPaths.ExecutablePath
     $relativeConfigPath = ConvertTo-CodedbProjectRelativePath -Context $context -Path $providerPaths.ConfigPath
@@ -133,7 +141,7 @@ if (-not (Test-Path -LiteralPath $projectConfigPath)) {
         Record-Failure "MCP server section [$serverSectionName] must appear exactly once."
     } else {
         Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "command" -ExpectedValue '"node"' -Label "MCP command"
-        Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "cwd" -ExpectedValue '"."' -Label "MCP working directory"
+        Assert-TomlWorkingDirectory -SectionContent $serverSection.Content
         Assert-TomlSectionValue -SectionContent $serverSection.Content -Key "startup_timeout_sec" -ExpectedValue "120" -Label "Startup timeout"
 
         $usesProjectWrapper = Test-ContainsLiteral -Content $serverSection.Content -Literal "args = [`"$relativeWrapperPath`", `"--root`", `".`"]"
@@ -171,11 +179,8 @@ if (-not (Test-Path -LiteralPath $projectConfigPath)) {
         }
     }
 
-    if (Test-HasMachineLocalPath -Content $config) {
-        Record-Failure "$projectConfigRelativePath contains a quoted absolute or user-local path. Use Unity-root-relative paths only."
-    } else {
-        Record-Pass "$projectConfigRelativePath uses relative paths only."
-    }
+    # command/args are checked against the project wrapper shape above. Other
+    # servers and client-owned values are outside this validator's authority.
 
     try {
         $providerPaths = Assert-ProjectCodedbProviderFiles -Context $context

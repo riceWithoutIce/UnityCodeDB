@@ -1,0 +1,5 @@
+base_head=14444cf1ad179fe29e067e8dcfdc7b0b5496e230
+branch=codex/v0.3.0-legacy-workflow
+5a00e3c5351ea10cd532cdd3b31a25305f2e1d2e885412119ff2af91d3487a39  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+6340ad4298c528edbb9be85abaf26255bf6ff5a0da9bea227cc18d96bfe23bfc  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+cc9e994996a4a38a78f3ec51928bd6e8e9d6bbdc08298ab45f51ea13c963aaab  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs (unchanged consumer)

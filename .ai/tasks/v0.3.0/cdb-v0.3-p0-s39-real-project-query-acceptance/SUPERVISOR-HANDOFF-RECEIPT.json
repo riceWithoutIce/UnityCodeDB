@@ -1,0 +1,45 @@
+{
+  "result": "OLD_OWNER_EXIT_OBSERVED_PROTECTED_STATE_PASS",
+  "observed_at_utc": "2026-10-20T13:29:44.3969853Z",
+  "user_authorized_stop": true,
+  "stop_invocations": 0,
+  "reason": "Owner had already exited before the authorized command could be invoked.",
+  "original_pid": 75380,
+  "original_owner_epoch": "bf12b96a51544279a65186d8a1754d7b",
+  "original_pid_present": false,
+  "project_node_process_count": 0,
+  "unity_process_count": 0,
+  "latest_event": {
+    "schema_version": 1,
+    "sequence": 3,
+    "at_utc": "2026-10-20T13:27:57.08Z",
+    "event": "supervisor_retiring",
+    "detail": "authenticated_shutdown"
+  },
+  "absent_files": {
+    "Temp/UnityLockfile": true,
+    "Library/EditorInstance.json": true,
+    "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor/supervisor-state.json": true,
+    "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor/supervisor.lock": true
+  },
+  "protected_hashes": {
+    "Packages/manifest.json": "4aac0076fec46a01af94988d08f48c2f90c29bfc8b441c5bf11b972a331f404d",
+    "Packages/packages-lock.json": "86aca69acf5393e2534e3c298e7792a6a1979d4523e71cfbe782eb0aed4001ed",
+    ".codex/config.toml": "770d2319ae6fbfa0eb01cec1faf4870e2a96033453dee44637aef4f88a943502",
+    "AIWork/.runtime/codedb/control/current-instance.json": "b28c7e8c1268bd06b5c58b1f8a16c1470701b0d06602ed2685b1d5b74db8e00c",
+    "AIWork/.runtime/codedb/instances/2414c73c2fbb47f4b664c1bdbcad5969/instance.json": "dd1244b1660a26b102867035cb85525d7e124b0c72ae0c55e18868eeab8b423e",
+    "AIWork/.runtime/codedb/host/generations/poc.43/generation-manifest.json": "55b042b1d6ddf66b45d167765a8f345a38478e9775b06973b8dfa7a88c8a4bb5",
+    "AIWork/codedb/wrapper/codedb-project-wrapper.mjs": "7f209316005ffd02bccd01c78ae1773d695694a77817d99f1753041b6aef4399",
+    "AIWork/.runtime/codedb/host/generations/poc.43/shared/codedb-instance-manifest-contract.mjs": "de2366310169830738ceef4cba4d24e2b54da72f6a8a11ec8c564b4dc298d07f"
+  },
+  "helper_path": "AIWork/codedb/shared/codedb-instance-manifest-contract.mjs",
+  "helper_sha256": "de2366310169830738ceef4cba4d24e2b54da72f6a8a11ec8c564b4dc298d07f",
+  "backup": "<repository-root>/.backups/s39-supervisor-handoff-observed-exit-20261020",
+  "external_writes": 0,
+  "process_control_calls": 0,
+  "supervisor_start_calls": 0,
+  "unity_reopen": "HUMAN_PENDING",
+  "manager_ready": "NOT_VERIFIED",
+  "coordinator_ready": "NOT_VERIFIED",
+  "real_codex": "NOT_RUN"
+}

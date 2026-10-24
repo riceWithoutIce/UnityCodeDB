@@ -1,0 +1,14 @@
+{
+  "base": "186aacf0371ba64e47114306170b449dbca261c9",
+  "branch": "codex/coordinator-query-readiness",
+  "sources": [
+    {
+      "path": "com.rice.ai-codedb/Tools~/codedb-project-supervisor.mjs",
+      "sha256": "ac341b039f0840735801dc991e42a9ba7e313df0c82cca895d00dfc08a104fba"
+    },
+    {
+      "path": "com.rice.ai-codedb/Tests~/test-codedb-project-supervisor.mjs",
+      "sha256": "7bf20ca426419905b34bb3297af2f164be2946d50a3e95a9850de09fb77f468e"
+    }
+  ]
+}

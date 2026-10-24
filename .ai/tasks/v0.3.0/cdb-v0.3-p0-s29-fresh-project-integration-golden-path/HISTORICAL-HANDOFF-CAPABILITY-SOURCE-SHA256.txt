@@ -1,0 +1,77 @@
+Status: E04_SOURCE_AND_ORIGINAL_TEST_COMPILE_PASS / PATH_PROVENANCE_PASS / STABLE_TERMINAL
+Base SHA: 9eac17cfdb741f89d33a4b7c2ddf6261abcb9566
+E04 terminal source:
+719661e6d0dc409de4c889019e8686819564ed3810f20b78c5784fb1d5bd2eac  com.rice.ai-codedb/Tests~/test-codedb-retained-entry-routing.ps1
+E04 artifact bindings (root .artifacts/tests/s29-historical-handoff-capability/evidence-e04-a1):
+c709f50583ca42c3c9b5bd42c6eaa6a94618156678caa41359e2f5ab3c46395c  Rice.AICodedb.Editor.Tests.dll
+5e46162a0f8b5df4e2418c5f21b130fdde1a02b7cc2feb81cdd283328968e186  Rice.AICodedb.Editor.Tests.ref.dll
+f9d11387647dc9a41750601fab2a23db6316cc3c880316a4784283aa5fdef33f  Rice.AICodedb.Editor.Tests.rsp
+04e870e815b8a54dc8ccad1ee31fedb29ce0ee96daf641b320b90a3bd475e592  compile-tests-exact.ps1
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  logs/tests-compile-a1.log
+ad19e1143c6d924e8b003fe779679a8bb4eeff171f54028de7b53062293e5fd8  logs/path-provenance-a1.log
+All seven scoped worktree sources equal evidence-e04-a1 overlay bytes.
+E03 terminal source / equal evidence-e03-a1 overlay byte binding:
+f3236e62297e19b1d7cf569dbe25580133a06ef4a4d0f826ef0ebcdbc54457a8  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+Prior accepted ManagerUi baseline preserved in evidence-a1:
+d599a155ae69548927779c37a6336bc1d0f23495df14716797a4f71fbacdd44c  com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs
+E03 exclusive artifact bindings (root .artifacts/tests/s29-historical-handoff-capability/evidence-e03-a1):
+1886bccc99d2c9b25e9fef9d91ad1a336f4ad945031c24d0d0605a2fa16afa45  Rice.AICodedb.Editor.Tests.dll
+ea98b51eedba334d6808a7301aafa86f816b1e32ab16f29fc2314ee9c67fd98a  Rice.AICodedb.Editor.Tests.ref.dll
+f909dd5910e33ef27fb5714aef5cbc31ed06887a5776c20cc97601c04272b888  Rice.AICodedb.Editor.Tests.rsp
+4d33d65c75bb39a1b9a78d37c68032cd4c885f0af2a33df04b5156f1b33e6213  compile-tests-exact.ps1
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  logs/tests-compile-a1.log
+d828832894cdafecf1cf39504c7d1e860946b8f7f9faa39b609b84be373afe38  logs/path-provenance-a1.log
+The following six prior terminal hashes equal evidence-e03-a1 Package as well as evidence-a1:
+3b82a99822118a9e5836a11242550d6707e1e9d5766aacca6970adcefb9cad84  com.rice.ai-codedb/Editor/AICodedbProjectIntegrationState.cs
+f4fe900d94b1662a40f595b8e8649cc1491f4c7e79632918266c1239832b024e  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+95e302d8ad90a47cc2a08b76d42a30413cb011478880658ac34a8ce946500acf  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+cac46933a227cb5092b7b4b2b9fdc9fa9c2f434bc67f44f0b172351a64d361e4  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+42d66aec012407c52b6f9cc45a59d8b55141dac1d0fbd0d862ef79f48a8b6aac  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+50e78911f9967cbd644a24f70bb103167a51a5f1c7c43a0dc05d8a289cf5448a  com.rice.ai-codedb/Tests/Editor/AICodedbHostPayloadMaterializerPreflightHandoffTests.cs
+All six terminal sources equal evidence-a1/com.rice.ai-codedb overlay bytes.
+Superseded HH01 evidence-stop fixture binding (before authorized marker fix):
+8a8bf223518b35a5eee7559c3d20984444806696713cd799644fbd24863e27fc  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+
+Renewed exclusive evidence-a1 artifact bindings (root .artifacts/tests/s29-historical-handoff-capability/evidence-a1):
+bbc6c5baba17e4194df02b692fb0316a62081d4252ee4aa4fda67e94e4442859  Rice.AICodedb.Editor.dll
+bd306ac9936a187b2a16eafc6e3126eab119637889b6900c7a896134c611cf0d  Rice.AICodedb.Editor.ref.dll
+f85c95b6f2c6ffe1d4b90c5fdc3971bfc1f9219afd24e63cb27b9d5936cfe764  Rice.AICodedb.Editor.Tests.dll
+fd3e6f9df691efe0dc9abfdf03d7220797194dba5d793a77a4bc6dfdd2e903eb  Rice.AICodedb.Editor.Tests.exe
+b13a294614266ec97879aa51461670ffcb20f6d39316b9a7c1e6ea211dc1d951  Seam.cs
+275fc3fe11e96b231b9f13544144a3001ff8fd60f99501df24659bdd1bcb8373  Runner.cs
+ca03c181e1a1469f42804c3656bdaea526001653ffa16ec2754134ae277d5bd6  seam-a1.rsp
+520afe24c2d157303271194b997fc4f4f5eef5253552bdc7999d64fde7c7a219  probe/probe-output.txt
+699f1cd2b6a2af0eb7bd84165e7481578fb1df3347face36786905aa9d2ba91b  logs/exact-ast-binding.txt
+0573ca76a4ff20c6101d2f3e7676eb4ec63f64d4d929c33b4a5e4c18f52d12fc  logs/seam-run-a1.log
+373752e56c3933e771b1d12001eb8f68b5f1d659ced238a7b4ee17844e556603  logs/seam-compile-a1.log
+fb2ea362fcedf2023f3b091c7beeaa125f7dfaa43360c6a43a0861707e1a46a3  logs/Rice.AICodedb.Editor.log
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  logs/Rice.AICodedb.Editor.Tests.log
+6be9cb6a37ee8e3eb29be2dd97c96ecaf261f9e46809403519cbecc76fca3e8d  compile-exact.ps1
+b58b90d5116993689960407d7fa1d1a92fcda336563e2dd46aeea06c8a11aa6a  run-seam.ps1
+75dbbc5b4f045bb4e47dfe90e9c858a9080be3c89acb5bb34a13f5080bb00886  extractor/Extract.cs
+cb5e3d9480a42f5f2730d8d208bb49e4ba1ecfd43f9870409232d9be394afd58  extractor/Extractor.csproj
+Read-only accepted Package / existing reference bindings:
+69d731882c730c9ad75af8c5385d5f36fb62d48067749a22e5c224cdbd55559a  .artifacts/s29-upgrade-callsite-fix-34b3a65/review/com.rice.ai-codedb/Payload~/payload-manifest.json
+2273266950bcd2867416821472285e217b64acdaae2fcf397712e8ab8defe026  .artifacts/s29-upgrade-callsite-fix-34b3a65/review/com.rice.ai-codedb/Payload~/Generations/poc.42/generation-manifest.json
+55b042b1d6ddf66b45d167765a8f345a38478e9775b06973b8dfa7a88c8a4bb5  .artifacts/s29-upgrade-callsite-fix-34b3a65/review/com.rice.ai-codedb/Payload~/Generations/poc.43/generation-manifest.json
+9adea12c24219aea55d06364dbb38346b418079746e59c05c37fcb7efd8fbc09  UnityFreshInstallValidationProjectS29/Packages/manifest.json
+507a4db713e10748a63d7a694729649f5550b2e2e42cd449d86a74636d9982d6  UnityFreshInstallValidationProjectS29/Packages/packages-lock.json
+
+Accepted narrowed-A baseline before HH-01 correction:
+3b82a99822118a9e5836a11242550d6707e1e9d5766aacca6970adcefb9cad84  com.rice.ai-codedb/Editor/AICodedbProjectIntegrationState.cs
+c0ac0acf5f28726940f59b5baa51dec3cbe35b31b9538112eb8b95c851704a24  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+95e302d8ad90a47cc2a08b76d42a30413cb011478880658ac34a8ce946500acf  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+9117efea4876159131806a0c39c0452ab1caac66f018b3750a4d96a4ae99f5ee  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+2da4bda14956e6a782a636f3a73e8700833533d4117e2c622f37dbb674bdeed9  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+
+Superseded terminal binding, captured before the intended DeleteEditorLease call was added:
+a8712d0be560fb195bbbad9b282daea7f877faac98ce6ef6dc2f674254e0c2d3  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+
+Original scope-stop clean source hashes (before approved outcome A):
+63481e74303a5d46b0dbb6894004aaba1883cfde3cc26ae0e37d6cd6a8821450  com.rice.ai-codedb/Editor/AICodedbPackageRuntimeContract.cs
+34ea23e11d5b0704c57cd4048a1bd9450fd5134780c9b8d504c5ea792b77dcac  com.rice.ai-codedb/Editor/AICodedbProjectIntegrationState.cs
+f6cf119349ff9432a67f08fff689807f2dd9bd48f16e0f242c59cb56ac3cb854  com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs
+6089ea99ff56690ad9055336ef28bfe77152705ffcd7eed7db8a5741e25efd1b  com.rice.ai-codedb/Editor/AICodedbHostPayloadMaterializer.cs
+7ee8ab147cd593028f68f0efe384308379a830d469831bd88b1bcaccc926e159  com.rice.ai-codedb/Tools~/codedb-instance-engine.ps1
+9b6c36f4f5fcc8cca92bb72c5cc99d099064d900c8aba3a674c1759c5675827a  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs
+111c92202b586de960ffa392710e0f9b2e24dedfdf37f683778a394082b41cf4  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1

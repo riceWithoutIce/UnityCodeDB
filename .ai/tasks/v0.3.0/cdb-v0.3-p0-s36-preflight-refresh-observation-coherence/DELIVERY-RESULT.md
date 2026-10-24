@@ -279,3 +279,34 @@ and both consumers resolve to the exact extracted package. No Unity launch,
 NUnit execution, lifecycle command, Install/Uninstall, process termination or
 push was performed. Human compilation, focused Test Runner execution and S35
 Manager/idle/close acceptance remain pending.
+
+## Human acceptance update — 2026-10-19
+
+The user reports that the focused Test Runner selections passed. Manager
+close/reopen, tab switching and the Ready display were normal. During Unity
+close, the Editor displayed the `Application.Shutdown.CleanupMono` wait dialog
+while the Manager was at a Ready-observation refresh boundary. This is recorded
+as a deferred close-time observation; it does not reopen the S36 fixture repair
+or change the accepted source/package. The terminal outcome of that close was
+successful: Unity eventually closed. Unity close is therefore recorded as
+PASS_WITH_OBSERVATION, with the transient CleanupMono wait retained for the
+deferred close-time follow-up.
+
+## Human Uninstall acceptance — 2026-10-19
+
+The user completed one Uninstall action in S35 after the S36 package switch.
+Manager displayed `s35 · Uninstalled`, the completion toast confirmed that
+CodeDB was uninstalled, and the activity panel reported `Completed` with
+`Exit 0` and no error. The next available action is Install CodeDB. A same
+version Install remains a separate lifecycle authorization and was not started
+automatically.
+
+## Human same-version Install observation — 2026-10-19
+
+The user then completed the same-version Install successfully; Manager first
+displayed Ready and the Install activity reported success. After approximately
+3-5 minutes, the Manager changed to NeedsAttention with
+`SUPERVISOR_IPC_TIMEOUT`; background cleanup was shown as in progress. The
+state eventually returned to Ready after a long delay. This is recorded as the
+S37 periodic observation/recovery finding and does not reopen the accepted S36
+fixture or package delivery.

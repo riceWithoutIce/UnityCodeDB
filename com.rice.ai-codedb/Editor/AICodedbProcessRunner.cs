@@ -752,7 +752,8 @@ namespace Rice.AI.Codedb.Editor
                         normalizedWriterPath,
                         null,
                         new[] { "-ReceiptPath", admittedPath }),
-                    checked(timeoutMilliseconds + ManagerActionWriterGraceMilliseconds));
+                    checked(timeoutMilliseconds + ManagerActionWriterGraceMilliseconds),
+                    terminateOnTimeout: owner.Index.EffectClass != "ConfirmedProjectMutation");
                 var terminalPath = ReceiptSibling(admittedPath, "terminal");
                 var startFailurePath = ReceiptSibling(admittedPath, "start-failure");
                 if (File.Exists(startFailurePath))
@@ -2124,7 +2125,8 @@ namespace Rice.AI.Codedb.Editor
             int timeoutMilliseconds,
             Action<string> outputLine = null,
             CancellationToken cancellationToken = default(CancellationToken),
-            bool cancelOnDomainReload = false)
+            bool cancelOnDomainReload = false,
+            bool terminateOnTimeout = true)
         {
             var output = new StringBuilder();
             var error = new StringBuilder();
@@ -2195,8 +2197,12 @@ namespace Rice.AI.Codedb.Editor
                         var remaining = deadline - stopwatch.ElapsedMilliseconds;
                         if (remaining <= 0)
                         {
-                            TryKillProcess(process);
-                            WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task);
+                            if (terminateOnTimeout)
+                                TryKillProcess(process);
+                            else
+                                Debug.LogWarning("Codedb durable writer exceeded its bounded wait; leaving the authenticated writer alive for safe transaction completion.");
+                            if (terminateOnTimeout)
+                                WaitForOutputDrain(outputCompleted.Task, errorCompleted.Task);
                             return new AICodedbCommandResult(-1, GetCapturedText(output, outputLock), GetCapturedText(error, errorLock), true, GetElapsedMilliseconds(stopwatch));
                         }
 

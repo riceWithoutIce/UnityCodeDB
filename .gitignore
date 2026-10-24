@@ -1,8 +1,12 @@
 # UnityCodeDB repository-local scratch and disposable validation projects.
 /.codex_tmp/
 .utmp/
+/.worktrees/
 /AIWork/.runtime/
 /UnityFreshInstallValidationProject/
+
+# Historical validation project retained locally for evidence review.
+/UnityFreshLifecycleValidationProjectS33/
 
 # Repository-owned development exports and protected recovery copies.
 # Ignored does not mean disposable; retention is defined by the workflow.

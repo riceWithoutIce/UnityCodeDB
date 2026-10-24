@@ -432,3 +432,87 @@ same-S23 addendum; then form one exact commit-derived Package and prepare the
 human Unity compile gate without touching runtime evidence.
 Human decision or authorization required: human-owned Unity validation,
 Verifier routing, push and publication.
+
+## Phase C - Historical Event Package Prepared For Human Unity
+
+- Exact source/evidence commit:
+  `5fb5121c9141be2bb5273a28c1c1b27775f2a1c5`, parent
+  `01684f9e82fa2bb6e6c102792b90813e81931379`, message
+  `fix(v0.3): validate segmented supervisor evidence`. It contains only the
+  five reviewed Package source/test paths and this S23 TASK/RESULT pair.
+  Staged `git diff --check` passed; no validation-project, artifact, or
+  unrelated dirty path was staged.
+- New commit-derived artifact root:
+  `.artifacts/v0.3.0-preview.5-s23-event-stream-5fb5121-final/`.
+  Both commit-staged and exact-ZIP closure checks passed with
+  `source_count=46`, `mismatch_count=0`. Shared generation, host-current and
+  runtime-contract hashes remained unchanged from the preceding Package.
+  Export contains one Package root, 479 files, 9,715,313 bytes and 479 ZIP
+  entries. ZIP SHA-256, independently read back:
+  `7cca2b6071b01b4c284dc0b5ed778658455d0407538518e8d6a0c60058c52a38`.
+  All five changed Package files match their committed blobs byte-for-byte.
+- While Unity remained human-confirmed closed, only the CodeDB dependency in
+  `UnityValidationProject/Packages/manifest.json` was switched to
+  `file:../../.artifacts/v0.3.0-preview.5-s23-event-stream-5fb5121-final/package/com.rice.ai-codedb`.
+  The JSON parses; the relative target exists and declares
+  `com.rice.ai-codedb@0.3.0-preview.5`; scoped manifest `git diff --check`
+  passed. The existing lockfile and other validation-project changes were
+  not manually edited. Earlier artifacts were preserved.
+- The new Package has not yet been imported or compiled by Unity. No Unity,
+  Unity MCP, EditMode, Manager action, real RemoveIntegration, Provider
+  change, runtime cleanup, process probe, push, tag or publication occurred
+  in this preparation checkpoint.
+
+Current task: `cdb-v0.3-p0-s23-s22-accepted-commit-package-unity-golden-path`
+Current status: `EVENT_STREAM_COMMIT_DERIVED_CLOSURE_PASS / HUMAN_UNITY_GATE_PENDING`
+Next notification: human operator
+Next action: open `UnityValidationProject` visibly, wait for Package import
+and C# compilation, and report zero/nonzero CodeDB errors before opening
+Manager or attempting any action. If compile passes, observe Manager's stable
+terminal state and stop at the first product error.
+Human decision or authorization required: human-owned Unity validation,
+subsequent product mutation, Verifier routing, push and publication.
+
+## Phase C - Read-Only Activation Binding Diagnosis
+
+- The human authorized a read-only diagnosis after the Manager reported
+  `Partial Owner Identity v1 activation evidence does not bind the selection.`
+  Unity was not running during the inspection (`Unity` process count: 0).
+- No runtime file was created, deleted, rewritten, or otherwise mutated. No
+  source, Package, manifest, lockfile, Provider state, Unity process, MCP
+  endpoint, or external process was changed or started.
+- The current and last-known-good selection are byte-identical and internally
+  self-consistent:
+  - `control/current-instance.json` and
+    `control/last-known-good-instance.json` are both 516 bytes with SHA-256
+    `0b6ee343a2379aa92d91b2c4be05821f62ba710724a6b718a1f23371dac3bb82`.
+  - Both select instance `7f02adc0f68f43c3888bf9375cc865ec`, generation
+    `poc.34`, and instance manifest SHA-256
+    `02845cf711df7be4167fe5591ff93debf3d09d69a55544f2e5ae5ce9fadb523c`.
+  - The selected instance manifest and `poc.34/generation-manifest.json`
+    match those declared hashes exactly.
+- The v1 activation and activation journal are internally paired and
+  `COMMITTED` with the same activation epoch
+  `4ef91366cd5f46cf9c53ce5c27905a5a` and operation ID
+  `0c69e031d52b4824b799a11dbf5030d4`. Their candidate/current values all
+  point to the same `poc.34` instance and generation, but declare that
+  predecessor as `CURRENT`.
+- The imported Package declares `0.3.0-preview.5 / poc.39` as its current
+  generation and `poc.34` as a predecessor. The Supervisor failure record
+  correspondingly classifies the selected `poc.34` instance as
+  `TRUSTED_PREVIOUS` and reports that handoff from the trusted previous
+  generation is required.
+- Diagnosis: this is a stale predecessor activation closure, not a damaged
+  current/last-known-good selection or a Supervisor event-stream continuity
+  failure. The new Package reaches the activation-binding gate, then rejects
+  the old journal because it was authored under the predecessor context and
+  was never rebound by a committed `poc.39` activation. This exposes a
+  lifecycle/reconciliation gap; it does not authorize rewriting the evidence
+  in place.
+
+Current task status: `BLOCKED / STALE_PREDECESSOR_ACTIVATION_CLOSURE`.
+Next action: Planner/User must choose a bounded lifecycle correction that
+authenticates the predecessor-to-current handoff (or an explicit supported
+reinstall/migration path), followed by a new commit-derived Package and one
+human Unity attempt. No deletion, evidence rewrite, or blind retry is
+authorized by this diagnosis.

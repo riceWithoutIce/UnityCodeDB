@@ -1,0 +1,30 @@
+{
+    "schema_version":  1,
+    "managed_by":  "com.rice.ai-codedb",
+    "platform":  "win32",
+    "architecture":  "x64",
+    "source":  "Tools~/native/codedb-daemon-launch.cpp",
+    "source_sha256":  "f21557cbb64acd6b6afba418225dab7be1aad24d960b558daaa34fa30975b29a",
+    "build_script":  "Tools~/build-codedb-daemon-launch.ps1",
+    "build_script_sha256":  "e217321f9f4290a52a3b5b948497b5e637795cf23265ae8f0859b14d2deac922",
+    "options":  [
+                    "/nologo",
+                    "/W4",
+                    "/WX",
+                    "/O2",
+                    "/MT",
+                    "/EHsc",
+                    "/utf-8",
+                    "/Brepro",
+                    "/MACHINE:X64",
+                    "kernel32.lib"
+                ],
+    "imports":  [
+                    "KERNEL32.DLL"
+                ],
+    "binary_sha256":  "6d1ec230841951f2c80e8b8a0ffd3a385a4abff394690cc69e367a102f3544a3",
+    "compiler_version":  "19.51.36244.0",
+    "compiler_sha256":  "9cf613fcbebece019712511eec4b1a32d0a9c94e65249a1aeb326305c2388d6b",
+    "linker_sha256":  "101461b51a18daaf033cb743690e20b449e9ac8783638e961bb65c5fd36e9cb5",
+    "windows_sdk_version":  "10.0.26100.0"
+}

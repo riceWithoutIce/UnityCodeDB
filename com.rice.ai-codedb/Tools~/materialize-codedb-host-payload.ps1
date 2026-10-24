@@ -155,6 +155,7 @@ foreach ($allowedTarget in @(
     "AIWork/codedb/native/win-x64/codedb-daemon-launch.exe",
     "AIWork/codedb/shared/codedb-daemon-launch.mjs",
     "AIWork/codedb/shared/codedb-machine-provider-contract.ps1",
+    "AIWork/codedb/shared/codedb-mcp-registration-contract.ps1",
     "AIWork/codedb/shared/codedb-text-adapter-output-contract.ps1",
     "AIWork/codedb/shared/codedb-strict-json.ps1",
     "AIWork/codedb/shared/codedb-instance-manifest-contract.ps1",
@@ -188,6 +189,7 @@ foreach ($generationTarget in @(
     "native/win-x64/build-manifest.json",
     "native/win-x64/codedb-daemon-launch.exe",
     "shared/codedb-daemon-launch.mjs",
+    "shared/codedb-mcp-registration-contract.ps1",
     "scripts/build-codedb-project-text-adapter.ps1",
     "scripts/check-codedb-project-freshness.ps1",
     "scripts/clear-codedb-project-index.ps1",
@@ -971,6 +973,7 @@ function Get-PayloadContentIdentitySha256 {
 }
 
 . (Join-Path $PSScriptRoot '..\Payload~\AIWork\codedb\shared\codedb-instance-manifest-contract.ps1')
+. (Join-Path $PSScriptRoot '..\Payload~\AIWork\codedb\shared\codedb-mcp-registration-contract.ps1')
 . (Join-Path $PSScriptRoot '..\Payload~\AIWork\codedb\shared\codedb-text-adapter-output-contract.ps1')
 
 function Get-RequiredJsonPropertyValue {
@@ -3915,18 +3918,26 @@ function Clear-ProjectIntegrationUninstalledState {
     return $true
 }
 
+function Get-RepairMcpRegistrationValues {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    return [ordered]@{
+        command = '"node"'
+        cwd = ConvertTo-CodedbMcpWorkingDirectoryValue -ProjectRoot $ProjectRoot
+        args = '["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]'
+        startup_timeout_sec = '120'
+    }
+}
+
 function Get-RepairMcpRegistrationContent {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
     $projectSlug = ConvertTo-MaterializerProjectSlug -Value (Split-Path -Leaf ($ProjectRoot.TrimEnd('\', '/')))
     $providerSlug = "codedb-$projectSlug"
-    return @(
-        "[mcp_servers.$providerSlug]",
-        'command = "node"',
-        'cwd = "."',
-        'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
-        'startup_timeout_sec = 120'
-    ) -join "`n"
+    $values = Get-RepairMcpRegistrationValues -ProjectRoot $ProjectRoot
+    return (@("[mcp_servers.$providerSlug]") + @(
+        foreach ($key in $values.Keys) { "$key = $($values[$key])" }
+    )) -join "`n"
 }
 
 function Skip-RepairTomlWhitespace {
@@ -4365,12 +4376,7 @@ function Get-RepairMcpConfigPlan {
     $implicitNonArrayTablePaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $arrayTablePaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $targetAssignments = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-    $desiredValues = [ordered]@{
-        command = '"node"'
-        cwd = '"."'
-        args = '["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]'
-        startup_timeout_sec = '120'
-    }
+    $desiredValues = Get-RepairMcpRegistrationValues -ProjectRoot $ProjectRoot
     $currentTable = ""
     $currentScope = "@root"
     for ($index = 0; $index -lt $lines.Count; $index++) {
@@ -4553,7 +4559,13 @@ function Get-RepairMcpConfigPlan {
         foreach ($desiredKey in $desiredValues.Keys) {
             if (-not $targetAssignments.ContainsKey($desiredKey)) { continue }
             $assignment = $targetAssignments[$desiredKey]
-            $desiredLines[$assignment.Line] = $assignment.Prefix + [string]$desiredValues[$desiredKey] + $assignment.Suffix
+            $desiredValue = [string]$desiredValues[$desiredKey]
+            if ($desiredKey -eq 'cwd' -and
+                (Test-CodedbMcpWorkingDirectoryValue -Value $assignment.Value -ProjectRoot $ProjectRoot)) {
+                # Preserve equivalent user formatting instead of rewriting it.
+                $desiredValue = $assignment.Value
+            }
+            $desiredLines[$assignment.Line] = $assignment.Prefix + $desiredValue + $assignment.Suffix
         }
         $missingLines = [System.Collections.Generic.List[string]]::new()
         foreach ($desiredKey in $desiredValues.Keys) {

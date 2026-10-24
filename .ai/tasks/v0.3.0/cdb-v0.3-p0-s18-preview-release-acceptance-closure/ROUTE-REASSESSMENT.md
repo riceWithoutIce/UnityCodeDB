@@ -1003,6 +1003,62 @@ Verifier review. Broader Unity/runtime/release/publication work remains
 deferred and requires separate authorization. No commit, push, or promotion
 was performed.
 
+## Phase B Candidate Decision - 2026-09-18
+
+Decision: use the current `0.3.0-preview.2 / poc.36` candidate for completing
+item 10. The earlier `preview.1 / poc.35` identity is predecessor context and
+must remain immutable. The next route is exact candidate snapshot assembly,
+including Package/generation/pointer closure, candidate identity, artifact
+hash plan, and rollback boundary. Publication remains separately human-gated.
+
+## Planner/User Roadmap Decision - 2026-09-18
+
+Decision: continue S18 to complete Delivery Sequence item 10. The accepted
+focused consumer slice is not a release completion claim. The next bounded
+route is Phase B exact publication proposal, followed by the human-owned
+third-party Package-only and real Codex gates, then final release Verifier.
+No new micro-task is created for these phases, and no publication or release
+mutation is currently authorized.
+
+## Phase B Exact Publication Proposal - 2026-09-18
+
+The exact candidate assembly was committed locally after human authorization.
+This proposal does not authorize any external mutation.
+
+- Task: `cdb-v0.3-p0-s18-preview-release-acceptance-closure`
+- Branch: `codex/v0.3.0-legacy-workflow`
+- Candidate commit: `983e091bbf5973fbb799a6e044dec028ef5b9720`
+- Package version: `0.3.0-preview.2`
+- Immutable generation: `poc.36`
+- Runtime-contract SHA-256: `a3cbc22b0b3fd2394a5cbdcca4acd37b142a4a81df122d6b48bccda1c593bf68`
+- Candidate 42-path implementation identity: `2efefd3a3898c88a0566e05b98ee9a3c34da26f7`
+- Source remote: `origin`
+- Proposed tag: `v0.3.0-preview.2`
+
+Artifact hash plan: create one deterministic archive from the committed
+`com.rice.ai-codedb` Package only, with stable relative entry ordering, LF
+normalization only where already part of the committed bytes, and no task
+records, `.git` data, local runtime state, or validation-project files. Record
+the resulting SHA-256 and byte size before publication. No archive has been
+created in this phase.
+
+Rollback boundary: do not modify or delete `poc.34`, `poc.35`, their history,
+existing tags, or the current pointer. If publication or artifact verification
+fails, stop without promotion and retain the previous accepted candidate; any
+tag deletion, registry cleanup, or consumer rollback is a separate explicit
+authorization.
+
+Required human authorization before the next action: exact tag creation,
+remote push, Package publication destination, and promotion. After publication
+is separately authorized and verified, continue this same S18 task through the
+human-owned clean third-party Package-only Unity gate and one real Codex task;
+then route the stable release snapshot once to Verifier.
+
+Current status: `PHASE_B_PUBLICATION_PROPOSAL_READY / PUBLICATION_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize the exact publication
+proposal. No tag, push, archive generation, registry mutation, or promotion
+has been performed.
+
 ## Human Focused EditMode Evidence - 2026-09-18
 
 The supplied screenshot shows the named focused EditMode test passing with
@@ -1698,3 +1754,458 @@ Next actor: `UnityCodeDB v0.3 Planner`.
 Next action: review/admit this frozen identity and decide the separate
 human-owned focused EditMode handoff. Unity, Verifier, commit, push,
 publication, and promotion remain closed.
+
+## Phase B Publication Completion - 2026-09-18
+
+The exact publication proposal was authorized by the human and completed
+without changing the committed candidate bytes.
+
+- Branch commit pushed to `origin/codex/v0.3.0-legacy-workflow`:
+  `983e091bbf5973fbb799a6e044dec028ef5b9720`
+- Annotated tag pushed: `v0.3.0-preview.2`
+- Remote tag dereference resolves to commit:
+  `983e091bbf5973fbb799a6e044dec028ef5b9720`
+- Package candidate: `0.3.0-preview.2`
+- Immutable generation: `poc.36`
+- Runtime-contract SHA-256:
+  `a3cbc22b0b3fd2394a5cbdcca4acd37b142a4a81df122d6b48bccda1c593bf68`
+- Deterministic Package-only archive: `1,864,833` bytes
+- Archive SHA-256:
+  `30e255fbc66995757505ebc18f223783a07d6a2c1443c3b719624242d3cebf56`
+
+The archive was created from the committed `com.rice.ai-codedb` tree only and
+was not added to the repository. No registry mutation, release promotion,
+Provider publication, or existing-generation rewrite was performed. The
+published Package source is the Git URL pinned to `#v0.3.0-preview.2`.
+
+Current status: `PHASE_B_PUBLISHED / PHASE_C_HUMAN_PROJECT_REQUIRED`.
+Next actor: human owner prepares a clean repository-external Unity project,
+installs the exact Package tag, and performs the bounded Package-only and real
+Codex acceptance. Coder/Verifier must not launch or terminate that project.
+
+## Post-Publication FIX 01 Authorization - 2026-09-18
+
+Human evidence from the first external Package-only setup exposed a release
+blocker in the published `v0.3.0-preview.2` candidate:
+`Tools~/install-codedb-provider.ps1` still declares Package version
+`0.3.0-preview.1`, while the published Package manifest is
+`0.3.0-preview.2`. The installer therefore rejects the real Package version
+before Provider configuration can proceed.
+
+Bounded FIX authorization:
+
+- Preserve `v0.3.0-preview.2`, commit `983e091bbf5973fbb799a6e044dec028ef5b9720`,
+  and generation `poc.36` byte-for-byte.
+- Prepare one successor candidate only, provisionally
+  `0.3.0-preview.3` / `poc.37`; return `ROUTE_REASSESSMENT_REQUIRED` before
+  editing if the exact successor identity or generation closure is not
+  mechanically established.
+- Update only the Provider installer Package-version contract and its focused
+  installer tests, plus the directly required Package metadata, payload
+  manifest/pointer, successor generation, and release identity records.
+- Keep the external Provider identity `0.5.0-28e3912-c2` unchanged; do not
+  alter Provider binaries, machine installation state, or project runtime.
+- Run only the affected Provider-installer/static checks, one scoped diff
+  check, and one successor identity calculation. No Unity, Unity MCP, real
+  Provider install, external process, tag, push, or publication action.
+- Do not edit the closed external Unity project or use a stale
+  `-PackageVersion` value as a workaround.
+
+Current status: `POST_PUBLICATION_FIX_AUTHORIZED / CODER_DEEP_PENDING`.
+Next actor: `v0.3.coder.deep` returns one consolidated successor snapshot or
+`ROUTE_REASSESSMENT_REQUIRED`; Verifier and further publication remain closed.
+
+## Post-Publication FIX 01 Planner Review - 2026-09-18
+
+Planner read-only admission of the Coder completion passed. The published
+`.2/poc.36` predecessor remains unchanged, and the remote
+`v0.3.0-preview.2` tag still resolves to commit
+`983e091bbf5973fbb799a6e044dec028ef5b9720`.
+
+The successor snapshot is bounded to `0.3.0-preview.3 / poc.37` with
+29-path identity `4b57740477e611c2b37e048d74919e98cad3da27`. Coder evidence is
+accepted as focused evidence: static/source closure PASS, Provider-installer
+focused fixture PASS (exit `0`), scoped diff-check PASS, and predecessor
+immutability PASS. No Unity, real Provider installation, or external process
+was used.
+
+Current status: `POST_PUBLICATION_FIX_01_SUCCESSOR_READY / VERIFIER_ROUTING_READY`.
+Next actor: Planner/User decides whether to authorize one guarded Verifier
+review of this exact uncommitted successor snapshot. Commit, tag, push,
+publication, and external Unity acceptance remain closed.
+
+## Post-Publication FIX 01 Verifier Authorization - 2026-09-18
+
+The human authorized one guarded, targeted read-only review of the frozen
+uncommitted `0.3.0-preview.3 / poc.37` successor on HEAD
+`983e091bbf5973fbb799a6e044dec028ef5b9720`, with 29-path identity
+`4b57740477e611c2b37e048d74919e98cad3da27`.
+
+Reviewer: `v0.3.verifier.deep`. Only writable path:
+`verifications/VERIFICATION-02.md`. Preserve `VERIFICATION-01.md`.
+Review only the original installer Package-version mismatch and directly
+adjacent successor metadata/hash/pointer closure and predecessor immutability.
+Reuse Coder focused evidence; rerun no tests, diff-checks, or Unity actions.
+Stop on identity drift and report findings once to Planner/User, without
+contacting Coder or dispatching repairs.
+
+Current status: `POST_PUBLICATION_FIX_01_VERIFIER_AUTHORIZED / REVIEW_PENDING`.
+Next actor: Verifier returns PASS/FAIL/BLOCKED with explicit deferred limits;
+Planner/User decides ACCEPT / FIX / DEFER / STOP. No commit, tag, push,
+publication, or external Unity acceptance is authorized by this review.
+
+## Post-Publication FIX 01 Verifier Admission Stop - 2026-09-18
+
+Verifier stopped at frozen identity admission. HEAD matched
+`983e091bbf5973fbb799a6e044dec028ef5b9720`, and the published `.2/poc.36`
+predecessor remains unchanged. However, the one authorized current 29-path
+calculation produced `b4af83cc4df0b5297064e85bc91f6c37dc5283af`, not the Coder
+recorded `4b57740477e611c2b37e048d74919e98cad3da27`.
+
+No semantic review was started and no Coder evidence was promoted to the
+current-snapshot PASS. The Verifier report is
+`verifications/VERIFICATION-02.md`; no tests, Unity, Provider installation,
+repair, commit, tag, push, or publication was performed.
+
+Current status: `BLOCKED / FROZEN_IDENTITY_DRIFT`.
+Next actor: Planner/User decides `ACCEPT / FIX / DEFER / STOP`. A new identity
+reconciliation or replacement freeze requires explicit authorization; no
+automatic recalculation, repair, or publication is allowed.
+
+## Post-Publication FIX 02 Identity Reconciliation Authorization - 2026-09-18
+
+The human authorized one independent identity-reconciliation attempt for the
+same uncommitted `0.3.0-preview.3 / poc.37` successor. The attempt is limited
+to reconciling the recorded Coder identity
+`4b57740477e611c2b37e048d74919e98cad3da27` with the Verifier observation
+`b4af83cc4df0b5297064e85bc91f6c37dc5283af`.
+
+The Coder may read only the exact 29-path successor set and the corresponding
+Coder/Verifier records, compare current blob IDs, path ordering, separators,
+terminal LF, and UTF-8 encoding, and append one reconciliation result to
+RESULT.md. It may establish one replacement identity only if the current
+bytes are stable and the serialization cause is proven. It must return
+`ROUTE_REASSESSMENT_REQUIRED` on real byte drift, path-set ambiguity, or any
+need for production changes.
+
+No semantic tests, Unity, Provider installation, external process, full diff,
+commit, tag, push, publication, or Verifier rerun are allowed in this attempt.
+The published `.2/poc.36` predecessor remains immutable.
+
+Current status: `FIX_02_IDENTITY_RECONCILIATION_AUTHORIZED / CODER_PENDING`.
+Next actor: `v0.3.coder.deep` returns one reconciliation result to Planner;
+Verifier remains closed until a new stable identity is admitted.
+
+## Post-Publication FIX 02 Planner Admission - 2026-09-18
+
+The identity reconciliation completed without source or byte changes. The
+previous `4b577...` value was produced by PowerShell default string sorting;
+the documented ordinal ordering used by Verifier produces the unique current
+identity `b4af83cc4df0b5297064e85bc91f6c37dc5283af`. No path-set ambiguity or
+successor byte drift was found, and `.2/poc.36` remains immutable.
+
+Current status: `IDENTITY_RECONCILED / VERIFIER_REOPEN_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize one replacement guarded
+Verifier admission using identity `b4af83cc4df0b5297064e85bc91f6c37dc5283af`.
+No semantic tests, commit, tag, push, publication, or Unity action is implied.
+
+## Post-Publication FIX 02 Verifier Reopen Authorization - 2026-09-18
+
+The human authorized reopening the original guarded review after the sorting
+reconciliation. Frozen HEAD remains
+`983e091bbf5973fbb799a6e044dec028ef5b9720`; the sole admitted 29-path successor
+identity is `b4af83cc4df0b5297064e85bc91f6c37dc5283af`.
+
+Verifier preserves the original BLOCKED record and appends the reopened
+admission and original-scope semantic review to
+`verifications/VERIFICATION-02.md`. No tests, static batches, diff-checks,
+Unity actions, source changes, Coder contact, or publication are authorized.
+
+Current status: `VERIFIER_REOPEN_AUTHORIZED / GUARDED_REVIEW_PENDING`.
+Next actor: `v0.3.verifier.deep` returns one consolidated verdict to Planner;
+the user decides ACCEPT / FIX / DEFER / STOP.
+
+## Successor Accepted And Published - 2026-09-18
+
+The reopened guarded review passed with no findings. The human accepted the
+bounded FIX and authorized commit and Git publication. Exact successor
+29-path identity `b4af83cc4df0b5297064e85bc91f6c37dc5283af` matched before
+staging. Candidate `0.3.0-preview.3 / poc.37` was committed as
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` and pushed atomically with annotated
+tag `v0.3.0-preview.3`. Remote tag dereference and branch match this commit;
+the predecessor `.2` tag remains unchanged.
+
+Current status: `PREVIEW_3_GIT_PUBLISHED / EXTERNAL_SETUP_RECHECK_PENDING`.
+Next actor: human owner updates the external Unity project to the `.3` Git
+tag, waits for compilation, and retries Configure Dependencies once; supply
+the terminal state to Planner. No stable-release promotion, external Unity
+success, or real Codex acceptance is implied. Existing task and unrelated
+dirty files remain outside the candidate commit.
+
+## External Package-Only Blocker - 2026-09-18
+
+The human retry on the external `G:\work\mumodazhi\Unity` project confirmed
+the Provider installer fix, but the `.3` Package still cannot reach Ready:
+Manager reports `Payload source hash mismatch: host-current.json`, and no
+`Upgrade` / `Host Payload Upgrade` action is exposed. No manual runtime edit,
+Redeploy, Reinstall, Unity MCP, or substitute process was used.
+
+Current status: `BLOCKED / EXTERNAL_HOST_PAYLOAD_UPGRADE_ACTION_UNAVAILABLE`.
+This is a new product-flow blocker after the Provider contract fix. Next actor
+is Planner/User deciding whether to authorize a bounded Coder investigation of
+the legal mismatch-state action routing. No further external acceptance or
+publication action is authorized by this record.
+
+## External Host Payload Blocker Investigation Authorization - 2026-09-18
+
+The human authorized a bounded Coder investigation/fix for the observed
+external Package-only state. Scope is limited to the legal
+`host-current.json` payload-source mismatch state and the missing controlled
+upgrade/recovery action. The Coder may read the exact Manager/status/action
+routing and directly related materializer contract, and may change only the
+existing S18 conditional allowlist paths when a concrete product defect is
+proven.
+
+No Unity launch, selection, termination, Unity MCP, CUA, BatchMode, external
+process, runtime-file edit, Provider install, or substitute acceptance is
+allowed. Do not edit the external project or published tag. Do not use
+Redeploy/Reinstall as a workaround. Run only directly affected static/source
+checks and focused evidence after a source change; stop and return
+`ROUTE_REASSESSMENT_REQUIRED` for Package metadata, immutable generation,
+Provider-contract, or broader architecture changes. No Verifier, commit, tag,
+push, or publication is authorized by this investigation.
+
+Current status: `EXTERNAL_HOST_PAYLOAD_FIX_AUTHORIZED / CODER_DEEP_PENDING`.
+Next actor: `v0.3.coder.deep` returns one bounded diagnosis/repair result to
+Planner; external Unity acceptance remains closed until a stable snapshot is
+available.
+
+## preview.4 / poc.38 Successor Snapshot Accepted - 2026-09-19
+
+The human accepted the stable uncommitted successor after FIX 02 targeted
+Verifier re-review returned `PASS / FIX_02_P1_01_CLOSED` with no findings.
+Frozen admission matched HEAD
+`645f5effbe9f386600c216abaa3e7a9f3a0c233b` and the exact 32-path canonical
+identity
+`29552e61ee7b234518dd58574bb78181b14bea38cf6346a17c01c8683222a21c`.
+
+This disposition accepts the bounded snapshot and recorded focused evidence
+only. It does not authorize a commit, artifact export, Unity operation,
+Verifier expansion, tag, push, publication, promotion, or external release
+acceptance.
+
+Current status: `ACCEPTED / LOCAL_ARTIFACT_GATE_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize one exact local commit
+and a release-byte-equivalent Package export from that commit for human Unity
+Package Manager validation. Tag, push, and publication remain separately
+closed.
+
+## Local Commit Preflight Blocked By Git-Normalized Bytes - 2026-09-19
+
+The human authorized the exact local commit and release-byte-equivalent Package
+export, but the Planner stopped before staging or committing after an isolated
+temporary-index preflight proved that Git's required LF normalization changes
+hash-authoritative JSON bytes. The real index, worktree, and HEAD were not
+modified.
+
+Observed worktree SHA-256 -> prospective commit-byte SHA-256:
+
+- `Payload~/host-current.json`:
+  `88128cb74863360147abc789a7bad0899b1f2360aa02bdd9b8405791cbdc5040` ->
+  `f7b89154057fba1a5f66fd2f88c5d94f1b94c977381a82274f330ef72e85e973`.
+  The payload manifest still declares the worktree value.
+- `Payload~/payload-manifest.json`:
+  `46faed01a92cf0579bb08cccedf51a840f281a718232c15bbae49f7cc4f7d842` ->
+  `08564a77ad63408e970e454649a8352a1acd44eed4758b8454043e4c285ea14a`.
+  The portable fixture still declares the worktree value.
+- `Payload~/Generations/poc.38/generation-manifest.json`:
+  `4b2cfced7397b9c1616274ca35ce170c8c497124c9206982f9d34acd16903c2a` ->
+  `b176c13aeb19d183e388290c6617567e19b61ade9b467dca7160310d00424638`.
+  `host-current.json` still declares the worktree value.
+
+`.gitattributes` requires LF for these text files and `core.autocrlf=true`; the
+temporary index emitted CRLF-to-LF normalization warnings. Committing the
+accepted worktree bytes as-is would therefore reproduce the same class of
+published Package/source hash mismatch that blocked preview.3. No commit or
+artifact export was performed.
+
+Current status: `BLOCKED / RELEASE_BYTE_NORMALIZATION_CLOSURE`.
+Next actor: Planner/User decides whether to authorize a bounded successor
+repair that makes Git-filtered commit bytes authoritative, regenerates the
+generation/pointer/payload/fixture hash chain, reruns only the directly
+affected focused gates, and proves the resulting temporary-index/archive
+bytes before any commit. Tag, push, publication, and Unity remain closed.
+
+## Release-byte Closure Accepted - 2026-09-19
+
+The human accepted the repaired successor after the guarded Verifier review
+returned `PASS / RELEASE_BYTE_NORMALIZATION_CLOSED` with no findings. Frozen
+admission matched HEAD `645f5effbe9f386600c216abaa3e7a9f3a0c233b`, exact 32-path
+prospective identity
+`c67d6ebe4721fa5eb6bfa70f8d153a139ec4827e56cff60ed458704281cce723`,
+and an unchanged real Git index.
+
+The accepted evidence proves final LF prospective bytes, the complete
+generation/pointer/payload/fixture hash chain, 26/26 authoritative
+worktree-to-blob matches, Package-byte stability, canonical `poc.37` retired
+targets, and published predecessor no-drift. This disposition does not revive
+the previously stopped commit authorization and does not authorize Unity,
+tag, push, publication, promotion, or external release acceptance.
+
+Current status: `ACCEPTED / FRESH_LOCAL_COMMIT_AND_ARTIFACT_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize one exact 32-path local
+commit and one Package export derived from that commit for human Unity Package
+Manager validation. Remote publication remains separately closed.
+
+## Local Commit And Commit-derived Package Export - 2026-09-19
+
+The human authorized the accepted 32-path snapshot for a local commit and
+release-byte-equivalent Package export. The snapshot identity matched
+`c67d6ebe4721fa5eb6bfa70f8d153a139ec4827e56cff60ed458704281cce723`
+before staging and in the committed tree. The snapshot contains 32 admitted
+paths; 31 produced commit changes because the admitted fixture `.meta` was
+already byte-identical to HEAD.
+
+- Commit: `babec1fcf97e424fbf6c8c9ba28e5339407b13da`
+- Subject: `fix(v0.3): close preview.4 release byte integrity`
+- Candidate: `0.3.0-preview.4 / poc.38`
+- Local branch state: one commit ahead of its upstream; nothing was pushed.
+- Staging after commit: empty.
+- Commit-derived Package ZIP: `2,044,916` bytes.
+- ZIP SHA-256:
+  `1aa258411211a5331decd286847408933c291c9d5864ca0afa575081106778ca`.
+- Extracted Package location: `<local-artifact-root>/v0.3.0-preview.4-babec1fc/package/com.rice.ai-codedb/`.
+
+The exported Package independently matched version `0.3.0-preview.4` and the
+accepted generation-manifest, host-current, payload-manifest, and two fixture
+runtime-contract bindings. The export is a local validation artifact only; no
+tag, push, publication, promotion, Unity operation, or external acceptance was
+performed.
+
+Current status: `LOCAL_ARTIFACT_READY / HUMAN_UNITY_PACKAGE_VALIDATION_REQUIRED`.
+Next actor: the human owner installs the extracted commit-derived Package via
+Unity Package Manager `Add package from disk` by selecting its `package.json`,
+then reports compilation, dependency configuration, host-payload convergence,
+and stable Manager state. Remote publication remains separately closed.
+
+## External Host Admission Fix Authorized - 2026-09-22
+
+Human external validation of the commit-derived `0.3.0-preview.4` Package
+confirmed Provider installation success but no Host payload admission:
+`Configure Dependencies` completed with exit `0`, while Host payload remained
+`Needs Setup / Not evaluated`, Current instance remained `Inactive / Not
+evaluated`, and Coordinator/Host/MCP checks remained unevaluated.
+
+Read-only source inspection shows the Configure Dependencies action invokes
+only the Provider installer path (`RunInstallProviderAsync`). It does not
+trigger Host payload `DryRun`/`Verify`/`Upgrade`/`Repair` admission or expose a
+clear follow-up action from this state.
+
+The human authorized a bounded same-S18 product investigation/fix. Cross-
+session Coder routing is currently unavailable in the active tool registry;
+no false dispatch is recorded. The copy-ready dispatch is held for manual
+forwarding to `v0.3.coder.deep`.
+
+Current status: `EXTERNAL_HOST_ADMISSION_FIX_AUTHORIZED / CODER_ROUTE_PENDING`.
+Next actor: `v0.3.coder.deep` investigates and, only if a concrete source
+defect is proven, repairs the Provider-success to Host-admission transition.
+No Unity, external-project mutation, commit, artifact export, Verifier, tag,
+push, or publication is authorized by this record.
+
+## External Host Admission FIX 01 Accepted - 2026-09-22
+
+The human accepted the stable three-path uncommitted repair after the
+sub-Coder -> Planner -> sub-Verifier flow returned `PASS / P1_01_CLOSED` with
+no findings. Frozen HEAD remained
+`babec1fcf97e424fbf6c8c9ba28e5339407b13da`.
+
+The accepted repair keeps Provider failure fail-closed, performs Supervisor
+`materialize/Probe` first after Provider success, consumes the Package-owned
+read-only Probe fallback exactly once only when the Bridge supplies
+`OneShotFallbackAuthorized`, and avoids duplicate fallback when the Supervisor
+Probe succeeds. Overview and Setup share the continuation; the Manager does
+not directly access the materializer.
+
+Accepted source/test paths:
+
+- `com.rice.ai-codedb/Editor/AICodedbActions.cs`
+- `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+This disposition accepts the bounded source result and targeted review only.
+It does not authorize commit, artifact export, Unity/external Package rerun,
+tag, push, publication, promotion, or release acceptance.
+
+Current status: `ACCEPTED / HOST_ADMISSION_FIX_COMMIT_AND_ARTIFACT_AUTHORIZATION_REQUIRED`.
+Next actor: Planner/User decides whether to authorize an exact three-path
+local commit and a new commit-derived `0.3.0-preview.4` Package export for
+human repetition of the blocked external Configure Dependencies flow. Remote
+publication remains separately closed.
+
+## Host Admission FIX 01 Local Commit And Package Export - 2026-09-22
+
+The human authorized the accepted three-path repair for a local commit and a
+new commit-derived Package export. The committed path set matched the frozen
+Coder/Verifier hashes and contained no unrelated task, workflow, validation-
+project, or documentation changes.
+
+- Commit: `e4ac545e3d1261340c5b757cfa328a0c3296ac1e`
+- Subject: `fix(v0.3): recheck host admission after provider setup`
+- Changed paths: exactly the accepted three source/test paths.
+- Staging after commit: empty.
+- Branch state: two local commits ahead of upstream; nothing was pushed.
+- Commit-derived Package ZIP: `2,045,791` bytes.
+- ZIP SHA-256:
+  `7d33d1c4317ecee879f93762f34ca4e9a794295ab319369ddc6161a25e648736`.
+- Extracted Package location:
+  `<local-artifact-root>/v0.3.0-preview.4-e4ac545e/package/com.rice.ai-codedb/`.
+
+The exported Package independently passed the existing generation/pointer/
+payload/fixture hash-chain checks and contained the accepted Supervisor-first,
+Bridge-authorized read-only bootstrap Probe fallback plus its adjacent test
+coverage. No tag, push, publication, promotion, Unity operation, or external
+acceptance was performed.
+
+Current status: `HOST_ADMISSION_LOCAL_ARTIFACT_READY / HUMAN_EXTERNAL_RETEST_REQUIRED`.
+Next actor: the human owner replaces the prior local Package with this exact
+commit-derived Package, waits for Unity compilation, then executes Configure
+Dependencies once and reports the terminal Manager state. Remote publication
+remains separately closed.
+
+## Bootstrap Admission Architecture Reassessment - 2026-09-22
+
+The external retry on commit-derived Package `8313d090` reproduced
+`MCP availability requires the current Package-owned Host runtime.` after the
+Provider was verified current. The target project loaded that exact artifact,
+so stale Package caching is excluded. The repeated FIX sequence is stopped;
+another stderr-marker or action-specific fallback is not authorized.
+
+Root cause is architectural ownership duplication. Actions currently tries to
+classify a bootstrap Probe and choose `Install`, while the Materializer emits
+the observed failure through stderr with a nonzero exit and reserves `Install`
+for explicit `UNINSTALLED`. The existing Lifecycle worker already owns the
+correct default-`INSTALLED` convergence: prerequisite admission, Probe,
+current-instance plan, `Upgrade`, and verification Probe.
+
+Decision: `REFACTOR / LIFECYCLE_OWNS_BOOTSTRAP_ADMISSION`.
+
+- Do not add a new `materialize:Ensure` command.
+- Remove Host mutation selection and stderr parsing from Actions/Manager.
+- After Provider success, request and await one post-Provider Lifecycle
+  reconcile epoch.
+- Reuse the existing Lifecycle worker and Materializer `Upgrade` semantics.
+- Return one typed terminal result after authoritative cache publication.
+- Preserve explicit `UNINSTALLED`, fail-closed ownership states, Supervisor
+  external-operation ownership, query-first behavior, and Manager cache-only
+  behavior.
+
+The human approved this decision and the exact five-path allowlist recorded in
+`TASK.md`. This is a continuous same-S18 refactor checkpoint under the standing
+sub-Coder/sub-Verifier workflow. Unity and the external target remain closed
+to agent operation; the human must not retry Configure Dependencies until the
+new snapshot passes Coder and targeted Verifier review.
+
+Current status: `BOOTSTRAP_ADMISSION_REFACTOR_AUTHORIZED / SUB_CODER_PENDING`.
+Next actor: one sub-Coder implements the frozen contract within the five-path
+allowlist and returns a stable uncommitted snapshot to Planner. It must not
+contact or dispatch Verifier.

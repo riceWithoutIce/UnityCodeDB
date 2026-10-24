@@ -1,0 +1,32 @@
+Base 39d79aeee1bd5525c6ed2eb1369f6c27334b9d07
+Evidence .artifacts/tests/s29-removal-process-identity/coder-a1
+Accepted .artifacts/s29-removal-namespace-39d79ae/review/com.rice.ai-codedb
+Overlay .artifacts/tests/s29-removal-process-identity/coder-a1/attempt-a2/com.rice.ai-codedb
+Inventory accepted=618 overlay=618 missing=0 extra=0 changed=3
+22aa5eedc0f5f61e90f2c17cabbe4496cccd8ba1b2e33028c2101a02268b4f2c  com.rice.ai-codedb/Tools~/materialize-codedb-host-payload.ps1
+4b9e60cb7906852e6de3a694b6303451cc69473b4593a593632ad96fe439089b  com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+49aacc0dd0065c32f9d451dfe40da05b7a540afffba71b826dc9e2ab0f2a7f45  com.rice.ai-codedb/Tests/Editor/AICodedbHostPayloadMaterializerPreflightHandoffTests.cs
+
+Following hashes are relative to Evidence root:
+2a800dac88bb9d9f41c88062392b94ea4f432f843e447ba468a24f285b9d7b3b  snapshot.ps1
+be2aa74653bba96876f70b250194d7b0ea33618cfddd19b94752b33312155087  protected-before.txt
+be2aa74653bba96876f70b250194d7b0ea33618cfddd19b94752b33312155087  protected-after.txt
+0a444cd7d183699ad951410f37fc1d26e04537460387a03050d0b628e4c6bc99  protected-comparison.log
+985a3b5dd47d634b11e4539faf16e6ee058a77a3c7f7d191813f6361e4fcc896  source-overlay-check.log
+64586bd42433748f1731aabb1786e510b18c2f5416c69b2b2eec8c2ea49d5b98  verify-source.ps1
+77fa348ade9a4ecc15619a3eae98cf0c8213d31f3e153e650a9bd3bd13bf01bc  scenario-a1.log
+687bebd2ac464ad0696136f1928472149ff0ef2f50f99b572bf6e59b3297b410  attempt-a2/l0-a1.log
+24976116d5c78f04cf504511a14960bc5512bd2d6c8291cdbe5b792a7b47a10d  attempt-a2/prepare-and-l0.ps1
+3d00bc5e8a961e815f6d7f6043f78430f288bddcd71921ab33e567bc93e49b11  attempt-a2/scenario-a1.log
+a732b3838c3eb38fd7d5578a22ce71d773d06cc3ff45aac141f664c1b1b9ec30  attempt-a2/run-scenario.ps1
+fa5593927fad9f1f091ba73c6ff10fdc913308d554bdd90d364d1ef75926f919  attempt-a2/compile-exact.ps1
+5c0a468a0feb9371888b681d0c77bd878bb2437b55b1bef8463a76832a95efc0  attempt-a2/Rice.AICodedb.Editor.rsp
+71803c420c230da0600c590442ae537626e2acd1bf8bc03746b9f765eb448eba  attempt-a2/Rice.AICodedb.Editor.Tests.rsp
+e6cf8b8e1e554a572b0299e9439663a2733a65ca6567629cc5b58a48ddbb68a9  attempt-a2/Rice.AICodedb.Editor-compile-a1.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  attempt-a2/Rice.AICodedb.Editor.Tests-compile-a1.log
+c2c9514f0e8d12ce8fc529fda1c387fcadc8fce7ce4333e1560de94383dc68e5  attempt-a2/run-seam.ps1
+df7ea2c1338d6be029cf7d7d69e49b1579b23721cf79653a47b08257f8dfe8bb  attempt-a2/Runner.cs
+fbcebadd7924cc175136e85a0b63c389416838fe57f01104840591a17a8959e1  attempt-a2/extractor/Extract.cs
+d689a2d8e06aaa3edf0905be6b888250f00bf7554dc7f146400db7ad9315f958  attempt-a2/exact-ast-binding.txt
+135b92e9529c097c2a547dbaf41bcc0593e5cab7f0a7421d39e2615021711e36  attempt-a2/seam-run-a1.log
+555ac2ba61653d6b119a55acab7e12b6be6d23e6fbfd7aab43b502558ba70dff  attempt-a2/seam-compile-a1.log

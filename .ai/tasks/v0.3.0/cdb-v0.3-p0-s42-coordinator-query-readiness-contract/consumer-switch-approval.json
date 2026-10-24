@@ -1,0 +1,9 @@
+{
+  "action": "S42_CONTEXT_CONSUMER_SWITCH",
+  "human_authorized": true,
+  "approved_at_utc": "2026-10-22T06:25:53.5285951Z",
+  "project_root": "G:/RiceProgram/Test/CodedbTest/CodedbTest_2",
+  "executor_sha256": "3cb0685c13677274525c634388dad5ea5b936fcbdc4b2fc506bc97b9100eb495",
+  "scope": "CONSUMER-SWITCH-PROPOSAL.md steps 1-5 once",
+  "human_approval": "批准"
+}

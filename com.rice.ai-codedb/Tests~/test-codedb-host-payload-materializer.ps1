@@ -1867,6 +1867,10 @@ if ($NextChangeAdmissionOnly) {
 }
 
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+function Get-TestMcpCwdLine {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    return 'cwd = ' + (ConvertTo-Json -InputObject ([IO.Path]::GetFullPath($Root).Replace('\','/')) -Compress)
+}
 $embeddedProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $packageRoot "..\.."))
 $embeddedPackagePath = Join-Path $embeddedProjectRoot "Packages\com.rice.ai-codedb"
 $isEmbeddedLayout = [string]::Equals(
@@ -3896,7 +3900,7 @@ public static class CodedbMaterializerFreshnessProbe {
 # config sentinel
 [mcp_servers.codedb-fixture]
 command = "node"
-cwd = "."
+$(Get-TestMcpCwdLine -Root $Root)
 args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]
 startup_timeout_sec = 120
 "@
@@ -5342,7 +5346,7 @@ function Invoke-McpConfigCompatibilityScenarios {
         }
         foreach ($managedLine in @(
             'command = "node"',
-            'cwd = "."',
+            (Get-TestMcpCwdLine -Root $repairHostRoot),
             'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
             'startup_timeout_sec = 120'
         )) {
@@ -5488,7 +5492,7 @@ command = "keep-unrelated"
     }
     foreach ($managedLine in @(
         'command = "node"',
-        'cwd = "."',
+        (Get-TestMcpCwdLine -Root $repairHostRoot),
         'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
         'startup_timeout_sec = 120'
     )) {
@@ -6531,7 +6535,7 @@ function Invoke-RepairAcceptanceScenarios {
     $createdConfig = Get-Content -LiteralPath $repairConfigPath -Raw
     Assert-True -Condition ($createdConfig.Contains($targetHeader)) -Message "Repair did not create the project MCP target section."
     Assert-True -Condition ($createdConfig.Contains('command = "node"')) -Message "Repair MCP target command is not the reviewed wrapper command."
-    Assert-True -Condition ($createdConfig.Contains('cwd = "."')) -Message "Repair MCP target does not pin the project working directory."
+    Assert-True -Condition ($createdConfig.Contains((Get-TestMcpCwdLine -Root $repairHostRoot))) -Message "Repair MCP target does not pin the project working directory."
     Assert-True -Condition ($createdConfig.Contains('args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]')) -Message "Repair MCP target does not use the reviewed relative wrapper."
     Assert-True -Condition ($createdConfig.Contains('startup_timeout_sec = 120')) -Message "Repair MCP target does not use the bounded startup timeout."
     Assert-True -Condition (-not (Test-Path -LiteralPath $repairBackupRoot)) -Message "Creating a missing MCP config produced an unnecessary backup."
@@ -7055,7 +7059,7 @@ unknown = 77
     }
     Assert-True -Condition ($repairedTargetConfig.Contains('command   = "node" # command comment')) -Message "Repair did not update the stale command while preserving formatting and comment."
     Assert-True -Condition ($repairedTargetConfig.Contains('startup_timeout_sec = 120 # timeout comment')) -Message "Repair did not update the stale timeout while preserving its comment."
-    Assert-True -Condition ($repairedTargetConfig.Contains('cwd = "."')) -Message "Repair did not insert missing cwd."
+    Assert-True -Condition ($repairedTargetConfig.Contains((Get-TestMcpCwdLine -Root $repairHostRoot))) -Message "Repair did not insert missing cwd."
     Assert-True -Condition ($repairedTargetConfig.Contains('args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]')) -Message "Repair did not insert missing wrapper args."
     Assert-True -Condition ($repairedTargetConfig.IndexOf('custom_key = "keep-me"', [StringComparison]::Ordinal) -lt $repairedTargetConfig.IndexOf('command   = "node"', [StringComparison]::Ordinal)) -Message "Repair changed existing target-key ordering."
     $staleTargetBackups = @(Get-ChildItem -LiteralPath $repairBackupRoot -Force -File)
@@ -7067,7 +7071,7 @@ unknown = 77
 # unrelated prefix
 [mcp_servers.codedb-repair-fixture]
 command = "node"
-cwd = "."
+$(Get-TestMcpCwdLine -Root $repairHostRoot)
 args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]
 startup_timeout_sec = 120
 
@@ -7563,7 +7567,7 @@ function Invoke-UninstallAcceptanceScenarios {
         "",
         "[$targetTable]",
         'command = "node"',
-        'cwd = "."',
+        (Get-TestMcpCwdLine -Root $uninstallHostRoot),
         'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
         'startup_timeout_sec = 120',
         'custom_direct = "keep"',
@@ -7715,7 +7719,7 @@ function Invoke-UninstallAcceptanceScenarios {
         "[$targetTable]",
         'custom_direct = "child-first-keep"',
         'command = "node"',
-        'cwd = "."',
+        (Get-TestMcpCwdLine -Root $uninstallHostRoot),
         'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
         'startup_timeout_sec = 120',
         "",
@@ -7764,7 +7768,7 @@ function Invoke-UninstallAcceptanceScenarios {
     $childOnlyInstalled = [System.IO.File]::ReadAllText($configPath, $utf8NoBom)
     Assert-True -Condition ($childOnlyInstalled.Contains("# child-only sentinel`n[$targetTable.tools.codedb_text_search]`napproval_mode = `"approve`"`n# child-only comment")) -Message "Child-only Install changed the preserved descendant block."
     Assert-Equal -Actual ([regex]::Matches($childOnlyInstalled, "(?m)^\[$([regex]::Escape($targetTable))\]$").Count) -Expected 1 -Message "Child-only Install did not create exactly one target parent table."
-    foreach ($managedLine in @('command = "node"', 'cwd = "."', 'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]', 'startup_timeout_sec = 120')) {
+    foreach ($managedLine in @('command = "node"', (Get-TestMcpCwdLine -Root $uninstallHostRoot), 'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]', 'startup_timeout_sec = 120')) {
         Assert-True -Condition ($childOnlyInstalled.Contains($managedLine)) -Message "Child-only Install did not restore managed MCP line '$managedLine'."
     }
     Write-Utf8File -Path $configPath -Content $installedConfig
@@ -10246,7 +10250,7 @@ function Reset-PortabilityFixture {
 # portability config sentinel
 [mcp_servers.codedb-portability-fixture]
 command = "node"
-cwd = "."
+$(Get-TestMcpCwdLine -Root $portabilityHostRoot)
 args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]
 startup_timeout_sec = 120
 "@
@@ -13731,7 +13735,7 @@ syncBuiltinESMExports();
             "- Target file: .codex/config.toml",
             "[mcp_servers.$fixtureProviderName]",
             'command = "node"',
-            'cwd = "."',
+            (Get-TestMcpCwdLine -Root $hostRoot),
             'args = ["AIWork/codedb/wrapper/codedb-project-wrapper.mjs", "--root", "."]',
             '"registrationPolicy"',
             '"manual-review-only"'
@@ -13745,10 +13749,9 @@ syncBuiltinESMExports();
         }
         Assert-Result -Result $mcpValidationResult -ExitCode 0 -Label "Materialized MCP project config validation"
         foreach ($expected in @(
-            "OK: MCP working directory matches expected project-level value.",
+            "OK: MCP working directory matches the current Unity project root.",
             "OK: Project config uses the package-neutral wrapper MCP command shape.",
             "OK: Shader/HLSL text adapter manifest is present for wrapper routing.",
-            "OK: .codex/config.toml uses relative paths only.",
             "[OK] Project-level MCP config validation passed."
         )) {
             Assert-True -Condition ($mcpValidationResult.Text.Contains($expected)) -Message "MCP project config validation is missing '$expected'."
@@ -13756,7 +13759,7 @@ syncBuiltinESMExports();
 
         $validMcpConfig = Get-Content -LiteralPath $fixtureMcpConfigPath -Raw
         $validMcpConfigLastWriteTimeUtc = [System.IO.File]::GetLastWriteTimeUtc($fixtureMcpConfigPath)
-        $missingCwdConfig = $validMcpConfig -replace '(?m)^\s*cwd\s*=\s*"\."\s*\r?\n', ''
+        $missingCwdConfig = $validMcpConfig -replace '(?m)^\s*cwd\s*=[^\r\n]*\r?\n', ''
         Write-Utf8File -Path $fixtureMcpConfigPath -Content $missingCwdConfig
         $missingCwdValidation = Invoke-PowerShellAction -Action {
             & $materializedMcpValidator
@@ -13766,21 +13769,21 @@ syncBuiltinESMExports();
             -Condition ($missingCwdValidation.Text.Contains("FAIL: MCP working directory must appear exactly once in the project MCP section.")) `
             -Message "MCP validator accepted a project registration without cwd."
 
-        $wrongCwdConfig = $validMcpConfig.Replace('cwd = "."', 'cwd = ".."')
+        $wrongCwdConfig = $validMcpConfig.Replace((Get-TestMcpCwdLine -Root $hostRoot), 'cwd = ".."')
         Write-Utf8File -Path $fixtureMcpConfigPath -Content $wrongCwdConfig
         $wrongCwdValidation = Invoke-PowerShellAction -Action {
             & $materializedMcpValidator
         }
         Assert-Result -Result $wrongCwdValidation -ExitCode 1 -Label "Wrong-cwd MCP project config validation"
         Assert-True `
-            -Condition ($wrongCwdValidation.Text.Contains('FAIL: MCP working directory differs from the required project-level value: cwd = "."')) `
+            -Condition ($wrongCwdValidation.Text.Contains('FAIL: MCP working directory must be an absolute path to the current Unity project root.')) `
             -Message "MCP validator accepted a project registration with the wrong cwd."
 
         Write-Utf8File -Path $fixtureMcpConfigPath -Content @"
 # config sentinel
 [mcp_servers.$fixtureProviderName]
 command = "$($fixtureMachineProvider.ExecutablePath)"
-cwd = "."
+$(Get-TestMcpCwdLine -Root $hostRoot)
 args = ["mcp", "--root", ".", "--config", "$fixtureRuntimeRelativePath/config/codedb-mcp.toml", "--no-watch"]
 startup_timeout_sec = 120
 "@

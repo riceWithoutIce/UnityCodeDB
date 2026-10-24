@@ -4,7 +4,7 @@
 
 - Product/version: UnityCodeDB v0.3.0 / existing S29.
 - Workflow: codedb-workflow-v2 revision 2.6.
-- Status: REFERENCE_SWITCH_COMPLETE / HUMAN_UNITY_PENDING.
+- Status: HUMAN_ACCEPTANCE_PARTIAL / SHUTDOWN_OBSERVATION_DEFERRED.
 - Planner: current parent; Coder: /root/retained_disposition_coder;
   Verifier: /root/retained_disposition_verifier, after stable Coder termination.
 - Review mode: GUARDED; independent historical-removal/identity review required.
@@ -163,10 +163,12 @@ completion of each child, as the user requires. No model override is proposed.
 - Next notification: provide the exact delivered Package and bounded human
   checklist to User. Source commit is d127a45eafa62f04f25a4b578839e6056e46299a;
   exact export and S29 reference switch passed under the grouped approval.
-- Next action: human opens the exact repaired Package and follows
-  INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-HUMAN-CHECKLIST.md.
-  Source commit, exact export and two-file reference switch passed. Preserve
-  failed d127a45 Package; real Remove/Install remains a separate gate.
+- Next action: preserve the human result in
+  INSTALLED-GENERATION-ALIGNMENT-UPGRADE-CALLSITE-FIX-HUMAN-RESULT.md.
+  Compile, focused tests, Manager reopen and tabs pass. First-close shutdown
+  blocking is deferred by user decision for additional samples because the
+  second close completed. Do not attribute it to the call-site repair or start a
+  shutdown fix from this sample. Real Remove/Install remains a separate gate.
 - Human authorization required: expanded schema/reader/architecture scope,
   later source disposition or real/delivery operations only.
 

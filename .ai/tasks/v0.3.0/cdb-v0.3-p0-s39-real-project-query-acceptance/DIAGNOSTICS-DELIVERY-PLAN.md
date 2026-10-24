@@ -1,11 +1,16 @@
 # Proposed diagnostics delivery — 2026-10-20
 
-Status: GRANTS_A_B_AUTHORIZED / EXECUTION_IN_PROGRESS.
+Status: GRANTS_A_B_EXECUTED / HUMAN_COMPILE_AND_FIRST_INSTALL_PENDING.
 
 The human explicitly replied `批准` to the named commit, exact Package
 export/verification/copy, and CodedbTest_1 manifest/sample preparation sequence.
 Execution stops before human Unity compilation/first Install. This authorization
 supersedes the proposal-only status; it does not expand the listed boundaries.
+
+Execution complete: commit `237c72d9980114b99887fb8e805658447dd8d4fd`, exact
+ZIP checks/copy and CodedbTest_1 manifest/sample preparation PASS. See
+DIAGNOSTICS-DELIVERY-RESULT.md and DIAGNOSTICS-HUMAN-FIRST-INSTALL-CHECKLIST.md.
+The proposal and preflight wording below are retained as the execution scope.
 
 Purpose: deliver the checked diagnostic bytes through the normal Package and
 first-Install path, preserve CodedbTest_0, then obtain evidence from a separately

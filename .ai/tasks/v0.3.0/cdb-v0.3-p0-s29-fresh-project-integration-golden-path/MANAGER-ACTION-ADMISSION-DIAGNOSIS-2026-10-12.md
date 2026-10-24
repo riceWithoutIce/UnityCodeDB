@@ -1,5 +1,11 @@
 # S29 — Manager 操作入口源头诊断
 
+后续补充（2026-10-12）：本稿关于原 action 断链的事实仍成立，但缺少
+330b… 已绑定 FAILED_PREPARATION removal intent 的证据，不能据此推定
+它必须恢复原 action 链才能解除当前阻断。见
+RETAINED-DISPOSITION-ADMISSION-DIAGNOSIS-2026-10-12.md，区分历史命令结果、
+当前 effects 处置及 Manager/后端分类差异。下文保留原诊断快照与当时授权边界。
+
 日期：2026-10-12。父任务只读诊断完成；不是独立 Verifier 结果。
 范围依据：MANAGER-ACTION-ADMISSION-ALIGNMENT-2026-10-12.md。
 产品源码 / 测试 / payload / 实际运行状态未修改；仅新增本诊断记录。

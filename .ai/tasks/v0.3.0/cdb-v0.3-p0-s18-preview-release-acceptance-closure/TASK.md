@@ -5,8 +5,8 @@
 - Product: UnityCodeDB
 - Version: `v0.3.0`
 - Workflow: `codedb-workflow-v2`
-- Candidate version: `0.3.0-preview.1`
-- Status: `ROUTE_REASSESSMENT_REQUIRED / REFACTOR_AUTHORIZED`
+- Candidate version: `0.3.0-preview.5`
+- Status: `PRECOMMIT_NON_UNITY_GATE_AUTHORIZED / CODER_DISPATCH_PENDING`
 - Planner: `UnityCodeDB v0.3 Planner`
 - Coder: `v0.3.coder.deep`
 - Verifier: `v0.3.verifier.deep` after one stable complete result and Planner
@@ -1771,6 +1771,161 @@ Next actor: human owner opens relative `UnityValidationProject`, waits for
 compilation, runs only the named focused EditMode test, reports Unity version
 and result, and closes the project.
 
+## Workflow v2.2 Preview.5 Pre-Commit Continuation - 2026-09-23
+
+This overlay supersedes the historical preview.1-preview.4 candidate routing
+for all remaining Delivery Sequence item 10 work. Historical evidence remains
+append-only. The active candidate is the accepted Package Identity Authority
+snapshot `0.3.0-preview.5 / poc.39 / payload sequence 39` on frozen HEAD
+`7bd3eaca0243b17fbc60cd3d3a624f755846408b`.
+
+Prerequisite acceptance is recorded in
+`../cdb-v0.3-p0-s18-package-identity-authority-refactor/RESULT.md` and its
+targeted `verifications/VERIFICATION-02.md`: Package-boundary L0 passed and the
+sole Owner Identity fixture P1 is closed. That acceptance does not imply the
+deferred Materializer, Provider-installer, Unity, external-consumer, commit,
+export, push, publication, or promotion gates.
+
+The user authorizes one continuous non-Unity pre-commit evidence phase:
+
+1. Admit the frozen HEAD and current preview.5/poc.39 identity closure without
+   reading or mutating protected external runtime state.
+2. Run exactly one focused Materializer payload-contract L0:
+   `powershell -NoProfile -ExecutionPolicy Bypass -File
+   com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1
+   -PayloadContractOnly`.
+3. Run exactly one Provider-installer L0:
+   `powershell -NoProfile -ExecutionPolicy Bypass -File
+   com.rice.ai-codedb/Tests~/test-codedb-provider-installer.ps1`.
+4. If either scenario exposes only a stale preview.5/poc.39 fixture or
+   assertion inside its own authorized test file, Coder may make up to two
+   total test-only corrections across those two files and run one corrected
+   attempt for the affected scenario. Identity values should be derived from
+   the canonical Package contract where practical; replacing one duplicated
+   literal with another production authority is forbidden.
+5. A production, Package metadata, payload manifest, current pointer,
+   generation, Provider contract/installer, C#, or external-state change is
+   not authorized by this phase. Such a requirement, a second corrected
+   failure for one scenario, or a new independent product failure stops the
+   phase as `ROUTE_REASSESSMENT_REQUIRED`.
+6. After both L0 scenarios pass, enumerate the exact task-owned Package paths,
+   compute one deterministic release-byte identity using ordinal path order
+   and Git-filtered bytes, and run one final scoped `git diff --check`.
+
+The pre-commit identity includes only the accepted Package paths and any
+authorized test-only correction:
+
+- `com.rice.ai-codedb/package.json`
+- `com.rice.ai-codedb/Payload~/payload-manifest.json`
+- `com.rice.ai-codedb/Payload~/host-current.json`
+- `com.rice.ai-codedb/Payload~/Generations/poc.39/**`
+- `com.rice.ai-codedb/Tools~/install-codedb-provider.ps1`
+- `com.rice.ai-codedb/Tests~/test-codedb-provider-installer.ps1`
+- `com.rice.ai-codedb/Tests~/test-codedb-package-boundary.ps1`
+- `com.rice.ai-codedb/Tests~/test-codedb-host-payload-materializer.ps1` only
+  if the authorized focused correction changes it
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+- `com.rice.ai-codedb/Tests/Editor/OwnerIdentityV2Status.json`
+
+All workflow/task records, validation-project state, preview-release reports,
+`poc.38`, external consumer manifests/runtime, and the nine existing external
+`PROVISIONING` directories remain inherited and excluded from the release-byte
+identity. No Unity/Unity MCP/CUA/BatchMode, real Provider installation,
+external cleanup/retry, commit, export, tag, push, publication, or Verifier
+routing is authorized in this phase.
+
+Current status: `PRECOMMIT_NON_UNITY_GATE_AUTHORIZED / CODER_DISPATCH_PENDING`.
+Next actor: bounded Coder subagent.
+Next action: execute the two focused L0 scenarios and freeze one stable
+release-byte identity, then return one consolidated result to Planner.
+
+## Bootstrap Admission Refactor Contract - 2026-09-22
+
+Repeated external Package validation proved that the accepted incremental
+Host-admission fixes modelled the wrong process contract. `Configure
+Dependencies` must not parse stdout/stderr or select `Probe`, `Install`, or
+`Upgrade` itself. The same S18 task therefore continues as one coherent
+`Bootstrap Admission Refactor`; no new micro-task is created.
+
+The frozen golden path is:
+
+1. Manager starts one user action and invokes the Actions orchestration entry.
+2. Actions installs or verifies the fixed Provider.
+3. Provider failure returns without Host mutation.
+4. Provider success submits one forceful, awaitable Lifecycle reconcile whose
+   epoch is not earlier than Provider completion.
+5. The existing Lifecycle worker remains the sole convergence authority:
+   integration/migration/prerequisite admission, Supervisor-first Probe,
+   current-instance convergence planning, ordinary `Upgrade` deployment when
+   the desired state is `INSTALLED`, and final Probe verification.
+6. Lifecycle publishes its cache before completing the request with a typed,
+   bounded terminal outcome. Manager renders that outcome and consumes only
+   the published cache.
+
+No new `materialize:Ensure` action is permitted. `Install` remains reserved
+for an explicit user restoration from authoritative `UNINSTALLED`; Configure
+Dependencies must never change that desired state or silently reinstall it.
+Invalid, ambiguous, conflicting, or incompletely proved ownership remains
+fail-closed and non-mutating. An already-current instance must not be deployed
+again.
+
+The awaitable reconcile must preserve one local authority and one-flight
+behavior. If Provider completion occurs while an older reconcile epoch is in
+flight, the explicit request records one forced follow-up epoch and waits for
+that epoch rather than accepting the older result. Compilation, Play, Domain
+Reload, shutdown, or bounded cancellation returns a typed deferred/cancelled
+outcome; it does not report success or terminate an operation already owned by
+the authenticated Supervisor. No terminal branch may leave Manager in
+indefinite `Checking`.
+
+The typed result must carry the reconcile epoch, terminal disposition
+(`Ready`, `Uninstalled`, `MissingPrerequisite`, `NeedsAttention`, or
+`Deferred`), authoritative `AICodedbProductStatus`, last authoritative command
+result when present, published cache revision, and bounded detail. Actions and
+Manager may use this result for orchestration/presentation only; neither may
+derive a mutation from text output.
+
+### Refactor Allowlist
+
+Exactly these source/test paths may change:
+
+- `com.rice.ai-codedb/Editor/AICodedbActions.cs`
+- `com.rice.ai-codedb/Editor/AICodedbEditorLifecycle.cs`
+- `com.rice.ai-codedb/Editor/AICodedbManagerWindow.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs`
+- `com.rice.ai-codedb/Tests/Editor/AICodedbManagerUiTests.cs`
+
+Supervisor, request-queue, Bridge, PowerShell Materializer, Provider contract,
+Package metadata, immutable generation, payload closure, external project, and
+workflow files are read-only. Any required edit outside the five-path
+allowlist returns `ROUTE_REASSESSMENT_REQUIRED` before editing.
+
+### Required Adjacent Evidence
+
+The continuous Coder checkpoint must cover:
+
+- Provider failure short-circuits Host convergence;
+- Provider current plus default `INSTALLED` and no current instance performs
+  the existing `Upgrade -> Probe -> Ready` convergence;
+- authoritative `UNINSTALLED` performs no automatic mutation;
+- invalid/ambiguous ownership performs no mutation and returns
+  `NeedsAttention`;
+- an existing current instance is verified without duplicate deployment;
+- the real failed command shape (nonzero exit, prerequisite marker on stdout,
+  Host-runtime requirement on stderr) cannot drive Actions/Manager routing;
+- an explicit post-Provider request cannot complete from an older in-flight
+  reconcile epoch;
+- cache publication precedes waiter completion, and Manager open/repaint/tab
+  behavior remains cache-only.
+
+Run only bounded source/static evidence and the directly affected focused
+tests available without Unity. C# compilation/EditMode, Unity, Unity MCP/CUA,
+BatchMode, external Package validation, artifact export, commit, tag, push,
+publication, and promotion remain separately human-gated. After one stable
+Coder snapshot, one independent sub-Verifier reviews this contract and its
+adjacent regressions. Only after Coder and Verifier pass may Planner propose a
+single rebuilt local Package and one external golden-path retry.
+
 ## Human Focused EditMode Evidence - 2026-09-18
 
 The human reported the named focused test passed in the relative
@@ -1828,6 +1983,44 @@ Current status: `ACCEPTED_FOCUSED_CONSUMER_SLICE / BROADER_GATES_DEFERRED`.
 Next actor: Planner/User selects a separately authorized next roadmap action;
 no commit, push, publication, or release promotion is implied.
 
+## Phase B Candidate Decision - 2026-09-18
+
+The human selected the current Route A candidate for the remaining item-10
+release work: Package `0.3.0-preview.2` with immutable generation `poc.36`.
+The earlier task-card references to `0.3.0-preview.1 / poc.35` remain
+historical predecessor context and are not the Phase B publication target.
+
+Before any publication action, Planner must assemble and freeze one exact
+candidate snapshot containing the reviewed Package metadata, `poc.36`
+generation, current pointer/manifest closure, accepted source, and required
+release evidence. The assembly must record the complete allowlist, HEAD,
+candidate identity, artifact hash plan, and rollback boundary. No tag, push,
+registry mutation, publication, or promotion is authorized by this decision.
+
+Current status: `PHASE_B_CANDIDATE_SELECTED / EXACT_SNAPSHOT_ASSEMBLY_PENDING`.
+Next actor: Planner prepares the exact snapshot assembly proposal for separate
+human authorization.
+
+## Planner/User Roadmap Decision - 2026-09-18
+
+The human accepted the recommendation to complete Delivery Sequence item 10.
+The accepted focused-consumer slice is a completed checkpoint, not the end of
+S18. This same Task ID continues through the remaining release phases:
+
+- Phase B: exact publication proposal and separate human authorization;
+- Phase C: clean third-party Package-only Unity acceptance;
+- Phase D: one real Codex task against that exact published artifact;
+- Phase E: final bounded release Verifier review.
+
+These phases remain human-gated. Coder/Verifier must not launch or terminate
+Unity, publish artifacts, mutate a registry, or infer release success from the
+focused consumer PASS. No new micro-task is created for each phase.
+
+Current status: `FOCUSED_CONSUMER_ACCEPTED / ITEM_10_CONTINUATION_ALIGNED`.
+Next actor: Planner prepares the Phase B exact publication proposal for
+human review; no publication, tag, push, or release promotion is authorized by
+this decision.
+
 ## Verifier Completion - 2026-09-18
 
 The bounded Verifier report `verifications/VERIFICATION-01.md` returned
@@ -1870,3 +2063,74 @@ Current status: `EDITMODE_HUMAN_HANDOFF_READY`.
 Next actor: human owner opens relative `UnityValidationProject`, waits for
 compilation, runs only the named focused EditMode test, reports Unity version
 and result, and closes the project.
+
+## Active Route Pointer - 2026-09-23
+
+The latest active contract is `Workflow v2.2 Preview.5 Pre-Commit
+Continuation - 2026-09-23`. It supersedes every earlier candidate, EditMode
+handoff, publication, and external-consumer status in this append-only task
+card.
+
+Current status: `PRECOMMIT_NON_UNITY_GATE_AUTHORIZED / CODER_DISPATCH_PENDING`.
+Next actor: bounded Coder subagent.
+No Unity, commit, export, external cleanup/retry, or publication is authorized.
+
+## Active Route Pointer - 2026-09-23 (Post-Verifier)
+
+The preview.5/poc.39 non-Unity RELEASE gate is accepted. The bounded RELEASE
+Verifier returned `PASS / GUARDED_RELEASE_NON_UNITY_GATES_CLOSED` with no
+findings in `verifications/VERIFICATION-10.md`, and the user disposition is
+`ACCEPTED / NON_UNITY_RELEASE_GATES_CLOSED`.
+
+Current status: `ACCEPTED / NON_UNITY_RELEASE_GATES_CLOSED`.
+Next actor: Planner/User for separate commit/export authorization, then the
+human-owned Unity and external-consumer gates.
+No commit, export, Unity, external cleanup/retry, publication, or promotion is
+implied by this acceptance.
+
+## Materializer Canonical-Tuple Alignment Authorization - 2026-09-23
+
+The first preview.5 pre-commit Materializer checkpoint stopped after its one
+allowed correction exposed a second stale current-candidate assertion. The
+user authorizes one new coherent test-only alignment, limited to the
+`-PayloadContractOnly` current-canonical initialization path in
+`Tests~/test-codedb-host-payload-materializer.ps1`.
+
+The alignment may derive current package version, payload version/sequence,
+generation id, generation-manifest hash, and current-pointer identity from the
+canonical `Payload~/payload-manifest.json` and `host-current.json`. Historical
+predecessor, upgrade, negative, and collision fixtures such as `poc.27` and
+`poc.36-review` must remain unchanged. Production code, Package metadata,
+payload/generation files, Provider code/contract, C#, external runtime, and
+protected provisioning state are outside this authorization.
+
+After the correction, exactly one Materializer `-PayloadContractOnly` L0 is
+allowed. A new independent failure stops the phase. If it passes, the Coder
+may continue the already-authorized sequence with exactly one Provider
+installer L0; release-byte identity and final diff-check remain conditional on
+both L0 passes. Unity, external cleanup/retry, commit, export, push,
+publication, and Verifier routing remain unauthorized.
+
+## Materializer Synthetic-Schema Alignment Authorization - 2026-09-23
+
+The canonical-tuple alignment reached a structural harness failure: the
+`New-SyntheticPayload` helper emits a payload manifest without the production
+required `owner_identity_version` field. The user authorizes one test-only
+schema alignment in that helper. Required schema fields must be projected from
+the loaded canonical payload manifest; no new package or generation literals
+may be introduced, and historical predecessor/negative fixtures remain
+unchanged.
+
+Exactly one corrected `-PayloadContractOnly` L0 is allowed. A new independent
+failure stops the phase. If it passes, the previously authorized single
+Provider-installer L0 may run; release-byte identity and final diff-check remain
+conditional on both L0 passes. No production, Package/generation, Provider,
+C#, external runtime, Unity, cleanup, commit, export, publication, or Verifier
+action is authorized here.
+
+## Active Route Pointer - 2026-09-23 (Post-Verifier Final)
+
+The current accepted route is `ACCEPTED / NON_UNITY_RELEASE_GATES_CLOSED`.
+The next decision is separate commit/export authorization, followed by the
+human-owned Unity and external-consumer gates. No further non-Unity repair is
+authorized or required by the accepted Verifier result.

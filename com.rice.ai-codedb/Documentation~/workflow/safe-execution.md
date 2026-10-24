@@ -74,7 +74,7 @@ representativeness is normative in the
 | Content | Default repository-relative destination | Git policy |
 | --- | --- | --- |
 | Exported ZIPs, extracted Packages, commit snapshots, and development evidence intermediates | `.artifacts/<task-or-candidate-id>/` | Ignore the generated copies. |
-| Residual worktree copies and recovery archives | `.backups/<backup-id>/` | Ignore the backup copies; treat them as protected recovery data. |
+| Residual worktree copies and temporary recovery backups | `.backups/<backup-id>/` | Ignore the copies; review their recovery purpose before removal. |
 | Source, canonical Package/payload identity contracts, export tools, and concise provenance/evidence records | Their existing source paths and `.ai` task records | Track the authoritative files, not duplicate output trees. |
 
 An external output or backup destination is an exception, not a fallback. The
@@ -122,10 +122,13 @@ reset budgets, or authorize retries.
   not evidence that an output is unused; review the declared consumers without
   expanding the task into a machine-wide reference scan.
 - Historical output may be archived without rewriting its bytes. Preserve
-  invalid artifacts and failure evidence under the Package Release Closure
-  Gate; a passing successor does not make the only failed copy disposable.
-  Before removing an original, verify the retained copy/archive against its
-  recorded hashes and preserve its original-path mapping and recovery route.
+  invalid release candidates and meaningful failure evidence under the Package
+  Release Closure Gate. A passing successor does not by itself close an
+  unresolved failure or make its necessary evidence disposable. For archive
+  migration, verify the retained copy/archive against its recorded hashes and
+  preserve the original-path mapping and recovery route before removing the source.
+  Deliberate deletion of a classified intermediate needs no byte-for-byte
+  replacement; record the result, lost recoverability and exact deleted path.
   For a retired Unity acceptance project, the evidence-only disposition in
   [Validation Project Evidence Retention And Deletion](#validation-project-evidence-retention-and-deletion)
   may replace a complete project copy after explicit approval of the exact
@@ -141,6 +144,14 @@ reset budgets, or authorize retries.
   clear either storage root. Scope any approved cleanup to validated exact
   children, excluding protected inputs and the only recoverable copies.
 
+`.backups/` is temporary recovery storage, not a default historical archive.
+After the rollback window closes, review manifest/lock-file snapshots,
+intermediate worktree copies and other temporary backups for deletion. A
+different hash alone is not a retention reason. Keep a bounded exception only
+when it is the sole copy of historical source, needed to reproduce an open
+failure, or still needed for an active recovery route. Identify its owner,
+reason and next review milestone; decide its final disposition separately.
+
 ### Artifact Lifecycle And Retention
 
 Every repository-local artifact must have an owning task or candidate, a
@@ -154,11 +165,11 @@ Use these lifecycle states:
 | State | Meaning | Default action |
 | --- | --- | --- |
 | `ACTIVE` | Used by the current task, Package consumer or acceptance project | Retain and do not overwrite |
-| `PROTECTED` | Unique failure, blocker, crash, runtime, human or release evidence | Retain until an explicit evidence replacement decision |
+| `PROTECTED` | Evidence needed for an unresolved failure, blocker, crash, runtime, human or release conclusion; sole historical source or active recovery data | Retain until its need and replacement/disposition are reviewed |
 | `FROZEN` | Task is complete but the artifact remains a historical reference | Retain one canonical copy |
-| `REVIEW` | Candidate for deduplication, supersession or archive | Build references and hash mapping before mutation |
+| `REVIEW` | Candidate for deduplication, supersession, archive or deletion | Check purpose, references and identity before mutation |
 | `ARCHIVED` | Removed from the active route but retained as evidence | Preserve bytes and recoverability limits |
-| `DELETED` | Exact target removed after the deletion gate | Report target, retained replacement and limits |
+| `DELETED` | Exact target removed after the deletion gate | Report target, reason, deletion receipt, retained evidence if any, and recovery limits |
 
 At creation, record the task/candidate ID, artifact kind, source commit or
 runtime identity, hash where applicable, known consumers, evidence level,
@@ -167,31 +178,38 @@ stable task/candidate name and purpose; anonymous or reusable `latest` output
 directories are not allowed for durable evidence.
 
 The default artifact set for a completed task is one canonical exact Package
-archive, one extracted Package only when a consumer requires it, and the
-bounded evidence needed to explain the result. Exact-byte duplicate ZIPs or
-extractions are represented by one canonical copy plus a source-to-canonical
-mapping. A failed or blocked artifact is not removed merely because a later
-candidate passes; the only failed copy and unique reproduction inputs remain
-`PROTECTED` until a reviewed replacement proves they are unnecessary.
+archive when Package evidence is required, one extracted Package only when a
+consumer requires it, and the minimum evidence needed to explain the result.
+Exact-byte duplicate ZIPs or extractions need only one canonical copy plus a
+source-to-canonical mapping. A failed or blocked artifact is retained when its
+bytes or reproduction inputs are needed to explain an unresolved result; a
+later passing candidate alone does not settle that question.
 
-Test-run output follows the same rule: retain the first meaningful failure, the
-final accepted run, and any input needed to reproduce an unresolved issue.
-Intermediate retries and duplicate successful runs become `REVIEW` after the
-task result is frozen. A task-level output budget or a repeated candidate set
-is a review trigger, never automatic deletion authority.
+For test runs, retain the final authoritative run and the bounded raw evidence
+needed for unresolved failures. Once the task stage is closed and the final
+result covers the relevant outcome, superseded attempts, build outputs,
+temporary extractions and configuration backups become deletion candidates
+after their consumer and rollback needs end. Different bytes or a historical
+filename do not by themselves require preserving an intermediate. Keep the
+result and disposition in the task record; intentional loss of intermediate
+bytes is allowed. A task-level output budget or a repeated candidate set is a
+review trigger, never automatic deletion authority.
 
 Retention review is required when a task closes, a validation project leaves
 the active route, a candidate is superseded, or a soft output budget is
 reached. The review must classify each exact child as `RETAIN`, `PROTECTED`,
 `ARCHIVE` or `DELETE_CANDIDATE`, list known consumers and preserve original
-path-to-retained-path mappings. It must not expand into a machine-wide search
-or make an unbounded historical scan.
+path-to-retained-path mappings for archived content. It must not expand into a
+machine-wide search or make an unbounded historical scan.
 
 Physical cleanup is a staged operation: (1) freeze the exact source and
 destination/removal list; (2) verify containment, reparse safety, references,
-hashes and live holders; (3) preserve and verify the retained copy; (4) move or
-delete only the approved exact targets; and (5) recheck consumers and report
-removed paths and recoverability limits. Stop on the first mismatch. Never
+current file count/hashes and live holders; (3) for archive migration, preserve
+and verify the retained copy and original-path mapping; (4) move or delete only
+the approved exact targets; and (5) recheck consumers and record the exact
+removed paths, reason, retained evidence if any and recoverability limits in a
+deletion receipt. A deliberate intermediate deletion does not require an
+archive or replacement copy. Stop on the first mismatch. Never
 move a complete Unity project while it is open, and never assume a relative
 `file:` Package reference survives a project move without recomputing it.
 

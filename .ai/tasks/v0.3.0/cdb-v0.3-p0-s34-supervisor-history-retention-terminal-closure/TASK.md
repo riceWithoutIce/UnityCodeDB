@@ -4,7 +4,7 @@
 
 - Product/version: UnityCodeDB v0.3, current-version lifecycle repair.
 - Workflow: codedb-workflow-v2 revision 2.6.
-- Status: DELIVERY_AUTHORIZED / COMMIT_PENDING.
+- Status: SOURCE_ACCEPTED / DELIVERY_COMPLETE / HUMAN_BASELINE_PASS_WITH_SHUTDOWN_EXCEPTION / REINSTALL_PENDING_BASELINE_DISPOSITION.
 - Planner: current parent. Coder: one task-scoped implementation role, pending.
 - Verifier: one subsequent independent targeted read-only role, pending.
 - Review mode: GUARDED.
@@ -163,3 +163,28 @@ source/test snapshot and task records, commit-derived Package export and closure
 authorize real history cleanup, Install, Unity launch, process control or commit
 of unrelated dirty files. After the reference switch, human Install -> Ready is
 a separate acceptance action.
+
+## Delivery consolidation - 2026-10-19
+
+Accepted eight-file snapshot committed as
+`d4a097d20af598ca760163867a3394ff5efb116d`. Commit-derived export, exact
+artifact byte/identity/admission gates and affected producer/consumer closure
+passed. S33 manifest and lock now reference that exact extraction after human
+confirmation that Unity was closed. See DELIVERY-RESULT.md.
+
+Next human step is compile and Manager baseline only; see HUMAN-CHECKLIST.md.
+The existing S33 canonical UNKNOWN record remains preserved and unresolved.
+Do not retry Install until its bounded baseline disposition is agreed and a new
+real-action attempt is authorized. No live cleanup or mutation was performed.
+
+## Human baseline consolidation - 2026-10-19
+
+User reports no other abnormalities; screenshot confirms logically uninstalled
+Manager state with Install available. Unity shutdown stalled at
+Application.Shutdown.CleanupMono and user confirms manual force termination.
+Normal shutdown is not PASS. Continue the previously agreed deferred observation
+scope; no shutdown repair is added to S34. See HUMAN-RESULT.md.
+
+Read-only follow-up confirms matching manifest/lock reference, unchanged canonical
+UNKNOWN bytes and 5301 history records. Next step remains alignment on the exact
+existing baseline disposition before any separately authorized Install attempt.

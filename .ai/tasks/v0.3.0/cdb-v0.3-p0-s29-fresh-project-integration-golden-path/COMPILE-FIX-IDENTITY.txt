@@ -1,0 +1,3 @@
+34ea23e11d5b0704c57cd4048a1bd9450fd5134780c9b8d504c5ea792b77dcac  com.rice.ai-codedb/Editor/AICodedbProjectIntegrationState.cs
+ae607244e11097b890e7071ed5b0472b207a5a22e6ce7af40b076908fe48bd05  com.rice.ai-codedb/Editor/AICodedbStrictJson.cs
+9c9f12c2884ac4dc963a330178581379e75c061a0fbcd6cff3fcd4c2adf4afad  com.rice.ai-codedb/Tests/Editor/AICodedbEditorLifecycleTests.cs

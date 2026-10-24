@@ -55,6 +55,19 @@ not evidence that S36's cache-coherence fix failed.
 
 ## Handoff
 
+S38 later completed an attributable current-version Install -> Ready ->
+Uninstall -> same-version Install -> Ready sequence against the `d856a8f`
+delivery. Its post-reinstall human observation reports heavier recurring
+checks and a `CodeDB status unconfirmed / Checking` Manager display lasting an
+estimated 30-60 seconds before returning to Ready automatically. No Unity
+stutter or abnormal interaction has been experienced so far. Record this as a
+non-blocking periodic-status-delay FOLLOW-UP, without claiming a measured
+Editor performance regression.
+The bounded read-only record is in the S38
+`PERIODIC-OBSERVATION-RESULT.md`. This reopens the existing periodic UX and
+runtime-latency follow-up for alignment; it does not turn the S38 action
+sequence into a failure or authorize another source repair.
+
 - Current task: cdb-v0.3-p0-s37-manager-periodic-observation-ux.
 - Current status: DEFERRED / ALIGNMENT_PENDING.
 - Next notification: User, when choosing to reopen the refresh UX discussion.
