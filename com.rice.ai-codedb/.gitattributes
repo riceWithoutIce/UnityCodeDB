@@ -8,3 +8,9 @@ Tools~/**/*.mjs text eol=lf
 Tools~/**/*.json text eol=lf
 Tests~/**/*.ps1 text eol=lf
 Tests~/**/*.toml text eol=lf
+
+# Preserve accepted immutable payload bytes with historical CRLF.
+Payload~/Generations/poc.42/generation-manifest.json -text
+Payload~/Generations/poc.42/scripts/codedb-project-common.ps1 -text
+Payload~/Generations/poc.43/scripts/codedb-project-common.ps1 -text
+Payload~/Generations/poc.44/scripts/codedb-project-common.ps1 -text

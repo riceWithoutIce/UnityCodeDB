@@ -6,9 +6,10 @@ are relative to the already user-designated sibling test root, not new locations
 
 ## Source and outputs
 
-- Source: the candidate source commit recorded in this task's RESULT.md.
-  A later receipt-only commit has the identical Package tree and is not a new
-  candidate. Package 0.3.0-preview.5; poc.44; F01 off by default; F02 excluded.
+- Source: the final candidate commit recorded in this task's RESULT.md. It adds
+  four exact Git-filter exceptions to the implementation snapshot cd7dd01,
+  preserving historical payload byte hashes in ordinary checkouts/commits.
+  Package 0.3.0-preview.5; poc.44; F01 off by default; F02 excluded.
 - Local export: `.artifacts/tests/cdb-v0.3-candidate-freeze-delivery-preparation/`
   `export-<candidate-short-hash>/`, through
   `com.rice.ai-codedb/Tests~/export-codedb-package.ps1 -Commit <candidate-commit>`.

@@ -1,6 +1,6 @@
 # v0.3 candidate commit and delivery preparation
 
-Date: 2026-10-25. Status: IN_PROGRESS.
+Date: 2026-10-25. Status: COMPLETE / CANDIDATE_COMMITTED_DELIVERY_PREPARED.
 Grant: user "ok 继续" following the explicit next step of fixing the candidate
 commit and preparing CodedbTest_2 delivery/acceptance. Current session only;
 workflow codedb-workflow-v2 revision 2.7. No new agents or worktrees.
@@ -29,7 +29,7 @@ generation transition or new runtime policy. Other Package files stay unchanged.
 
 Records/scripts allowlist: the residual-review, source-integration and this task
 directory only. First commit fixes the candidate and pre-existing records;
-a documentation-only receipt commit may record the resulting candidate hash.
+a receipt/repository-metadata commit may record the resulting candidate hash.
 No generated copies in Git. Intended candidate message:
 `fix(codedb): freeze reviewed v0.3 candidate source`.
 
@@ -52,3 +52,23 @@ No generated copies in Git. Intended candidate message:
 Prepare DELIVERY-PLAN.md with source/destination/rollback and acceptance steps;
 leave consumer writes for the separately named delivery grant and human-confirmed
 closed Unity prerequisite. No current Unity state is inferred from old reports.
+
+## Adjacent Git metadata correction
+
+After the exact-byte candidate commit, Git still reported the four canonical
+historical payload paths as modified: the root LF text rule cleans their CRLF
+bytes even when raw bytes equal HEAD. Close this directly caused freeze issue
+with four exact-path `-text` exceptions in the Package `.gitattributes`; do not change the
+default or any other path. This extends the repository metadata allowlist only,
+without changing payload bytes, generation or runtime behavior. The Package
+tree changes only for its Git metadata. Prior root
+attributes SHA-256: `931ea98fe553b945d3032a322cf0932f35581d7eea127c8a3385d8e727381a8e`.
+One patch context error occurred before this correction was applied.
+
+Check exact text attributes, normal filtered hashes versus canonical HEAD blobs,
+payload byte preservation, unchanged Package tree and final main-checkout status.
+Include this same-cause correction with the result/plan receipt commit.
+The root rule was overridden by the existing nested Package rule; the first
+root-only attempt had no effect and was restored byte-for-byte. The final
+four exceptions belong in `com.rice.ai-codedb/.gitattributes`. This is the one
+adjacent Git-filter repair, not a general normalization or fallback policy.
