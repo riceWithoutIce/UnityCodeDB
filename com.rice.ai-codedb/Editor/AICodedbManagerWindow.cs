@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -96,6 +98,18 @@ namespace Rice.AI.Codedb.Editor
         private AICodedbManagerStatusBoundary _statusBoundary;
         private string _historicalActionWarning = string.Empty;
         private DateTimeOffset _readyObservationAtUtc;
+        private AICodedbManagerTransitionEvidence _transitionEvidence;
+        private string _transitionWindow;
+        private string _renderedEvidenceKey;
+        private string _lastApplySource = "NOT_EVALUATED";
+        private DateTimeOffset _previousAppliedReadyAtUtc;
+        private DateTimeOffset _expiredReadyAtUtc;
+        private DateTimeOffset _readyExpiryAtUtc;
+        private DateTimeOffset _lastRenderedReadyAtUtc;
+        private string _candidateDisposition = "NOT_EVALUATED";
+        private long? _candidateRevision;
+        private AICodedbSupervisorSnapshot _candidateObservation;
+        private AICodedbSupervisorSnapshot _appliedObservation;
         private AICodedbCommandResult _lastResult;
         private string _lastResultTitle = string.Empty;
         private bool _postCommandStatusObservationInFlight;
@@ -168,6 +182,9 @@ namespace Rice.AI.Codedb.Editor
                 _statusBoundary = null;
                 AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.Enable);
                 _executionContext = AICodedbPaths.CaptureExecutionContext();
+                _transitionEvidence = AICodedbLifecycleEvidence.ManagerTransitions(_executionContext.ProjectRoot);
+                _transitionWindow = Guid.NewGuid().ToString("N");
+                _renderedEvidenceKey = null;
                 ApplyWindowTitle();
                 _activitySidebarWidth = EditorPrefs.GetFloat(
                     ActivitySidebarWidthPrefsKey,
@@ -606,10 +623,14 @@ namespace Rice.AI.Codedb.Editor
             AICodedbStatusSnapshot snapshot,
             bool invalidateReadyCache,
             bool initializeDisclosures,
-            DateTimeOffset? readyObservedAt = null)
+            DateTimeOffset? readyObservedAt = null,
+            string evidenceSource = "STATUS_SNAPSHOT")
         {
             if (snapshot == null)
                 return;
+            _previousAppliedReadyAtUtc = _readyObservationAtUtc;
+            _lastApplySource = evidenceSource;
+            _appliedObservation = null;
             _statusSnapshot = snapshot;
             _readyObservationAtUtc = snapshot.ProductStatus.State == AICodedbProductState.Ready
                 ? readyObservedAt ?? DateTimeOffset.UtcNow : default(DateTimeOffset);
@@ -742,6 +763,9 @@ namespace Rice.AI.Codedb.Editor
 
         private bool TryApplyCachedLifecycleStatus()
         {
+            _candidateDisposition = "NOT_EVALUATED";
+            _candidateRevision = null;
+            _candidateObservation = null;
             AICodedbLifecycleEvidence.RecordManagerObservation(AICodedbManagerObservationKind.CacheRead);
             if (_hostStatusRefreshInFlight
                 || IsPlayModeDisplaySuspended()
@@ -750,7 +774,12 @@ namespace Rice.AI.Codedb.Editor
 
             if (_statusSnapshot != null && ShouldExpireDisplayedReady(
                     _statusSnapshot.ProductStatus.State, _readyObservationAtUtc, DateTimeOffset.UtcNow))
-                ApplyStatusSnapshot(AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName));
+            {
+                _expiredReadyAtUtc = _readyObservationAtUtc;
+                _readyExpiryAtUtc = DateTimeOffset.UtcNow;
+                ApplyStatusSnapshot(AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName),
+                    true, _statusSnapshot == null, null, "READY_EXPIRED");
+            }
 
             AICodedbCommandResult cachedResult;
             AICodedbProductStatus cachedProductStatus;
@@ -768,15 +797,20 @@ namespace Rice.AI.Codedb.Editor
                 || revision <= _cachedLifecycleStatusRevision)
                 return false;
 
+            _candidateRevision = revision;
+            _candidateObservation = cachedSupervisorSnapshot;
+
             // Lifecycle/Bridge owns product classification and authentication.
             // This additional display boundary cannot promote an incomplete,
             // stale or foreign observation to Ready, regardless of old history.
-            if ((_statusBoundary == null && cachedProductStatus.State == AICodedbProductState.Ready)
-                || (_statusBoundary != null
-                    && !_statusBoundary.CanDisplay(_executionContext, cachedProductStatus.State,
-                        hasProductStatus, cachedSupervisorSnapshot, DateTimeOffset.UtcNow)))
+            _candidateDisposition = _statusBoundary == null
+                ? (cachedProductStatus.State == AICodedbProductState.Ready ? "MISSING_BOUNDARY" : "ACCEPTED")
+                : _statusBoundary.DisplayDisposition(_executionContext, cachedProductStatus.State,
+                    hasProductStatus, cachedSupervisorSnapshot, DateTimeOffset.UtcNow);
+            if (_candidateDisposition != "ACCEPTED")
             {
-                ApplyStatusSnapshot(AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName));
+                ApplyStatusSnapshot(AICodedbStatusSnapshot.CreateStarting(_executionContext.ProjectDisplayName),
+                    true, _statusSnapshot == null, null, "DISPLAY_BOUNDARY_REJECTED");
                 return false;
             }
 
@@ -792,7 +826,9 @@ namespace Rice.AI.Codedb.Editor
                         cachedTerminalFailure),
                     true,
                     false,
-                    cachedSupervisorSnapshot?.ObservedAtUtc);
+                    cachedSupervisorSnapshot?.ObservedAtUtc,
+                    "LIFECYCLE_PRODUCT_CACHE");
+                _appliedObservation = cachedSupervisorSnapshot;
                 Repaint();
                 return true;
             }
@@ -840,7 +876,8 @@ namespace Rice.AI.Codedb.Editor
                     return;
                 }
 
-                ApplyStatusSnapshot(snapshot, true, false);
+                ApplyStatusSnapshot(snapshot, true, false, null, "LIFECYCLE_COMMAND_CACHE");
+                _appliedObservation = cachedSupervisorSnapshot;
                 await RefreshRetainedEffectsAsync(context, windowStatusGeneration, cancellationToken);
                 _transientStatusRefreshPending = false;
                 _transientStatusRefreshAttempts = 0;
@@ -1264,20 +1301,26 @@ namespace Rice.AI.Codedb.Editor
 
         private void DrawHeader()
         {
+            // Freeze the same values used for this draw. Capture only at actual Repaint.
+            var displayedState = GetDisplayedProductState();
+            var headerTitle = GetHeaderTitle();
+            var headerDescription = GetHeaderDescription();
+            if (Event.current != null && Event.current.type == EventType.Repaint)
+                CaptureHeaderRenderInput(displayedState);
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox, GUILayout.Height(AICodedbManagerStyles.HeaderHeight)))
             {
                 DrawHeaderBrandIcon();
                 GUILayout.Label(
                     "\u25cf",
-                    AICodedbManagerStyles.GetStateDotStyle(GetDisplayedProductState()),
+                    AICodedbManagerStyles.GetStateDotStyle(displayedState),
                     GUILayout.Width(AICodedbManagerStyles.StatusDotWidth),
                     GUILayout.Height(HeaderContentHeight));
 
                 using (new EditorGUILayout.VerticalScope())
                 {
                     GUILayout.Space(4f);
-                    EditorGUILayout.LabelField(GetHeaderTitle(), AICodedbManagerStyles.HeaderTitle);
-                    EditorGUILayout.LabelField(GetHeaderDescription(), AICodedbManagerStyles.HeaderSubtitle);
+                    EditorGUILayout.LabelField(headerTitle, AICodedbManagerStyles.HeaderTitle);
+                    EditorGUILayout.LabelField(headerDescription, AICodedbManagerStyles.HeaderSubtitle);
                 }
 
                 GUILayout.FlexibleSpace();
@@ -3419,6 +3462,87 @@ namespace Rice.AI.Codedb.Editor
             }
         }
 
+        private void CaptureHeaderRenderInput(AICodedbStatusState displayedState)
+        {
+            if (_transitionEvidence == null || _statusSnapshot == null) return;
+            var selectedOverride = TryGetActionStatusOverride(out var action);
+            var activity = GetUserActionPresentation();
+            var phase = _userActionStatus == null ? "MISSING" : _userActionStatus.Phase.ToString();
+            var headerKind = selectedOverride
+                ? (action.IsRunning ? "ACTION_RUNNING"
+                    : GetActionStatusTitle(action) == "CodeDB needs attention" ? "ACTION_NEEDS_ATTENTION"
+                    : "ACTION_UNCONFIRMED")
+                : _statusSnapshot.ProductStatus.State.ToString();
+            var activityKind = phase + ":" + activity.State + ":" + activity.IsVisible;
+            var key = AICodedbManagerTransitionEvidence.SemanticKey(
+                headerKind, displayedState.ToString(), selectedOverride, activityKind);
+            if (_renderedEvidenceKey == key)
+            {
+                _lastRenderedReadyAtUtc = _readyObservationAtUtc;
+                return;
+            }
+            var now = DateTimeOffset.UtcNow;
+            var fields = new Dictionary<string, string>
+            {
+                { "utc", now.ToString("o", CultureInfo.InvariantCulture) },
+                { "header_kind", headerKind },
+                { "header_severity", displayedState.ToString() },
+                { "product_state", _statusSnapshot.ProductStatus.State.ToString() },
+                { "product_attention_reason", _statusSnapshot.ProductStatus.AttentionReason.ToString() },
+                { "render_branch", selectedOverride ? "ACTION_OVERRIDE" : "PRODUCT_CLASSIFICATION" },
+                { "last_internal_apply", _lastApplySource },
+                { "consumed_cache_revision", _cachedLifecycleStatusRevision < 0 ? null
+                    : _cachedLifecycleStatusRevision.ToString(CultureInfo.InvariantCulture) },
+                { "candidate_cache_revision", _candidateRevision?.ToString(CultureInfo.InvariantCulture) },
+                { "candidate_disposition", _candidateDisposition },
+                { "previous_apply_ready_utc", EvidenceTime(_previousAppliedReadyAtUtc) },
+                { "previous_apply_ready_age_ms", EvidenceAge(_previousAppliedReadyAtUtc, now) },
+                { "previous_render_ready_utc", EvidenceTime(_lastRenderedReadyAtUtc) },
+                { "previous_render_ready_age_ms", EvidenceAge(_lastRenderedReadyAtUtc, now) },
+                { "current_ready_utc", EvidenceTime(_readyObservationAtUtc) },
+                { "current_ready_age_ms", EvidenceAge(_readyObservationAtUtc, now) },
+                { "last_expired_ready_utc", EvidenceTime(_expiredReadyAtUtc) },
+                { "last_ready_expiry_utc", EvidenceTime(_readyExpiryAtUtc) },
+                { "action_phase", phase },
+                { "activity_kind", activityKind },
+                { "action_fresh_product", _userActionStatus == null ? null
+                    : _userActionStatus.HasFreshProductState.ToString() },
+                { "override_selected", selectedOverride.ToString() },
+                { "project_identity", null },
+                { "project_context", string.IsNullOrWhiteSpace(_executionContext.ProjectRoot) ? "MISSING" : "PRESENT" }
+            };
+            AddObservationEvidence(fields, "applied_", _appliedObservation);
+            AddObservationEvidence(fields, "candidate_", _candidateObservation);
+            _transitionEvidence.Capture(_transitionWindow, key, fields);
+            _renderedEvidenceKey = key;
+            _lastRenderedReadyAtUtc = _readyObservationAtUtc;
+        }
+
+        private static string EvidenceTime(DateTimeOffset value)
+        {
+            return value == default(DateTimeOffset) ? null : value.ToString("o", CultureInfo.InvariantCulture);
+        }
+
+        private static string EvidenceAge(DateTimeOffset value, DateTimeOffset now)
+        {
+            return value == default(DateTimeOffset) ? null
+                : (now - value).TotalMilliseconds.ToString("F3", CultureInfo.InvariantCulture);
+        }
+
+        private static void AddObservationEvidence(Dictionary<string, string> fields, string prefix,
+            AICodedbSupervisorSnapshot observation)
+        {
+            fields[prefix + "observation_id"] = observation?.OperationalObservationId;
+            fields[prefix + "observation_revision"] = observation?.OperationalObservationRevision.ToString(CultureInfo.InvariantCulture);
+            fields[prefix + "observed_utc"] = observation == null ? null : EvidenceTime(observation.ObservedAtUtc);
+            fields[prefix + "supervisor_id"] = observation?.SupervisorId;
+            fields[prefix + "owner_epoch"] = observation?.OwnerEpoch;
+            fields[prefix + "instance_id"] = observation?.SelectedInstanceId;
+            fields[prefix + "generation_id"] = observation?.SelectedGenerationId;
+            fields[prefix + "activation_epoch"] = observation?.ActivationEpoch;
+            fields[prefix + "reason_code"] = observation?.ReasonCode;
+        }
+
         private string GetHeaderTitle()
         {
             if (TryGetActionStatusOverride(out var presentation))
@@ -3595,14 +3719,21 @@ namespace Rice.AI.Codedb.Editor
             AICodedbProductState state, bool hasProductStatus,
             AICodedbSupervisorSnapshot observation, DateTimeOffset now)
         {
+            return DisplayDisposition(context, state, hasProductStatus, observation, now) == "ACCEPTED";
+        }
+
+        internal string DisplayDisposition(AICodedbEditorExecutionContext context,
+            AICodedbProductState state, bool hasProductStatus,
+            AICodedbSupervisorSnapshot observation, DateTimeOffset now)
+        {
             if (!AICodedbManagerWindow.IsSameStatusContext(_context, context))
-                return false;
+                return "CONTEXT_REJECTED";
             if (observation != null && !string.IsNullOrWhiteSpace(observation.RuntimePath)
                 && !SamePath(_runtimePath, observation.RuntimePath))
-                return false;
+                return "RUNTIME_REJECTED";
             if (state != AICodedbProductState.Ready)
-                return true;
-            return observation != null && CanDisplayReadyEvidence(context,
+                return "ACCEPTED";
+            return observation == null ? "MISSING_READY_OBSERVATION" : ReadyEvidenceDisposition(context,
                 observation.RuntimePath, observation.TargetGenerationId,
                 observation.RuntimeContractSha256,
                 hasProductStatus && observation.IsCoreReady
@@ -3614,13 +3745,23 @@ namespace Rice.AI.Codedb.Editor
             string runtimePath, string generationId, string contractSha256,
             bool hasAuthenticatedProductReady, DateTimeOffset observedAt, DateTimeOffset now)
         {
-            return AICodedbManagerWindow.IsSameStatusContext(_context, context)
-                && hasAuthenticatedProductReady
-                && !string.IsNullOrEmpty(_generationId) && !string.IsNullOrEmpty(_contractSha256)
-                && SamePath(_runtimePath, runtimePath)
-                && string.Equals(_generationId, generationId, StringComparison.Ordinal)
-                && string.Equals(_contractSha256, contractSha256, StringComparison.Ordinal)
-                && IsReadyObservationFresh(observedAt, now);
+            return ReadyEvidenceDisposition(context, runtimePath, generationId, contractSha256,
+                hasAuthenticatedProductReady, observedAt, now) == "ACCEPTED";
+        }
+
+        private string ReadyEvidenceDisposition(AICodedbEditorExecutionContext context,
+            string runtimePath, string generationId, string contractSha256,
+            bool hasAuthenticatedProductReady, DateTimeOffset observedAt, DateTimeOffset now)
+        {
+            // Same predicate and decision order as the bool boundary; codes are evidence only.
+            if (!AICodedbManagerWindow.IsSameStatusContext(_context, context)) return "CONTEXT_REJECTED";
+            if (!hasAuthenticatedProductReady) return "PRODUCT_READY_NOT_AUTHENTICATED";
+            if (string.IsNullOrEmpty(_generationId) || string.IsNullOrEmpty(_contractSha256)) return "BOUNDARY_CONTRACT_MISSING";
+            if (!SamePath(_runtimePath, runtimePath)) return "RUNTIME_REJECTED";
+            if (!string.Equals(_generationId, generationId, StringComparison.Ordinal)) return "GENERATION_REJECTED";
+            if (!string.Equals(_contractSha256, contractSha256, StringComparison.Ordinal)) return "CONTRACT_REJECTED";
+            if (!IsReadyObservationFresh(observedAt, now)) return "READY_OBSERVATION_NOT_FRESH";
+            return "ACCEPTED";
         }
 
         internal static bool IsReadyObservationFresh(DateTimeOffset observedAt, DateTimeOffset now)

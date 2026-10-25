@@ -231,7 +231,6 @@ if ((Get-Sha256Hex $utf8NoBom.GetBytes($argumentText)) -cne ([string]$admitted.c
     throw 'Manager action command arguments changed after admission.'
 }
 $timeoutMilliseconds = [int]$admitted.command.timeout_ms
-$protectTransaction = [string]$admitted.effect_class -ceq 'ConfirmedProjectMutation'
 if ($timeoutMilliseconds -lt 1 -or $timeoutMilliseconds -gt 1800000) { throw 'Manager action timeout is invalid.' }
 $expectedCommandIdentity = Get-Sha256Hex $utf8NoBom.GetBytes(([string]$admitted.command.script_sha256 + "`n" + [string]$admitted.command.arguments_sha256 + "`n" + $timeoutMilliseconds.ToString([Globalization.CultureInfo]::InvariantCulture)))
 if ($expectedCommandIdentity -cne [string]$admitted.command_identity_sha256) { throw 'Manager command identity conflicts with its complete command.' }
@@ -349,19 +348,12 @@ try {
             }
         }
         if (-not $child.HasExited -and -not $terminationRequested -and ($outputOverflow -or $stopwatch.ElapsedMilliseconds -ge $timeoutMilliseconds)) {
-            # The admitted materializer owns a durable transaction and may be
-            # between journal publication and commit. Do not terminate it at
-            # the receipt deadline: the outer runner returns UNKNOWN while
-            # this authenticated writer completes its safe boundary.
             $timedOut = -not $outputOverflow
             $terminationRequested = $true
-            $outputDrainIncomplete = $outputOverflow
-            if (-not $protectTransaction) {
-                if ($drainDeadline -eq [long]::MaxValue) {
-                    $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
-                }
-                try { $child.Kill() } catch { $outputDrainIncomplete = $true }
+            if ($drainDeadline -eq [long]::MaxValue) {
+                $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
             }
+            try { $child.Kill() } catch { $outputDrainIncomplete = $true }
         }
         if ($stopwatch.ElapsedMilliseconds -gt $drainDeadline) {
             $outputDrainIncomplete = $true
@@ -381,14 +373,9 @@ finally {
         if ($drainDeadline -eq [long]::MaxValue) {
             $drainDeadline = $stopwatch.ElapsedMilliseconds + 5000
         }
-        # A direct writer owns the admitted transaction. A finally block must
-        # never turn a caller timeout or output fault into a mid-write kill.
-        $outputDrainIncomplete = $true
-        if (-not $protectTransaction) {
-            try { $child.Kill() } catch { }
-            $remaining = [int][Math]::Max(0, $drainDeadline - $stopwatch.ElapsedMilliseconds)
-            if ($remaining -gt 0) { $null = $child.WaitForExit($remaining) }
-        }
+        try { $child.Kill() } catch { }
+        $remaining = [int][Math]::Max(0, $drainDeadline - $stopwatch.ElapsedMilliseconds)
+        if ($remaining -gt 0) { $null = $child.WaitForExit($remaining) }
     }
     $child.Dispose()
     $stdoutBytes.Dispose()

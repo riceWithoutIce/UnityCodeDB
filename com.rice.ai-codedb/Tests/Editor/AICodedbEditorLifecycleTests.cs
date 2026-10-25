@@ -2860,6 +2860,50 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void LifecycleEvidence_BoundsReconcileEpochAndCommandEvidenceToCurrentPass()
+        {
+            var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
+            evidence.RecordReconcileStarted(AICodedbProductState.Ready);
+            evidence.RecordPostAdmissionDisposition(
+                AICodedbEditorLifecycle.AICodedbPostAdmissionDisposition.RetirementSelected);
+            evidence.RecordSourceStage("RETIRE_UPGRADE");
+            var command = new AICodedbCommandResult(
+                0,
+                "[COMMAND_RESULT] {\"schema_version\":1,\"managed_by\":\"com.rice.ai-codedb\",\"action\":\"UPGRADE\",\"outcome\":\"CONVERGED\",\"phase\":\"PREFLIGHT\",\"reason_code\":\"INSTANCE_CURRENT\",\"mutated_scopes\":[],\"cleanup_state\":\"PENDING\",\"next_action\":\"No action is required.\",\"exit_code\":0,\"detail\":\"\"}",
+                string.Empty,
+                false);
+            evidence.RecordMaterializerCommandEvidence("materialize", "Upgrade", command);
+            evidence.RecordReconcileCompleted(AICodedbProductState.NeedsAttention);
+
+            var completed = evidence.Capture("reconcile_completed");
+
+            Assert.That(completed.reconcile_epoch, Is.EqualTo(1));
+            Assert.That(completed.reconcile_started_at_utc, Does.EndWith("Z"));
+            Assert.That(completed.reconcile_completed_at_utc, Does.EndWith("Z"));
+            Assert.That(completed.source_stage, Is.EqualTo("RETIRE_UPGRADE"));
+            Assert.That(completed.product_state_before, Is.EqualTo("Ready"));
+            Assert.That(completed.product_state_after, Is.EqualTo("NeedsAttention"));
+            Assert.That(completed.field_validity_epoch, Is.EqualTo("RECONCILE_1"));
+            Assert.That(completed.command_action, Is.EqualTo("UPGRADE"));
+            Assert.That(completed.command_outcome, Is.EqualTo("CONVERGED"));
+            Assert.That(completed.command_phase, Is.EqualTo("PREFLIGHT"));
+            Assert.That(completed.command_reason_code, Is.EqualTo("INSTANCE_CURRENT"));
+            Assert.That(completed.command_cleanup_state, Is.EqualTo("PENDING"));
+            Assert.That(completed.command_identity_disposition, Is.EqualTo("OPERATION_ID_NOT_EXPOSED"));
+
+            evidence.RecordReconcileStarted(AICodedbProductState.NeedsAttention);
+            var nextPass = evidence.Capture("reconcile_started");
+
+            Assert.That(nextPass.reconcile_epoch, Is.EqualTo(2));
+            Assert.That(nextPass.source_stage, Is.EqualTo("RECONCILE_STARTED"));
+            Assert.That(nextPass.product_state_before, Is.EqualTo("NeedsAttention"));
+            Assert.That(nextPass.product_state_after, Is.Empty);
+            Assert.That(nextPass.command_action, Is.Empty);
+            Assert.That(nextPass.command_cleanup_state, Is.Empty);
+            Assert.That(nextPass.post_admission_disposition, Is.EqualTo("NotEvaluated"));
+        }
+
+        [Test]
         public void LifecycleEvidence_CapturesManagerCloseAndQuittingTaskStateWithoutRawData()
         {
             var evidence = new AICodedbLifecycleEvidenceCounter(Thread.CurrentThread.ManagedThreadId);
@@ -5312,6 +5356,95 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void OperationalObservationCadence_CoalescesAtMostOnePendingRequest()
+        {
+            var nextObservationAt = 10d;
+            var pending = false;
+
+            Assert.That(AICodedbEditorLifecycle.ShouldDispatchOperationalObservation(
+                5d,
+                ref nextObservationAt,
+                false,
+                false,
+                ref pending), Is.False);
+            Assert.That(pending, Is.False);
+
+            Assert.That(AICodedbEditorLifecycle.ShouldDispatchOperationalObservation(
+                10d,
+                ref nextObservationAt,
+                false,
+                true,
+                ref pending), Is.False);
+            Assert.That(pending, Is.True);
+            Assert.That(nextObservationAt, Is.EqualTo(20d));
+
+            Assert.That(AICodedbEditorLifecycle.ShouldDispatchOperationalObservation(
+                11d,
+                ref nextObservationAt,
+                false,
+                false,
+                ref pending), Is.True);
+            Assert.That(pending, Is.False);
+            Assert.That(nextObservationAt, Is.EqualTo(21d));
+
+            Assert.That(AICodedbEditorLifecycle.ShouldDispatchOperationalObservation(
+                21d,
+                ref nextObservationAt,
+                true,
+                false,
+                ref pending), Is.False);
+        }
+
+        [Test]
+        public void OperationalObservationAcceptance_AllowsAuthenticatedNonReadyStates()
+        {
+            var contract = ReadPackageRuntimeContract();
+            var starting = CreateTerminalObservation(
+                contract,
+                1,
+                AICodedbSupervisorReadinessState.Starting,
+                "11111111111111111111111111111111");
+            var maintenance = CreateTerminalObservation(
+                contract,
+                2,
+                AICodedbSupervisorReadinessState.Maintenance,
+                "22222222222222222222222222222222");
+            var disconnected = AICodedbSupervisorSnapshot.Disconnected(
+                "SUPERVISOR_STATE_UNAVAILABLE",
+                "fixture");
+
+            Assert.That(AICodedbEditorLifecycle.IsCompleteOperationalObservation(starting), Is.True);
+            Assert.That(AICodedbEditorLifecycle.IsCompleteOperationalObservation(maintenance), Is.True);
+            Assert.That(AICodedbEditorLifecycle.IsCompleteOperationalObservation(disconnected), Is.False);
+        }
+
+        [Test]
+        public void OperationalObservationSource_IsReadOnlyAndDoesNotEnsureRuntime()
+        {
+            var source = File.ReadAllText(Path.Combine(
+                AICodedbPaths.PackageRootPath,
+                "Editor",
+                "AICodedbSupervisorBridge.cs"));
+            var start = source.IndexOf(
+                "private static AICodedbSupervisorSnapshot ObserveOperationalStatusWorker(",
+                StringComparison.Ordinal);
+            Assert.That(start, Is.GreaterThanOrEqualTo(0));
+            var end = source.IndexOf(
+                "private static AICodedbSupervisorSnapshot ConnectWorker(",
+                start,
+                StringComparison.Ordinal);
+            Assert.That(end, Is.GreaterThan(start));
+            var body = source.Substring(start, end - start);
+            Assert.That(body, Does.Contain("GetSupervisorStatePath"));
+            Assert.That(body, Does.Contain("ConnectSupervisorWorker"));
+            Assert.That(body, Does.Not.Contain("EnsureStartedAsync"));
+            Assert.That(body, Does.Not.Contain("SendCommand"));
+            Assert.That(body, Does.Not.Contain("materialize"));
+            Assert.That(body, Does.Not.Contain("cleanup"));
+            Assert.That(body, Does.Not.Contain("shutdown"));
+        }
+
+        [Test]
         public void SupervisorIntentAdapter_DispatchesIndependentIntentOffCallingThread()
         {
             var adapter = new AICodedbSupervisorIntentAdapter();
@@ -6385,6 +6518,66 @@ namespace Rice.AI.Codedb.Editor.Tests
         }
 
         [Test]
+        public void ReadyCurrentInstance_WithRetainedOnlyCleanup_DoesNotScheduleRetirement()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Installed,
+                    AICodedbProjectCleanupState.Pending,
+                    string.Empty,
+                    "installed"),
+                Result("[PRODUCT_LAYER PREREQUISITE] CURRENT\n"
+                       + "[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                       + "[PRODUCT_LAYER CONFIGURED] CURRENT\n"
+                       + "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n"
+                       + "[PRODUCT_STATE] READY\n"
+                       + "[CLEANUP_SCHEDULING] {\"schema_version\":1,\"disposition\":\"RetainedOnly\",\"inputs\":[]}"));
+            Assert.That(status.CleanupSchedulingDisposition,
+                Is.EqualTo(AICodedbCleanupSchedulingDisposition.RetainedOnly));
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true, true, AICodedbProductState.Ready,
+                    AICodedbProjectCleanupState.Pending,
+                    AICodedbCleanupSchedulingDisposition.RetainedOnly),
+                Is.False);
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceState.Current, status,
+                    AICodedbProjectCleanupState.Pending),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.None));
+            Assert.That(
+                AICodedbEditorLifecycle.ShouldRunInstalledInstanceConvergence(
+                    true, true, AICodedbProductState.Ready,
+                    AICodedbProjectCleanupState.Pending,
+                    AICodedbCleanupSchedulingDisposition.Unresolved),
+                Is.False);
+        }
+
+        [Test]
+        public void InvalidCleanupSchedulingObservation_DoesNotClaimRetention()
+        {
+            var status = AICodedbProductStatusBuilder.Build(
+                new AICodedbProjectIntegrationStatus(
+                    AICodedbProjectIntegrationState.Installed,
+                    AICodedbProjectCleanupState.Pending,
+                    string.Empty,
+                    "installed"),
+                Result("[PRODUCT_LAYER PREREQUISITE] CURRENT\n"
+                       + "[PRODUCT_LAYER INSTALLED] CURRENT\n"
+                       + "[PRODUCT_LAYER CONFIGURED] CURRENT\n"
+                       + "[PRODUCT_LAYER MCP_AVAILABLE] CURRENT\n"
+                       + "[PRODUCT_STATE] READY\n"
+                       + "[CLEANUP_SCHEDULING] {broken}"));
+            Assert.That(status.CleanupSchedulingDisposition,
+                Is.EqualTo(AICodedbCleanupSchedulingDisposition.Unresolved));
+            Assert.That(
+                AICodedbEditorLifecycle.ResolveCurrentInstanceConvergencePlan(
+                    AICodedbCurrentInstanceState.Current, status,
+                    AICodedbProjectCleanupState.Pending),
+                Is.EqualTo(AICodedbEditorLifecycle.AICodedbCurrentInstanceConvergencePlan.Retire));
+        }
+
+        [Test]
         public void MissingOrUnavailableCurrentInstance_StillRunsFullConvergence()
         {
             Assert.That(
@@ -6809,7 +7002,9 @@ namespace Rice.AI.Codedb.Editor.Tests
                 observationId,
                 revision,
                 supervisorId,
-                ownerEpoch);
+                ownerEpoch,
+                AICodedbPackageRuntimeContract.CurrentOwnerIdentityVersion,
+                "abcdefabcdefabcdefabcdefabcdefab");
         }
 
         private static AICodedbCommandResult TerminalFailureResult()

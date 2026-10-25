@@ -300,6 +300,7 @@ function buildContext(raw) {
     watchManager,
     provider,
     providerConfig,
+    watchService: buildWatchServiceProfile(root, selectedInstance),
     projectIdentity: identity,
     runtimeContract,
     selectedInstance,
@@ -315,6 +316,18 @@ function buildContext(raw) {
     activationEpoch: selectedInstance.activationEpoch,
     lifecycleId: validId(raw.lifecycleId) || supervisorId,
     startupTimeoutMs: positiveInt(raw.startupTimeoutMs, START_TIMEOUT_MS)
+  };
+}
+
+function buildWatchServiceProfile(root, selectedInstance) {
+  return {
+    config: path.join(selectedInstance.instanceRoot, "config", "codedb-mcp.watch.toml"),
+    adapterBuilder: path.join(selectedInstance.generationRoot, "scripts", "build-codedb-project-text-adapter.ps1"),
+    adapterWorker: path.join(selectedInstance.generationRoot, "scripts", "run-codedb-project-text-adapter-worker.ps1"),
+    adapterManifest: path.join(selectedInstance.instanceRoot, "adapter", "text-index", "manifest.json"),
+    legacyAdapterBuilder: path.join(root, "AIWork", "codedb", "scripts", "build-codedb-project-text-adapter.ps1"),
+    legacyAdapterWorker: path.join(root, "AIWork", "codedb", "scripts", "run-codedb-project-text-adapter-worker.ps1"),
+    adapterDebounceMs: 750
   };
 }
 
@@ -1088,7 +1101,7 @@ async function runDaemon(raw) {
       state.readiness_state = "degraded";
       state.reason_code = "SUPERVISOR_STATE_PUBLISH_FAILED";
       state.detail = "The project Supervisor could not durably publish its state; maintenance is blocked.";
-      publishOperationalReadiness(state, null, {
+      publishOperationalReadiness(context, state, null, {
         state: "degraded",
         reasonCode: "SUPERVISOR_STATE_PUBLISH_FAILED",
         detail: "The project Supervisor could not durably publish its operational state."
@@ -1218,7 +1231,7 @@ async function runDaemon(raw) {
       return result;
     } catch (error) {
       state.coordinator_failure_category = coordinatorFailureCategory(error);
-      publishOperationalReadiness(state, null);
+      publishOperationalReadiness(context, state, null);
       throw error;
     }
   };
@@ -1235,7 +1248,7 @@ async function runDaemon(raw) {
     state.readiness_state = "stopping";
     state.reason_code = "SUPERVISOR_STOPPING";
     state.detail = "The project Supervisor is retiring its authenticated runtime.";
-    publishOperationalReadiness(state, coordinatorStatus, {
+    publishOperationalReadiness(context, state, coordinatorStatus, {
       state: "stopping",
       reasonCode: "SUPERVISOR_STOPPING",
       detail: "The project Supervisor is retiring its authenticated runtime."
@@ -1271,7 +1284,7 @@ async function runDaemon(raw) {
       if (coordinatorObserved && coordinatorUnavailableSince === 0)
         coordinatorUnavailableSince = Date.now();
     }
-    updateReadiness(state, coordinatorStatus, activeOperation);
+    updateReadiness(context, state, coordinatorStatus, activeOperation);
     persist();
     if (coordinatorObserved
         && coordinatorUnavailableSince > 0
@@ -1342,7 +1355,7 @@ async function runDaemon(raw) {
       value.handoff_reason = "selected_instance_changed";
     }
     rememberOperation(value);
-    updateReadiness(state, coordinatorStatus, null);
+    updateReadiness(context, state, coordinatorStatus, null);
     emitSafely(value.state === "completed" ? "operation_completed" : "operation_failed", value.name);
     try { await queueQuery(refresh, "internal:status-refresh"); } catch (refreshError) { emitSafely("status_error", refreshError.message); }
     if (activeOperation?.operation_id === value.operation_id)
@@ -1382,7 +1395,7 @@ async function runDaemon(raw) {
       scheduleRequestQueue();
       return;
     }
-    updateReadiness(state, coordinatorStatus, activeOperation);
+    updateReadiness(context, state, coordinatorStatus, activeOperation);
     if (!emitSafely("operation_started", value.name)) {
       activeOperation = null;
       failQueuedMaintenance(
@@ -1754,7 +1767,7 @@ function createInitialState(context, ownerEvidence) {
     last_event: "",
     last_event_detail: ""
   };
-  publishOperationalReadiness(state, null);
+  publishOperationalReadiness(context, state, null);
   return state;
 }
 
@@ -1824,8 +1837,8 @@ function publicStatus(
   };
 }
 
-function updateReadiness(state, coordinatorStatus, operation) {
-  const operational = publishOperationalReadiness(state, coordinatorStatus);
+function updateReadiness(context, state, coordinatorStatus, operation) {
+  const operational = publishOperationalReadiness(context, state, coordinatorStatus);
   if (operation?.state === "running") {
     state.readiness_state = "maintenance";
     state.reason_code = "SUPERVISOR_MAINTENANCE";
@@ -1837,8 +1850,9 @@ function updateReadiness(state, coordinatorStatus, operation) {
   state.detail = operational.detail;
 }
 
-function publishOperationalReadiness(state, coordinatorStatus, override = null) {
+function publishOperationalReadiness(context, state, coordinatorStatus, override = null) {
   const decision = override ?? resolveOperationalReadiness(
+    context,
     coordinatorStatus,
     sanitizeCoordinatorFailureCategory(state.coordinator_failure_category));
   const previousRevision = Number.isSafeInteger(state.operational_readiness?.revision)
@@ -1873,7 +1887,7 @@ function publishOperationalReadiness(state, coordinatorStatus, override = null) 
   return observation;
 }
 
-function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
+function resolveOperationalReadiness(context, coordinatorStatus, failureCategory) {
   if (!coordinatorStatus) {
     if (!["NOT_EVALUATED", "NONE"].includes(failureCategory)) {
       return {
@@ -1893,6 +1907,14 @@ function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
     };
   }
 
+  const mismatch = coordinatorServiceMismatch(context, coordinatorStatus);
+  if (mismatch) {
+    return {
+      state: "degraded",
+      reasonCode: "COORDINATOR_COMPONENT_FAILED",
+      detail: `Coordinator query service configuration mismatch: ${mismatch}. Use the owned stop/recovery route before starting this configuration.`
+    };
+  }
   if (TERMINAL_COORDINATOR_STARTUP_FAILURE_CATEGORIES.has(failureCategory)) {
     return {
       state: "degraded",
@@ -1914,8 +1936,13 @@ function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
     };
   }
   if (provider !== "ready"
-      || ["starting", "pending", "building", "restarting"].includes(adapter)
-      || ["starting", "restarting"].includes(worker)) {
+      || !["watching", "pending", "building"].includes(adapter)
+      || worker !== "ready"
+      || coordinatorStatus.desired_state !== "enabled"
+      || coordinatorStatus.editor_demand !== "online"
+      || !(Number(coordinatorStatus.editor_session_count) > 0)
+      || ![coordinatorStatus.coordinator_pid, coordinatorStatus.provider_pid,
+        coordinatorStatus.adapter_worker_pid].every(coordinatorProcessMayBeAlive)) {
     return {
       state: "starting",
       reasonCode: "COORDINATOR_STARTING",
@@ -1929,22 +1956,78 @@ function resolveOperationalReadiness(coordinatorStatus, failureCategory) {
   };
 }
 
+// Match the existing complete watch lane, including the legacy path aliases
+// still consumed by the immutable worker. Never attach to a different owner
+// shape merely because its Provider is ready.
+function coordinatorServiceMismatch(context, status) {
+  if (status.schema_version !== 2) return "schema_version";
+  if (status.generation_id !== context.generationId) return "generation_id";
+  if (status.exclusive_lifecycle === true && status.lifecycle_id !== context.lifecycleId)
+    return "exclusive lifecycle";
+  const service = context.watchService;
+  for (const [field, expected] of [
+    ["root", context.root],
+    ["provider_executable", context.provider],
+    ["provider_config", service.config],
+    ["runtime", context.coordinatorRuntime],
+    ["adapter_builder", service.legacyAdapterBuilder],
+    ["generation_adapter_builder", service.adapterBuilder],
+    ["adapter_worker", service.legacyAdapterWorker],
+    ["generation_adapter_worker", service.adapterWorker],
+    ["adapter_manifest", service.adapterManifest]
+  ]) {
+    if (!pathsEqual(status[field], expected)) return field;
+  }
+  if (status.adapter_enabled !== true) return "adapter_enabled";
+  if (status.adapter_state === "disabled") return "adapter_state disabled";
+  if (status.adapter_worker_state === "disabled") return "adapter_worker_state disabled";
+  if (Number(status.adapter_debounce_ms) !== service.adapterDebounceMs) return "adapter_debounce_ms";
+  return null;
+}
+
+function coordinatorProcessMayBeAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch (error) {
+    return !["ENOENT", "ESRCH"].includes(error?.code);
+  }
+}
+
 async function ensureCoordinator(context, operation = null) {
   const existing = await requestCoordinatorStatus(context);
-  if (existing?.provider_state === "ready") {
+  if (existing) {
+    const mismatch = coordinatorServiceMismatch(context, existing);
+    if (mismatch) {
+      throw createCoordinatorFailure(
+        `Coordinator query service configuration mismatch: ${mismatch}; stop the existing owned coordinator before starting this configuration.`,
+        "NONZERO_EXIT");
+    }
+  }
+  if (existing && resolveOperationalReadiness(context, existing, "NONE").state === "core_ready") {
     if (operation?.execution_disposition === "UNKNOWN" && operation.child === null) {
       operation.execution_disposition = "NO_CHILD";
       persistOperation(context, operation);
     }
     return { exit_code: 0, action: "attached", status: existing };
   }
+  const service = context.watchService;
+  // The materializer/watch preparation owns this file. Never fall back to the
+  // ordinary watch-disabled Provider configuration or create a second writer.
+  assertReviewedPath(context.selectedInstance.instanceRoot, service.config, "selected watch Provider config", "file");
   const args = [
     context.coordinatorScript,
     "start",
     "--generation-id", context.generationId,
     "--root", context.root,
     "--provider", context.provider,
-    "--config", context.providerConfig,
+    "--config", service.config,
+    "--adapter-builder", service.adapterBuilder,
+    "--adapter-worker", service.adapterWorker,
+    "--adapter-manifest", service.adapterManifest,
+    "--adapter-debounce-ms", String(service.adapterDebounceMs),
     "--runtime", context.coordinatorRuntime,
     "--lifecycle-id", context.lifecycleId,
     "--exclusive-lifecycle", "false",
@@ -2011,7 +2094,11 @@ async function runWatchManager(context, action, request, operation = null) {
     args,
     context.root,
     120000,
-    (child) => queueChildEvidenceCapture(context, operation, command, args, child));
+    (child) => queueChildEvidenceCapture(context, operation, command, args, child),
+    {
+      RICE_CODEDB_UNITY_ROOT: context.root,
+      RICE_CODEDB_INSTANCE_ROOT: context.selectedInstance.instanceRoot
+    });
 }
 
 async function runProjectMaintenance(context, action, operation = null) {

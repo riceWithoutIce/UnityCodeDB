@@ -542,6 +542,15 @@ namespace Rice.AI.Codedb.Editor
         ControlContractAuthenticationUnavailable
     }
 
+    internal enum AICodedbCleanupSchedulingDisposition
+    {
+        Unknown,
+        None,
+        RetainedOnly,
+        RetirementPending,
+        Unresolved
+    }
+
     internal readonly struct AICodedbMaterializerCommandStatus
     {
         internal bool Present { get; }
@@ -801,6 +810,7 @@ namespace Rice.AI.Codedb.Editor
         internal string DiagnosticDetail { get; }
         internal AICodedbProductAttentionReason AttentionReason { get; }
         internal bool RemovalPreflightPassed { get; }
+        internal AICodedbCleanupSchedulingDisposition CleanupSchedulingDisposition { get; }
         internal bool IsReady => State == AICodedbProductState.Ready;
         internal bool RequiresReinstall =>
             State == AICodedbProductState.NeedsAttention
@@ -816,7 +826,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
             AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
             string diagnosticDetail = "",
-            bool removalPreflightPassed = false)
+            bool removalPreflightPassed = false,
+            AICodedbCleanupSchedulingDisposition cleanupSchedulingDisposition = AICodedbCleanupSchedulingDisposition.Unknown)
             : this(
                 state,
                 AICodedbProductLayerState.Unknown,
@@ -827,7 +838,8 @@ namespace Rice.AI.Codedb.Editor
                 command,
                 attentionReason,
                 diagnosticDetail,
-                removalPreflightPassed)
+                removalPreflightPassed,
+                cleanupSchedulingDisposition)
         {
         }
 
@@ -841,7 +853,8 @@ namespace Rice.AI.Codedb.Editor
             AICodedbMaterializerCommandStatus command = default(AICodedbMaterializerCommandStatus),
             AICodedbProductAttentionReason attentionReason = AICodedbProductAttentionReason.None,
             string diagnosticDetail = "",
-            bool removalPreflightPassed = false)
+            bool removalPreflightPassed = false,
+            AICodedbCleanupSchedulingDisposition cleanupSchedulingDisposition = AICodedbCleanupSchedulingDisposition.Unknown)
         {
             State = state;
             Prerequisite = prerequisite;
@@ -853,6 +866,7 @@ namespace Rice.AI.Codedb.Editor
             DiagnosticDetail = diagnosticDetail ?? string.Empty;
             AttentionReason = attentionReason;
             RemovalPreflightPassed = removalPreflightPassed;
+            CleanupSchedulingDisposition = cleanupSchedulingDisposition;
         }
     }
 
@@ -863,6 +877,7 @@ namespace Rice.AI.Codedb.Editor
         private const string ConfiguredPrefix = "[PRODUCT_LAYER CONFIGURED]";
         private const string McpAvailablePrefix = "[PRODUCT_LAYER MCP_AVAILABLE]";
         private const string ProductStatePrefix = "[PRODUCT_STATE]";
+        private const string CleanupSchedulingPrefix = "[CLEANUP_SCHEDULING]";
 
         internal static AICodedbProductStatus Build(
             AICodedbProjectIntegrationStatus integrationStatus,
@@ -914,6 +929,9 @@ namespace Rice.AI.Codedb.Editor
             var configured = ParseLayer(output, ConfiguredPrefix);
             var mcpAvailable = ParseLayer(output, McpAvailablePrefix);
             var declaredState = ReadMarkerValue(output, ProductStatePrefix);
+            string cleanupSchedulingDetail;
+            var cleanupSchedulingDisposition = ParseCleanupSchedulingDisposition(
+                output, out cleanupSchedulingDetail);
             if (prerequisite == AICodedbProductLayerState.Missing
                 || string.Equals(declaredState, "MISSING_PREREQUISITE", StringComparison.Ordinal))
             {
@@ -946,7 +964,11 @@ namespace Rice.AI.Codedb.Editor
                     configured,
                     mcpAvailable,
                     "The Package-owned Host, project registration, and MCP handshake are current.",
-                    command);
+                    command,
+                    AICodedbProductAttentionReason.None,
+                    cleanupSchedulingDetail,
+                    false,
+                    cleanupSchedulingDisposition);
             }
 
             var blocked = prerequisite == AICodedbProductLayerState.Blocked
@@ -1012,6 +1034,35 @@ namespace Rice.AI.Codedb.Editor
             if (value.StartsWith("UNAVAILABLE", StringComparison.Ordinal))
                 return AICodedbProductLayerState.Unavailable;
             return AICodedbProductLayerState.Unknown;
+        }
+
+        private static AICodedbCleanupSchedulingDisposition ParseCleanupSchedulingDisposition(
+            string output,
+            out string detail)
+        {
+            detail = string.Empty;
+            var value = ReadMarkerValue(output, CleanupSchedulingPrefix);
+            if (value.StartsWith("{", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var document = AICodedbStrictJson.ParseObject(value, "Cleanup scheduling observation");
+                    value = AICodedbStrictJson.GetRequiredString(
+                        document, "disposition", "Cleanup scheduling observation");
+                    if (document.ContainsKey("detail"))
+                        detail = AICodedbStrictJson.GetRequiredString(
+                            document, "detail", "Cleanup scheduling observation");
+                }
+                catch (Exception)
+                {
+                    return AICodedbCleanupSchedulingDisposition.Unresolved;
+                }
+            }
+            AICodedbCleanupSchedulingDisposition disposition;
+            return Enum.TryParse(value, false, out disposition)
+                && disposition != AICodedbCleanupSchedulingDisposition.Unknown
+                ? disposition
+                : AICodedbCleanupSchedulingDisposition.Unknown;
         }
 
         private static string ReadMarkerValue(string output, string prefix)

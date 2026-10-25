@@ -8,9 +8,283 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+
+// Selected watch-manager child context; product spawn intercepted, consumer functions only.
+if (process.argv[2] === "--watch-manager-context-fixture") {
+  const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const sourceRoot=path.join(repo,"com.rice.ai-codedb");
+const sources={supervisor:path.join(sourceRoot,'Tools~/codedb-project-supervisor.mjs'),
+ common:path.join(sourceRoot,'Payload~/Generations/poc.44/scripts/codedb-project-common.ps1'),
+ watch:path.join(sourceRoot,'Payload~/Generations/poc.44/scripts/manage-codedb-project-watch.ps1')};
+const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const source=fs.readFileSync(sources.supervisor,'utf8');
+
+const run=path.resolve(process.argv[3]);
+assert.ok(run.startsWith(path.join(repo,'.artifacts/tests/s42-instance-context')+path.sep));
+for(let p=path.dirname(run);;p=path.dirname(p)){
+ if(fs.existsSync(p))assert.equal(fs.lstatSync(p).isSymbolicLink(),false);
+ if(path.dirname(p)===p)break;
+}
+assert.equal(fs.existsSync(run),false);fs.mkdirSync(run,{recursive:true});
+const project=path.join(run,'project');
+const instance=path.join(project,'AIWork/.runtime/codedb/instances','a'.repeat(32));
+const foreign=path.join(project,'AIWork/.runtime/codedb/instances','b'.repeat(32));
+const leaseRoot=path.join(instance,'watch/lifecycle/editor-leases');
+fs.mkdirSync(leaseRoot,{recursive:true});fs.mkdirSync(foreign,{recursive:true});
+const projectIdentity='sha256:'+hash(project.replaceAll('\\','/').toLowerCase());
+const stamp=new Date().toISOString();
+fs.writeFileSync(path.join(leaseRoot,'fixture-session.json'),JSON.stringify({schema_version:1,managed_by:'com.rice.ai-codedb',
+ session_id:'fixture-session',editor_pid:12345,process_start_ticks:'123456789',project_root:project,project_identity:projectIdentity,
+ created_at_utc:stamp,heartbeat_at_utc:stamp}));
+const extract=name=>{const lines=source.split(/\r?\n/);const start=lines.findIndex(l=>new RegExp(`^(?:async )?function ${name}\\(`).test(l));
+ const end=lines.findIndex((l,i)=>i>start&&/^(?:async )?function |^await main\(/.test(l));assert.ok(start>=0&&end>start,name);return lines.slice(start,end).join('\n');};
+const cases=[];
+for(const [name,inheritedInstance] of [['absent',null],['matching',instance],['foreign',foreign],['wrong-unity',foreign],['no-valid-lease',null]]){
+ let captured;let admissionCount=0,captureCount=0;
+ // Deliberately controlled environment: no host environment secrets enter VM or output.
+ const env={RICE_CODEDB_UNITY_ROOT:name==='wrong-unity'?path.join(run,'unrelated-project'):project,FIXTURE_UNRELATED:'preserve'};
+ if(inheritedInstance)env.RICE_CODEDB_INSTANCE_ROOT=inheritedInstance;
+ const parentBefore={...env};
+ const sandbox={process:{platform:'win32',env},setTimeout,clearTimeout,
+  prepareOperationChildEvidence:async()=>{admissionCount++;},queueChildEvidenceCapture:()=>{captureCount++;},
+  spawn:(command,args,options)=>{
+   assert.equal(command,'powershell.exe');assert.ok(args.includes('Stop'));
+   assert.equal(options.cwd,project);assert.equal(options.windowsHide,true);
+   assert.equal(args[args.indexOf('-ExpectedLifecycleId')+1],'fixture-lifecycle');
+   captured={...options.env};
+   const child=new EventEmitter();child.pid=999;child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+   child.kill=()=>{throw Error('FIXTURE_KILL_FORBIDDEN');};setImmediate(()=>child.emit('close',0,null));return child;
+  }};
+ const api=vm.runInNewContext(extract('runWatchManager')+'\n'+extract('runChild')+'\n({runWatchManager})',sandbox);
+ const result=await api.runWatchManager({root:project,selectedInstance:{instanceRoot:instance},watchManager:'synthetic-watch.ps1'},
+  'Stop',{expected_lifecycle_id:'fixture-lifecycle'},{});
+ assert.equal(result.code,0);assert.equal(admissionCount,1);assert.equal(captureCount,1);
+ assert.equal(captured.RICE_CODEDB_INSTANCE_ROOT,instance);
+ assert.equal(captured.RICE_CODEDB_UNITY_ROOT,project);
+ assert.deepEqual(env,parentBefore,'Parent environment must remain unchanged');
+ assert.equal(captured.FIXTURE_UNRELATED,'preserve');
+ cases.push({name,capturedEnvironment:captured});
+}
+const input=path.join(run,'input.json');
+fs.writeFileSync(input,JSON.stringify({project,selectedInstance:instance,projectIdentity,sources,cases}));
+const probe=String.raw`param([string]$InputFile)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$fixture=Get-Content -LiteralPath $InputFile -Raw | ConvertFrom-Json
+function Import-FixtureFunction([string]$Source,[string]$Name) {
+ $tokens=$null;$errors=$null
+ $ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+ if($errors.Count -gt 0){throw 'SOURCE_PARSE_FAILED'}
+ $nodes=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name},$true))
+ if($nodes.Count -ne 1){throw 'FUNCTION_EXTRACTION_FAILED'}
+ return $nodes[0].Extent.Text
+}
+# Only function definitions are evaluated. A fixture file supplies PSScriptRoot;
+# no original script entry point/imports run.
+$functionFile=Join-Path (Split-Path -Parent $InputFile) 'consumer-functions.ps1'
+$definitions=(Import-FixtureFunction $fixture.sources.common 'Get-ProjectCodedbContext')+[Environment]::NewLine+(Import-FixtureFunction $fixture.sources.watch 'Get-ActiveEditorSessionIds')
+Set-Content -LiteralPath $functionFile -Value $definitions -Encoding UTF8
+. $functionFile
+function ConvertTo-CodedbProjectSlug { param([string]$Value) return 'fixture-project' }
+function Assert-CodedbPathInside { param([string]$Path,[string]$Root,[string]$Label)
+ if(-not $Path.StartsWith($Root+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'FIXTURE_PATH_OUTSIDE_ROOT'} }
+function Get-CodedbTextAdapterOutputContract { return [pscustomobject]@{RootRelativePath='adapter/text-index';LogsRelativePath='adapter/text-index/logs';TempRelativePath='adapter/text-index/tmp'} }
+function Get-ProcessStartTicks { param([int]$ProcessId)
+ if($ProcessId -ne 12345){throw 'UNEXPECTED_SYNTHETIC_PID'};return '123456789' }
+$reports=@()
+foreach($case in $fixture.cases){
+ $env:RICE_CODEDB_UNITY_ROOT=$case.capturedEnvironment.RICE_CODEDB_UNITY_ROOT
+ $property=$case.capturedEnvironment.PSObject.Properties['RICE_CODEDB_INSTANCE_ROOT']
+ $env:RICE_CODEDB_INSTANCE_ROOT=if($null -eq $property){$null}else{[string]$property.Value}
+ $context=Get-ProjectCodedbContext
+ $projectIdentity=$fixture.projectIdentity
+ $editorLeaseRoot=Join-Path $context.ProviderRoot 'watch/lifecycle/editor-leases'
+ $derivedLeaseRoot=$editorLeaseRoot
+ if($case.name -eq 'no-valid-lease'){
+  Remove-Item -LiteralPath (Join-Path $editorLeaseRoot 'fixture-session.json')
+  Set-Content -LiteralPath (Join-Path $editorLeaseRoot 'invalid.json') -Value '{"schema_version":99}' -Encoding UTF8
+ }
+ $sessions=@(Get-ActiveEditorSessionIds)
+ $reports += [pscustomobject]@{name=$case.name;selected_instance_used=[string]::Equals($context.ProviderRoot,$fixture.selectedInstance,[StringComparison]::OrdinalIgnoreCase);lease_root_matches=[string]::Equals($derivedLeaseRoot,(Join-Path $fixture.selectedInstance 'watch/lifecycle/editor-leases'),[StringComparison]::OrdinalIgnoreCase);session_count=$sessions.Count}
+}
+$reports | ConvertTo-Json -Depth 4 -Compress
+`;
+const probePath=path.join(run,'consumer-probe.ps1');fs.writeFileSync(probePath,probe);
+const stdout=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',probePath,'-InputFile',input],
+ {encoding:'utf8',timeout:15000,windowsHide:true,maxBuffer:65536});
+const consumer=JSON.parse(stdout.trim());
+assert.equal(consumer.length,5);
+for(const c of consumer){assert.equal(c.selected_instance_used,true);assert.equal(c.lease_root_matches,true);assert.equal(c.session_count,c.name==='no-valid-lease'?0:1);}
+const report={status:'WATCH_MANAGER_CONTEXT_PASS',evidence:'OFFLINE_FUNCTION_BOUNDARY',
+ production_child_starts:0,consumer_fixture_powershell_invocations:1,live_process_probes:0,ipc_requests:0,
+ selected_instance_only_has_synthetic_lease:true,
+ cases:consumer,
+ sources:Object.fromEntries(Object.entries(sources).map(([name,p])=>[name,{path:path.relative(repo,p).replaceAll('\\','/'),sha256:hash(fs.readFileSync(p))}])),
+ limitations:['Synthetic process-start evidence','Controlled inherited environment, not historical child environment','No live retirement or consumer acceptance established']};
+fs.writeFileSync(path.join(run,'result.json'),JSON.stringify(report,null,2)+'\n');
+console.log(JSON.stringify({result:path.relative(repo,path.join(run,'result.json')).replaceAll('\\','/'),...report},null,2));
+
+process.exit(0);
+}
+
+// Complete synthetic service facts shared by the directly coupled fixtures.
+function queryServiceFixture(root, instanceRoot, generationRoot, generationId, provider, lifecycleId) {
+  return {
+    schema_version: 2, root, generation_id: generationId, lifecycle_id: lifecycleId,
+    runtime: path.join(instanceRoot, "watch", "coordinator"),
+    provider_executable: provider,
+    provider_config: path.join(instanceRoot, "config", "codedb-mcp.watch.toml"),
+    provider_state: "ready", desired_state: "enabled", editor_demand: "online", editor_session_count: 1,
+    adapter_enabled: true, adapter_state: "watching", adapter_worker_state: "ready",
+    adapter_builder: path.join(root, "AIWork/codedb/scripts/build-codedb-project-text-adapter.ps1"),
+    adapter_worker: path.join(root, "AIWork/codedb/scripts/run-codedb-project-text-adapter-worker.ps1"),
+    generation_adapter_builder: path.join(generationRoot, "scripts/build-codedb-project-text-adapter.ps1"),
+    generation_adapter_worker: path.join(generationRoot, "scripts/run-codedb-project-text-adapter-worker.ps1"),
+    adapter_manifest: path.join(instanceRoot, "adapter/text-index/manifest.json"), adapter_debounce_ms: 750,
+    coordinator_pid: process.pid, provider_pid: process.pid, adapter_worker_pid: process.pid
+  };
+}
+
+// S42: execute original producer and immutable consumer functions, with only
+// manifest admission, IPC and process boundaries controlled. No service starts.
+if (process.argv[2] === "--query-readiness-contract-fixture") {
+  const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const root = path.resolve(process.argv[3]);
+  assert.ok(root.startsWith(path.join(repository, ".artifacts/tests/s42-readiness") + path.sep));
+  for (let p = path.dirname(root); ; p = path.dirname(p)) {
+    if (fs.existsSync(p)) assert.equal(fs.lstatSync(p).isSymbolicLink(), false);
+    if (path.dirname(p) === p) break;
+  }
+  assert.equal(fs.existsSync(root), false, "Preserve previous evidence");
+  fs.mkdirSync(root, {recursive:true});
+  const supervisorPath = path.join(repository, "com.rice.ai-codedb/Tools~/codedb-project-supervisor.mjs");
+  const workerPath = path.join(repository, "com.rice.ai-codedb/Payload~/Generations/poc.44/wrapper/codedb-project-instance-worker.mjs");
+  const supervisorSource = fs.readFileSync(supervisorPath, "utf8");
+  const extract = (text, name) => {
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex(line => new RegExp(`^(?:async )?function ${name}\\(`).test(line));
+    const end = lines.findIndex((line, i) => i > start && /^(?:async )?function |^await main\(/.test(line));
+    assert.ok(start >= 0 && end > start, name);
+    return lines.slice(start, end).join("\n");
+  };
+  const project = path.join(root, "project");
+  const packageRoot = path.join(root, "package");
+  const runtime = path.join(project, "AIWork/.runtime/codedb/control/contracts/v0.3-control/v2/supervisor");
+  const selected = {instanceRoot:path.join(project, "AIWork/.runtime/codedb/instances/selected"),
+    generationRoot:path.join(project, "AIWork/.runtime/codedb/host/generations/selected-generation"),
+    generationId:"selected-generation",instanceId:"selected-instance",activationEpoch:"epoch",disposition:"current"};
+  for (const file of [path.join(packageRoot,"Tools~/materialize-codedb-host-payload.ps1"),
+    path.join(selected.instanceRoot,"config/codedb-mcp.toml"),
+    path.join(selected.instanceRoot,"config/codedb-mcp.watch.toml"),
+    path.join(selected.generationRoot,"coordinator/codedb-watch-coordinator.mjs"),
+    path.join(selected.generationRoot,"scripts/manage-codedb-project-watch.ps1")]) {
+    fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file,"fixture\n");
+  }
+  fs.mkdirSync(path.join(packageRoot,"Payload~"), {recursive:true});
+  let currentStatus = null;
+  let launchResult = {code:0,stdout:"started",stderr:""};
+  const launches = [], admissions = [], captures = [], cases = [];
+  const names = ["buildContext","buildWatchServiceProfile","resolveOperationalReadiness","publishOperationalReadiness",
+    "updateReadiness","coordinatorServiceMismatch","coordinatorProcessMayBeAlive","ensureCoordinator",
+    "createCoordinatorFailure","coordinatorReadinessTimeout","sanitizeCoordinatorFailureCategory","pathsEqual",
+    "assertReviewedPath","assertNoRedirectedAncestors","assertInside","isPathInside","isFile","isDirectory","realDirectory",
+    "validId","positiveInt","canonicalPipeIdentityPath","hash"];
+  const sandbox = {fs,path,crypto,Buffer,START_TIMEOUT_MS:30000,OPERATIONAL_READINESS_SCHEMA_VERSION:1,
+    process:{platform:process.platform,execPath:process.execPath,kill:pid=>{if(pid===999999)throw Object.assign(new Error("gone"),{code:"ESRCH"});}},
+    COORDINATOR_FAILURE_CATEGORIES:new Set(["NOT_EVALUATED","NONE","LAUNCH_FAILED","NONZERO_EXIT","STARTUP_TIMEOUT","STATUS_UNAVAILABLE","UNKNOWN_FAILURE"]),
+    TERMINAL_COORDINATOR_STARTUP_FAILURE_CATEGORIES:new Set(["LAUNCH_FAILED","NONZERO_EXIT","STARTUP_TIMEOUT","UNKNOWN_FAILURE"]),
+    readPackageRuntimeContract:()=>({controlContract:{},generationId:selected.generationId,ownerIdentityVersion:2,sha256:"contract"}),
+    getSupervisorRuntimePath:()=>runtime,readSelectedInstance:()=>selected,createProjectIdentity:()=>"project-identity",
+    requestCoordinatorStatus:async()=>currentStatus,persistOperation:()=>{},
+    prepareOperationChildEvidence:async(...args)=>admissions.push(args),
+    queueChildEvidenceCapture:(...args)=>captures.push(args),
+    runChild:async(command,args,cwd,timeout,capture)=>{launches.push({command,args,cwd,timeout});capture({pid:123});return launchResult;}};
+  // Use the production filename constants required by the real context builder.
+  for(const name of ["STATE_NAME","LOCK_NAME","OPERATION_NAME","OPERATION_HISTORY_NAME","ACTION_OPERATION_NAME",
+    "TAKEOVER_CLAIM_NAME","EVENT_NAME","ERROR_NAME"]) {
+    sandbox[name]=JSON.parse(supervisorSource.match(new RegExp(`^const ${name} = (.*);$`,"m"))[1]);
+  }
+  const producer = vm.runInNewContext(names.map(name=>extract(supervisorSource,name)).join("\n")
+    + "\n({buildContext,ensureCoordinator,resolveOperationalReadiness,publishOperationalReadiness,updateReadiness})", sandbox);
+  const context = producer.buildContext({root:project,runtime,packageRoot,provider:process.execPath,lifecycleId:"lifecycle"});
+  assert.equal(context.providerConfig,path.join(selected.instanceRoot,"config/codedb-mcp.toml"),"Formal CLI config preserved");
+  const service = context.watchService;
+  const complete = queryServiceFixture(project,selected.instanceRoot,selected.generationRoot,selected.generationId,process.execPath,"lifecycle");
+  const worker = vm.runInNewContext(extract(fs.readFileSync(workerPath,"utf8"),"getReadyWatchCoordinatorState")
+    + "\ngetReadyWatchCoordinatorState", {
+    context:{unityRoot:project,providerExecutablePath:process.execPath,watchConfigPath:service.config,
+      watchCoordinatorRuntimePath:context.coordinatorRuntime,textAdapterManifestPath:service.adapterManifest,
+      generationId:selected.generationId,legacyAdapterBuilderPath:service.legacyAdapterBuilder,
+      legacyAdapterWorkerPath:service.legacyAdapterWorker,adapterBuilderPath:service.adapterBuilder,adapterWorkerPath:service.adapterWorker},
+    readWatchCoordinatorState:()=>currentStatus,ADAPTER_OPERATIONAL_STATES:new Set(["watching","pending","building"]),
+    normalizeAbsolutePath:value=>typeof value==="string"?path.resolve(value).replaceAll("\\","/").toLowerCase():"",
+    processMayBeAlive:pid=>Number.isInteger(pid)&&pid>0&&pid!==999999,countLegacyMcpSessions:()=>0
+  });
+  const decision = () => producer.resolveOperationalReadiness(context,currentStatus,"NONE");
+  const lifecycle = {desiredState:"enabled",editorOnline:true};
+  await producer.ensureCoordinator(context);
+  assert.equal(launches.length,1);assert.equal(admissions.length,1);assert.equal(captures.length,1);
+  const launch=launches[0]; const options=Object.fromEntries(Array.from({length:(launch.args.length-2)/2},(_,i)=>launch.args.slice(2+i*2,4+i*2)));
+  assert.equal(launch.command,process.execPath);assert.equal(launch.cwd,project);
+  assert.equal(launch.args[0],path.join(selected.generationRoot,"coordinator/codedb-watch-coordinator.mjs"));
+  assert.equal(launch.args[1],"start");
+  for(const [name,value] of Object.entries({"--generation-id":selected.generationId,"--root":project,"--provider":process.execPath,
+    "--config":complete.provider_config,"--adapter-builder":complete.generation_adapter_builder,
+    "--adapter-worker":complete.generation_adapter_worker,"--adapter-manifest":complete.adapter_manifest,
+    "--adapter-debounce-ms":"750","--runtime":complete.runtime,"--lifecycle-id":"lifecycle","--exclusive-lifecycle":"false"})) assert.equal(options[name],value,name);
+  assert.equal(launch.timeout,35000);cases.push("derived cold launch and attribution callback");
+  fs.renameSync(service.config,service.config+".retained");
+  await assert.rejects(()=>producer.ensureCoordinator(context),/watch Provider config/);
+  assert.equal(launches.length,1);assert.equal(admissions.length,1);
+  fs.renameSync(service.config+".retained",service.config);cases.push("missing watch config refuses before admission");
+  for(const adapter_state of ["watching","pending","building"]) {
+    currentStatus={...complete,adapter_state};
+    assert.equal((await producer.ensureCoordinator(context)).action,"attached");
+    assert.equal(decision().state,"core_ready");assert.ok(worker(lifecycle));
+  }
+  assert.equal(launches.length,1);cases.push("compatible watching pending building reuse without duplicate launch");
+  for(const patch of [{provider_config:context.providerConfig},{adapter_enabled:false,adapter_state:"disabled",adapter_worker_state:"disabled"},
+    {adapter_state:"disabled"},{adapter_worker_state:"disabled",adapter_worker_pid:null},
+    {generation_id:"other-generation"},{generation_adapter_builder:"wrong"},{generation_adapter_worker:"wrong"},
+    {adapter_manifest:"wrong"},{adapter_worker:null},{schema_version:1},{exclusive_lifecycle:true,lifecycle_id:"other"}]) {
+    currentStatus={...complete,...patch};
+    await assert.rejects(()=>producer.ensureCoordinator(context),/query service configuration mismatch/);
+    assert.equal(decision().state,"degraded");assert.match(decision().detail,/configuration mismatch/);
+    if(!patch.exclusive_lifecycle)assert.equal(worker(lifecycle),null);
+  }
+  assert.equal(launches.length,1);assert.equal(admissions.length,1);cases.push("incompatible service refuses attach Ready and second admission");
+  for(const patch of [{adapter_worker_state:"starting"},
+    {adapter_worker_pid:999999},{provider_pid:null},{coordinator_pid:999999},{editor_session_count:0},
+    {desired_state:"disabled"},{editor_demand:"offline"},{provider_state:"starting"},{adapter_state:"starting"}]) {
+    currentStatus={...complete,...patch};assert.equal(decision().state,"starting");assert.equal(worker(lifecycle),null);
+  }
+  currentStatus={...complete,adapter_worker_state:"failed"};assert.equal(decision().state,"degraded");
+  cases.push("component lifecycle and missing-process facts cannot publish Ready");
+  currentStatus=complete;
+  const state={coordinator_failure_category:"NONE",root:project,project_identity:"project-identity",activation_epoch:"epoch"};
+  producer.updateReadiness(context,state,currentStatus,{state:"running",name:"Probe"});
+  assert.equal(state.readiness_state,"maintenance");assert.equal(state.operational_readiness.state,"core_ready");
+  const previous=state.operational_readiness;
+  currentStatus={...complete,adapter_enabled:false};producer.updateReadiness(context,state,currentStatus,null);
+  assert.equal(state.readiness_state,"degraded");assert.equal(state.operational_readiness.revision,previous.revision+1);
+  assert.notEqual(state.operational_readiness.observation_id,previous.observation_id);
+  assert.equal(state.operational_readiness.activation_epoch,"epoch");cases.push("identity observation revision and maintenance retained");
+  currentStatus=null;
+  for(const [result,category] of [[{code:4,stderr:"Timed out after 30000 ms waiting for coordinator readiness."},"STARTUP_TIMEOUT"],
+    [{code:4,launchFailed:true},"LAUNCH_FAILED"],[{code:4,evidenceFailed:true},"UNKNOWN_FAILURE"],[{code:4},"NONZERO_EXIT"]]) {
+    launchResult=result;await assert.rejects(()=>producer.ensureCoordinator(context),e=>e.coordinatorFailureCategory===category);
+    assert.equal(producer.resolveOperationalReadiness(context,null,category).state,"degraded");
+  }
+  cases.push("existing timeout launch and evidence-failure categories preserved");
+  fs.writeFileSync(path.join(root,"result.json"),JSON.stringify({evidence:"CONTRACT_ISOLATED",cases,actualChildStarts:0,
+    sources:[supervisorPath,workerPath].map(p=>({path:path.relative(repository,p),sha256:crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex")}))},null,2)+"\n");
+  console.log(`PASS S42 ${cases.length} contract scenario groups; actual child starts=0; original worker predicate exercised.`);
+  process.exit(0);
+}
 
 // S34 production writers only. No Supervisor, Provider, network or child starts.
 if (process.argv[2] === "--s34-history-fixture") {
@@ -92,7 +366,9 @@ if (process.argv[2] === "--s32-disposition-fixture") {
     assert.ok(start >= 0 && end > start, name);
     return lines.slice(start, end).join("\n");
   };
-  const names = ["ensureCoordinator", "prepareOperationChildEvidence", "recordChildEvidence", "publicOperation",
+  const names = ["ensureCoordinator", "buildWatchServiceProfile", "coordinatorServiceMismatch", "resolveOperationalReadiness",
+    "coordinatorProcessMayBeAlive", "createCoordinatorFailure", "sanitizeCoordinatorFailureCategory",
+    "prepareOperationChildEvidence", "recordChildEvidence", "publicOperation",
     "validatePersistedOperation", "validatePersistedChild", "compactResult", "commandExitCode", "truncate",
     "persistOperation", "operationHistoryFile", "persistManagerActionOperation", "managerActionOperationFile",
     "ensureOperationEvidenceDirectory", "validId", "assertInside", "isPathInside", "assertNoRedirectedAncestors",
@@ -105,9 +381,17 @@ if (process.argv[2] === "--s32-disposition-fixture") {
     projectIdentity:"sha256:"+crypto.createHash("sha256").update(project.replaceAll("\\","/").toLowerCase()).digest("hex"),
     operationPath:path.join(runtime,"operation.json"), operationHistoryPath:path.join(runtime,"operation-history"),
     actionOperationPath:path.join(runtime,"manager-actions") };
+  context.generationId="fixture-generation";context.lifecycleId="fixture-lifecycle";context.provider=process.execPath;
+  const fixtureInstance={instanceRoot:path.join(project,"AIWork/.runtime/codedb/instances/fixture"),
+    generationRoot:path.join(project,"AIWork/.runtime/codedb/host/generations/fixture-generation")};
+  context.coordinatorRuntime=path.join(fixtureInstance.instanceRoot,"watch/coordinator");
+  const readyStatus=queryServiceFixture(project,fixtureInstance.instanceRoot,fixtureInstance.generationRoot,
+    context.generationId,context.provider,context.lifecycleId);
   const sandbox = {fs,path,crypto,process,Buffer,context,EVIDENCE_SCHEMA_VERSION:1,OPERATION_RETENTION_LIMIT:16,
     ATOMIC_RENAME_RETRY_DELAYS_MS:[],ATOMIC_RENAME_RETRYABLE_CODES:new Set(),
-    requestCoordinatorStatus:async()=>({provider_state:"ready"}),
+    COORDINATOR_FAILURE_CATEGORIES:new Set(["NONE","NONZERO_EXIT","UNKNOWN_FAILURE"]),
+    TERMINAL_COORDINATOR_STARTUP_FAILURE_CATEGORIES:new Set(["NONZERO_EXIT","UNKNOWN_FAILURE"]),
+    requestCoordinatorStatus:async()=>readyStatus,
     runChild:()=>{throw new Error("UNAUTHORIZED_CHILD_LAUNCH");},
     getProcessEvidence:async()=>({available:false,exists:true}),
     resolveCommandExecutable:async()=>process.execPath,validateProcessEvidenceShape:()=>{},
@@ -116,7 +400,8 @@ if (process.argv[2] === "--s32-disposition-fixture") {
   const producer = vm.runInNewContext(names.map(source).join("\n")
     + "\nlet activeOperation=null;const state={};let retirementReason='';let shuttingDown=false;let handoffTimer=null;"
     + "\nconst rememberOperation=value=>persistOperation(context,value);\n"+finish
-    + "\n({ensureCoordinator,prepareOperationChildEvidence,recordChildEvidence,finishOperation,publicOperation,persistOperation,validatePersistedOperation})",sandbox);
+    + "\n({ensureCoordinator,buildWatchServiceProfile,prepareOperationChildEvidence,recordChildEvidence,finishOperation,publicOperation,persistOperation,validatePersistedOperation})",sandbox);
+  context.watchService=producer.buildWatchServiceProfile(project,fixtureInstance);
   assert.match(text,/runtime_contract_sha256: context\.runtimeContractSha256,\s+execution_disposition: "UNKNOWN",\s+child: null/);
   const cases=[];
   const fresh = () => ({schema_version:1,managed_by:"com.rice.ai-codedb",operation_id:crypto.randomBytes(16).toString("hex"),
@@ -374,6 +659,7 @@ function createFixture(selected = TARGET) {
   for (const directory of ["config", "index", "adapter", "watch", "leases", "logs", "tmp"])
     mkdir(path.join(instanceRoot, directory));
   write(path.join(instanceRoot, "config", "codedb-mcp.toml"), "# synthetic selected Provider config\n");
+  write(path.join(instanceRoot, "config", "codedb-mcp.watch.toml"), "# synthetic selected watch Provider config\n");
   write(materializerScript, "# synthetic materializer path identity\n");
   const packageWrapperPath = path.join(payloadRoot, ...STABLE_WRAPPER_RELATIVE_PATH.split("/"));
   const stableWrapperPath = path.join(root, ...STABLE_WRAPPER_RELATIVE_PATH.split("/"));
@@ -476,7 +762,7 @@ function createFixture(selected = TARGET) {
     adapter_state: "disabled",
     adapter_worker_state: "disabled",
     adapter_worker: null,
-    coordinator_pid: process.pid
+    ...queryServiceFixture(root, instanceRoot, projectGenerationRoot, selected.generationId, "", lifecycleId)
   });
 
   return {
@@ -553,6 +839,7 @@ function installAdditionalFixtureInstance(fixture, identity) {
   for (const directory of ["config", "index", "adapter", "watch", "leases", "logs", "tmp"])
     mkdir(path.join(instanceRoot, directory));
   write(path.join(instanceRoot, "config", "codedb-mcp.toml"), "# synthetic selected Provider config\n");
+  write(path.join(instanceRoot, "config", "codedb-mcp.watch.toml"), "# synthetic selected watch Provider config\n");
   const workerPath = path.join(projectGenerationRoot, ...workerRelativePath.split("/"));
   const instanceManifestPath = path.join(instanceRoot, "instance.json");
   json(instanceManifestPath, {
@@ -607,7 +894,7 @@ function installAdditionalFixtureInstance(fixture, identity) {
     adapter_state: "disabled",
     adapter_worker_state: "disabled",
     adapter_worker: null,
-    coordinator_pid: process.pid
+    ...queryServiceFixture(fixture.root, instanceRoot, projectGenerationRoot, identity.generationId, "", fixture.lifecycleId)
   });
 
   return {

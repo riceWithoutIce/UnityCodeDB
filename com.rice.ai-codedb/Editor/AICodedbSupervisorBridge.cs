@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
@@ -1132,6 +1133,9 @@ namespace Rice.AI.Codedb.Editor
             AICodedbSupervisorSnapshot.Disconnected("NOT_CONNECTED", "The CodeDB Supervisor has not been contacted.");
         private Task<AICodedbSupervisorSnapshot> _inFlight;
         private WorkerCancellation _cancellation;
+        private Task<AICodedbSupervisorSnapshot> _observationInFlight;
+        private WorkerCancellation _observationCancellation;
+        private int _observationEpoch;
         private int _epoch;
         private bool _disposed;
         private string _connectedStatePath = string.Empty;
@@ -1171,6 +1175,47 @@ namespace Rice.AI.Codedb.Editor
                 _cancellation = cancellation;
                 _inFlight = ObserveWorkerAsync(worker, cancellation, epoch);
                 return _inFlight;
+            }
+        }
+
+        /// <summary>
+        /// Reads and authenticates an already-published Supervisor state without
+        /// starting, materializing, repairing, cleaning up, or taking ownership
+        /// of any runtime. This is intentionally separate from ReconnectAsync:
+        /// the Editor heartbeat may use it as a passive operational observation.
+        /// </summary>
+        internal Task<AICodedbSupervisorSnapshot> ObserveOperationalStatusAsync(
+            string projectRoot,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return Task.FromCanceled<AICodedbSupervisorSnapshot>(cancellationToken);
+            if (string.IsNullOrWhiteSpace(projectRoot))
+                return Task.FromResult(AICodedbSupervisorSnapshot.Degraded(
+                    "INVALID_PROJECT_ROOT",
+                    "The Unity project root is empty."));
+
+            lock (_gate)
+            {
+                if (_disposed)
+                    return Task.FromResult(AICodedbSupervisorSnapshot.Disconnected(
+                        "DISPOSED",
+                        "The Unity Editor lifecycle is closing."));
+                if (_observationInFlight != null && !_observationInFlight.IsCompleted)
+                    return _observationInFlight;
+                if (_inFlight != null && !_inFlight.IsCompleted)
+                    return Task.FromResult(AICodedbSupervisorSnapshot.Degraded(
+                        "SUPERVISOR_RECONNECT_IN_FLIGHT",
+                        "Operational observation was deferred while Supervisor reconnect was in flight."));
+
+                var cancellation = new WorkerCancellation();
+                var epoch = ++_observationEpoch;
+                var worker = Task.Run(
+                    () => ObserveOperationalStatusWorker(projectRoot, cancellation.Source.Token),
+                    cancellation.Source.Token);
+                _observationCancellation = cancellation;
+                _observationInFlight = ObserveOperationalWorkerAsync(worker, cancellation, epoch);
+                return _observationInFlight;
             }
         }
 
@@ -1298,8 +1343,11 @@ namespace Rice.AI.Codedb.Editor
             lock (_gate)
             {
                 ++_epoch;
+                ++_observationEpoch;
                 if (_cancellation != null)
                     _cancellation.Cancel();
+                if (_observationCancellation != null)
+                    _observationCancellation.Cancel();
                 _cachedSnapshot = AICodedbSupervisorSnapshot.Disconnected(
                     "RECONNECT_REQUIRED",
                     "The Unity domain was reloaded; the Supervisor connection will be re-established asynchronously.");
@@ -1314,8 +1362,11 @@ namespace Rice.AI.Codedb.Editor
                     return;
                 _disposed = true;
                 ++_epoch;
+                ++_observationEpoch;
                 if (_cancellation != null)
                     _cancellation.Cancel();
+                if (_observationCancellation != null)
+                    _observationCancellation.Cancel();
                 _cachedSnapshot = AICodedbSupervisorSnapshot.Disconnected(
                     "DISPOSED",
                     "The Unity Editor lifecycle is closing.");
@@ -1377,6 +1428,104 @@ namespace Rice.AI.Codedb.Editor
             }
             cancellation.Dispose();
             return result;
+        }
+
+        private async Task<AICodedbSupervisorSnapshot> ObserveOperationalWorkerAsync(
+            Task<AICodedbSupervisorSnapshot> worker,
+            WorkerCancellation cancellation,
+            int epoch)
+        {
+            AICodedbSupervisorSnapshot result;
+            try
+            {
+                result = await worker.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                result = AICodedbSupervisorSnapshot.Disconnected(
+                    "CANCELLED",
+                    "The operational observation was superseded by an Editor lifecycle boundary.");
+            }
+            catch (SupervisorMessageTooLargeException)
+            {
+                result = AICodedbSupervisorSnapshot.Blocked(
+                    "RESPONSE_TOO_LARGE",
+                    "The Supervisor response exceeds the IPC message limit.");
+            }
+            catch (InvalidOperationException exception)
+            {
+                result = AICodedbSupervisorSnapshot.Blocked(
+                    "INVALID_SUPERVISOR_EVIDENCE",
+                    exception.Message);
+            }
+            catch (KeyNotFoundException exception)
+            {
+                result = AICodedbSupervisorSnapshot.Blocked(
+                    "INVALID_SUPERVISOR_EVIDENCE",
+                    exception.Message);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                result = AICodedbSupervisorSnapshot.Blocked(
+                    "INVALID_SUPERVISOR_EVIDENCE",
+                    "The Supervisor response is not valid UTF-8. " + exception.Message);
+            }
+            catch (Exception exception)
+            {
+                result = AICodedbSupervisorSnapshot.Degraded("BRIDGE_ERROR", exception.Message);
+            }
+
+            lock (_gate)
+            {
+                if (epoch == _observationEpoch && !_disposed)
+                {
+                    _observationInFlight = null;
+                    _observationCancellation = null;
+                }
+            }
+            cancellation.Dispose();
+            return result;
+        }
+
+        private static AICodedbSupervisorSnapshot ObserveOperationalStatusWorker(
+            string projectRoot,
+            CancellationToken cancellationToken)
+        {
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.FileSystem);
+            AICodedbLifecycleEvidence.RecordWork(AICodedbLifecycleWorkKind.SynchronousIpc);
+            var normalizedRoot = AICodedbPaths.NormalizePath(projectRoot).TrimEnd('/', '\\');
+            try
+            {
+                var context = AICodedbPaths.CaptureExecutionContext();
+                var runtimeContract = AICodedbPackageRuntimeContractStore.Read(context.PackageRoot);
+                var statePath = AICodedbSupervisorLauncher.GetSupervisorStatePath(
+                    normalizedRoot,
+                    runtimeContract.ControlContract);
+                if (!File.Exists(statePath))
+                {
+                    return AICodedbSupervisorSnapshot.Disconnected(
+                        "SUPERVISOR_STATE_UNAVAILABLE",
+                        "No published project Supervisor state is available for passive observation.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                return ConnectSupervisorWorker(
+                    normalizedRoot,
+                    statePath,
+                    context.PackageRoot,
+                    runtimeContract,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return AICodedbSupervisorSnapshot.Degraded(
+                    "SUPERVISOR_OBSERVATION_FAILED",
+                    exception.Message);
+            }
         }
 
         private static AICodedbSupervisorSnapshot ConnectWorker(
@@ -1995,14 +2144,17 @@ namespace Rice.AI.Codedb.Editor
                     confirmedProjectMutation,
                     managerActionId);
                 requestDispatched = true;
-                var responseLine = SendPipeRequest(identity.PipeName, request, cancellationToken);
+                var responseLine = SendPipeRequest(identity.PipeName, request, cancellationToken,
+                    new IpcExchangeDiagnostic("command", command, action, originalRequestId, null));
                 if (string.IsNullOrWhiteSpace(responseLine))
                     throw new InvalidOperationException("The project Supervisor closed the command without a response.");
                 responseLine = WaitForAcceptedOperation(
                     responseLine,
                     normalizedRoot,
                     identity,
-                    cancellationToken);
+                    cancellationToken,
+                    command,
+                    action);
 
                 var response = AICodedbStrictJson.ParseObject(responseLine, "CodeDB Supervisor command response");
                 var succeeded = AICodedbStrictJson.GetRequiredBoolean(response, "ok", "CodeDB Supervisor command response");
@@ -2297,7 +2449,9 @@ namespace Rice.AI.Codedb.Editor
             string initialResponseLine,
             string normalizedRoot,
             SupervisorRuntimeIdentity identity,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string command,
+            string action)
         {
             const string label = "CodeDB Supervisor operation response";
             var response = AICodedbStrictJson.ParseObject(initialResponseLine, label);
@@ -2315,13 +2469,15 @@ namespace Rice.AI.Codedb.Editor
             while (true)
             {
                 WaitForOperationPoll(deadline, cancellationToken);
+                var pollRequestId = Guid.NewGuid().ToString("N");
                 var responseLine = SendPipeRequest(
                     identity.PipeName,
                     AICodedbSupervisorProtocol.BuildOperationRequest(
                         identity.AuthToken,
-                        Guid.NewGuid().ToString("N"),
+                        pollRequestId,
                         operationId),
-                    cancellationToken);
+                    cancellationToken,
+                    new IpcExchangeDiagnostic("operation_poll", command, action, pollRequestId, operationId));
                 if (string.IsNullOrWhiteSpace(responseLine))
                     throw new InvalidOperationException("The project Supervisor closed an operation query without a response.");
 
@@ -2506,43 +2662,143 @@ namespace Rice.AI.Codedb.Editor
             return true;
         }
 
+        // Per exchange only: no logging/timers in the per-byte loop. Values are
+        // deliberately restricted so a request body, token or path cannot leak.
+        internal sealed class IpcExchangeDiagnostic
+        {
+            private readonly string _kind;
+            private readonly string _command;
+            private readonly string _action;
+            private readonly string _requestId;
+            private readonly string _operationId;
+            private readonly string _startedAtUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            private readonly Stopwatch _clock = Stopwatch.StartNew();
+            private string _stage = "connect";
+            private double _stageStartedMs;
+            private double _connectMs;
+            private double _writeMs;
+            private double _readMs;
+            internal int ReceivedBytes { get; set; }
+
+            internal IpcExchangeDiagnostic(string kind, string command, string action,
+                string requestId, string operationId)
+            {
+                _kind = kind == "command" || kind == "operation_poll" ? kind : "other";
+                _command = SafeCode(command);
+                _action = SafeCode(action);
+                _requestId = SafeId(requestId);
+                _operationId = SafeId(operationId);
+            }
+
+            internal void Enter(string stage)
+            {
+                var now = _clock.Elapsed.TotalMilliseconds;
+                if (_stage == "connect") _connectMs = now - _stageStartedMs;
+                else if (_stage == "write") _writeMs = now - _stageStartedMs;
+                else if (_stage == "read") _readMs = now - _stageStartedMs;
+                _stage = stage;
+                _stageStartedMs = now;
+            }
+
+            internal string FormatTimeout()
+            {
+                var now = _clock.Elapsed.TotalMilliseconds;
+                var current = now - _stageStartedMs;
+                return "[CODEDB_IPC_DIAGNOSTIC] {\"schema_version\":1,\"kind\":\"" + _kind
+                    + "\",\"command\":\"" + _command + "\",\"action\":\"" + _action
+                    + "\",\"request_id\":\"" + _requestId + "\",\"operation_id\":\"" + _operationId
+                    + "\",\"started_at_utc\":\"" + _startedAtUtc + "\",\"stage\":\"" + _stage
+                    + "\",\"elapsed_ms\":" + Milliseconds(now)
+                    + ",\"connect_ms\":" + Milliseconds(_stage == "connect" ? current : _connectMs)
+                    + ",\"write_ms\":" + Milliseconds(_stage == "write" ? current : _writeMs)
+                    + ",\"read_ms\":" + Milliseconds(_stage == "read" ? current : _readMs)
+                    + ",\"received_bytes\":" + ReceivedBytes.ToString(CultureInfo.InvariantCulture) + "}";
+            }
+
+            private static string Milliseconds(double value) => value.ToString("F3", CultureInfo.InvariantCulture);
+
+            private static string SafeCode(string value)
+            {
+                if (string.IsNullOrEmpty(value) || value.Length > 64) return "not_provided";
+                foreach (var character in value)
+                    if (!(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z')
+                        && !(character >= '0' && character <= '9') && character != '_' && character != '-')
+                        return "omitted";
+                return value;
+            }
+
+            private static string SafeId(string value)
+            {
+                if (string.IsNullOrEmpty(value) || value.Length != 32) return "not_provided";
+                foreach (var character in value)
+                    if (!(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f'))
+                        return "omitted";
+                return value;
+            }
+        }
+
+        // Keep the original three-argument method-group shape for package
+        // consumers that inject the transport through Func<...>. Optional
+        // parameters do not provide that compatibility on Unity's compiler.
         internal static string SendPipeRequest(
             string pipeName,
             string request,
             CancellationToken cancellationToken)
         {
-            using (var pipe = new NamedPipeClientStream(
-                       ".",
-                       pipeName,
-                       PipeDirection.InOut,
-                       PipeOptions.Asynchronous))
-            {
-                // Unity's Windows NamedPipeClientStream reports CanTimeout=false
-                // and throws when ReadTimeout or WriteTimeout is assigned. Keep
-                // the platform-bounded synchronous connect, then bound the
-                // overlapped message exchange explicitly on this worker.
-                cancellationToken.ThrowIfCancellationRequested();
-                pipe.Connect(AICodedbSupervisorProtocol.ConnectionTimeoutMilliseconds);
-                cancellationToken.ThrowIfCancellationRequested();
-                var requestBytes = new UTF8Encoding(false, true).GetBytes(request + "\n");
-                if (requestBytes.Length > AICodedbSupervisorProtocol.MaximumMessageBytes + 1)
-                    throw new InvalidOperationException("The Supervisor request exceeds the IPC message limit.");
+            return SendPipeRequest(pipeName, request, cancellationToken, null);
+        }
 
-                var deadline = DateTime.UtcNow.AddMilliseconds(
-                    AICodedbSupervisorProtocol.ConnectionTimeoutMilliseconds);
-                WaitForPipeIo(
-                    pipe.WriteAsync(requestBytes, 0, requestBytes.Length, CancellationToken.None),
-                    pipe,
-                    deadline,
-                    cancellationToken);
-                return ReadBoundedUtf8Line(pipe, deadline, cancellationToken);
+        internal static string SendPipeRequest(
+            string pipeName,
+            string request,
+            CancellationToken cancellationToken,
+            IpcExchangeDiagnostic diagnostic = null)
+        {
+            diagnostic = diagnostic ?? new IpcExchangeDiagnostic("other", null, null, null, null);
+            try
+            {
+                using (var pipe = new NamedPipeClientStream(
+                           ".",
+                           pipeName,
+                           PipeDirection.InOut,
+                           PipeOptions.Asynchronous))
+                {
+                    // Unity's Windows NamedPipeClientStream reports CanTimeout=false
+                    // and throws when ReadTimeout or WriteTimeout is assigned. Keep
+                    // the platform-bounded synchronous connect, then bound the
+                    // overlapped message exchange explicitly on this worker.
+                    cancellationToken.ThrowIfCancellationRequested();
+                    pipe.Connect(AICodedbSupervisorProtocol.ConnectionTimeoutMilliseconds);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    diagnostic.Enter("write");
+                    var requestBytes = new UTF8Encoding(false, true).GetBytes(request + "\n");
+                    if (requestBytes.Length > AICodedbSupervisorProtocol.MaximumMessageBytes + 1)
+                        throw new InvalidOperationException("The Supervisor request exceeds the IPC message limit.");
+
+                    var deadline = DateTime.UtcNow.AddMilliseconds(
+                        AICodedbSupervisorProtocol.ConnectionTimeoutMilliseconds);
+                    WaitForPipeIo(
+                        pipe.WriteAsync(requestBytes, 0, requestBytes.Length, CancellationToken.None),
+                        pipe,
+                        deadline,
+                        cancellationToken);
+                    diagnostic.Enter("read");
+                    var response = ReadBoundedUtf8Line(pipe, deadline, cancellationToken, diagnostic);
+                    diagnostic.Enter("complete");
+                    return response;
+                }
+            }
+            catch (TimeoutException exception)
+            {
+                throw new TimeoutException(exception.Message + " " + diagnostic.FormatTimeout(), exception);
             }
         }
 
         private static string ReadBoundedUtf8Line(
             PipeStream pipe,
             DateTime deadline,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            IpcExchangeDiagnostic diagnostic)
         {
             using (var response = new MemoryStream())
             {
@@ -2560,6 +2816,7 @@ namespace Rice.AI.Codedb.Editor
                         reachedEndOfStream = true;
                         break;
                     }
+                    diagnostic.ReceivedBytes += count;
 
                     if (buffer[0] == (byte)'\n' || buffer[0] == (byte)'\r')
                         break;

@@ -75,6 +75,20 @@ namespace Rice.AI.Codedb.Editor
         public int play_transition_count;
         public int reconcile_started_count;
         public int reconcile_completed_count;
+        public int reconcile_epoch;
+        public string reconcile_started_at_utc = string.Empty;
+        public string reconcile_completed_at_utc = string.Empty;
+        public string source_stage = string.Empty;
+        public string product_state_before = string.Empty;
+        public string product_state_after = string.Empty;
+        public string field_validity_epoch = string.Empty;
+        public string command_action = string.Empty;
+        public string command_outcome = string.Empty;
+        public string command_phase = string.Empty;
+        public string command_reason_code = string.Empty;
+        public string command_cleanup_state = string.Empty;
+        public string command_identity_disposition = string.Empty;
+        public string command_action_id = string.Empty;
         public string last_product_state = string.Empty;
         public int manager_open_count;
         public int manager_enable_count;
@@ -144,6 +158,20 @@ namespace Rice.AI.Codedb.Editor
         private int _playTransitionCount;
         private int _reconcileStartedCount;
         private int _reconcileCompletedCount;
+        private int _reconcileEpoch;
+        private string _reconcileStartedAtUtc = string.Empty;
+        private string _reconcileCompletedAtUtc = string.Empty;
+        private string _sourceStage = string.Empty;
+        private string _productStateBefore = string.Empty;
+        private string _productStateAfter = string.Empty;
+        private string _fieldValidityEpoch = string.Empty;
+        private string _commandAction = string.Empty;
+        private string _commandOutcome = string.Empty;
+        private string _commandPhase = string.Empty;
+        private string _commandReasonCode = string.Empty;
+        private string _commandCleanupState = string.Empty;
+        private string _commandIdentityDisposition = string.Empty;
+        private string _commandActionId = string.Empty;
         private string _lastProductState = string.Empty;
         private int _managerAutomaticStatusRequestCount;
         private int _managerExplicitStatusRequestCount;
@@ -222,15 +250,64 @@ namespace Rice.AI.Codedb.Editor
             Interlocked.Increment(ref _playTransitionCount);
         }
 
-        internal void RecordReconcileStarted()
+        internal void RecordReconcileStarted(AICodedbProductState previousProductState)
         {
-            Interlocked.Increment(ref _reconcileStartedCount);
+            var epoch = Interlocked.Increment(ref _reconcileStartedCount);
+            Interlocked.Exchange(ref _reconcileEpoch, epoch);
+            Interlocked.Exchange(ref _reconcileStartedAtUtc, DateTime.UtcNow.ToString("O"));
+            Interlocked.Exchange(ref _reconcileCompletedAtUtc, string.Empty);
+            Interlocked.Exchange(ref _sourceStage, "RECONCILE_STARTED");
+            Interlocked.Exchange(ref _productStateBefore, SanitizeCode(previousProductState.ToString()));
+            Interlocked.Exchange(ref _productStateAfter, string.Empty);
+            Interlocked.Exchange(ref _fieldValidityEpoch, "RECONCILE_" + epoch);
+            Interlocked.Exchange(ref _commandAction, string.Empty);
+            Interlocked.Exchange(ref _commandOutcome, string.Empty);
+            Interlocked.Exchange(ref _commandPhase, string.Empty);
+            Interlocked.Exchange(ref _commandReasonCode, string.Empty);
+            Interlocked.Exchange(ref _commandCleanupState, string.Empty);
+            Interlocked.Exchange(ref _commandIdentityDisposition, "OPERATION_ID_NOT_EXPOSED");
+            Interlocked.Exchange(ref _commandActionId, string.Empty);
+            ResetPostAdmissionEvidence();
         }
 
         internal void RecordReconcileCompleted(AICodedbProductState state)
         {
             Interlocked.Increment(ref _reconcileCompletedCount);
             Interlocked.Exchange(ref _lastProductState, state.ToString());
+            Interlocked.Exchange(ref _productStateAfter, SanitizeCode(state.ToString()));
+            Interlocked.Exchange(ref _reconcileCompletedAtUtc, DateTime.UtcNow.ToString("O"));
+        }
+
+        internal void RecordSourceStage(string stage)
+        {
+            Interlocked.Exchange(ref _sourceStage, SanitizeCode(stage));
+        }
+
+        internal void RecordMaterializerCommandEvidence(
+            string command,
+            string action,
+            AICodedbCommandResult result)
+        {
+            var parsed = result == null
+                ? default(AICodedbMaterializerCommandStatus)
+                : AICodedbMaterializerCommandStatusParser.Parse(result.StandardOutput);
+            Interlocked.Exchange(
+                ref _commandAction,
+                SanitizeCode(parsed.Present && !string.IsNullOrWhiteSpace(parsed.Action)
+                    ? parsed.Action
+                    : (string.IsNullOrWhiteSpace(action) ? command : command + "_" + action)));
+            Interlocked.Exchange(ref _commandOutcome, SanitizeCode(parsed.Outcome));
+            Interlocked.Exchange(ref _commandPhase, SanitizeCode(parsed.Phase));
+            Interlocked.Exchange(ref _commandReasonCode, SanitizeCode(parsed.ReasonCode));
+            Interlocked.Exchange(ref _commandCleanupState, SanitizeCode(parsed.CleanupState));
+            Interlocked.Exchange(
+                ref _commandIdentityDisposition,
+                result != null && !string.IsNullOrWhiteSpace(result.ActionId)
+                    ? "ACTION_ID_ONLY_OPERATION_ID_NOT_EXPOSED"
+                    : "OPERATION_ID_NOT_EXPOSED");
+            Interlocked.Exchange(
+                ref _commandActionId,
+                SanitizeIdentifier(result == null ? string.Empty : result.ActionId));
         }
 
         internal void RecordManagerObservation(AICodedbManagerObservationKind kind)
@@ -486,6 +563,20 @@ namespace Rice.AI.Codedb.Editor
                 play_transition_count = Volatile.Read(ref _playTransitionCount),
                 reconcile_started_count = Volatile.Read(ref _reconcileStartedCount),
                 reconcile_completed_count = Volatile.Read(ref _reconcileCompletedCount),
+                reconcile_epoch = Volatile.Read(ref _reconcileEpoch),
+                reconcile_started_at_utc = Volatile.Read(ref _reconcileStartedAtUtc) ?? string.Empty,
+                reconcile_completed_at_utc = Volatile.Read(ref _reconcileCompletedAtUtc) ?? string.Empty,
+                source_stage = SanitizeCode(Volatile.Read(ref _sourceStage)),
+                product_state_before = SanitizeCode(Volatile.Read(ref _productStateBefore)),
+                product_state_after = SanitizeCode(Volatile.Read(ref _productStateAfter)),
+                field_validity_epoch = SanitizeCode(Volatile.Read(ref _fieldValidityEpoch)),
+                command_action = SanitizeCode(Volatile.Read(ref _commandAction)),
+                command_outcome = SanitizeCode(Volatile.Read(ref _commandOutcome)),
+                command_phase = SanitizeCode(Volatile.Read(ref _commandPhase)),
+                command_reason_code = SanitizeCode(Volatile.Read(ref _commandReasonCode)),
+                command_cleanup_state = SanitizeCode(Volatile.Read(ref _commandCleanupState)),
+                command_identity_disposition = SanitizeCode(Volatile.Read(ref _commandIdentityDisposition)),
+                command_action_id = SanitizeIdentifier(Volatile.Read(ref _commandActionId)),
                 last_product_state = SanitizeCode(Volatile.Read(ref _lastProductState)),
                 manager_open_count = Volatile.Read(ref _managerObservationCounts[(int)AICodedbManagerObservationKind.Open]),
                 manager_enable_count = Volatile.Read(ref _managerObservationCounts[(int)AICodedbManagerObservationKind.Enable]),
@@ -571,6 +662,22 @@ namespace Rice.AI.Codedb.Editor
             Interlocked.Exchange(ref _playTransitionCount, Math.Max(0, document.play_transition_count));
             Interlocked.Exchange(ref _reconcileStartedCount, Math.Max(0, document.reconcile_started_count));
             Interlocked.Exchange(ref _reconcileCompletedCount, Math.Max(0, document.reconcile_completed_count));
+            Interlocked.Exchange(ref _reconcileEpoch, Math.Max(0, document.reconcile_epoch));
+            Interlocked.Exchange(ref _reconcileStartedAtUtc, BoundedTimestamp(document.reconcile_started_at_utc));
+            Interlocked.Exchange(ref _reconcileCompletedAtUtc, BoundedTimestamp(document.reconcile_completed_at_utc));
+            Interlocked.Exchange(ref _sourceStage, SanitizeCode(document.source_stage));
+            Interlocked.Exchange(ref _productStateBefore, SanitizeCode(document.product_state_before));
+            Interlocked.Exchange(ref _productStateAfter, SanitizeCode(document.product_state_after));
+            Interlocked.Exchange(ref _fieldValidityEpoch, SanitizeCode(document.field_validity_epoch));
+            Interlocked.Exchange(ref _commandAction, SanitizeCode(document.command_action));
+            Interlocked.Exchange(ref _commandOutcome, SanitizeCode(document.command_outcome));
+            Interlocked.Exchange(ref _commandPhase, SanitizeCode(document.command_phase));
+            Interlocked.Exchange(ref _commandReasonCode, SanitizeCode(document.command_reason_code));
+            Interlocked.Exchange(ref _commandCleanupState, SanitizeCode(document.command_cleanup_state));
+            Interlocked.Exchange(
+                ref _commandIdentityDisposition,
+                SanitizeCode(document.command_identity_disposition));
+            Interlocked.Exchange(ref _commandActionId, SanitizeIdentifier(document.command_action_id));
             Interlocked.Exchange(ref _lastProductState, SanitizeCode(document.last_product_state));
             RestoreManagerObservation(AICodedbManagerObservationKind.Open, document.manager_open_count);
             RestoreManagerObservation(AICodedbManagerObservationKind.Enable, document.manager_enable_count);
@@ -780,6 +887,13 @@ namespace Rice.AI.Codedb.Editor
             return IsBoundedIdentifier(value) ? value : string.Empty;
         }
 
+        private static string BoundedTimestamp(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length > 64)
+                return string.Empty;
+            return value;
+        }
+
         private static int[] Snapshot(int[] values)
         {
             var snapshot = new int[values.Length];
@@ -843,7 +957,21 @@ namespace Rice.AI.Codedb.Editor
         internal const string LogPrefix = "CODEDB_S12_EVIDENCE ";
 
         private const string SessionStateKey = "Rice.AICodedb.S12.LifecycleEvidence";
+        // Explicit diagnostic sessions only. Read once per domain, never per Repaint.
+        private static readonly bool DiagnosticPublicationEnabled = string.Equals(
+            Environment.GetEnvironmentVariable("CODEDB_EDITOR_DIAGNOSTICS"),
+            "1", StringComparison.Ordinal);
         private static AICodedbLifecycleEvidenceCounter _counter;
+        // Domain-local supplementary evidence; never restored as product authority.
+        private static AICodedbManagerTransitionEvidence _managerTransitions;
+
+        internal static AICodedbManagerTransitionEvidence ManagerTransitions(string projectRoot)
+        {
+            if (!DiagnosticPublicationEnabled)
+                return null;
+            return _managerTransitions ?? (_managerTransitions =
+                new AICodedbManagerTransitionEvidence(projectRoot));
+        }
 
         internal static void InitializeMainThread()
         {
@@ -892,14 +1020,27 @@ namespace Rice.AI.Codedb.Editor
             GetCounter().RecordPlayTransition();
         }
 
-        internal static void RecordReconcileStarted()
+        internal static void RecordReconcileStarted(AICodedbProductState previousProductState)
         {
-            GetCounter().RecordReconcileStarted();
+            GetCounter().RecordReconcileStarted(previousProductState);
         }
 
         internal static void RecordReconcileCompleted(AICodedbProductState state)
         {
             GetCounter().RecordReconcileCompleted(state);
+        }
+
+        internal static void RecordSourceStage(string stage)
+        {
+            GetCounter().RecordSourceStage(stage);
+        }
+
+        internal static void RecordMaterializerCommandEvidence(
+            string command,
+            string action,
+            AICodedbCommandResult result)
+        {
+            GetCounter().RecordMaterializerCommandEvidence(command, action, result);
         }
 
         internal static void RecordManagerObservation(AICodedbManagerObservationKind kind)
@@ -1028,12 +1169,16 @@ namespace Rice.AI.Codedb.Editor
         internal static void PersistAndEmit(string checkpoint)
         {
             var document = GetCounter().Capture(checkpoint);
-            SessionState.SetString(SessionStateKey, JsonUtility.ToJson(document));
-            Debug.Log(LogPrefix + JsonUtility.ToJson(document));
+            var json = JsonUtility.ToJson(document);
+            SessionState.SetString(SessionStateKey, json);
+            if (DiagnosticPublicationEnabled)
+                Debug.Log(LogPrefix + json);
         }
 
         private static void EmitWorkerCheckpoint(string checkpoint)
         {
+            if (!DiagnosticPublicationEnabled)
+                return;
             Debug.Log(LogPrefix + JsonUtility.ToJson(GetCounter().Capture(checkpoint)));
         }
 

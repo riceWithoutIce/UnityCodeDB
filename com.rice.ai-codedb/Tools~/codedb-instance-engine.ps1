@@ -5794,6 +5794,199 @@ function Invoke-InstanceUninstall {
     }
 }
 
+function Get-InstanceCleanupSchedulingInputs {
+    param([string]$ProjectRoot, $Manifest)
+
+    # Only stable control inputs and subject inventories: never lease heartbeat
+    # contents, runtime logs, credentials, or recursive payload hashing.
+    $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($relative in @($script:InstanceCurrentRelativePath, $script:InstanceLastKnownGoodRelativePath,
+            $script:InstanceDesiredStateRelativePath, $script:InstanceOperationRelativePath,
+            $script:MarkerRelativePath, $script:CurrentPointerRelativePath, $script:LastKnownGoodPointerRelativePath)) {
+        $null = $paths.Add($relative)
+    }
+    $contract = "$($script:InstanceContractNamespaceRelativePath)/$($Manifest.ControlContract.Id)/v$($Manifest.ControlContract.Version)"
+    foreach ($relative in @("$contract/activation.json", "$contract/operation.json")) { $null = $paths.Add($relative) }
+    $collections = @($script:InstanceRemovalIntentsRelativePath, $script:InstanceRetiredRelativePath,
+        "$contract/retirements", "$contract/operations", $script:InstancesRelativePath,
+        'AIWork/.runtime/codedb/host/generations')
+    foreach ($relative in $collections) {
+        $null = $paths.Add($relative)
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'cleanup scheduling collection'
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'cleanup scheduling collection'
+            foreach ($entry in @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)) {
+                Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'cleanup scheduling subject'
+                if ($relative -eq $script:InstancesRelativePath -and $entry.PSIsContainer) {
+                    $null = $paths.Add("$relative/$($entry.Name)/instance.json")
+                } elseif ($relative -eq 'AIWork/.runtime/codedb/host/generations' -and $entry.PSIsContainer) {
+                    $null = $paths.Add("$relative/$($entry.Name)/generation-manifest.json")
+                } elseif (-not $entry.PSIsContainer) { $null = $paths.Add("$relative/$($entry.Name)") }
+            }
+        }
+    }
+    foreach ($file in $Manifest.Files) {
+        if ($file.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            $file.Target -cnotin @(Get-InstanceBootstrapTargets)) { $null = $paths.Add([string]$file.Target) }
+    }
+    foreach ($relative in $Manifest.RetiredTargets) {
+        if ($relative.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) { $null = $paths.Add([string]$relative) }
+    }
+    if ($paths.Count -gt 512) { throw 'Cleanup scheduling input bound exceeded.' }
+    $records = [Collections.Generic.List[object]]::new()
+    $records.Add([ordered]@{
+        path = '$package'; kind = 'identity';
+        value = "$($Manifest.GenerationId)|$($Manifest.RuntimeContractSha256)|$($Manifest.PackageVersion)"
+    })
+    foreach ($relative in @($paths | Sort-Object -CaseSensitive)) {
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'cleanup scheduling input'
+        Assert-NoReparsePoint -Path $path -Root $ProjectRoot -Label 'cleanup scheduling input'
+        $kind = 'missing'; $value = ''
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            $kind = 'directory'
+            $names = [Collections.Generic.List[string]]::new()
+            foreach ($entry in @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)) {
+                Assert-NoReparsePoint -Path $entry.FullName -Root $ProjectRoot -Label 'cleanup scheduling entry'
+                if ($entry.Name.IndexOfAny([char[]]"`r`n") -ge 0) { throw 'Invalid cleanup subject name.' }
+                $names.Add($(if ($entry.PSIsContainer) { 'D:' } else { 'F:' }) + $entry.Name)
+            }
+            if ($names.Count -gt 512) { throw 'Cleanup scheduling inventory bound exceeded.' }
+            $names.Sort([StringComparer]::Ordinal)
+            $value = Get-TextSha256 -Text ($names -join "`n")
+        } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+            if ((Get-Item -LiteralPath $path).Length -gt 1048576) { throw 'Cleanup scheduling file bound exceeded.' }
+            $kind = 'file'
+            # Bind exact control documents; for payload cleanup targets, the
+            # subject inventory only needs membership/presence and package
+            # identity above already binds their immutable source.
+            if (($relative.StartsWith($script:InstanceControlRelativePath + '/', [StringComparison]::Ordinal) -or
+                 $relative -eq $script:CurrentPointerRelativePath -or
+                 $relative -eq $script:LastKnownGoodPointerRelativePath)) {
+                $value = Get-FileSha256 -Path $path
+            } else {
+                $value = 'present'
+            }
+        }
+        $records.Add([ordered]@{ path = $relative; kind = $kind; value = $value })
+    }
+    return $records.ToArray()
+}
+
+function Get-InstanceCleanupSchedulingDisposition {
+    param([string]$ProjectRoot, $Manifest, $CurrentInstance)
+
+    # Observation only. Mutation functions retain their own authority and holder
+    # checks. In particular, a removal intent never grants automatic retirement.
+    $contract = Get-InstanceActivationContractState -Manifest $Manifest -ProjectRoot $ProjectRoot
+    if ($null -eq $contract -or $contract.Operation.Phase -cne 'COMMITTED') { throw 'No committed cleanup authority.' }
+    $controls = @(Get-ValidatedInstanceRetirementControls -ProjectRoot $ProjectRoot -Manifest $Manifest)
+    $retiredId = ''; $automatic = $false; $retained = $false
+    if ($null -ne $contract.RetirementIntent) {
+        $retiredId = [string]$contract.RetirementIntent.RetiredInstance.instance_id
+        $bound = Get-IntentBoundRetiredInstanceEvidence -ContractState $contract -ProjectRoot $ProjectRoot -Manifest $Manifest
+        $automatic = $null -ne $bound.Retired -or $controls.Count -gt 0
+    }
+    foreach ($control in $controls) {
+        if ($control.InstanceId -cne $retiredId -or
+            $control.ManifestSha256 -cne [string]$contract.RetirementIntent.RetiredInstance.instance_manifest_sha256) {
+            throw 'Retirement control has no matching automatic authority.'
+        }
+    }
+    $retainedIds = @{}
+    foreach ($intent in @(Get-InstanceRemovalIntents -Manifest $Manifest -ProjectRoot $ProjectRoot)) {
+        if ($intent.Document.schema_version -ne 1) { throw 'Nonstandard retained effects need explicit cleanup review.' }
+        $retainedIds[$intent.InstanceId] = $true
+    }
+    $root = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:InstancesRelativePath -Label 'cleanup instance inventory'
+    if (Test-Path -LiteralPath $root -PathType Container) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop)) {
+            if (-not $entry.PSIsContainer) { throw 'Unknown cleanup instance subject.' }
+            if ($entry.Name -ceq $CurrentInstance.InstanceId) { continue }
+            if ($retainedIds.ContainsKey($entry.Name)) { $retained = $true; continue }
+            if ($entry.Name -ceq $retiredId) { continue }
+            throw 'An instance has neither retention nor automatic retirement authority.'
+        }
+    } elseif (Test-Path -LiteralPath $root) {
+        throw 'Cleanup instance inventory is not a directory.'
+    }
+
+    # Do not use the combined cleanup short-circuit as evidence of an empty
+    # legacy domain. Known legacy work remains eligible; ambiguous work is not
+    # silently classified as intentional retention.
+    $marker = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $script:MarkerRelativePath -Label 'legacy cleanup marker'
+    $legacy = Get-ValidatedLegacyFlatRetirement -Manifest $Manifest -ProjectRoot $ProjectRoot -MarkerPath $marker
+    if ($null -ne $legacy) { $automatic = $true }
+    elseif (Test-Path -LiteralPath $marker) { throw 'Legacy marker needs cleanup review.' }
+    foreach ($file in $Manifest.Files) {
+        if ($file.Target.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            $file.Target -cnotin @(Get-InstanceBootstrapTargets) -and (Test-Path -LiteralPath $file.TargetPath) -and $null -eq $legacy) {
+            throw 'Legacy flat residue has no reviewed retirement marker.'
+        }
+    }
+    foreach ($relative in $Manifest.RetiredTargets) {
+        if ($relative.StartsWith($script:TargetPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath (Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'legacy cleanup target')) -and $null -eq $legacy) {
+            throw 'Legacy retired residue needs cleanup review.'
+        }
+    }
+    $generations = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath 'AIWork/.runtime/codedb/host/generations' -Label 'cleanup generations'
+    if (Test-Path -LiteralPath $generations -PathType Container) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $generations -Force -ErrorAction Stop)) {
+            if (-not $entry.PSIsContainer) { throw 'Unknown generation cleanup subject.' }
+            if ($entry.Name -ceq $Manifest.GenerationId) { continue }
+            $historical = Get-ValidatedPackageOwnedInstalledGeneration -GenerationId $entry.Name -ProjectRoot $ProjectRoot -PayloadRoot $Manifest.Root
+            if ($null -eq $historical -or (Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $historical) -cne 'TRUSTED_PREVIOUS') {
+                throw 'Historical generation needs cleanup review.'
+            }
+            $automatic = $true
+        }
+    } elseif (Test-Path -LiteralPath $generations) {
+        throw 'Cleanup generations inventory is not a directory.'
+    }
+    foreach ($relative in @($script:CurrentPointerRelativePath, $script:LastKnownGoodPointerRelativePath)) {
+        $path = Get-InstanceProjectPath -ProjectRoot $ProjectRoot -RelativePath $relative -Label 'cleanup generation pointer'
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $pointer = Get-ValidatedInstalledGenerationPointer -PointerPath $path -ProjectRoot $ProjectRoot
+        if ($null -eq $pointer) { throw 'Unverified generation cleanup selection.' }
+        $disposition = Get-RuntimeIdentityDisposition -Manifest $Manifest -Identity $pointer
+        if ($disposition -ceq 'TRUSTED_PREVIOUS') { $automatic = $true }
+        elseif ($disposition -cne 'CURRENT') { throw 'Unknown generation cleanup selection.' }
+    }
+    if ($automatic) { return 'RetirementPending' }
+    if ($retained) { return 'RetainedOnly' }
+    return 'None'
+}
+
+function Write-InstanceCleanupSchedulingObservation {
+    param([string]$ProjectRoot, $Manifest, $CurrentInstance)
+
+    $inputs = @(); $disposition = 'Unresolved'; $detail = ''
+    try {
+        $inputs = @(Get-InstanceCleanupSchedulingInputs -ProjectRoot $ProjectRoot -Manifest $Manifest)
+        try { $disposition = Get-InstanceCleanupSchedulingDisposition -ProjectRoot $ProjectRoot -Manifest $Manifest -CurrentInstance $CurrentInstance }
+        catch { $detail = $_.Exception.Message }
+        $after = @(Get-InstanceCleanupSchedulingInputs -ProjectRoot $ProjectRoot -Manifest $Manifest)
+        if ((ConvertTo-InstanceJsonText -Value $inputs) -cne (ConvertTo-InstanceJsonText -Value $after)) {
+            throw 'Cleanup scheduling inputs changed during observation.'
+        }
+    } catch {
+        $inputs = @(); $disposition = 'Unresolved'; $detail = $_.Exception.Message
+    }
+    $record = [ordered]@{
+        schema_version = 1
+        disposition = $disposition
+        detail = if ($detail) { $detail.Substring(0, [Math]::Min($detail.Length, 2048)) } else { '' }
+        inputs = @($inputs)
+    }
+    $json = ConvertTo-Json -InputObject $record -Depth 8 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 131072) {
+        $json = '{"schema_version":1,"disposition":"Unresolved","inputs":[]}'
+        $detail = 'Cleanup scheduling observation bound exceeded.'
+    }
+    Write-Host "[CLEANUP_SCHEDULING] $json"
+    if ($detail) { Write-Host "[CLEANUP_DIAGNOSTIC] $detail" }
+}
+
 function Write-InstanceProductStatus {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -5900,6 +6093,9 @@ function Write-InstanceProductStatus {
         $cleanupState = "PENDING"
     }
     Write-Host "[CLEANUP_STATE] $cleanupState"
+    if ($cleanupState -eq 'PENDING') {
+        Write-InstanceCleanupSchedulingObservation -ProjectRoot $ProjectRoot -Manifest $Manifest -CurrentInstance $current
+    }
     if ($RequireReady -and -not $readiness.Ready) {
         Throw-MaterializerError -Message "Current instance availability probe did not reach Ready: $($readiness.Reason)" -ExitCode 5
     }

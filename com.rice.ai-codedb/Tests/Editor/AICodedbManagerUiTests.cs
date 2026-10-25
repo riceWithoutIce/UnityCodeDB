@@ -15,6 +15,48 @@ namespace Rice.AI.Codedb.Editor.Tests
 {
     internal sealed class AICodedbProjectSettingsTests
     {
+        [Test]
+        public void ManagerRenderEvidence_ReadyAgesAndRevisionsDoNotCreateTransitions()
+        {
+            string output = null;
+            var evidence = new AICodedbManagerTransitionEvidence("synthetic-project", (path, json) => output = json);
+            var key = AICodedbManagerTransitionEvidence.SemanticKey("Ready", "Ok", false, "None:Inactive:False");
+            evidence.Capture("window", key, new Dictionary<string, string> { { "revision", "1" } });
+            evidence.Capture("window", key, new Dictionary<string, string> { { "revision", "2" } });
+            Assert.That(SpinWait.SpinUntil(() => !evidence.IsWriting, 5000), Is.True);
+            Assert.That(evidence.Count, Is.EqualTo(1));
+            Assert.That(output, Does.Contain("BASELINE"));
+            Assert.That(output, Does.Not.Contain("TRANSITION\""));
+        }
+
+        [Test]
+        public void ManagerRenderEvidence_RecoveryActivityDoesNotImplyHeaderOverride()
+        {
+            var status = new AICodedbUserActionStatus();
+            status.Recover("Install CodeDB", 0d);
+            var presentation = status.BuildPresentation(1d);
+            Assert.That(presentation.StatusLabel, Is.EqualTo("Outcome unconfirmed"));
+            Assert.That(AICodedbManagerWindow.ShouldOverrideProductStatus(status.Phase,
+                presentation, status.HasFreshProductState), Is.False);
+            Assert.That(AICodedbManagerTransitionEvidence.SemanticKey("Ready", "Ok", false, "Recovery"),
+                Is.Not.EqualTo(AICodedbManagerTransitionEvidence.SemanticKey("ACTION_UNCONFIRMED", "Warning", true, "Failed")));
+        }
+
+        [Test]
+        public void ManagerRenderEvidence_DisplayDispositionRetainsBoolBoundary()
+        {
+            var context = new AICodedbEditorExecutionContext(RuntimePlatform.WindowsEditor,
+                "synthetic-project", "synthetic-package", "synthetic");
+            var boundary = new AICodedbManagerStatusBoundary(context, "generation", "hash", "runtime");
+            var now = DateTimeOffset.UtcNow;
+            Assert.That(boundary.DisplayDisposition(context, AICodedbProductState.Starting, false, null, now),
+                Is.EqualTo("ACCEPTED"));
+            Assert.That(boundary.CanDisplay(context, AICodedbProductState.Starting, false, null, now), Is.True);
+            Assert.That(boundary.DisplayDisposition(context, AICodedbProductState.Ready, true, null, now),
+                Is.EqualTo("MISSING_READY_OBSERVATION"));
+            Assert.That(boundary.CanDisplay(context, AICodedbProductState.Ready, true, null, now), Is.False);
+        }
+
         [TestCase(AICodedbProductState.Ready, false, "Uninstall CodeDB from Project")]
         [TestCase(AICodedbProductState.NotIntegrated, false, "Install CodeDB")]
         [TestCase(AICodedbProductState.Uninstalled, false, "Install CodeDB")]
