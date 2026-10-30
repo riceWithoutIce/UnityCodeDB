@@ -1,6 +1,14 @@
 # Proposed CodedbTest_2 candidate delivery
 
-Status: PREPARED_ONLY; no export or consumer switch executed.
+Status: EXPORT_PASS / CONSUMER_DELIVERY_PASS / HUMAN_READY / CLIENT_FUNCTIONAL_PASS (2026-10-26).
+Candidate: `11056964da1143955ed69a067361622799e3d6f2`.
+ZIP SHA-256: `8a3fcad610093f17eca062726cd5412ad47a64bf565e835690e69b9de8329ef8`.
+Exact committed/exported source inventory: 669 files; both exporter closure
+gates PASS. See EXPORT-RESULT.md. Copy and both references switched after current
+human closed-Editor confirmation; see DELIVERY-RESULT.md. User subsequently
+confirmed no compilation errors and Ready; bounded target-chat status/query
+passed, with response identity LIMITED. See TARGET-CLIENT-RESULT.md.
+This plan's remaining acceptance steps are not authorized by those results.
 All repository paths are relative to `<repository-root>`; external paths below
 are relative to the already user-designated sibling test root, not new locations.
 
@@ -21,6 +29,11 @@ are relative to the already user-designated sibling test root, not new locations
   `Packages/<candidate-short-hash>-v03-reviewed-candidate/com.rice.ai-codedb`.
   Copy only the successfully validated artifact, verify every file hash, and
   preserve the previous package directory.
+
+Resolved next delivery directory under the existing external test root:
+`Packages/1105696-v03-reviewed-candidate/com.rice.ai-codedb`.
+Proposed CodeDB reference in both consumer JSON files:
+`file:../../Packages/1105696-v03-reviewed-candidate/com.rice.ai-codedb`.
 
 ## Consumer switch prerequisites and scope
 
