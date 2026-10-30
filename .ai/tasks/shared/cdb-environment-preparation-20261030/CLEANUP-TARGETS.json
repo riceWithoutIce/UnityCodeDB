@@ -1,0 +1,1337 @@
+{
+  "status": "EXACT_CANDIDATES_ONLY_NOT_EXECUTED",
+  "inventory": "G:\\RiceProgram\\UnityCodeDB\\.artifacts\\maintenance\\environment-preparation-20261030-114343\\result.json",
+  "excluded": [
+    "All Library/CodeDB diagnostics",
+    "All Logs/UserSettings/project configs/runtime history",
+    "All Test7/Test8 contents",
+    "All original project/worktree roots",
+    "All existing .artifacts/.backups",
+    "All Temp logs/results/historical snapshots"
+  ],
+  "targets": [
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\AnnotationManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 1500,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\APIUpdater",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5782,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ArtifactDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16777216,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ArtifactDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\Artifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3800,
+      "bytes": 28977308,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\Bee",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 423,
+      "bytes": 25795794,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\BuildPlayer.prefs",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\BuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2040,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\EditorOnlyScriptingSettings.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 181,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\EditorOnlyVirtualTextureState.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 79,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\EditorSnapSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 546,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\EditorUserBuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8064,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\expandedItems",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 824,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ilpp.pid",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\InspectorExpandedItems.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 888,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\LastSceneManagerSetup.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 97,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\LibraryFormatVersion.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 65,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\MonoManager.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2576,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\PackageCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 9601,
+      "bytes": 115777827,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\PackageManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 2,
+      "bytes": 84384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\SceneVisibilityState.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 3732,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ScriptAssemblies",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 60,
+      "bytes": 11973668,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ScriptMapper",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 10769,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\Search",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 6,
+      "bytes": 941653,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ShaderCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 37,
+      "bytes": 79404,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\ShaderCache.db",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\SourceAssetDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8388608,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\SourceAssetDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\SpriteAtlasDatabase.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2952,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\StateCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3,
+      "bytes": 663,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\Style.catalog",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 245851,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_2\\Library\\TempArtifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 0,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\AnnotationManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 1500,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\APIUpdater",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5782,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ArtifactDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16777216,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ArtifactDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\Artifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3758,
+      "bytes": 28785775,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\Bee",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 402,
+      "bytes": 24215810,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\BuildPlayer.prefs",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\BuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2040,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\EditorOnlyScriptingSettings.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 181,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\EditorOnlyVirtualTextureState.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 79,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\EditorSnapSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 546,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\EditorUserBuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8064,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\expandedItems",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 824,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ilpp.pid",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 6,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\InspectorExpandedItems.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 888,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\LastSceneManagerSetup.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 97,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\LibraryFormatVersion.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 65,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\MonoManager.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2576,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\PackageCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 9601,
+      "bytes": 115777827,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\PackageManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 2,
+      "bytes": 84351,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\SceneVisibilityState.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 3732,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ScriptAssemblies",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 58,
+      "bytes": 11297852,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ScriptMapper",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 10769,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\Search",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 6,
+      "bytes": 112004,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ShaderCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 37,
+      "bytes": 79404,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\ShaderCache.db",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\SourceAssetDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8388608,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\SourceAssetDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\SpriteAtlasDatabase.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2952,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\StateCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3,
+      "bytes": 663,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\Style.catalog",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 245851,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_3\\Library\\TempArtifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 0,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\AnnotationManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 1500,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\APIUpdater",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5782,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ArtifactDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16777216,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ArtifactDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\Artifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3756,
+      "bytes": 28778255,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\Bee",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 384,
+      "bytes": 24035182,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\BuildPlayer.prefs",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\BuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2040,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\EditorOnlyScriptingSettings.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 181,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\EditorOnlyVirtualTextureState.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 79,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\EditorSnapSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 546,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\EditorUserBuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8064,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\expandedItems",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 824,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ilpp.pid",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 6,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\InspectorExpandedItems.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 888,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\LastSceneManagerSetup.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 97,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\LibraryFormatVersion.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 65,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\MonoManager.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2576,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\PackageCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 9601,
+      "bytes": 115777827,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\PackageManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 2,
+      "bytes": 84358,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\SceneVisibilityState.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 3732,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ScriptAssemblies",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 56,
+      "bytes": 11274996,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ScriptMapper",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 10769,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\Search",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 5,
+      "bytes": 108768,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ShaderCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 37,
+      "bytes": 79404,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\ShaderCache.db",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\SourceAssetDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8388608,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\SourceAssetDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\SpriteAtlasDatabase.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2952,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\StateCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3,
+      "bytes": 663,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\Style.catalog",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 245851,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_4\\Library\\TempArtifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 0,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\AnnotationManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 1500,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\APIUpdater",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5782,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ArtifactDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16777216,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ArtifactDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\Artifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3757,
+      "bytes": 28783283,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\Bee",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 384,
+      "bytes": 24040738,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\BuildPlayer.prefs",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\BuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2040,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\EditorOnlyScriptingSettings.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 181,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\EditorOnlyVirtualTextureState.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 79,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\EditorSnapSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 546,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\EditorUserBuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8064,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\expandedItems",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 824,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ilpp.pid",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\InspectorExpandedItems.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 888,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\LastSceneManagerSetup.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 97,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\LibraryFormatVersion.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 65,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\MonoManager.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2576,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\PackageCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 9601,
+      "bytes": 115777827,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\PackageManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 2,
+      "bytes": 84378,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\SceneVisibilityState.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 3732,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ScriptAssemblies",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 56,
+      "bytes": 11275660,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ScriptMapper",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 10769,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\Search",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 6,
+      "bytes": 111948,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ShaderCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 37,
+      "bytes": 79404,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\ShaderCache.db",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\SourceAssetDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8388608,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\SourceAssetDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\SpriteAtlasDatabase.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2952,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\StateCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3,
+      "bytes": 663,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\Style.catalog",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 245851,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_5\\Library\\TempArtifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 0,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\AnnotationManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 1500,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\APIUpdater",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5782,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ArtifactDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16777216,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ArtifactDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\Artifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3758,
+      "bytes": 28788783,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\Bee",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 404,
+      "bytes": 24279435,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\BuildPlayer.prefs",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\BuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2040,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\EditorOnlyScriptingSettings.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 181,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\EditorOnlyVirtualTextureState.json",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 79,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\EditorSnapSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 546,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\EditorUserBuildSettings.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8064,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\expandedItems",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 824,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ilpp.pid",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 5,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\InspectorExpandedItems.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 956,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\LastSceneManagerSetup.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 97,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\LibraryFormatVersion.txt",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 65,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\MonoManager.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2576,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\PackageCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 9601,
+      "bytes": 115777827,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\PackageManager",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 2,
+      "bytes": 84368,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\SceneVisibilityState.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 3820,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ScriptAssemblies",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 58,
+      "bytes": 11307904,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ScriptMapper",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 10769,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\Search",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 5,
+      "bytes": 273016,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ShaderCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 37,
+      "bytes": 79404,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\ShaderCache.db",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 16384,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\SourceAssetDB",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8388608,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\SourceAssetDB-lock",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 8192,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\SpriteAtlasDatabase.asset",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 2952,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\StateCache",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 3,
+      "bytes": 663,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\Style.catalog",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 1,
+      "bytes": 245851,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\Test\\CodedbTest\\CodedbTest_6\\Library\\TempArtifacts",
+      "type": "UNITY_GENERATED_LIBRARY_CHILD",
+      "files": 0,
+      "bytes": 0,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\UnityCodeDB\\Temp\\codedb-editor-compile\\bin",
+      "type": "COMPILE_OUTPUT",
+      "files": 3,
+      "bytes": 973806,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\UnityCodeDB\\Temp\\codedb-editor-compile\\obj",
+      "type": "COMPILE_OUTPUT",
+      "files": 22,
+      "bytes": 2057925,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\UnityCodeDB\\Temp\\codedb-tests-compile\\bin",
+      "type": "COMPILE_OUTPUT",
+      "files": 161,
+      "bytes": 31806253,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\UnityCodeDB\\Temp\\codedb-tests-compile\\obj",
+      "type": "COMPILE_OUTPUT",
+      "files": 15,
+      "bytes": 341417,
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_FRESH_OCCUPANCY_SOURCE_RECHECK"
+    },
+    {
+      "path": "G:\\RiceProgram\\UnityCodeDB\\.worktrees\\cdb-v03-install-quarantine-admission\\ .ai\\tasks\\v0.3.0\\cdb-v03-ready-observation-deadline\\SLICE-A-EVIDENCE-STOP-MATRIX.md",
+      "type": "SUPERSEDED_STRAY_DESIGN_COPY",
+      "files": 1,
+      "bytes": 3051,
+      "sha256": "7e7363484101f106963c83e5f195eef4635b77d0c41858e038d32188978e0908",
+      "authorized_for_removal": false,
+      "precondition": "EXACT_LIST_APPROVAL_AND_RECHECK_SAVED_COPY_AND_CANONICAL_FROZEN_FILE"
+    }
+  ],
+  "files": 69674,
+  "bytes": 1067474466
+}

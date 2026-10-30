@@ -1,0 +1,844 @@
+{
+  "status": "NOT_STAGED_NOT_COMMITTED",
+  "groups": {
+    "G1": {
+      "checkout": "G:\\RiceProgram\\UnityCodeDB",
+      "files": [
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/DELIVERY-PLAN.md",
+          "bytes": 4425,
+          "sha256": "328e51451040fd3fbc6fa5de7e9c509deb21f28668d0aa79dfe860f071a96c79"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/DELIVERY-RESULT.md",
+          "bytes": 4949,
+          "sha256": "20c8fba4cc2d60666874695318211a21dd278f03b8391b9d9dbfe4b30dc6e624"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/DELIVERY-TASK.md",
+          "bytes": 2315,
+          "sha256": "c33c5974d8a243e34e75e69ab07ee4998eefb5ac0c6d5cc592bf99246d047664"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/EXPORT-RESULT.md",
+          "bytes": 3158,
+          "sha256": "fe158f1e58acbe07c2655395b20acd80a0861f9714da2ea1d3c5a664384379e4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/EXPORT-TASK.md",
+          "bytes": 2001,
+          "sha256": "6a79e299e648f596c89d7904215fb3746166892f75703b1b0f461d6d6a1a08c3"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/F01-LIVE-CHECK-RESULT.md",
+          "bytes": 3432,
+          "sha256": "d2a69c8a486a1f572415cb42ba0bf8812cf81d02c94309ee0a0d97e6de2d45e5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/F01-LIVE-CHECK-TASK.md",
+          "bytes": 1887,
+          "sha256": "2e131b181a31269bbc06c4ec1345284e5400a7b1b346369cd38fd933e6035f3c"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/TARGET-CLIENT-RESULT.md",
+          "bytes": 4759,
+          "sha256": "155e03845466d16d6249663846c7c9a7d529c145c5d4d72cddc56657a18294ab"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/TARGET-CLIENT-TASK.md",
+          "bytes": 5277,
+          "sha256": "15b7a11d7504a5dcb58aebfcb903092190e0be3a536696ad7a02e82119467fa9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-freeze-delivery-preparation/deliver.cjs",
+          "bytes": 8511,
+          "sha256": "7a9d22acef4ee27fe0e0e6bed4395d46bc25d94f2fa62d244451943726854033"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/FRESH-INSTALL-ATTEMPT-01-RESULT.md",
+          "bytes": 6808,
+          "sha256": "014a16b1570263011d9ba3538217dbff795fb481843f8c7c1a22d0ab613f6a1d"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/RESULT.md",
+          "bytes": 3074,
+          "sha256": "11616a3f7db49405f0478c74252ddc77655f308c8741ecb15ea8a5b9c810303c"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/TASK.md",
+          "bytes": 4326,
+          "sha256": "740df232684d5fdccb29af2c612df14c3f77d449efcdff48330201d5fd03de8e"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/UNINSTALL-ATTEMPT-01-RESULT.md",
+          "bytes": 5137,
+          "sha256": "1d4045562c5e700266d0bab83957196c62a72cfe2db6befb9fafe8063583eae4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/UNINSTALL-ATTEMPT-01-TASK.md",
+          "bytes": 3624,
+          "sha256": "38044f9c71aa16a5fb1ea05c2fa53762b47a5ced03d258d97243ffb1b8954595"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/UNINSTALL-HANDOFF-CHECK-RESULT.md",
+          "bytes": 5755,
+          "sha256": "84dd27fd72dbff48f2fd409c491c3b797d5956cf04bc7e21d838ba140c80d980"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/UNINSTALL-HANDOFF-CHECK-TASK.md",
+          "bytes": 2699,
+          "sha256": "bcb78abd531b86dab0cbf3708914b083415805e1888499a76726b778f2ffe400"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/check-install-failure.cjs",
+          "bytes": 4513,
+          "sha256": "d735221a1e20bd47eecfa5ec1725af054c32f330d8357f540c96a035e97aca63"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-candidate-lifecycle-acceptance/check-uninstall-handoff.cjs",
+          "bytes": 6814,
+          "sha256": "2c7b27ccde95ba7c1df90d7a9cfb7143e5dd98baa1884de4394e5481d4955f2a"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/BUGS.md",
+          "bytes": 5117,
+          "sha256": "f49e55ee41021d80f5bff5b38c21d1b6bd9ecadbc01cb1acfb2b030525e5775a"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-CLOSURE-NEXT-ACCEPTANCE-PLAN.md",
+          "bytes": 3196,
+          "sha256": "dc37d42b01f1478afcc54a0c80318c5f23e7b78f7f599cde7641adcadda54e6a"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-CLOSURE-PLAN.md",
+          "bytes": 8462,
+          "sha256": "f2921bf3a605758d8ca4da6600ca9d1451633de4eaf3a7a5d3801556697b788a"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-CLOSURE-RESULT.md",
+          "bytes": 6037,
+          "sha256": "f42c77405c85f48c6167d9b2a6f50c29b5b44db506490de375c20bf7d6bda9c7"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-CLOSURE-SCOPED-REVIEW.md",
+          "bytes": 2753,
+          "sha256": "4f5cc1a49463c3c1b6c01fe33f6601d0be6ae6d9a35cc5f973fb80d67b94cdb7"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-EVIDENCE-CAUSAL-ANALYSIS.md",
+          "bytes": 7149,
+          "sha256": "e50f59f0059b93b4dcf8c067421fc685028665e172d0cf580543d824145a14b4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/CHILD-EVIDENCE-RESULT.md",
+          "bytes": 3842,
+          "sha256": "5ebfc6ec7730f3e058ec115e18f64b71488bedbcf5954d18aa4f2b3a647c6370"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/PLAN.md",
+          "bytes": 7647,
+          "sha256": "fc8ae6d544e60b72f9d2d7d20830699a267c60b804e25621e3e79cb931c85992"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/RESULT.md",
+          "bytes": 6629,
+          "sha256": "cf394f4a1d496122474470c68c828a2ac1a265a5e56a9754a6871a5a88f49ad6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/STATIC-REVIEW.md",
+          "bytes": 2696,
+          "sha256": "9eb5d9a8fd6bc9cd98666d3e5f3a1e18a5fafdb2852292a119f67989fc32aff1"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TASK.md",
+          "bytes": 4464,
+          "sha256": "ba6868f39f86c15e83f058b854151343d580a625d90ddf2f66ea8d49623dc8e4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-CLOSE-REOPEN-RESULT.md",
+          "bytes": 994,
+          "sha256": "95cee9d0830eaa5536e1adcdefe12aec4310b50a3638b03b512bf91f34554ed9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-DELIVERY-PLAN.md",
+          "bytes": 3397,
+          "sha256": "4096e58c6c4918899b3b448a0710343bbe1274b40177ba513145e4f37980f198"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-DELIVERY-RESULT.md",
+          "bytes": 3491,
+          "sha256": "ac751dcee7da55908dc804cc37efeb716e4bc2a46b74de65895d8cc8d670741b"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-FIRST-INSTALL-RESULT.md",
+          "bytes": 6626,
+          "sha256": "7338214d8c15236d35a1f2cbbf02d3f783699439360921d5124c86fcfad94fec"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-FIRST-INSTALL-TASK.md",
+          "bytes": 1732,
+          "sha256": "b51ade57d11a0877a248928e8737b4e5e3c918715305cd1f80f81fff11bc3d79"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-RECOVERED-TARGET-CLIENT-RESULT.md",
+          "bytes": 2756,
+          "sha256": "07fc739d400735deccbd45c65f75dffb4be1692361243184312245d343560bd6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-RECOVERED-TARGET-CLIENT-TASK.md",
+          "bytes": 4783,
+          "sha256": "1482ad48c05ea0efd40803a11127d6eb05c7baf775ae9e5fade7cba1620ed3dc"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-UNINSTALL-ATTEMPT-RESULT.md",
+          "bytes": 1908,
+          "sha256": "7c46154656798634db58464b9df25de724599e0b25f275501fe1455f786e57a8"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-UNINSTALL-ATTEMPT-TASK.md",
+          "bytes": 1529,
+          "sha256": "c82282c5bb13c5106f775a237d4147f9bcdb06255bcba9d97d4996b103d8bcee"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-UNINSTALL-HANDOFF-CHECK-RESULT.md",
+          "bytes": 4802,
+          "sha256": "194f3bd6e64b090d20c6803b0e368f07f1d3f06263ddf936e2ffb44de0df1d54"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/TEST3-UNKNOWN-PROBE-ANALYSIS.md",
+          "bytes": 5954,
+          "sha256": "d52aa3b161f1d40b7ab50d2c2de2ee871015a5e21a5ed0011bfceb7223e6a530"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/check-test3-uninstall.cjs",
+          "bytes": 7010,
+          "sha256": "d3571c44705d77ccd14f4f3c7c44341b36a40235adc9b09d0934caa0e52f569c"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/check-test3-unknown-records.cjs",
+          "bytes": 2780,
+          "sha256": "4be58b562befda79e5361cd14c55c7e624cc41acff330483f790b04146c94e95"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/deliver-09d345d.cjs",
+          "bytes": 7480,
+          "sha256": "d87c8c3640bf18e9bf47d7310aebe17ad694db41c55dc9f57ea7908d1764fa53"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-install-quarantine-admission/deliver-test3.cjs",
+          "bytes": 6568,
+          "sha256": "b1e01d8ab98a604878c2d0f3dad6f7212c1573f8852fae407d019d299aa8c6cc"
+        }
+      ],
+      "count": 45
+    },
+    "G2": {
+      "checkout": "G:\\RiceProgram\\UnityCodeDB\\.worktrees\\cdb-v03-install-quarantine-admission",
+      "files": [
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-p0-s45-adapter-snapshot/POC50-TEST7-CONTROLLED-REMOVAL-RESULT.md",
+          "bytes": 2636,
+          "sha256": "6c91e3e7760093eb7124bbacf411481d9cb5570021308fa57063e4516f7290dd"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-p0-s45-adapter-snapshot/POC50-TEST7-DELIVERY-RESULT.md",
+          "bytes": 2133,
+          "sha256": "18995acca96cbbe9e94b25c41d49f46d52f82c90bc10bcdc0c84dfacf12d2e00"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-p0-s45-adapter-snapshot/POC50-TEST7-DISK-BASELINE.json",
+          "bytes": 1917,
+          "sha256": "871755f9a15e319b3ec95d013422458a5a5d39779ea0d3f83a142209acd8d794"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-p0-s45-adapter-snapshot/POC50-TEST7-MIGRATION-CHECK.md",
+          "bytes": 3916,
+          "sha256": "cee3e664712b4e77a51fdc0a797e24ae62408b670c5e60e6a306d946922eee70"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v0.3-p0-s45-adapter-snapshot/POC50-TEST7-REAL-ACCEPTANCE-PLAN.md",
+          "bytes": 8820,
+          "sha256": "e0fa5b3ae464ef816044723337446bf0ca44662b24be326014fb5fa5610112f0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/COMMIT-EXPORT-PLAN.md",
+          "bytes": 7802,
+          "sha256": "e9bf55d45d4352b9f2ecb436e8d18c379f65e72a33d5644fd687e41342162f14"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/COMMIT-FILES.json",
+          "bytes": 5693,
+          "sha256": "34de01813fd1722acc4a99299d3d01c69c36db1abefa77b710c89036930110d7"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/EXPORT-EVIDENCE.json",
+          "bytes": 10395,
+          "sha256": "6270089759f741007405ebe76db6651b95488259411ba40b9f1df3a4bce770d5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/EXPORT-EXECUTION.md",
+          "bytes": 2741,
+          "sha256": "d01f8c82b67f34fec6a572ffb7a565039e6e220f3b854e0d0602943a65cc015d"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/EXPORT-RESULT.md",
+          "bytes": 4252,
+          "sha256": "a2391b3d84e7c5292a9719a59f8a52d5f3d54680aa46cec4f8f838fcffe95868"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/READY-CAUSE-ANALYSIS.md",
+          "bytes": 12382,
+          "sha256": "d0eb5151883192d5e42a9a654b60be1dada2918b0c1e45745b6f21bf82b06938"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/READY-REPAIR-DESIGN.md",
+          "bytes": 14335,
+          "sha256": "5835ac22f6f4802dbef1e1b151e71e7c34692abe2f2e49ec1998edb32f5718ea"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/TEST8-DELIVERY-BASELINE.json",
+          "bytes": 2484,
+          "sha256": "c0da366b3cb3b5c8865a5c22181c2bce1c3ee08446ff912ea716366de3b54247"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/TEST8-DELIVERY-EXECUTION.md",
+          "bytes": 4979,
+          "sha256": "7fd13a4757f3db9cba640649b473cb17a59136e2c9dc33bc89e51ecd3e88ba63"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/TEST8-DELIVERY-RESULT.md",
+          "bytes": 2760,
+          "sha256": "8c3f5de37db6d2accab1e5a6a092e707d2b94e43f8c74e4f6def1717e9177df5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/TEST8-HUMAN-ACCEPTANCE.md",
+          "bytes": 5572,
+          "sha256": "97077d2ba3c63fde938562b442009f8ef9b69402393384153e4c39223ab6eeed"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/TEST8-SLOW-STARTING-OBSERVATION.md",
+          "bytes": 13082,
+          "sha256": "3a3ec1e7095607858c841d01bc0e786ade670c81360c50ea9f72151d33cfe761"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/check-export-entry-hashes.ps1",
+          "bytes": 2024,
+          "sha256": "70d3bacf3e994fae7914dbc49cba169fb429ee8317aa56c7eb4f8b3d36bb8274"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/deliver-eebb46c-test8.ps1",
+          "bytes": 11344,
+          "sha256": "a7f2ca31ea63588967de88585212e1ea6e0ec8983b0f2f1165fdb95207aa18b9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-bound-observation-cache/verify-exact-export.mjs",
+          "bytes": 7302,
+          "sha256": "15fd98161b92acbf77c3f57829f9ac5b48e948d4454004d4b63496fe4535a1c8"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-f1-publication-instance-root/DELIVERY-RESULT.md",
+          "bytes": 2278,
+          "sha256": "c7d468515c0de866645d9843791aa93a61740147200148f5d40b431819ba9b76"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-f1-publication-instance-root/EXPORT-RESULT.md",
+          "bytes": 2752,
+          "sha256": "9e44521e15ac8007c2e1395eb7626ec2f969399260bbc11782e6938f4aa7a782"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-f1-publication-instance-root/ROUTE-REASSESSMENT.md",
+          "bytes": 13010,
+          "sha256": "59a20e8fa752a64780366a72c51688538205192ab9f08fa87ee8adb3e84d99e1"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-f1-publication-instance-root/deliver-poc51-test7.ps1",
+          "bytes": 7223,
+          "sha256": "5f3bdbbf7f11a437011b3d8b08b4becfcefeb47fd857f659eb756df5119935b7"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/EXPORT-RESULT.md",
+          "bytes": 4360,
+          "sha256": "9d6174dbd145a7ef8536e7f0f7f7424a5acf78bcb8162debe47aca893b03b5d6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST7-DELIVERY-BASELINE.json",
+          "bytes": 3879,
+          "sha256": "435ca62fb7c544b50087a4482096bc4240f7afe8c271cce409289736162fc570"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST7-DELIVERY-PLAN.md",
+          "bytes": 2951,
+          "sha256": "88953669bb0b06e037b4cb547f31d5850ee937851b21525c940b53f631e8cda0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST7-DELIVERY-RESULT.md",
+          "bytes": 2316,
+          "sha256": "873d64ca4148878a29c0105ad46f73778c68a0232b097f7bfe3ed8105458859e"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST7-MIGRATION-OBSERVATION.md",
+          "bytes": 1901,
+          "sha256": "df1c3120216bace8a82be30c03143589b29f0e9512cc2012cc6fb9e28132a75f"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST8-CLEAN-BASELINE.json",
+          "bytes": 1431,
+          "sha256": "f046df2eb775d77af00e76afb7f6bafc51303300a898fbc6750a3ee76e2f7d98"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST8-DELIVERY-PLAN.md",
+          "bytes": 832,
+          "sha256": "465a046e6463ac41cf4db475e306575ddbd92d68c503dc28e4d2b89e2a6ad26a"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST8-DELIVERY-RESULT.md",
+          "bytes": 1897,
+          "sha256": "2614532923959936ac62578bf3fcb1fc9b80e8cf908bcc48ad5db130cf7a19a7"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/TEST8-READY-UNCONFIRMED-OBSERVATION.md",
+          "bytes": 6706,
+          "sha256": "21379616a24dfb2b5c6ae232b95cedbb6c5f31c2e67a8465cff89c8c45ebb72b"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/deliver-poc52-test7.ps1",
+          "bytes": 7850,
+          "sha256": "e37bcf99aae018f4fc9171b6aad70ff3a756af691b29f17cec5df74cf8b1964d"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/deliver-poc52-test8.ps1",
+          "bytes": 7895,
+          "sha256": "1cbc2458165bdf95db7f4875516756ca98bc2d7bb6013d25ec91f34421a174f2"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-integration-control-convergence/verify-exact-artifact.mjs",
+          "bytes": 6178,
+          "sha256": "5cdaf2f66db2fb1239277d157e510f13db623f8a88d87447ddff471786712018"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/ARTIFACT-SNAPSHOT-FIRST-ATTEMPT.json",
+          "bytes": 1096,
+          "sha256": "37f6c71f476a22e7828734eaa6e744fa104cb83e2ae4861afee6aad5491d6d77"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/ARTIFACT-SNAPSHOT.json",
+          "bytes": 4324,
+          "sha256": "523cd1390bfed4757982f64e0a7ee2dc82c96938ce1af530811c01d4ff66f5bd"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/BATCH-ALIGNMENT-DECISION-DRAFT.md",
+          "bytes": 4582,
+          "sha256": "706b207895deaa7fa55146712e0e6835674af18b50eecafce76a72d14349a703"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/BATCH-ALIGNMENT-REVIEW.md",
+          "bytes": 8015,
+          "sha256": "0acb84ab6e98f5ee9408ab3b4f5aa7b8b2f25461dc83373391a256662196f673"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/COMMIT-FILES.json",
+          "bytes": 8216,
+          "sha256": "627a2141a3f6651b29943c58af332a2442fb6112fefed5bf61b985bab4ba39e3"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/CONTRACT-ARTIFACT-PLAN.md",
+          "bytes": 11393,
+          "sha256": "72addf2b125d33ad1850fb0c8a00d006b2ea4ecf36ed6ef78b260cb7a398f071"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/CONTROL-ROOT-MIGRATION-ENTRY-MAP.md",
+          "bytes": 10192,
+          "sha256": "a9768ea953fee3f70fcd848944a186d5005460718aa84c88fb12e62968fe7ed3"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/CROSS-PROCESS-DEADLINE-CLOCK-PROPOSAL.md",
+          "bytes": 3498,
+          "sha256": "bf6b3baf5bf6cbabff8154da2a4ad6fbb2c0583070e5e6ee04facab4f15b1ec9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/EXPORT-EXECUTION.md",
+          "bytes": 3576,
+          "sha256": "86b4a3812b1753e0583d85e23ac64ad2356aa8b2aea49b33ebf64572683b88d2"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/EXPORT-RESULT.md",
+          "bytes": 5614,
+          "sha256": "aaadb184764c0df99718a3e02057306f24d49846563f140721f627bfdac41b11"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/EXPORT-VERIFICATION.md",
+          "bytes": 5034,
+          "sha256": "eadcbbf7b4757c28d9ec7cecc72aa6b8075049053698ece1b7de4d23ed094db5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/FRONTEND-BACKEND-SESSION-DESIGN.md",
+          "bytes": 131239,
+          "sha256": "731537e735af3d7dd967ff8529de826ef3718028ac3a63d8496ce44fbbe13c47"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/MIGRATION-JOURNAL-ARTIFACT-CHECK.md",
+          "bytes": 3976,
+          "sha256": "07e7c298e9725d1c951509677d98009166091dc4b0797339166b71d133b59f3f"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/MIGRATION-JOURNAL-CONTRACT-PROPOSAL.md",
+          "bytes": 17742,
+          "sha256": "49c0d0a055026b5e08a196007e4a06da7d475a3f646312b13c9b4d9ea943ae00"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/MIGRATION-POLICY-BUDGET-PROPOSAL.md",
+          "bytes": 9943,
+          "sha256": "9add65ae45b01b2805cd329326a86210729ab57eebd8a93b71e3ee1097cff135"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/MIGRATION-PROTOCOL-ARTIFACT-CHECK.md",
+          "bytes": 3529,
+          "sha256": "472e5ec49e35ce93030e5eb6973d7b51d49ab3ed3baf8adda217c14b241acc9d"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/MIGRATION-PROTOCOL-DETAILS-DRAFT.md",
+          "bytes": 14151,
+          "sha256": "992f76639da274558152cf397c54e9b32280327609b28a412239e3c860ed64d0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/NEXT-TASK-ALIGNMENT.md",
+          "bytes": 4925,
+          "sha256": "0a162f534490fd826d971308000e5620315448db338521e9ec42a522c747b1c6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/OLD-OWNER-DRAIN-PROTOCOL-PROPOSAL.md",
+          "bytes": 4122,
+          "sha256": "6616a24934daa91e8a791b9bf538cb86667a5a362606707526fb88c893a10fdf"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/PREFLIGHT-VALIDITY-PROPOSAL.md",
+          "bytes": 5844,
+          "sha256": "b5efeed5c6b0eb9206f6ca9f87d52dadbe4e25dd9acf850c2ed7a43adbd9fbe2"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/PUBLICATION-BUDGET-PROPOSAL.md",
+          "bytes": 11701,
+          "sha256": "afc922340f9340ed2a19e32a6473404cae8497a9eb65b1e9a9e4b30ac9085d6f"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SLICE-A-EVIDENCE-STOP-MATRIX.md",
+          "bytes": 3058,
+          "sha256": "d670463c60804e15bcd0518b45fbd6840bf7c24f214cbcd59e55c9a1e37afb49"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SLICE-A-IMPLEMENTATION-READINESS.md",
+          "bytes": 8624,
+          "sha256": "1d6b4dd2de8a476a7a8a797c3500af65d15030a24909b67c95cb72320eef13a3"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SLICE-A-IMPLEMENTATION-TASK-DRAFT.md",
+          "bytes": 7260,
+          "sha256": "49bd725e619b13562104f951a702ab30fad22f15b8854e771f6947781c05d0ae"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SNAPSHOT-CONTRACT-DRAFT.md",
+          "bytes": 10038,
+          "sha256": "ddb7c2aa49121aca9d2623e5bee784457fc4ce6ca96053df0675d69ce59146b5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SOURCE-PUBLICATION-ARTIFACT-CHECK.md",
+          "bytes": 8761,
+          "sha256": "7767a1ba3a2650b3516dcedbe56a18d0bbf3160c55fd02588c1aaf061e768c39"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/SOURCE-PUBLICATION-CONTRACT-DRAFT.md",
+          "bytes": 32393,
+          "sha256": "eee0e5da7408a5e88975c79182f2171a885e79445c90c580c90b11393f479d55"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-AUTHORIZATION.json",
+          "bytes": 554,
+          "sha256": "f5e393dbebc37de86a48f843e73e76b058b2eddcf02af5bbbd369c3da46cc539"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-BASELINE.json",
+          "bytes": 3334,
+          "sha256": "2f255c0b11d1fde1598f1b9100b752806ea1c2a9417ee09643b3af35ebd35de4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-PLAN.md",
+          "bytes": 3684,
+          "sha256": "2d3138b0a3fd969fb0ad443c925c4a9c8677736e2ff52916c1b8d6fbbcee1ec5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-RESULT.md",
+          "bytes": 3669,
+          "sha256": "487caaa0730c42280e2d3b323c9f69c06ff07b426bf2e128d18dfc65d1e6f4e0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-SNAPSHOT.json",
+          "bytes": 4146,
+          "sha256": "f572cd2cf54ada0f1bcc8b3306e7bbc3253396c42faf293087891feae335a747"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-DELIVERY-VERIFICATION.md",
+          "bytes": 4195,
+          "sha256": "efb17f9613d3cd86d74cb8857c16e015253a2d4b69893ed889fcfc746a4f96a2"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/TEST8-HUMAN-ACCEPTANCE.md",
+          "bytes": 5615,
+          "sha256": "e66a0dc8fb39d9d2b17796e44d1f29b7f352dfa54eecf70dd227240343bf5f04"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/build-control-root-entry-map.py",
+          "bytes": 6818,
+          "sha256": "fdb0154823ae721162c04733a59d7158a4eb997382b50a0dbc5c928fd3fc4db9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/build-migration-journal-design-artifacts.py",
+          "bytes": 16725,
+          "sha256": "90364dbd021a29ff07387f3d584b070ff0e95352152646141fa1504291ac59eb"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/build-migration-protocol-design-artifacts.py",
+          "bytes": 12740,
+          "sha256": "28ed391bbf75bbd94620184e4775794e5c4540da5aa2f3b9f27f63be4bdcedba"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/build-snapshot-design-artifacts.py",
+          "bytes": 12601,
+          "sha256": "2774e131b914b9916945f6f9f1cce358d827212d63040c21cdde155581418b8e"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/build-source-publication-design-artifacts.py",
+          "bytes": 27881,
+          "sha256": "550841289d37c52f337873d311691b4cfe56acf9115fcad85c564fec49d2fe94"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-migration-journal-design-artifacts.py",
+          "bytes": 10766,
+          "sha256": "2c8d3500c51e18b0a4aee69d345541ba303112a3ee0fc79c3bc9e95e02ba00ff"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-migration-journal-regex.mjs",
+          "bytes": 1612,
+          "sha256": "ebc7706e55f4aafe9b06f42789e70bebc7ade6c89a64b5c7ebdd9adc9e34a8d9"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-migration-protocol-design-artifacts.py",
+          "bytes": 6929,
+          "sha256": "c00940bfe2045af1b5d6bba9647eeaaeca5f6ff0d022c091ed3b5d5e2555b6d8"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-migration-protocol-regex.mjs",
+          "bytes": 1588,
+          "sha256": "4ab0be24ebcf99359e795970f8ab472619d170e7ddddcc13086d9b27780bd048"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-snapshot-design-artifacts.py",
+          "bytes": 5230,
+          "sha256": "8583c7081567fc092d6b9928100ac7a92e853e0b6b43b50bfd20181803426374"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-source-publication-design-artifacts.py",
+          "bytes": 16023,
+          "sha256": "6e0cc263de7dbd3ffd8ac4d9d511da6d4bd62d7a2a8961c16a2946d32e2e0471"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/check-source-publication-regex.mjs",
+          "bytes": 1968,
+          "sha256": "5dea16f300d185e89f8c995b02b8f118c4e2a3a592a7b6142f80298170380d69"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/commit-paths.txt",
+          "bytes": 1953,
+          "sha256": "fa091474a4e0c9936b65018fa5b051b54ad83043c4f99eedcf46ca7f50efeddf"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/control-root.entry-map.json",
+          "bytes": 13877,
+          "sha256": "c1196c46a745628937c94357c537d813227438abaceb10d1c53580be60cfff7b"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/deliver-3beb2c7-test8.ps1",
+          "bytes": 14902,
+          "sha256": "b2c1ed17ea86d489446aba6784a9610863f58ea579f4a02aea48c108779a742c"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-journal.design-check.json",
+          "bytes": 6815,
+          "sha256": "e16de359075d1c4cd7fd58807ba68939774cc2a5aea365707c1284a7a9727bc0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-journal.examples.json",
+          "bytes": 1471583,
+          "sha256": "e1e8e233f2d07be32279a3ab3f42d88c0c2cc2d6490f0576160fc5916a4defb8"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-journal.regex-check.json",
+          "bytes": 351,
+          "sha256": "3ce4e86911a3cfc3e994fafce075100b11fe0b7e71f9ac02acae8b4302c9a00d"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-journal.schema.draft.json",
+          "bytes": 16011,
+          "sha256": "39a80efe551c4ba987f77a3168d92e306e0a5436a1b53b542680b54d16a68118"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-protocol.design-check.json",
+          "bytes": 7620,
+          "sha256": "e94f0662d68b9b5a762591faa486d0dda84253ac13413640698c56ed90aed8b2"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-protocol.examples.json",
+          "bytes": 95755,
+          "sha256": "2f28169ca456158a2988b45fbb4e386ede7f2f2d0eb29bb7af08c0ec5dce8205"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-protocol.regex-check.json",
+          "bytes": 352,
+          "sha256": "54b4497bd781a31caa750a23028acd74fc797eac15a2b641f28b121b4d9e9971"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/migration-protocol.schema.draft.json",
+          "bytes": 22020,
+          "sha256": "7fa8124f516295f0a5f936bc4324b8c9885b6da30c2d0a7dfed321f69d947213"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/publication-state.schema.draft.json",
+          "bytes": 59311,
+          "sha256": "96df51a32eef5a3b36474a1da78223352e8f3f36088000919ade5d9cde9fef22"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/snapshot-wire.design-check.json",
+          "bytes": 3030,
+          "sha256": "edc47d6200d195040441b1474ec8c08b41f06cdc3fb2d13beba24c8df1135a76"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/snapshot-wire.examples.json",
+          "bytes": 53952,
+          "sha256": "2b1432691a7cbb29e01af8122e0b34a96f03a8656417b3ed6e64a0a80a9c170e"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/snapshot-wire.schema.draft.json",
+          "bytes": 17706,
+          "sha256": "e7069e0c73b3352031d663dfdcae9a44865d61eaca55685e2c56ca799a9db817"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/source-content.schema.draft.json",
+          "bytes": 21272,
+          "sha256": "1562bcbd004ad29f9a015ec78394cfb4cdeba6eeeaf4ec974c8a3dedb288c1e6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/source-publication.design-check.json",
+          "bytes": 9329,
+          "sha256": "056acb6c62e3bbeb0b7c86013338457e7280a087d7648f1df0e8eccf48d324d4"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/source-publication.examples.json",
+          "bytes": 472858,
+          "sha256": "84027ba0c642d6094c70356ddf13fa558ed41b0cc7db909dbbc9791d53d8e6da"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/source-publication.regex-check.json",
+          "bytes": 585,
+          "sha256": "3112e90481c41db136c6011b6b6be3ce1771f250e63194e23db9230b5b07897e"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/source-wire.schema.draft.json",
+          "bytes": 29966,
+          "sha256": "4fe0c7fed2d17df54f7e3a958b07810658fa585e774daf29e1b3bc5bcf089e99"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-ready-observation-deadline/verify-ready-artifact.mjs",
+          "bytes": 9329,
+          "sha256": "8ed115c8cfb2238cfe0373c79f7741ac68501fd1b81038a4e5ae57cabf56cd1f"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/HUMAN-STEPS.md",
+          "bytes": 2594,
+          "sha256": "183ae73fbe5eb3f0379ea62cf9416aa26bcd3137cfc1d0c798084c9c834504ab"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/RESULT.md",
+          "bytes": 15960,
+          "sha256": "ddd064e9deba92dcd6e7b017bbff429708d9327fa4d8331d05fa59be85110e12"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/TASK.md",
+          "bytes": 5253,
+          "sha256": "56a6dcf663b5168560bb21f8065d718c2415f4db1e87ab002a797f7fa0583cf0"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/collect.mjs",
+          "bytes": 18845,
+          "sha256": "52f99a8b90205978391057c1d1dad8703457bf3b65347136ec21a736ea5023d6"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/launch-manual.ps1",
+          "bytes": 2188,
+          "sha256": "927cc0f303be63916a2b1d0d4709c72e63518d49e99667bdaf00cae890eca838"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-runtime-manager-reload/test-collector.mjs",
+          "bytes": 14472,
+          "sha256": "624f49a9b1e66d0c3c4b6d68b02a506a71657796f577f12b663ebeda8578de63"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-selected-instance-client-acceptance/RESULT.md",
+          "bytes": 4413,
+          "sha256": "67d43724c020cd454496e352aa4ffca70d1cbf1df63d3945753a262b0dfce9d5"
+        },
+        {
+          "path": ".ai/tasks/v0.3.0/cdb-v03-selected-instance-client-acceptance/TASK.md",
+          "bytes": 8700,
+          "sha256": "ed8aa22ab3b4c73a1e01dc6ddf1133a330eacc1e499535afa88d1dcfd8954c56"
+        }
+      ],
+      "count": 111
+    }
+  },
+  "G3": {
+    "checkout": "G:\\RiceProgram\\UnityCodeDB",
+    "files": [
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/CLEANUP-TARGETS.json"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/GIT-AND-PROJECT-UPDATE-PROPOSAL.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/GIT-CANDIDATE-FILES.json"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PLAN.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PROJECT-CARD-DESIGN.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PROJECT-CARD-ENVIRONMENT.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PROJECT-CARD-SLICE-A.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PROJECT-EXISTING-CARD-OVERLAY.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/PROJECT-ROUTE-OVERLAY.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/RESULT.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/TASK.md"
+      },
+      {
+        "path": ".ai/tasks/shared/cdb-environment-preparation-20261030/prepare_environment.py"
+      },
+      {
+        "path": ".ai/validation-projects.md"
+      }
+    ],
+    "count": 13,
+    "status": "EXACT_PATH_LIST_NOT_STAGED",
+    "note": "G3 contains this manifest and evolving execution receipts; final content hashes are captured at any separately authorized commit."
+  }
+}
